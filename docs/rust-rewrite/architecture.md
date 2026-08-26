@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F11 Rust boundary now implemented
+## Phase 1–4F12 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -60,7 +60,7 @@ Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
 resource is created. The spec layer overlays the declared Go defaults, validates
 the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
 spec into executable `Config` is a separate fallible step which accepts only
-the incrementally declared Phase 1–4F11 runtime slices. This prevents parser
+the incrementally declared Phase 1–4F12 runtime slices. This prevents parser
 coverage from being mistaken for implemented protocol behavior.
 
 `rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
@@ -177,6 +177,17 @@ An in-flight map publishes one cloneable result to concurrent callers and
 restores each transaction ID before the local listener writes it. Runtime
 reload clears this cache and then resets all DNS transport pools before the
 generation continues serving new queries.
+
+Phase 4F12 replaces the exact-name host map with a Go-priority domain table in
+`rewrite-config`. Exact and wildcard labels plus `.`/`+.` suffix nodes produce
+one owned lookup surface shared by validation, DNS and tunnel routing. The
+parser expands `lan` from eligible interface addresses and rejects mixed-value
+lists and alias cycles. `rewrite-dns` follows aliases for A/AAAA, preserves the
+oracle's CNAME and non-address pass-through rules, and consults a native
+hosts-file cache with a five-second metadata refresh. `rewrite-runtime` uses
+the same configured table independently of DNS middleware enablement and
+randomly selects a mapped address before rule evaluation. The host table owns
+no sockets and the Rust product retains no Go runtime dependency.
 
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
@@ -584,7 +595,10 @@ composition, Phase 4F8 adds ordered policy matchers, Phase 4F9 adds owned
 fallback matcher data and scheduling evidence, and Phase 4F10 adds the shared
 dual-stack/ECH lookup boundary plus development-only differential helpers.
 Phase 4F11 replaces the development FIFO cache with the configured LRU/ARC,
-singleflight, stale-refresh and retry lifecycle without adding a crate.
+singleflight, stale-refresh and retry lifecycle without adding a crate. Phase
+4F12 extends the existing config/DNS/runtime boundary with host-trie lookup,
+portable interface enumeration, native hosts-file refresh and tunnel address
+selection; it also adds no crate.
 `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:

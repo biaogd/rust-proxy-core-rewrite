@@ -621,7 +621,6 @@ struct Resolver {
     inflight: Arc<Mutex<BTreeMap<Vec<u8>, Arc<InflightQuery>>>>,
     tls_pool: Arc<Mutex<TlsConnectionPool>>,
     http_pool: Arc<Mutex<HttpConnectionPool>>,
-    system_hosts: Arc<BTreeMap<String, Vec<IpAddr>>>,
 }
 
 /// Resolver state shared by the local DNS listener and controller cache APIs.
@@ -747,7 +746,6 @@ impl Resolver {
             inflight: Arc::new(Mutex::new(BTreeMap::new())),
             tls_pool: Arc::new(Mutex::new(TlsConnectionPool::default())),
             http_pool: Arc::new(Mutex::new(HttpConnectionPool::default())),
-            system_hosts: Arc::new(load_system_hosts()),
         }
     }
 
@@ -800,7 +798,7 @@ impl Resolver {
         state: &RuntimeState,
     ) -> Result<Option<Vec<u8>>, DnsError> {
         if question.record_type == 5 {
-            return Ok(match config.hosts.get(&question.name) {
+            return Ok(match config.hosts.search(&question.name) {
                 Some(HostEntry::Domain(target)) => {
                     Some(host_response(query, question, &[], Some(target)))
                 }
@@ -808,7 +806,7 @@ impl Resolver {
             });
         }
 
-        match lookup_host(&question.name, config, dns, &self.system_hosts) {
+        match lookup_host(&question.name, config, dns) {
             Some(HostLookup::Addresses(addresses)) => {
                 let selected: Vec<_> = addresses
                     .into_iter()
@@ -1817,16 +1815,11 @@ fn resource_record_end(message: &[u8], start: usize) -> Result<(u16, usize), Dns
     Ok((record_type, end))
 }
 
-fn lookup_host(
-    name: &str,
-    config: &Config,
-    dns: &DnsConfig,
-    system_hosts: &BTreeMap<String, Vec<IpAddr>>,
-) -> Option<HostLookup> {
+fn lookup_host(name: &str, config: &Config, dns: &DnsConfig) -> Option<HostLookup> {
     let mut current = name;
     let mut followed_alias = false;
     loop {
-        match config.hosts.get(current) {
+        match config.hosts.search(current) {
             Some(HostEntry::Addresses(addresses)) => {
                 return Some(HostLookup::Addresses(addresses.clone()));
             }
@@ -1841,7 +1834,7 @@ fn lookup_host(
         }
     }
     dns.use_system_hosts
-        .then(|| system_hosts.get(name).cloned())
+        .then(|| system_host_addresses(name))
         .flatten()
         .map(HostLookup::Addresses)
 }
@@ -2155,12 +2148,7 @@ fn checked_record_end(
         .ok_or(DnsError::InvalidMessage(error))
 }
 
-fn load_system_hosts() -> BTreeMap<String, Vec<IpAddr>> {
-    #[cfg(unix)]
-    let contents = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
-    #[cfg(not(unix))]
-    let contents = String::new();
-
+fn parse_system_hosts(contents: &str) -> BTreeMap<String, Vec<IpAddr>> {
     let mut hosts = BTreeMap::<String, Vec<IpAddr>>::new();
     for line in contents.lines() {
         let mut fields = line
@@ -2179,6 +2167,86 @@ fn load_system_hosts() -> BTreeMap<String, Vec<IpAddr>> {
         }
     }
     hosts
+}
+
+struct SystemHostsCache {
+    checked_at: Option<Instant>,
+    modified: Option<std::time::SystemTime>,
+    size: u64,
+    entries: BTreeMap<String, Vec<IpAddr>>,
+}
+
+impl SystemHostsCache {
+    fn new() -> Self {
+        Self {
+            checked_at: None,
+            modified: None,
+            size: 0,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    fn lookup(&mut self, name: &str) -> Option<Vec<IpAddr>> {
+        let now = Instant::now();
+        if self
+            .checked_at
+            .is_none_or(|checked| now.duration_since(checked) >= Duration::from_secs(5))
+        {
+            self.refresh();
+            self.checked_at = Some(now);
+        }
+        self.entries
+            .get(&name.trim_matches('.').to_lowercase())
+            .cloned()
+    }
+
+    fn refresh(&mut self) {
+        let path = system_hosts_path();
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            self.entries.clear();
+            self.modified = None;
+            self.size = 0;
+            return;
+        };
+        let modified = metadata.modified().ok();
+        if self.modified == modified && self.size == metadata.len() && !self.entries.is_empty() {
+            return;
+        }
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        self.entries = parse_system_hosts(&contents);
+        self.modified = modified;
+        self.size = metadata.len();
+    }
+}
+
+fn system_hosts_cache() -> &'static StdMutex<SystemHostsCache> {
+    static CACHE: OnceLock<StdMutex<SystemHostsCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(SystemHostsCache::new()))
+}
+
+fn system_hosts_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        return std::path::PathBuf::from(root).join("System32/drivers/etc/hosts");
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("/etc/hosts")
+    }
+}
+
+/// Looks up one name through the native hosts file with the Go five-second
+/// metadata refresh interval.
+#[must_use]
+pub fn system_host_addresses(name: &str) -> Option<Vec<IpAddr>> {
+    if std::env::var("DISABLE_SYSTEM_HOSTS")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "t" | "true"))
+    {
+        return None;
+    }
+    system_hosts_cache().lock().ok()?.lookup(name)
 }
 
 async fn query_udp(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, DnsError> {
@@ -4466,6 +4534,28 @@ mod tests {
         for value in ["", "0", "f", "FALSE", "yes", " true"] {
             assert!(!go_style_true(value));
         }
+    }
+
+    #[test]
+    fn parses_system_hosts_aliases_case_insensitively() {
+        let hosts = parse_system_hosts(
+            "192.0.2.1 Primary.Example Alias.Example # comment\n\
+             2001:db8::1 alias.example.\n\
+             invalid ignored.example\n",
+        );
+
+        assert_eq!(
+            hosts.get("primary.example"),
+            Some(&vec!["192.0.2.1".parse().expect("IPv4 address")])
+        );
+        assert_eq!(
+            hosts.get("alias.example"),
+            Some(&vec![
+                "192.0.2.1".parse().expect("IPv4 address"),
+                "2001:db8::1".parse().expect("IPv6 address"),
+            ])
+        );
+        assert!(!hosts.contains_key("ignored.example"));
     }
 
     #[tokio::test]

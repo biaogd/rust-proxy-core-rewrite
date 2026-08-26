@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use ipnet::IpNet;
+use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use prost::Message;
 use regex::Regex;
 use rewrite_model::AuthUser;
@@ -58,7 +59,7 @@ pub struct ConfigSpec {
     pub secret: String,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
-    pub hosts: BTreeMap<String, HostEntry>,
+    pub hosts: HostTable,
     pub raw_rules: Vec<String>,
     pub raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub rematches: Vec<RematchSpec>,
@@ -79,7 +80,7 @@ pub struct Config {
     pub secret: String,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
-    pub hosts: BTreeMap<String, HostEntry>,
+    pub hosts: HostTable,
     pub rules: RuleSet,
 }
 
@@ -325,6 +326,60 @@ pub struct RuleSetDomain {
 pub enum HostEntry {
     Addresses(Vec<IpAddr>),
     Domain(String),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HostTable {
+    entries: BTreeMap<String, HostEntry>,
+}
+
+impl HostTable {
+    #[must_use]
+    pub fn get(&self, pattern: &str) -> Option<&HostEntry> {
+        self.entries.get(pattern)
+    }
+
+    #[must_use]
+    pub fn search(&self, name: &str) -> Option<&HostEntry> {
+        self.entries
+            .iter()
+            .filter_map(|(pattern, entry)| {
+                host_pattern_rank(pattern, name).map(|rank| (rank, entry))
+            })
+            .max_by(|(left, _), (right, _)| left.cmp(right))
+            .map(|(_, entry)| entry)
+    }
+
+    #[must_use]
+    pub fn resolve(&self, name: &str) -> Option<HostEntry> {
+        let mut current = name.to_owned();
+        let mut followed = false;
+        let mut seen = BTreeSet::new();
+        loop {
+            if !seen.insert(current.to_lowercase()) {
+                return None;
+            }
+            match self.search(&current) {
+                Some(HostEntry::Addresses(addresses)) => {
+                    return Some(HostEntry::Addresses(addresses.clone()));
+                }
+                Some(HostEntry::Domain(target)) => {
+                    current.clone_from(target);
+                    followed = true;
+                }
+                None if followed => return Some(HostEntry::Domain(current)),
+                None => return None,
+            }
+        }
+    }
+
+    fn insert(&mut self, pattern: String, entry: HostEntry) {
+        self.entries.insert(pattern, entry);
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
 }
 
 // Keep independent boolean fields in the normalized oracle observation.
@@ -2424,26 +2479,33 @@ fn parse_fake_ip_range(value: &str, ipv6: bool, field: &str) -> Result<Option<Ip
     Ok(Some(network))
 }
 
-fn parse_hosts(
-    raw: BTreeMap<String, RawHostValue>,
-) -> Result<BTreeMap<String, HostEntry>, ConfigError> {
-    let mut hosts = BTreeMap::from([(
+fn parse_hosts(raw: BTreeMap<String, RawHostValue>) -> Result<HostTable, ConfigError> {
+    let mut hosts = HostTable::default();
+    hosts.insert(
         "localhost".to_owned(),
         HostEntry::Addresses(vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]),
-    )]);
+    );
     for (name, raw_value) in raw {
-        let name = normalize_host_name(&name, "hosts key")?;
-        let values = match raw_value {
+        let Ok(name) = normalize_host_pattern(&name) else {
+            continue;
+        };
+        let mut values = match raw_value {
             RawHostValue::One(value) => vec![value],
             RawHostValue::Many(values) => values,
         };
+        if values == ["lan"] {
+            values = local_lan_addresses()?
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect();
+        }
         if values.is_empty() {
             return Err(ConfigError::InvalidHosts(format!("{name} has no values")));
         }
         let entry = if values.len() == 1 {
             match values[0].parse::<IpAddr>() {
                 Ok(address) => HostEntry::Addresses(vec![address.to_canonical()]),
-                Err(_) => HostEntry::Domain(normalize_host_name(&values[0], "hosts target")?),
+                Err(_) => HostEntry::Domain(normalize_host_target(&values[0])?),
             }
         } else {
             let addresses = values
@@ -2467,35 +2529,92 @@ fn parse_hosts(
     Ok(hosts)
 }
 
+fn normalize_host_pattern(value: &str) -> Result<String, ConfigError> {
+    if value.is_empty()
+        || value.ends_with('.')
+        || value.trim() != value
+        || value.split('.').skip(1).any(str::is_empty)
+    {
+        return Err(ConfigError::InvalidHosts("invalid hosts key".to_owned()));
+    }
+    let labels: Vec<_> = value.split('.').collect();
+    for (index, label) in labels.iter().enumerate() {
+        if label.contains('+') && (*label != "+" || index != 0 || labels.len() == 1)
+            || label.contains('*') && *label != "*"
+        {
+            return Err(ConfigError::InvalidHosts(
+                "invalid hosts wildcard".to_owned(),
+            ));
+        }
+    }
+    Ok(value.to_lowercase())
+}
+
+fn normalize_host_target(value: &str) -> Result<String, ConfigError> {
+    let value = value.trim_matches('.');
+    if value.split('.').count() < 2 {
+        return Err(ConfigError::InvalidHosts(
+            "hosts domain target must contain at least two labels".to_owned(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn normalize_host_name(value: &str, field: &str) -> Result<String, ConfigError> {
     let value = value.trim_matches('.').to_lowercase();
-    let valid = !value.is_empty()
-        && (field != "hosts target" || value.contains('.'))
-        && !value.starts_with("*.")
-        && !value.starts_with("+.")
-        && value.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
+    if value.is_empty()
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        });
-    if !valid {
-        return Err(ConfigError::InvalidHosts(format!(
-            "{field} is outside the exact-name Phase 4B subset"
-        )));
+        })
+    {
+        return Err(ConfigError::InvalidHosts(format!("invalid {field}")));
     }
     Ok(value)
 }
 
-fn validate_host_cycles(hosts: &BTreeMap<String, HostEntry>) -> Result<(), ConfigError> {
+fn local_lan_addresses() -> Result<Vec<IpAddr>, ConfigError> {
+    let interfaces = NetworkInterface::show().map_err(|error| {
+        ConfigError::InvalidHosts(format!("cannot list LAN addresses: {error}"))
+    })?;
+    let mut addresses = Vec::new();
+    for address in interfaces
+        .into_iter()
+        .flat_map(|interface| interface.addr)
+        .map(|address| match address {
+            Addr::V4(address) => IpAddr::V4(address.ip),
+            Addr::V6(address) => IpAddr::V6(address.ip),
+        })
+        .filter(|address| !address.is_loopback())
+        .filter(|address| match address {
+            IpAddr::V4(address) => !address.is_link_local(),
+            IpAddr::V6(address) => !address.is_unicast_link_local(),
+        })
+    {
+        let address = address.to_canonical();
+        if !addresses.contains(&address) {
+            addresses.push(address);
+        }
+    }
+    if addresses.is_empty() {
+        return Err(ConfigError::InvalidHosts(
+            "lan did not produce an eligible interface address".to_owned(),
+        ));
+    }
+    Ok(addresses)
+}
+
+fn validate_host_cycles(hosts: &HostTable) -> Result<(), ConfigError> {
     for origin in hosts.keys() {
         let mut seen = std::collections::BTreeSet::new();
         let mut current = origin.as_str();
-        while let Some(HostEntry::Domain(next)) = hosts.get(current) {
-            if !seen.insert(current.to_owned()) {
+        while let Some(HostEntry::Domain(next)) = hosts.search(current) {
+            if !seen.insert(current.to_lowercase()) {
                 return Err(ConfigError::InvalidHosts(format!(
                     "{origin} has a domain mapping cycle"
                 )));
@@ -2504,6 +2623,48 @@ fn validate_host_cycles(hosts: &BTreeMap<String, HostEntry>) -> Result<(), Confi
         }
     }
     Ok(())
+}
+
+fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {
+    let name = name.trim_end_matches('.').to_lowercase();
+    let name_labels: Vec<_> = name.split('.').collect();
+    if name_labels.iter().any(|label| label.is_empty()) {
+        return None;
+    }
+    let (suffix, include_root) = if let Some(suffix) = pattern.strip_prefix("+.") {
+        (Some(suffix), true)
+    } else if let Some(suffix) = pattern.strip_prefix('.') {
+        (Some(suffix), false)
+    } else {
+        (None, false)
+    };
+    if let Some(suffix) = suffix {
+        let suffix_labels: Vec<_> = suffix.split('.').collect();
+        if name_labels.len() < suffix_labels.len()
+            || (!include_root && name_labels.len() == suffix_labels.len())
+            || name_labels[name_labels.len() - suffix_labels.len()..] != suffix_labels
+        {
+            return None;
+        }
+        let mut rank = vec![0; name_labels.len()];
+        rank[..suffix_labels.len()].fill(2);
+        return Some(rank);
+    }
+    let pattern_labels: Vec<_> = pattern.split('.').collect();
+    if pattern_labels.len() != name_labels.len() {
+        return None;
+    }
+    let mut rank = Vec::with_capacity(name_labels.len());
+    for (pattern_label, name_label) in pattern_labels.iter().zip(&name_labels).rev() {
+        if pattern_label == name_label {
+            rank.push(2);
+        } else if *pattern_label == "*" {
+            rank.push(1);
+        } else {
+            return None;
+        }
+    }
+    Some(rank)
 }
 
 fn parse_loopback_dns_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigError> {
@@ -2910,6 +3071,39 @@ hosts:
             ConfigSpec::from_yaml(cycle),
             Err(ConfigError::InvalidHosts(message)) if message.contains("cycle")
         ));
+    }
+
+    #[test]
+    fn phase_four_f_twelve_hosts_follow_trie_priority_and_aliases() {
+        let config = ConfigSpec::from_yaml(
+            r#"
+hosts:
+  "+.example.test": 192.0.2.1
+  "*.example.test": 192.0.2.2
+  exact.example.test: 192.0.2.3
+  ".suffix.test": 192.0.2.4
+  alias.example.test: target.external.test
+"#,
+        )
+        .expect("wildcard hosts");
+        assert!(matches!(
+            config.hosts.search("example.test"),
+            Some(HostEntry::Addresses(addresses)) if addresses[0].to_string() == "192.0.2.1"
+        ));
+        assert!(matches!(
+            config.hosts.search("one.example.test"),
+            Some(HostEntry::Addresses(addresses)) if addresses[0].to_string() == "192.0.2.2"
+        ));
+        assert!(matches!(
+            config.hosts.search("EXACT.EXAMPLE.TEST"),
+            Some(HostEntry::Addresses(addresses)) if addresses[0].to_string() == "192.0.2.3"
+        ));
+        assert!(config.hosts.search("suffix.test").is_none());
+        assert!(config.hosts.search("deep.suffix.test").is_some());
+        assert_eq!(
+            config.hosts.resolve("alias.example.test"),
+            Some(HostEntry::Domain("target.external.test".to_owned()))
+        );
     }
 
     #[test]

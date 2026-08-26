@@ -889,6 +889,7 @@ name = "rewrite-config"
 version = "0.1.0"
 dependencies = [
  "ipnet",
+ "network-interface",
  "prost",
  "regex",
  "rewrite-model",
@@ -991,6 +992,7 @@ dependencies = [
 name = "rewrite-runtime"
 version = "0.1.0"
 dependencies = [
+ "rand",
  "rewrite-config",
  "rewrite-controller",
  "rewrite-dns",

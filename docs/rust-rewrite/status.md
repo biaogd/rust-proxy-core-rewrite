@@ -51,11 +51,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F9 fallback decision core | Complete in declared core; DNS-13 partial | GeoIP.dat/GeoSite/domain/IPv4/IPv6 filters, multiple fallback clients and eager/lazy failure/timeout ordering pass; MMDB and broader integration remain |
 | Phase 4F10 dual-stack/ECH/lazy tunnel | Complete in declared scope; DNS-14 parity | Concurrent A/AAAA with A-first ordering and configurable wait, primary IPv4, IP literals, HTTPS ECH extraction and tunnel lazy rule resolution pass |
 | Phase 4F11 DNS cache lifecycle | Complete in declared core; DNS-15 parity | LRU/ARC size eviction, positive/negative/stale TTL, concurrent singleflight, background retry and reload cache/reset behavior pass |
+| Phase 4F12 complete hosts core | Complete in declared portable core; DNS-16 platform gates remain | Wildcard/suffix priority, `lan`, IP/domain/multi-value aliases, DNS query pass-through, system hosts and randomized tunnel routing pass on Darwin |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F11 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F12 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F11 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F12 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2582,6 +2583,59 @@ gate passed locally. Complete Phase 1–4F11 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+## Phase 4F12 deliverables and evidence
+
+Phase 4F12 replaces the exact-name development map with an owned host table
+that follows the Go domain-trie priority. It accepts exact names, whole-label
+`*` at any position, root-inclusive `+.` suffixes and subdomain-only `.`
+suffixes. Keys and lookup names are case-insensitive. Invalid host patterns are
+skipped like the oracle, while mixed address/domain lists, short domain targets
+and alias cycles remain configuration errors.
+
+Values now cover scalar IPv4/IPv6, domain aliases, multi-address lists and
+`lan` expansion from eligible local interfaces. DNS A/AAAA resolution follows
+configured alias chains, external aliases prepend CNAME before upstream
+answers, CNAME queries against address entries pass through, and unrelated
+query types or classes remain upstream traffic. `dns.use-hosts: false` bypasses
+the DNS middleware without disabling tunnel host mapping.
+
+System-host lookup is no longer a startup snapshot. The DNS service reads the
+native Unix or Windows hosts-file path through a process-wide cache with the
+oracle's five-second metadata check and honors Go-style true forms of
+`DISABLE_SYSTEM_HOSTS`. Tunnel routing applies configured aliases and address
+values before rules, then randomly selects one configured address; it uses
+system hosts only when enabled by DNS configuration.
+
+`compat/scripts/phase4f12.py` compares configuration acceptance, DNS wire
+records and upstream-call observations, disabled-host behavior, available
+`lan` addresses, native system-host resolution and 48 mixed SOCKS domain
+connections across two loopback marker servers. The Go and Rust observations
+match exactly on the local Darwin host.
+
+Observed Phase 4F12 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared portable core passed; DNS-16 platform gates remain | Native `compat/scripts/phase4f12.py`; deterministic UDP authority, local interfaces, native hosts and loopback tunnel targets |
+| Linux amd64 | Pending | Default full differential now includes Phase 4F12; no result is recorded before completion |
+| Windows amd64 | Pending | Path and cache code are compiled by the workspace gate, but no native editable-hosts fixture is claimed |
+
+### Phase 4F12 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f12.py
+```
+
+The focused Phase 4F12 differential, format check and strict workspace Clippy
+gate passed locally. Complete Phase 1–4F12 regression, workspace tests and
+Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
+pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2657,10 +2711,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F11 DNS cache-lifecycle boundary.
+Rust behavior stops at the Phase 4F12 complete-hosts boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
-`DNS-10`–`DNS-13` retain the database/adapter/provider/integration gaps above.
-Phase 4D3B, 4F12 or another implementation gate must not begin without a separate
+`DNS-10`–`DNS-13` and `DNS-16` retain the platform/database/adapter/provider/
+integration gaps above.
+Phase 4D3B, 4F13 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

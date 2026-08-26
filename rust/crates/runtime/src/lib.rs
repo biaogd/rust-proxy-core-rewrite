@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rand::RngExt;
 use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata};
@@ -685,9 +686,27 @@ fn apply_host_mapping(
             }
         }
         Host::Domain(domain) => {
-            if let Some(HostEntry::Domain(target)) = config.hosts.get(&domain.to_lowercase()) {
+            let first_target = match config.hosts.search(&domain) {
+                Some(HostEntry::Domain(target)) => Some(target.clone()),
+                _ => None,
+            };
+            if let Some(target) = &first_target {
                 metadata.host.clone_from(target);
                 metadata.destination.host = Host::Domain(target.clone());
+            }
+            let lookup_name = first_target.as_deref().unwrap_or(&domain);
+            let configured = config.hosts.resolve(lookup_name);
+            let system = (configured.is_none()
+                && config.dns.as_ref().is_some_and(|dns| dns.use_system_hosts))
+            .then(|| rewrite_dns::system_host_addresses(lookup_name))
+            .flatten()
+            .map(HostEntry::Addresses);
+            if let Some(HostEntry::Addresses(addresses)) = configured.or(system)
+                && !addresses.is_empty()
+            {
+                let address = addresses[rand::rng().random_range(0..addresses.len())];
+                metadata.destination.host = Host::Ip(address);
+                metadata.destination_ip = Some(address);
             }
         }
     }

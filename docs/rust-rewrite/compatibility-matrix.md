@@ -193,6 +193,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4F9 fallback decision core | Oracle | **Partial** | File-backed geodata-mode GeoIP including inversion/private-address behavior, GeoSite/domain and IPv4/IPv6 CIDR filters, multiple fallback clients, eager/lazy SERVFAIL and shared five-second timeout ordering pass in `compat/scripts/phase4f9.py`; MMDB-mode GeoIP and broader transport/retry integration remain pending |
 | Phase 4F10 dual-stack/ECH/lazy tunnel core | Oracle | **Parity** | Concurrent A/AAAA start, A-first ordering, default/configured IPv6 wait windows, primary-IPv4 early return and AAAA fallback, IP literals, HTTPS ECH extraction/missing-ECH error and mixed SOCKS rule-stage lazy resolution pass in `compat/scripts/phase4f10.py` |
 | Phase 4F11 DNS cache lifecycle core | Oracle | **Parity** | Configured LRU/ARC capacity and scan behavior, positive/SOA-negative cache lifetime, TTL=1 stale return with refresh, caller-ID-safe singleflight, uncached SERVFAIL background retry and SIGHUP invalidation pass in `compat/scripts/phase4f11.py`; pooled connection teardown remains jointly covered by Phase 4E11/4E18 |
+| Phase 4F12 complete hosts core | Oracle | **Parity** | Exact/`*`/inner-`*`/`.`/`+.` priority, scalar IP/domain and multi-IP values, `lan`, alias chains, A/AAAA/CNAME plus non-address/class pass-through, `dns.use-hosts`, native system hosts and randomized tunnel address selection pass in `compat/scripts/phase4f12.py` on Darwin |
 | Phase 4D1 simple nameserver policy | Oracle | **Parity** | Exact, `*` one-label and `+.` root/deep suffix selection across local UDP/TCP authorities, overlap priority and policy cache hit in `compat/scripts/phase4d1.py` |
 | Full policy and proxy/direct nameservers | Oracle | Partial | Phase 4F8 proves the ordered main/proxy policy core and Phase 4D3A proves direct-follow-policy; external rule-provider vehicles, GeoSite attributes, proxy data-plane consumption and `respect-rules` remain unclaimed |
 | Phase 4D2 single main/fallback answer-filter subset | Oracle | **Parity** | One local fallback, `+.` domain forcing, IPv4 CIDR answer filtering, eager/lazy call behavior, policy precedence and selected-response cache hit in `compat/scripts/phase4d2.py` |
@@ -200,7 +201,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4D3A direct resolver and lazy IP-rule TCP subset | Oracle | **Parity** | Ordered domain/IP-CIDR rule queries, `no-resolve`, one local direct nameserver, policy-follow behavior and DIRECT TCP result in `compat/scripts/phase4d3a.py` |
 | Cache TTL, stale refresh, singleflight/retry | Oracle | **Parity** | Phase 4F11 product differential covers LRU/ARC max-size eviction, positive and SOA-negative TTL, stale refresh, eight-way singleflight, one observable background retry and reload invalidation; unusual non-trailing OPT layouts and cancellation races remain outside the declared deterministic core |
 | Phase 4B exact hosts and CNAME subset | Oracle | **Parity** | Configured A/AAAA, CNAME-only, CNAME-to-upstream and Darwin system-host observations in `compat/scripts/phase4b.py` |
-| Full hosts and CNAME behavior | Oracle | Partial | Exact names only; wildcard, `lan`, randomized multi-address routing, non-IP queries and broad platforms are not claimed |
+| Full hosts and CNAME behavior | Oracle | **Partial** | Phase 4F12 proves the portable trie/value/query/tunnel core and current native-host lookup on Darwin; editable hosts-file refresh, native Windows behavior and Linux CI evidence remain unclaimed |
 | Phase 4B redir-host TCP mapping subset | Oracle | **Parity** | Local DNS A answer -> IP SOCKS5 CONNECT -> recovered DOMAIN rule -> DIRECT echo chain |
 | Full redir-host mapping | Oracle | Partial | TCP SOCKS IPv4 evidence only; UDP, reload persistence, CNAME reverse-rule identity and other inbounds are not claimed |
 | Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py`; the fixture enables the oracle's IPv6 test escape hatch on hosts without global-unicast IPv6 |
@@ -275,7 +276,8 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4F9 fallback core | Oracle | **Partial** | Native deterministic GeoIP.dat/GeoSite/domain/IPv4/IPv6 and eager/lazy failure/timeout differential passed, 2026-08-26; MMDB and broader integration remain |
 | Darwin arm64 — Phase 4F10 dual-stack/ECH/lazy tunnel | Oracle | **Parity** | Native helper and mixed SOCKS tunnel differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 4F11 DNS cache lifecycle | Oracle | **Parity** | Native product differential passed, 2026-08-26; deterministic eviction, TTL, stale, negative, singleflight, retry and SIGHUP evidence |
-| Darwin arm64 beyond Phase 4F11 | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 4F12 complete hosts core | Oracle | **Parity** | Native product differential passed, 2026-08-26; trie priority, values/aliases, DNS pass-through, native hosts and randomized tunnel selection evidence |
+| Darwin arm64 beyond Phase 4F12 | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -292,7 +294,8 @@ separate build and runtime claim.
 | Linux amd64 — Phase 4F9 fallback core | Oracle | Pending | Default fallback differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 4F10 dual-stack/ECH/lazy tunnel | Oracle | Pending | Default focused differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 4F11 DNS cache lifecycle | Oracle | Pending | Default focused differential and prior pooled-reset suites are configured; no result is claimed before completion |
-| Linux amd64 beyond Phase 4F11 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 4F12 complete hosts core | Oracle | Pending | Default focused differential is configured; no result is claimed before completion |
+| Linux amd64 beyond Phase 4F12 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |
 | Windows amd64 — Phase 4F4 DHCP resolver | Oracle | Cross-build passed; native pending | Interface enumeration, packet and socket code compile for Rust 1.95 GNU; privileged native client/server parity remains pending |

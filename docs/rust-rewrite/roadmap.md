@@ -492,6 +492,19 @@ connection-reset path already proven at the encrypted transport gates. Unusual
 non-trailing OPT layouts, caller-cancellation races and REST/external-DoH cache
 controls remain later focused work rather than implicit Phase 4F11 claims.
 
+Phase 4F12 accepts the portable `DNS-16` hosts core. Configured host keys use
+the Go trie priority for exact labels, whole-label wildcards, root-inclusive
+`+.` suffixes and subdomain-only `.` suffixes. Scalar IP/domain values,
+multi-IP values and local-interface `lan` expansion are validated before the
+owned table is published. A/AAAA queries follow configured aliases, CNAME
+queries preserve the oracle's IP-versus-domain behavior, and unrelated types
+or classes pass through to the selected upstream. Tunnel routing applies the
+same table independently of `dns.use-hosts` and randomly selects configured
+addresses. Native hosts-file lookup uses the five-second metadata refresh
+boundary and `DISABLE_SYSTEM_HOSTS` switch. The deterministic gate proves these
+paths on Darwin; native Linux and Windows refresh evidence remains a platform
+gate rather than an implicit cross-platform claim.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,
