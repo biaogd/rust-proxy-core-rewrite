@@ -9,12 +9,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      full-regression:
-        description: Run every Phase 1-4E15 Go/Rust differential suite
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -112,7 +106,6 @@ jobs:
 
   full-differential:
     name: Full Phase 1-4E15 differential regression
-    if: github.event_name == 'workflow_dispatch' && inputs.full-regression
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
