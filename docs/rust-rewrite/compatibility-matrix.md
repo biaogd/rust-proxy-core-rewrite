@@ -140,7 +140,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Inbound type/user/name matchers | Oracle | **Partial** | Phases 5B3a–5B3c prove local TCP `IN-TYPE`, `IN-USER` and `IN-NAME`, including `DEFAULT-HTTP`/`SOCKS`/`MIXED`, lists, aliases and case-sensitive users; UDP, named listeners and future protocols remain pending |
 | GEOIP/GEOSITE/ASN | Oracle | Not started | Pinned geodata corpus |
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
-| Phase 2 pure SUB-RULE and AND/OR/NOT subset | Oracle | **Parity** | Nested pure matcher, missing reference, PASS-RULE and cycle observations; no lazy DNS/process helpers |
+| SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references, PASS-RULE and cycles; Phase 5B3d proves basic AND/OR/NOT mixed-TCP DIRECT/REJECT routing; live SUB-RULE and lazy DNS/process helpers remain pending |
 | Phase 2 pure PASS/PASS-RULE/REMATCH scan | Oracle | **Parity** | Ordered scan, metadata mutation, sub-rule switch and rematch-cycle observations; no live adapter claim |
 | Proxy groups/select/fallback/url-test/load-balance | Oracle | Not started | Deterministic health/delay fixtures |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |

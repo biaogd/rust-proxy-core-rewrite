@@ -956,6 +956,14 @@ slash lists are case-sensitive and must create observable DIRECT/REJECT
 differences while all listeners coexist. UDP associations, general YAML named
 listeners and future inbound names remain attached to their own inbound gates.
 
+### Phase 5B3d accepted scope
+
+Phase 5B3d accepts basic live `AND`, `OR` and `NOT` evaluation on the local
+mixed TCP path. Conditions must combine real domain and inbound-type metadata,
+and every operator must produce observable DIRECT and REJECT outcomes against
+the oracle. Live `SUB-RULE`, lazy destination resolution, process helpers and
+the broader nested/error corpus remain independent RULE-11 gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
