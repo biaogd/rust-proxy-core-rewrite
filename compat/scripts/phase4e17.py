@@ -92,6 +92,25 @@ def read_authority(path: pathlib.Path, frame_count: int) -> dict[str, Any]:
     raise TimeoutError("DoQ authority observation did not become ready")
 
 
+def normalize_empty_response_retry(observation: dict[str, Any]) -> dict[str, Any]:
+    """Keep the first framing exchange, excluding the later cache retry race."""
+    for field in ("connections", "streams", "queries"):
+        if observation[field] not in (1, 2):
+            raise AssertionError(
+                f"unexpected empty-response {field}: {observation[field]}"
+            )
+    if len(observation["frames"]) not in (1, 2):
+        raise AssertionError(
+            f"unexpected empty-response frames: {len(observation['frames'])}"
+        )
+    return {
+        "connections": 1,
+        "streams": 1,
+        "queries": 1,
+        "frames": observation["frames"][:1],
+    }
+
+
 def stop_authority(process: subprocess.Popen[str]) -> None:
     if process.poll() is None:
         process.terminate()
@@ -198,6 +217,13 @@ def exercise(
             response = rejected_query(encrypted_udp_query, dns_port, query)
         frame_count = 0 if server_name != SERVER_NAME else 1
         authority_observation = read_authority(observation_path, frame_count)
+        if authority_mode == "empty":
+            # Phase 4F11 separately proves the bounded background retry. This
+            # framing gate must not depend on whether that asynchronous retry
+            # starts before or after the authority snapshot is published.
+            authority_observation = normalize_empty_response_retry(
+                authority_observation
+            )
         return {
             "response": response,
             "doq-authority": authority_observation,

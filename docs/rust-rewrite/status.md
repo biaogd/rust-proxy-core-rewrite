@@ -2636,6 +2636,24 @@ gate passed locally. Complete Phase 1–4F12 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+### Differential fixture timing stability
+
+The shared DNS fixture cleanup normalizes `-SIGTERM` only when that exact
+signal was sent by the harness to a still-running product. A process that exits
+before cleanup, any other signal, timeout or forced `SIGKILL` remains an exact
+observable failure. Common 30-second authority answers are compared as one
+narrow 27–30 second freshness window so independent wall-clock rounding cannot
+create a false Go/Rust mismatch; values outside that window fail immediately,
+and Phase 4F11 continues to compare the semantic TTL=1 stale boundary and cache
+lifecycle separately.
+
+The Phase 4E17 empty-response case retains and validates the first DoQ framing
+exchange but excludes whether the Phase 4F11 background retry starts before or
+after the authority snapshot. Its retry count and bound remain covered by the
+Phase 4F11 differential instead of being sampled concurrently by two phases.
+The previously fluctuating Phase 4E1, 4E17, 4F6 and 4F11 focused suites pass
+locally with these scope-specific normalizations.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:

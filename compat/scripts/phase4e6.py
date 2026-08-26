@@ -19,6 +19,7 @@ from phase1 import IO_DEADLINE, ROOT, reserve_port
 from phase4 import (
     AuthorityState,
     build_binaries,
+    dns_question_end,
     dns_query,
     launch,
     stop,
@@ -193,9 +194,11 @@ def exercise(
 
 
 def observe_cached(response: bytes, identifier: int) -> dict[str, Any]:
+    answer = dns_question_end(response)
+    raw_ttl = int.from_bytes(response[answer + 6 : answer + 10], "big")
     observation = observe_or_raw(response, identifier)
-    ttl = observation.pop("ttl", None)
-    observation["ttl-aged-positive"] = isinstance(ttl, int) and 0 < ttl < 30
+    observation.pop("ttl", None)
+    observation["ttl-aged-positive"] = 0 < raw_ttl < 30
     return observation
 
 
