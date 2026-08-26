@@ -84,9 +84,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, startup readiness, Go-compatible live-resource shutdown-hook boundary and failure asymmetry pass |
 | Phase 5B1a domain regex routing | Complete in declared syntax/local-TCP scope; RULE-03 remains partial | Ignore-case lookahead and comma-bearing quantifier parsing, invalid syntax, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B1b domain wildcard routing | Complete in declared byte-wildcard/local-TCP scope; RULE-03 remains partial | Exact Go byte-level `*`/`?` matching, empty/non-ASCII unit boundaries, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
+| Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B1b rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B2a rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -2981,6 +2982,34 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 The focused tests pass locally. Full regression and Linux evidence remain
 delegated to GitHub Actions and are not pre-claimed.
+
+## Phase 5B2a deliverables and evidence
+
+Phase 5B2a starts `RULE-05` with literal destination IPv4 `IP-SUFFIX`. Unlike
+CIDR containment, the oracle preserves the address bits in the prefix text and
+compares the requested number of bits from the end of the address. Rust parses
+the address and width separately rather than using `ipnet`, which would risk
+normalizing away the host bits that are the rule's payload.
+
+`compat/scripts/phase5b2a.py` selects a native non-loopback IPv4 address, finds
+the shortest whole-byte suffix that distinguishes it from `127.0.0.1`, and
+runs one all-interface local echo server. The suffix route reaches DIRECT while
+the loopback literal falls through to REJECT; an over-wide `/33` rule is
+rejected by both products. Hosts without a non-loopback IPv4 interface report
+an explicit skip rather than using a public network.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B2A_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b2a.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-rules --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Destination IPv6, non-byte widths, IPv4-mapped IPv6, `src` and
+`SRC-IP-SUFFIX`, and observable lazy/no-resolve resolver calls remain pending;
+this phase does not claim them.
 
 ## Controller HTTP infrastructure refactor
 

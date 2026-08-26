@@ -81,6 +81,12 @@ enum Matcher {
         source: bool,
         no_resolve: bool,
     },
+    IpSuffix {
+        address: std::net::IpAddr,
+        bits: u8,
+        source: bool,
+        no_resolve: bool,
+    },
     Port {
         ranges: Vec<PortRange>,
         field: PortField,
@@ -408,20 +414,25 @@ impl Matcher {
                 network,
                 source,
                 no_resolve,
-            } => {
-                let address = if *source {
-                    metadata.source_ip
-                } else {
-                    metadata.destination_ip
-                };
-                match address {
-                    Some(address) => MatchResult::from_bool(network.contains(&address)),
-                    None if !source && !no_resolve && allow_resolution => {
-                        MatchResult::ResolveDestinationIp
-                    }
-                    None => MatchResult::Unmatched,
-                }
-            }
+            } => match_ip_address(
+                metadata,
+                *source,
+                *no_resolve,
+                allow_resolution,
+                |address| network.contains(&address),
+            ),
+            Self::IpSuffix {
+                address,
+                bits,
+                source,
+                no_resolve,
+            } => match_ip_address(
+                metadata,
+                *source,
+                *no_resolve,
+                allow_resolution,
+                |candidate| ip_suffix_matches(*address, *bits, candidate),
+            ),
             Self::Port { ranges, field } => {
                 let port = match field {
                     PortField::Source => metadata.source_port,
@@ -475,6 +486,8 @@ impl Matcher {
             Self::DomainWildcard(_) => "DomainWildcard",
             Self::IpCidr { source: true, .. } => "SrcIPCIDR",
             Self::IpCidr { source: false, .. } => "IPCIDR",
+            Self::IpSuffix { source: true, .. } => "SrcIPSuffix",
+            Self::IpSuffix { source: false, .. } => "IPSuffix",
             Self::Port {
                 field: PortField::Source,
                 ..
@@ -504,6 +517,25 @@ impl MatchResult {
         } else {
             Self::Unmatched
         }
+    }
+}
+
+fn match_ip_address(
+    metadata: &Metadata,
+    source: bool,
+    no_resolve: bool,
+    allow_resolution: bool,
+    predicate: impl FnOnce(std::net::IpAddr) -> bool,
+) -> MatchResult {
+    let address = if source {
+        metadata.source_ip
+    } else {
+        metadata.destination_ip
+    };
+    match address {
+        Some(address) => MatchResult::from_bool(predicate(address)),
+        None if !source && !no_resolve && allow_resolution => MatchResult::ResolveDestinationIp,
+        None => MatchResult::Unmatched,
     }
 }
 
@@ -614,6 +646,11 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
             params.iter().any(|param| param == "no-resolve"),
         ),
         "SRC-IP-CIDR" => parse_ip_cidr(payload, true, true),
+        "IP-SUFFIX" => parse_ip_suffix(
+            payload,
+            params.iter().any(|param| param == "src"),
+            params.iter().any(|param| param == "no-resolve"),
+        ),
         "SRC-PORT" => parse_port(payload, PortField::Source),
         "DST-PORT" => parse_port(payload, PortField::Destination),
         "IN-PORT" => parse_port(payload, PortField::Inbound),
@@ -708,6 +745,46 @@ fn parse_ip_cidr(payload: &str, source: bool, no_resolve: bool) -> Result<Matche
         source,
         no_resolve,
     })
+}
+
+fn parse_ip_suffix(payload: &str, source: bool, no_resolve: bool) -> Result<Matcher, RuleError> {
+    let (address, bits) = payload.split_once('/').ok_or(RuleError::InvalidPayload)?;
+    let address = std::net::IpAddr::from_str(address).map_err(|_| RuleError::InvalidPayload)?;
+    let bits = bits.parse::<u8>().map_err(|_| RuleError::InvalidPayload)?;
+    let maximum = if address.is_ipv4() { 32 } else { 128 };
+    if bits > maximum {
+        return Err(RuleError::InvalidPayload);
+    }
+    Ok(Matcher::IpSuffix {
+        address,
+        bits,
+        source,
+        no_resolve: no_resolve || source,
+    })
+}
+
+fn ip_suffix_matches(pattern: std::net::IpAddr, bits: u8, candidate: std::net::IpAddr) -> bool {
+    let pattern = ip_address_bytes(pattern);
+    let candidate = ip_address_bytes(candidate);
+    if pattern.len() != candidate.len() {
+        return false;
+    }
+    let full_bytes = usize::from(bits / 8);
+    let remaining_bits = bits % 8;
+    let size = pattern.len();
+    if pattern[size - full_bytes..] != candidate[size - full_bytes..] {
+        return false;
+    }
+    remaining_bits == 0
+        || pattern[size - full_bytes - 1] << (8 - remaining_bits)
+            == candidate[size - full_bytes - 1] << (8 - remaining_bits)
+}
+
+fn ip_address_bytes(address: std::net::IpAddr) -> Vec<u8> {
+    match address {
+        std::net::IpAddr::V4(address) => address.octets().to_vec(),
+        std::net::IpAddr::V6(address) => address.octets().to_vec(),
+    }
 }
 
 fn parse_port(payload: &str, field: PortField) -> Result<Matcher, RuleError> {
@@ -917,6 +994,31 @@ mod tests {
         assert!(domain_wildcard_matches("?", "a"));
         assert!(!domain_wildcard_matches("?", "é"));
         assert!(domain_wildcard_matches("**", ""));
+    }
+
+    #[test]
+    fn matches_destination_ip_suffix_bits() {
+        let rules = vec![
+            "IP-SUFFIX,0.0.0.5/8,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let mut input = metadata("suffix.test", 80);
+        input.destination_ip = Some("192.0.2.5".parse().expect("IPv4"));
+        let decision = program.evaluate(&input);
+        assert_eq!(decision.target, "REJECT");
+        assert_eq!(decision.matched_kind.as_deref(), Some("IPSuffix"));
+        input.destination_ip = Some("192.0.2.6".parse().expect("IPv4"));
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
+    }
+
+    #[test]
+    fn rejects_invalid_ip_suffix_width() {
+        let rules = vec!["IP-SUFFIX,127.0.0.1/33,DIRECT".to_owned()];
+        assert!(matches!(
+            RuleSet::parse(&rules, &BTreeMap::new(), &[]),
+            Err(RuleError::InvalidPayload)
+        ));
     }
 
     #[test]

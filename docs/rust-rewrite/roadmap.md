@@ -901,6 +901,16 @@ matched-kind observation, one DIRECT local echo and one REJECT fallback.
 Broader Unicode/normalization, sub-rule and recovered/intercepted-host coverage
 remains part of the aggregate RULE-03 exit gate.
 
+### Phase 5B2a accepted scope
+
+Phase 5B2a accepts destination literal IPv4 `IP-SUFFIX` only. The parser must
+retain host bits and compare the declared suffix width rather than normalize it
+as a network prefix. Acceptance uses a deterministic native-interface echo,
+the shortest whole-byte suffix that separates that address from loopback, a
+DIRECT hit, REJECT fallback and invalid `/33` configuration. IPv6, partial-byte
+widths, mapped addresses, source forms and observable lazy/no-resolve resolver
+calls remain independent gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
