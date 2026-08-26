@@ -754,6 +754,18 @@ parity, not a claim that classical MRS exists. Invalid-rule warning text,
 permissive streaming-YAML recovery and exhaustive malformed-record diagnostics
 remain later CLI-08/CLI-13 slices.
 
+### Phase 5A5f accepted scope
+
+Phase 5A5f accepts the oracle's line-oriented YAML recovery semantics for
+domain and IP-CIDR conversion. The parser discovers `payload` or `rules` after
+unrelated top-level preamble, evaluates each subsequent non-comment entry
+against only the retained header, skips a malformed entry without poisoning
+later valid records and preserves the peculiar single-line/no-final-newline
+`file must have a payload` failure boundary. The differential converts both
+behaviors and cross-decodes every Go/Rust MRS output. Semantic invalid-rule
+warning logs and exhaustive malformed binary/YAML diagnostics remain explicit
+CLI-08/CLI-13 gaps.
+
 ### Phase 5A6a accepted scope
 
 Phase 5A6a accepts only `generate uuid` from `CLI-09`. Rust delegates random
