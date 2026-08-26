@@ -197,9 +197,38 @@ fn run_generate_subcommand(
             println!("PrivateKey: {}", STANDARD.encode(pair.private));
             println!("PublicKey: {}", STANDARD.encode(pair.public));
         }
+        Some("vless-x25519") => {
+            let private = arguments.get(1).map(decode_vless_private).transpose()?;
+            let material = rewrite_generator::vless_x25519(private);
+            let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let private = encoding.encode(material.pair.private);
+            let password = encoding.encode(material.pair.public);
+            println!("PrivateKey: {private}");
+            println!("Password: {password}");
+            println!("Hash32: {}", encoding.encode(material.hash32));
+            println!("-----------------------");
+            println!("      Lazy-Config      ");
+            println!("-----------------------");
+            println!("[Server] decryption: \"mlkem768x25519plus.native.600s.{private}\"");
+            println!("[Client] encryption: \"mlkem768x25519plus.native.0rtt.{password}\"");
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn decode_vless_private(
+    value: &OsString,
+) -> Result<[u8; 32], Box<dyn std::error::Error + Send + Sync>> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("invalid X25519 private key"))?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .unwrap_or_default();
+    decoded.try_into().map_err(|_| {
+        std::io::Error::other(format!("invalid length of X25519 private key: {value}")).into()
+    })
 }
 
 fn run_convert_ruleset_subcommand(

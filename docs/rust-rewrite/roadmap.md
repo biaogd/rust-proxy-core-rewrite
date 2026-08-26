@@ -774,6 +774,18 @@ both 32-byte payloads, exact labels/padding, ignored trailing arguments and
 startup short-circuit. It does not claim WireGuard transport behavior; ECH,
 VLESS and Sudoku generation remain later 5A6 slices.
 
+### Phase 5A6d accepted scope
+
+Phase 5A6d accepts `generate vless-x25519` from `CLI-09`, with either generated
+or supplied raw URL-safe Base64 private material. It reuses the clamped X25519
+core and delegates the password digest to `blake3` 1.8.7 (CC0-1.0 OR
+Apache-2.0 variants), then emits the oracle's complete eight-line key/hash/lazy
+configuration contract. A fixed private-key differential compares every output
+byte with Go, while an independent RFC 7748 ladder verifies the public password
+relationship and an invalid-length case preserves the exit class. This does
+not claim VLESS transport/encryption runtime behavior; ML-KEM, ECH and Sudoku
+generation remain later slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
