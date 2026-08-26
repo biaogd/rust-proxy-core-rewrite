@@ -183,7 +183,7 @@ fn run_convert_ruleset_subcommand(
         .get(1)
         .and_then(|value| value.to_str())
         .ok_or_else(|| std::io::Error::other(usage))?;
-    if format != "mrs" {
+    if !matches!(format, "mrs" | "text" | "yaml") {
         return Err(
             std::io::Error::other(format!("unsupported conversion format: {format}")).into(),
         );
@@ -196,7 +196,13 @@ fn run_convert_ruleset_subcommand(
         .ok_or_else(|| std::io::Error::other(usage))?;
     let source = std::fs::read(source)?;
     let mut target = std::fs::File::create(target)?;
-    target.write_all(&rewrite_ruleset::ipcidr_mrs_to_text(&source)?)?;
+    let output = match format {
+        "mrs" => rewrite_ruleset::ipcidr_mrs_to_text(&source)?,
+        "text" => rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?,
+        "yaml" => rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?,
+        _ => unreachable!("format was validated"),
+    };
+    target.write_all(&output)?;
     Ok(())
 }
 

@@ -2,8 +2,10 @@
 
 use std::fmt::Write as _;
 use std::io::{Cursor, Read};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use ipnet::IpNet;
+use serde::Deserialize;
 use thiserror::Error;
 
 const MRS_MAGIC: &[u8; 4] = b"MRS\x01";
@@ -16,6 +18,140 @@ pub enum RulesetError {
     Io(#[from] std::io::Error),
     #[error("invalid MRS: {0}")]
     Invalid(&'static str),
+    #[error("invalid YAML rule set: {0}")]
+    Yaml(#[from] serde_yaml_ng::Error),
+    #[error("file must have a `payload` field")]
+    MissingPayload,
+    #[error("empty rule")]
+    Empty,
+}
+
+/// Source syntax accepted by [`ipcidr_to_mrs`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceFormat {
+    Text,
+    Yaml,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RulePayload {
+    #[serde(default)]
+    payload: Vec<String>,
+    #[serde(default)]
+    rules: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum IpRange {
+    V4(u32, u32),
+    V6(u128, u128),
+}
+
+/// Converts newline-delimited or YAML IP-CIDR rules to an MRS v1 zstd frame.
+///
+/// Invalid IP-CIDR entries are ignored like the oracle. At least one valid
+/// entry is required.
+///
+/// # Errors
+///
+/// Returns [`RulesetError`] for malformed YAML, an absent YAML payload, an
+/// empty valid rule set or an encoding failure.
+pub fn ipcidr_to_mrs(source: &[u8], format: SourceFormat) -> Result<Vec<u8>, RulesetError> {
+    let rules = parse_rules(source, format)?;
+    let mut ranges = Vec::new();
+    let mut count = 0_i64;
+    for rule in rules {
+        if let Ok(network) = rule.parse::<IpNet>() {
+            ranges.push(range_of(network));
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err(RulesetError::Empty);
+    }
+    let ranges = merge_ranges(ranges);
+    let mut plain = Vec::new();
+    plain.extend(MRS_MAGIC);
+    plain.push(IPCIDR_BEHAVIOR);
+    plain.extend(count.to_be_bytes());
+    plain.extend(0_i64.to_be_bytes());
+    plain.push(IPCIDR_SET_VERSION);
+    plain.extend(
+        i64::try_from(ranges.len())
+            .map_err(|_| RulesetError::Invalid("too many IP ranges"))?
+            .to_be_bytes(),
+    );
+    for range in ranges {
+        match range {
+            IpRange::V4(start, end) => {
+                plain.extend(mapped_v4_bytes(start));
+                plain.extend(mapped_v4_bytes(end));
+            }
+            IpRange::V6(start, end) => {
+                plain.extend(start.to_be_bytes());
+                plain.extend(end.to_be_bytes());
+            }
+        }
+    }
+    Ok(zstd::stream::encode_all(plain.as_slice(), 0)?)
+}
+
+fn parse_rules(source: &[u8], format: SourceFormat) -> Result<Vec<String>, RulesetError> {
+    match format {
+        SourceFormat::Text => Ok(String::from_utf8_lossy(source)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+            .map(ToOwned::to_owned)
+            .collect()),
+        SourceFormat::Yaml => {
+            let payload: RulePayload = serde_yaml_ng::from_slice(source)?;
+            if !payload.payload.is_empty() {
+                Ok(payload.payload)
+            } else if !payload.rules.is_empty() {
+                Ok(payload.rules)
+            } else {
+                Err(RulesetError::MissingPayload)
+            }
+        }
+    }
+}
+
+fn range_of(network: IpNet) -> IpRange {
+    match (network.network(), network.broadcast()) {
+        (IpAddr::V4(start), IpAddr::V4(end)) => IpRange::V4(start.into(), end.into()),
+        (IpAddr::V6(start), IpAddr::V6(end)) => IpRange::V6(start.into(), end.into()),
+        _ => unreachable!("an IP network has one address family"),
+    }
+}
+
+fn merge_ranges(mut ranges: Vec<IpRange>) -> Vec<IpRange> {
+    ranges.sort_unstable();
+    let mut merged = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match (merged.last_mut(), range) {
+            (Some(IpRange::V4(_, previous_end)), IpRange::V4(start, end))
+                if start <= previous_end.saturating_add(1) =>
+            {
+                *previous_end = (*previous_end).max(end);
+            }
+            (Some(IpRange::V6(_, previous_end)), IpRange::V6(start, end))
+                if start <= previous_end.saturating_add(1) =>
+            {
+                *previous_end = (*previous_end).max(end);
+            }
+            (_, range) => merged.push(range),
+        }
+    }
+    merged
+}
+
+fn mapped_v4_bytes(address: u32) -> [u8; 16] {
+    let mut mapped = [0; 16];
+    mapped[10] = 0xff;
+    mapped[11] = 0xff;
+    mapped[12..].copy_from_slice(&address.to_be_bytes());
+    mapped
 }
 
 /// Converts an IP-CIDR MRS v1 payload to canonical newline-delimited prefixes.
@@ -164,5 +300,27 @@ mod tests {
             ipcidr_mrs_to_text(&encoded).unwrap(),
             b"192.0.2.0/30\n2001:db8::/127\n"
         );
+    }
+
+    #[test]
+    fn encodes_text_and_yaml_as_merged_ipcidr_ranges() {
+        for (source, format) in [
+            (
+                b"# comment\n192.0.2.0/25\n192.0.2.128/25\n2001:db8::/127\n".as_slice(),
+                SourceFormat::Text,
+            ),
+            (
+                b"payload:\n  - 192.0.2.0/25\n  - 192.0.2.128/25\n  - 2001:db8::/127\n".as_slice(),
+                SourceFormat::Yaml,
+            ),
+        ] {
+            let encoded = ipcidr_to_mrs(source, format).unwrap();
+            assert_eq!(
+                ipcidr_mrs_to_text(&encoded).unwrap(),
+                b"192.0.2.0/24\n2001:db8::/127\n"
+            );
+            let decoded = zstd::stream::decode_all(encoded.as_slice()).unwrap();
+            assert_eq!(&decoded[5..13], 3_i64.to_be_bytes());
+        }
     }
 }

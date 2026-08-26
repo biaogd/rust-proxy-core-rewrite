@@ -2410,6 +2410,9 @@ dependencies = [
 name = "rewrite-ruleset"
 version = "0.1.0"
 dependencies = [
+ "ipnet",
+ "serde",
+ "serde_yaml_ng",
  "thiserror 2.0.20",
  "zstd",
 ]

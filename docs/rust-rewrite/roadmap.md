@@ -704,6 +704,20 @@ while the MRS record parser remains focused, safe Rust. Text/YAML to MRS,
 domain/classical rules, every malformed-record diagnostic and native Windows
 evidence remain later 5A5 slices.
 
+### Phase 5A5b accepted scope
+
+Phase 5A5b accepts the valid IP-CIDR text and YAML payload to MRS v1 direction
+of `CLI-08`. It skips the oracle's text comment forms, accepts `payload` and
+`rules` YAML lists, counts valid source prefixes, masks host bits, merges
+overlapping/adjacent IPv4 and IPv6 ranges and writes the documented MRS header
+and range-set records through `zstd` 0.13.3. Because the Go and Rust zstd
+encoders need not choose byte-identical frames, acceptance requires both Go and
+Rust outputs to be decoded successfully by both implementations into identical
+canonical records. Empty valid rule sets retain the oracle's failure/empty
+target behavior. The oracle's permissive streaming-YAML recovery, invalid-rule
+warning text, domain/classical records and exhaustive malformed inputs remain
+later 5A5 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

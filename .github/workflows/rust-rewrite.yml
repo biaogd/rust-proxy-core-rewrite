@@ -101,6 +101,7 @@ jobs:
       PHASE5A4C_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A4D_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A5A_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5A5B_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A7A_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A7B_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A8A_CARGO_TARGET: ${{ github.workspace }}/rust/target
@@ -134,6 +135,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5a5b.py \
             compat/scripts/phase5a5a.py \
             compat/scripts/phase5a4d.py \
             compat/scripts/phase5a4c.py \
