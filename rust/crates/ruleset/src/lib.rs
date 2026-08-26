@@ -9,6 +9,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const MRS_MAGIC: &[u8; 4] = b"MRS\x01";
+const DOMAIN_BEHAVIOR: u8 = 0;
 const IPCIDR_BEHAVIOR: u8 = 1;
 const IPCIDR_SET_VERSION: u8 = 1;
 
@@ -162,21 +163,7 @@ fn mapped_v4_bytes(address: u32) -> [u8; 16] {
 pub fn ipcidr_mrs_to_text(source: &[u8]) -> Result<Vec<u8>, RulesetError> {
     let decoded = zstd::stream::decode_all(source)?;
     let mut reader = Cursor::new(decoded);
-    if read_array::<4>(&mut reader)? != *MRS_MAGIC {
-        return Err(RulesetError::Invalid("magic bytes"));
-    }
-    if read_u8(&mut reader)? != IPCIDR_BEHAVIOR {
-        return Err(RulesetError::Invalid("behavior"));
-    }
-    let count = read_i64(&mut reader)?;
-    if count < 1 {
-        return Err(RulesetError::Invalid("rule count"));
-    }
-    let extra_length = read_i64(&mut reader)?;
-    let extra_length =
-        usize::try_from(extra_length).map_err(|_| RulesetError::Invalid("extra length"))?;
-    let mut extra = vec![0; extra_length];
-    reader.read_exact(&mut extra)?;
+    read_mrs_header(&mut reader, IPCIDR_BEHAVIOR)?;
     if read_u8(&mut reader)? != IPCIDR_SET_VERSION {
         return Err(RulesetError::Invalid("IP-CIDR set version"));
     }
@@ -192,6 +179,163 @@ pub fn ipcidr_mrs_to_text(source: &[u8]) -> Result<Vec<u8>, RulesetError> {
         append_range(&mut output, start, end)?;
     }
     Ok(output.into_bytes())
+}
+
+/// Converts a domain MRS v1 payload to sorted newline-delimited patterns.
+///
+/// # Errors
+///
+/// Returns [`RulesetError`] for invalid zstd, header, behavior or succinct trie
+/// data.
+pub fn domain_mrs_to_text(source: &[u8]) -> Result<Vec<u8>, RulesetError> {
+    let decoded = zstd::stream::decode_all(source)?;
+    let mut reader = Cursor::new(decoded);
+    read_mrs_header(&mut reader, DOMAIN_BEHAVIOR)?;
+    if read_u8(&mut reader)? != 1 {
+        return Err(RulesetError::Invalid("domain set version"));
+    }
+    let leaves = read_words(&mut reader, "domain leaves")?;
+    let label_bitmap = read_words(&mut reader, "domain label bitmap")?;
+    let label_length = read_positive_length(&mut reader, "domain labels")?;
+    let mut labels = vec![0; label_length];
+    reader.read_exact(&mut labels)?;
+
+    let mut reversed_keys = Vec::new();
+    traverse_domain_set(
+        &leaves,
+        &label_bitmap,
+        &labels,
+        0,
+        0,
+        &mut Vec::new(),
+        &mut reversed_keys,
+    )?;
+    let mut keys = reversed_keys
+        .into_iter()
+        .map(|key| {
+            String::from_utf8(key)
+                .map(|key| key.chars().rev().collect::<String>())
+                .map_err(|_| RulesetError::Invalid("domain label UTF-8"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    keys.sort_unstable();
+    let mut output = String::new();
+    for key in &keys {
+        if keys.binary_search(&format!("+.{key}")).is_ok() {
+            continue;
+        }
+        writeln!(output, "{key}").expect("writing to String cannot fail");
+    }
+    Ok(output.into_bytes())
+}
+
+fn read_mrs_header(reader: &mut impl Read, behavior: u8) -> Result<i64, RulesetError> {
+    if read_array::<4>(reader)? != *MRS_MAGIC {
+        return Err(RulesetError::Invalid("magic bytes"));
+    }
+    if read_u8(reader)? != behavior {
+        return Err(RulesetError::Invalid("behavior"));
+    }
+    let count = read_i64(reader)?;
+    if count < 1 {
+        return Err(RulesetError::Invalid("rule count"));
+    }
+    let extra_length = read_positive_or_zero_length(reader, "extra length")?;
+    let mut extra = vec![0; extra_length];
+    reader.read_exact(&mut extra)?;
+    Ok(count)
+}
+
+fn read_positive_or_zero_length(
+    reader: &mut impl Read,
+    description: &'static str,
+) -> Result<usize, RulesetError> {
+    usize::try_from(read_i64(reader)?).map_err(|_| RulesetError::Invalid(description))
+}
+
+fn read_positive_length(
+    reader: &mut impl Read,
+    description: &'static str,
+) -> Result<usize, RulesetError> {
+    read_positive_or_zero_length(reader, description).and_then(|length| {
+        (length > 0)
+            .then_some(length)
+            .ok_or(RulesetError::Invalid(description))
+    })
+}
+
+fn read_words(reader: &mut impl Read, description: &'static str) -> Result<Vec<u64>, RulesetError> {
+    let length = read_positive_length(reader, description)?;
+    (0..length)
+        .map(|_| Ok(u64::from_be_bytes(read_array(reader)?)))
+        .collect()
+}
+
+fn traverse_domain_set(
+    leaves: &[u64],
+    label_bitmap: &[u64],
+    labels: &[u8],
+    node_id: usize,
+    mut bitmap_index: usize,
+    current: &mut Vec<u8>,
+    keys: &mut Vec<Vec<u8>>,
+) -> Result<(), RulesetError> {
+    if bit(leaves, node_id)? {
+        keys.push(current.clone());
+    }
+    loop {
+        if bit(label_bitmap, bitmap_index)? {
+            return Ok(());
+        }
+        let label_index = bitmap_index
+            .checked_sub(node_id)
+            .filter(|index| *index < labels.len())
+            .ok_or(RulesetError::Invalid("domain label index"))?;
+        current.push(labels[label_index]);
+        let next_node_id = count_zero_bits(label_bitmap, bitmap_index + 1)?;
+        let next_bitmap_index = select_one_bit(label_bitmap, next_node_id - 1)? + 1;
+        traverse_domain_set(
+            leaves,
+            label_bitmap,
+            labels,
+            next_node_id,
+            next_bitmap_index,
+            current,
+            keys,
+        )?;
+        current.pop();
+        bitmap_index += 1;
+    }
+}
+
+fn bit(words: &[u64], index: usize) -> Result<bool, RulesetError> {
+    let word = words
+        .get(index / 64)
+        .ok_or(RulesetError::Invalid("domain bitmap index"))?;
+    Ok(word & (1_u64 << (index % 64)) != 0)
+}
+
+fn count_zero_bits(words: &[u64], end: usize) -> Result<usize, RulesetError> {
+    let mut zeroes = 0;
+    for index in 0..end {
+        if !bit(words, index)? {
+            zeroes += 1;
+        }
+    }
+    Ok(zeroes)
+}
+
+fn select_one_bit(words: &[u64], ordinal: usize) -> Result<usize, RulesetError> {
+    let mut seen = 0;
+    for index in 0..words.len() * 64 {
+        if bit(words, index)? {
+            if seen == ordinal {
+                return Ok(index);
+            }
+            seen += 1;
+        }
+    }
+    Err(RulesetError::Invalid("domain bitmap terminator"))
 }
 
 fn append_range(output: &mut String, start: [u8; 16], end: [u8; 16]) -> Result<(), RulesetError> {
@@ -322,5 +466,23 @@ mod tests {
             let decoded = zstd::stream::decode_all(encoded.as_slice()).unwrap();
             assert_eq!(&decoded[5..13], 3_i64.to_be_bytes());
         }
+    }
+
+    #[test]
+    fn decodes_single_key_domain_set() {
+        let mut plain = Vec::new();
+        plain.extend(MRS_MAGIC);
+        plain.push(DOMAIN_BEHAVIOR);
+        plain.extend(1_i64.to_be_bytes());
+        plain.extend(0_i64.to_be_bytes());
+        plain.push(1);
+        plain.extend(1_i64.to_be_bytes());
+        plain.extend(2_u64.to_be_bytes());
+        plain.extend(1_i64.to_be_bytes());
+        plain.extend(6_u64.to_be_bytes());
+        plain.extend(1_i64.to_be_bytes());
+        plain.push(b'a');
+        let encoded = zstd::stream::encode_all(plain.as_slice(), 0).unwrap();
+        assert_eq!(domain_mrs_to_text(&encoded).unwrap(), b"a\n");
     }
 }

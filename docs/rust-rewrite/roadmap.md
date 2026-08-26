@@ -718,6 +718,17 @@ target behavior. The oracle's permissive streaming-YAML recovery, invalid-rule
 warning text, domain/classical records and exhaustive malformed inputs remain
 later 5A5 slices.
 
+### Phase 5A5c accepted scope
+
+Phase 5A5c accepts only domain MRS v1 to sorted text from `CLI-08`. A focused
+safe-Rust decoder reads the oracle's versioned succinct-domain-set leaves,
+label bitmap and label bytes with explicit bounds checks, reconstructs exact
+and wildcard patterns and removes the internal exact key paired with a `+.`
+pattern just as the oracle does. The differential uses a Go-produced frame and
+compares complete output bytes plus malformed-frame lifecycle. Domain
+text/YAML encoding, exhaustive Unicode/malformed trie cases, classical records
+and runtime provider consumption remain later slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

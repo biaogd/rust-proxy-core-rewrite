@@ -176,7 +176,7 @@ fn run_convert_ruleset_subcommand(
         .first()
         .and_then(|value| value.to_str())
         .ok_or_else(|| std::io::Error::other(usage))?;
-    if behavior != "ipcidr" {
+    if !matches!(behavior, "ipcidr" | "domain") {
         return Err(std::io::Error::other(format!("unsupported behavior type: {behavior}")).into());
     }
     let format = arguments
@@ -196,10 +196,21 @@ fn run_convert_ruleset_subcommand(
         .ok_or_else(|| std::io::Error::other(usage))?;
     let source = std::fs::read(source)?;
     let mut target = std::fs::File::create(target)?;
-    let output = match format {
-        "mrs" => rewrite_ruleset::ipcidr_mrs_to_text(&source)?,
-        "text" => rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?,
-        "yaml" => rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?,
+    let output = match (behavior, format) {
+        ("ipcidr", "mrs") => rewrite_ruleset::ipcidr_mrs_to_text(&source)?,
+        ("ipcidr", "text") => {
+            rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?
+        }
+        ("ipcidr", "yaml") => {
+            rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?
+        }
+        ("domain", "mrs") => rewrite_ruleset::domain_mrs_to_text(&source)?,
+        ("domain", _) => {
+            return Err(std::io::Error::other(format!(
+                "unsupported conversion combination: {behavior}/{format}"
+            ))
+            .into());
+        }
         _ => unreachable!("format was validated"),
     };
     target.write_all(&output)?;
