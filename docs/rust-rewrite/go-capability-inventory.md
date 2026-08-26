@@ -45,7 +45,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-05 | `-m` geodata-mode default override with explicit-YAML precedence | **Parity** | Accepted 5A2b |
 | CLI-06 | Controller/UI/secret/routing-mark override flags and environment variables | Partial: controller address and secret parity | Accepted 5A3a; UI/TLS/Unix/pipe/routing-mark remain |
 | CLI-07 | `-age-secret-key` and encrypted configuration loading | Partial: single X25519 identity parity | Accepted 5A4a; multiple, hybrid, SSH and plugin identities remain |
-| CLI-08 | `convert-ruleset` subcommand and MRS/classical/domain/IP output | Partial: IP-CIDR text/YAML ↔ MRS v1 plus domain MRS v1 to text | Accepted 5A5a–5A5c; domain encoding, classical and broader parser/error slices remain |
+| CLI-08 | `convert-ruleset` subcommand and MRS/classical/domain/IP output | Partial: IP-CIDR and domain text/YAML ↔ MRS v1 | Accepted 5A5a–5A5d; classical and broader parser/error slices remain |
 | CLI-09 | `generate` subcommand family | Not started | 5A6 |
 | CLI-10 | `age` subcommand family | Partial: X25519 `keygen`/`convert`/`encrypt`/`decrypt` parity | Accepted 5A4b–5A4d; hybrid/PQ remains |
 | CLI-11 | Startup, readiness, SIGINT/SIGTERM, SIGHUP, invalid-reload rollback and complete resource shutdown | Partial | 5A7, then repeated per resource family |

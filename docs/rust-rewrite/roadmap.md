@@ -729,6 +729,19 @@ compares complete output bytes plus malformed-frame lifecycle. Domain
 text/YAML encoding, exhaustive Unicode/malformed trie cases, classical records
 and runtime provider consumption remain later slices.
 
+### Phase 5A5d accepted scope
+
+Phase 5A5d accepts valid domain text/YAML to MRS v1 from `CLI-08`. The safe-Rust
+builder applies the oracle's case, exact, `*`, `+.`, and leading-dot wildcard
+normalization, including the internal exact key required by complex-wildcard
+matching, then writes the same breadth-first succinct leaves/label-bitmap/label
+layout. Acceptance is semantic rather than compressed-byte identity: MRS frames
+produced by either implementation must decode through both implementations to
+the same sorted patterns. Comment-only input proves the empty-rule/empty-target
+failure path. Invalid-entry warning log parity, permissive streaming-YAML
+recovery, classical records and runtime provider consumption remain later
+slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

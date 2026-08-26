@@ -205,11 +205,11 @@ fn run_convert_ruleset_subcommand(
             rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?
         }
         ("domain", "mrs") => rewrite_ruleset::domain_mrs_to_text(&source)?,
-        ("domain", _) => {
-            return Err(std::io::Error::other(format!(
-                "unsupported conversion combination: {behavior}/{format}"
-            ))
-            .into());
+        ("domain", "text") => {
+            rewrite_ruleset::domain_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?
+        }
+        ("domain", "yaml") => {
+            rewrite_ruleset::domain_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?
         }
         _ => unreachable!("format was validated"),
     };
