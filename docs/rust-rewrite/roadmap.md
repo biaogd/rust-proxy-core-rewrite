@@ -764,6 +764,16 @@ to prove each random public key belongs to the emitted private key, in addition
 to length, clamp, output and startup-lifecycle checks. WireGuard formatting and
 the ECH/VLESS/Sudoku generators remain later 5A6 slices.
 
+### Phase 5A6c accepted scope
+
+Phase 5A6c accepts only `generate wg-keypair` from `CLI-09`. It deliberately
+reuses the Phase 5A6b clamped X25519 generator and changes only the externally
+observable encoding to the oracle's padded standard Base64. The black-box gate
+independently recomputes the public key from each emitted private key and checks
+both 32-byte payloads, exact labels/padding, ignored trailing arguments and
+startup short-circuit. It does not claim WireGuard transport behavior; ECH,
+VLESS and Sudoku generation remain later 5A6 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

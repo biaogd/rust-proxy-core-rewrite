@@ -37,7 +37,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Remaining controller/UI/routing-mark process overrides | Oracle | Not started | Split by listener/resource boundary under 5A3b onward |
 | Controller/UI/secret CLI overrides | Oracle | Not started | Config plus override differential |
 | `convert-ruleset` | Oracle | Partial | Phases 5A5a–5A5d accept IP-CIDR and domain text/YAML ↔ MRS v1 with bidirectional Go/Rust frame interchange; classical behavior, invalid-rule warning logs and remaining parser/error classes are unclaimed |
-| `generate` | Oracle | Partial | Phases 5A6a–5A6b accept UUID v4 and Reality X25519 keypair output; WireGuard/ECH/VLESS/Sudoku generators remain unclaimed |
+| `generate` | Oracle | Partial | Phases 5A6a–5A6c accept UUID v4 plus Reality/WireGuard X25519 keypair output; ECH/VLESS/Sudoku generators remain unclaimed |
 | Phase 5A4a X25519 age-encrypted config | Oracle | **Parity** | File/base64 input, CLI/environment/explicit-empty precedence, wrong key, invalid-key warning on plaintext and live applied config in `compat/scripts/phase5a4a.py` |
 | Phase 5A4b `age convert` for X25519 | Oracle | **Parity** | Exact recipient output, ignored trailing argument and invalid/missing-key exit classes in `compat/scripts/phase5a4b.py` |
 | Phase 5A4c X25519 `age encrypt` / `decrypt` | Oracle | **Parity** | Binary file/stdin/stdout round trips, plaintext pass-through, error exits and bidirectional Go/Rust armor interoperability in `compat/scripts/phase5a4c.py` |
@@ -48,6 +48,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 5A5d domain text/YAML to MRS | Oracle | **Parity** | Text/YAML (`payload`/`rules`) exact, `*`, `+.` and dot-wildcard inputs, case normalization, empty-rule lifecycle and Go↔Rust succinct-domain-set frame interchange in `compat/scripts/phase5a5d.py`; invalid-entry warning text remains unclaimed |
 | Phase 5A6a `generate uuid` | Oracle | **Parity** | Canonical lowercase RFC 4122 UUID v4 structure, ignored trailing argument, startup short-circuit, unknown-command silence and missing-command exit class in `compat/scripts/phase5a6a.py` |
 | Phase 5A6b `generate reality-keypair` | Oracle | **Parity** | Two labeled raw URL-safe Base64 32-byte keys, explicit private clamp, independently recomputed X25519 public relation, ignored trailing argument and startup short-circuit in `compat/scripts/phase5a6b.py` |
+| Phase 5A6c `generate wg-keypair` | Oracle | **Parity** | Two labeled padded standard-Base64 32-byte keys, explicit private clamp, independently recomputed X25519 public relation, ignored trailing argument and startup short-circuit in `compat/scripts/phase5a6c.py` |
 | Full age identities and encrypted config | Oracle | Partial | Multiple identities and hybrid/PQ, SSH, encrypted-identity and plugin forms remain unclaimed |
 | Phase 1 SIGTERM cleanup | Oracle | **Parity** | Exit 0, listener/idle stream closure and bounded task drain |
 | Phase 5A7b SIGINT/SIGTERM local-resource shutdown | Oracle | **Parity** | Zero exit, bounded idle-stream closure and immediate mixed/controller/DNS TCP plus DNS UDP port release in `compat/scripts/phase5a7b.py` |
@@ -314,6 +315,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A5d domain text/YAML to MRS | Oracle | **Parity** | Native bidirectional Go/Rust succinct domain-set MRS interchange and semantic record differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A6a UUID generation | Oracle | **Parity** | Native UUID v4 structure and command-lifecycle differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A6b Reality keypair | Oracle | **Parity** | Native X25519 clamp/relation and output-contract differential passed, 2026-08-26 |
+| Darwin arm64 — Phase 5A6c WireGuard keypair | Oracle | **Parity** | Native X25519 clamp/relation and standard-Base64 output differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
@@ -351,6 +353,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A5d domain text/YAML to MRS | Oracle | Pending | Default GitHub Actions bidirectional interchange differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A6a UUID generation | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A6b Reality keypair | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
+| Linux amd64 — Phase 5A6c WireGuard keypair | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7a invalid SIGHUP recovery | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

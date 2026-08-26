@@ -192,6 +192,11 @@ fn run_generate_subcommand(
             println!("PrivateKey: {}", encoding.encode(pair.private));
             println!("PublicKey: {}", encoding.encode(pair.public));
         }
+        Some("wg-keypair") => {
+            let pair = rewrite_generator::x25519_keypair();
+            println!("PrivateKey: {}", STANDARD.encode(pair.private));
+            println!("PublicKey: {}", STANDARD.encode(pair.public));
+        }
         _ => {}
     }
     Ok(())

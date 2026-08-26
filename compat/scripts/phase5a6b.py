@@ -17,7 +17,9 @@ from phase1 import IO_DEADLINE, ROOT, RUST_ROOT, assert_go_oracle_baseline
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5a6b-diff.json"
 
 
-def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
+def build_binaries(
+    output: pathlib.Path, target_environment: str = "PHASE5A6B_CARGO_TARGET"
+) -> dict[str, pathlib.Path]:
     assert_go_oracle_baseline()
     go_binary = output / "go-oracle"
     subprocess.run(
@@ -27,7 +29,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
     )
     target = pathlib.Path(
         os.environ.get(
-            "PHASE5A6B_CARGO_TARGET", ROOT / "target" / "compat" / "phase5a6b-rust"
+            target_environment, ROOT / "target" / "compat" / "phase5a6b-rust"
         )
     )
     subprocess.run(
