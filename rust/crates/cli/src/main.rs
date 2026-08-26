@@ -323,6 +323,40 @@ fn run_age_subcommand(
             );
             Ok(())
         }
+        Some("encrypt") => {
+            let public_key = age_argument(
+                arguments,
+                1,
+                "age encrypt <public_key> <source_file> <target_file>",
+            )?;
+            let source = arguments.get(2).ok_or_else(|| {
+                std::io::Error::other("Using: age encrypt <public_key> <source_file> <target_file>")
+            })?;
+            let target = arguments.get(3).ok_or_else(|| {
+                std::io::Error::other("Using: age encrypt <public_key> <source_file> <target_file>")
+            })?;
+            let data = read_age_input(source)?;
+            let encrypted = rewrite_age::encrypt_x25519_armor(&data, public_key)?;
+            write_age_output(target, encrypted.as_bytes())?;
+            Ok(())
+        }
+        Some("decrypt") => {
+            let secret_key = age_argument(
+                arguments,
+                1,
+                "age decrypt <secret_key> <source_file> <target_file>",
+            )?;
+            let source = arguments.get(2).ok_or_else(|| {
+                std::io::Error::other("Using: age decrypt <secret_key> <source_file> <target_file>")
+            })?;
+            let target = arguments.get(3).ok_or_else(|| {
+                std::io::Error::other("Using: age decrypt <secret_key> <source_file> <target_file>")
+            })?;
+            let data = read_age_input(source)?;
+            let decrypted = rewrite_age::decrypt_config(&data, secret_key)?;
+            write_age_output(target, &decrypted)?;
+            Ok(())
+        }
         Some(command) => Err(std::io::Error::other(format!(
             "age subcommand is not implemented: {command}"
         ))
@@ -330,6 +364,35 @@ fn run_age_subcommand(
         None => {
             Err(std::io::Error::other("Using: age keygen/keygen-pq/convert/decrypt/encrypt").into())
         }
+    }
+}
+
+fn age_argument<'a>(
+    arguments: &'a [OsString],
+    index: usize,
+    usage: &'static str,
+) -> Result<&'a str, std::io::Error> {
+    arguments
+        .get(index)
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| std::io::Error::other(format!("Using: {usage}")))
+}
+
+fn read_age_input(source: &std::ffi::OsStr) -> std::io::Result<Vec<u8>> {
+    if source == "-" {
+        let mut data = Vec::new();
+        std::io::stdin().read_to_end(&mut data)?;
+        Ok(data)
+    } else {
+        std::fs::read(source)
+    }
+}
+
+fn write_age_output(target: &std::ffi::OsStr, data: &[u8]) -> std::io::Result<()> {
+    if target == "-" {
+        std::io::stdout().write_all(data)
+    } else {
+        std::fs::write(target, data)
     }
 }
 

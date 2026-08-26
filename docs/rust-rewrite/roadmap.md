@@ -674,6 +674,15 @@ oracle and preserves the oracle's exit class for invalid or missing keys.
 Key generation, hybrid/PQ conversion and encrypt/decrypt remain later 5A4
 slices.
 
+### Phase 5A4c accepted scope
+
+Phase 5A4c accepts native X25519 `age encrypt` and `age decrypt` from `CLI-10`.
+Both file and `-` standard-stream forms preserve arbitrary bytes, produce or
+consume ASCII armor and retain the oracle's plaintext-decrypt pass-through and
+failure exit class. Bidirectional Go→Rust and Rust→Go ciphertext interchange is
+required. Key generation, hybrid/PQ and other identity/recipient types remain
+outside this slice.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

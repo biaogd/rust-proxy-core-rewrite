@@ -47,7 +47,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-07 | `-age-secret-key` and encrypted configuration loading | Partial: single X25519 identity parity | Accepted 5A4a; multiple, hybrid, SSH and plugin identities remain |
 | CLI-08 | `convert-ruleset` subcommand and MRS/classical/domain/IP output | Not started | 5A5 |
 | CLI-09 | `generate` subcommand family | Not started | 5A6 |
-| CLI-10 | `age` subcommand family | Partial: X25519 `convert` parity | Accepted 5A4b; key generation, encrypt/decrypt and hybrid/PQ remain |
+| CLI-10 | `age` subcommand family | Partial: X25519 `convert`/`encrypt`/`decrypt` parity | Accepted 5A4b–5A4c; key generation and hybrid/PQ remain |
 | CLI-11 | Startup, readiness, SIGINT/SIGTERM, SIGHUP, invalid-reload rollback and complete resource shutdown | Partial | 5A7, then repeated per resource family |
 | CLI-12 | `post-up` and `post-down` hook ordering, shell behavior and failure handling | Partial: Unix local-resource parity | Accepted 5A8a; native Windows evidence and future-resource ordering remain |
 | CLI-13 | Fatal panic/error/log formatting and exit-code classes | Partial | Cross-cutting contract gates |
