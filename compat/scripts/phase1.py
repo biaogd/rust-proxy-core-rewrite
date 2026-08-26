@@ -62,6 +62,37 @@ def assert_go_oracle_baseline() -> None:
         )
 
 
+def wait_for_linux_signal_handlers(process: subprocess.Popen[Any]) -> bool:
+    """Wait until Linux reports that SIGHUP and SIGTERM are caught.
+
+    Listener readiness can precede product signal-handler installation. The
+    Linux caught-signal mask supplies a deterministic barrier without sleeps or
+    repeated signals. Callers on other platforms receive ``False`` and must use
+    a capability-specific observable barrier.
+    """
+    status = pathlib.Path(f"/proc/{process.pid}/status")
+    if not status.exists():
+        return False
+    expected = (1 << (signal.SIGHUP - 1)) | (1 << (signal.SIGTERM - 1))
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise AssertionError("candidate exited before signal handlers were installed")
+        try:
+            caught = next(
+                line.split(":", 1)[1].strip()
+                for line in status.read_text().splitlines()
+                if line.startswith("SigCgt:")
+            )
+        except (OSError, StopIteration):
+            time.sleep(0.01)
+            continue
+        if int(caught, 16) & expected == expected:
+            return True
+        time.sleep(0.01)
+    raise AssertionError("candidate signal handlers did not become observable")
+
+
 def run_checked(command: list[str], *, cwd: pathlib.Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 

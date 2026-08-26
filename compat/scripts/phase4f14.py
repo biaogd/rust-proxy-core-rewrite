@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port
+from phase1 import IO_DEADLINE, ROOT, reserve_port, wait_for_linux_signal_handlers
 from phase4 import build_binaries, launch, stop, wait_dns_ready
 from phase4b import local_interface_ip, make_query, udp_query
 from phase4c import AuthorityHandler, AuthorityServer, AuthorityState, fake_address
@@ -143,14 +143,13 @@ def wait_for_real(
 ) -> str:
     deadline = time.monotonic() + IO_DEADLINE
     identifier = 0x7200
-    next_reload = 0.0
+    reload_sent = False
     while time.monotonic() < deadline:
-        now = time.monotonic()
-        if reload_process is not None and now >= next_reload:
+        if reload_process is not None and not reload_sent:
             if reload_process.poll() is not None:
                 raise AssertionError("candidate exited before fake-IP reload became observable")
             os.kill(reload_process.pid, signal.SIGHUP)
-            next_reload = now + 0.1
+            reload_sent = True
         try:
             data = query_data(port, name, identifier)
             if data == REAL_ADDRESS:
@@ -506,21 +505,23 @@ def interchange_generation(
             )
             for index, (name, record_type) in enumerate(queries)
         }
-        # Listener readiness can precede Go's signal.Notify calls. Prove that
-        # SIGHUP is installed and processed before SIGTERM is used to persist
-        # the allocation offset; otherwise a fast Linux runner can terminate
-        # the oracle without StoreState and produce a non-interchangeable DB.
-        marker = "reload-ready.interchange.phase4f14.test"
-        config.write_text(
-            config_text(
-                dns_port=dns_port,
-                mixed_port=mixed_port,
-                upstream_port=authority_port,
-                filters=[marker],
-                store=True,
+        # Listener readiness can precede Go's signal.Notify calls. On Linux,
+        # wait for the caught-signal mask directly before SIGTERM persists the
+        # allocation offset. Other platforms retain a single observable reload
+        # as the barrier; never flood SIGHUP because overlapping reloads can
+        # replace the pool while bbolt persistence is being observed.
+        if not wait_for_linux_signal_handlers(process):
+            marker = "reload-ready.interchange.phase4f14.test"
+            config.write_text(
+                config_text(
+                    dns_port=dns_port,
+                    mixed_port=mixed_port,
+                    upstream_port=authority_port,
+                    filters=[marker],
+                    store=True,
+                )
             )
-        )
-        wait_for_real(dns_port, marker, reload_process=process)
+            wait_for_real(dns_port, marker, reload_process=process)
         return addresses, stop(process)
     finally:
         if process.poll() is None:
