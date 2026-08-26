@@ -169,6 +169,7 @@ async fn apply_generation(
     };
 
     config_sender.send_replace(Arc::new(next));
+    dns_service.clear_cache().await;
     dns_service.reset_connections().await;
 
     for (kind, port, listener, udp) in prepared_listeners {

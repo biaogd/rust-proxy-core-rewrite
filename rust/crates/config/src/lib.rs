@@ -110,6 +110,12 @@ pub enum DnsMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsCacheAlgorithm {
+    Lru,
+    Arc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FakeIpFilterMode {
     Blacklist,
     Whitelist,
@@ -136,6 +142,8 @@ pub struct DnsConfig {
     pub proxy_resolvers: Vec<DnsResolverClient>,
     pub ipv6: bool,
     pub ipv6_timeout: std::time::Duration,
+    pub cache_algorithm: DnsCacheAlgorithm,
+    pub cache_max_size: usize,
     pub use_hosts: bool,
     pub use_system_hosts: bool,
     pub mode: DnsMode,
@@ -405,6 +413,8 @@ struct RawDns {
     listen: Option<String>,
     ipv6: Option<bool>,
     ipv6_timeout: Option<i64>,
+    cache_algorithm: Option<String>,
+    cache_max_size: Option<i64>,
     prefer_h3: Option<bool>,
     use_hosts: Option<bool>,
     use_system_hosts: Option<bool>,
@@ -839,6 +849,7 @@ fn parse_dns(
             u64::try_from(value).expect("positive IPv6 timeout fits u64"),
         ),
     };
+    let (cache_algorithm, cache_max_size) = parse_dns_cache(&raw)?;
     let use_hosts = raw.use_hosts.unwrap_or(true);
     let use_system_hosts = raw.use_system_hosts.unwrap_or(true);
     let mode = match raw.enhanced_mode.as_deref().unwrap_or("redir-host") {
@@ -898,6 +909,8 @@ fn parse_dns(
         proxy_resolvers: resolver_sets.proxy_resolvers,
         ipv6,
         ipv6_timeout,
+        cache_algorithm,
+        cache_max_size,
         use_hosts,
         use_system_hosts,
         mode,
@@ -909,6 +922,20 @@ fn parse_dns(
         tls: main.tls,
         query_options: main.query_options,
     }))
+}
+
+fn parse_dns_cache(raw: &RawDns) -> Result<(DnsCacheAlgorithm, usize), ConfigError> {
+    let algorithm = match raw.cache_algorithm.as_deref() {
+        Some("arc") => DnsCacheAlgorithm::Arc,
+        _ => DnsCacheAlgorithm::Lru,
+    };
+    let max_size = match raw.cache_max_size.unwrap_or(0) {
+        0 => 4096,
+        value if value > 0 => usize::try_from(value)
+            .map_err(|_| ConfigError::InvalidDns("dns.cache-max-size is too large".to_owned()))?,
+        _ => usize::MAX,
+    };
+    Ok((algorithm, max_size))
 }
 
 struct ParsedDnsResolverSets {
@@ -2662,6 +2689,8 @@ dns:
                 proxy_resolvers: Vec::new(),
                 ipv6: false,
                 ipv6_timeout: std::time::Duration::from_millis(100),
+                cache_algorithm: DnsCacheAlgorithm::Lru,
+                cache_max_size: 4096,
                 use_hosts: false,
                 use_system_hosts: false,
                 mode: DnsMode::RedirHost,

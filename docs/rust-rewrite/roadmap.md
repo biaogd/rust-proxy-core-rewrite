@@ -481,6 +481,17 @@ the mixed-tunnel distinction between a domain rule that avoids main DNS and an
 IP rule that requests lazy resolution. Outbound TLS ECH consumption and remote
 adapter/platform integration remain with their owning gates.
 
+Phase 4F11 accepts the deterministic `DNS-15` cache lifecycle core. The config
+selects LRU or ARC and a bounded live capacity; the gate distinguishes ordinary
+recency eviction from ARC scan resistance. Positive and SOA-bearing negative
+responses use the minimum non-OPT TTL, expired entries return once at TTL one
+while refreshing, concurrent misses share one exchange with per-caller IDs,
+and a first uncached SERVFAIL triggers the oracle's observable background
+retry. Same-config SIGHUP invalidates cache state and enters the pooled
+connection-reset path already proven at the encrypted transport gates. Unusual
+non-trailing OPT layouts, caller-cancellation races and REST/external-DoH cache
+controls remain later focused work rather than implicit Phase 4F11 claims.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -12,10 +12,10 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
-    Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMainKind,
-    DnsMode, DnsPolicy, DnsPolicyMatcher, DnsResolverClient, DnsTlsConfig, DnsTransport,
-    DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig, FakeIpFilterMode, GeositeDomainKind,
-    HostEntry, RuleSetDomainKind, SyntheticRcode,
+    Config, DnsCacheAlgorithm, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig,
+    DnsFallbackConfig, DnsMainKind, DnsMode, DnsPolicy, DnsPolicyMatcher, DnsResolverClient,
+    DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
+    FakeIpFilterMode, GeositeDomainKind, HostEntry, RuleSetDomainKind, SyntheticRcode,
 };
 use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
@@ -23,7 +23,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
@@ -42,7 +42,6 @@ use tokio_util::sync::CancellationToken;
 const DNS_HEADER_LENGTH: usize = 12;
 const MAX_DNS_MESSAGE: usize = 65_535;
 const MAX_DOH_REDIRECT_REQUESTS: usize = 10;
-const CACHE_CAPACITY: usize = 256;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_POOLED_TLS_CONNECTIONS: usize = 8;
 const SYSTEM_DNS_REFRESH_INTERVAL: Duration = Duration::from_mins(5);
@@ -247,59 +246,280 @@ struct CacheEntry {
     response: Vec<u8>,
     stored_at: Instant,
     lifetime: Duration,
-    sequence: u64,
 }
 
-#[derive(Default)]
-struct Cache {
+enum CacheLookup {
+    Fresh(Vec<u8>),
+    Stale(Vec<u8>),
+}
+
+struct LruCache {
     entries: BTreeMap<Vec<u8>, CacheEntry>,
-    next_sequence: u64,
+    order: VecDeque<Vec<u8>>,
+    capacity: usize,
 }
 
-impl Cache {
-    fn get(&mut self, key: &[u8], identifier: [u8; 2], now: Instant) -> Option<Vec<u8>> {
-        let entry = self.entries.get(key)?.clone();
-        let elapsed = now.saturating_duration_since(entry.stored_at);
-        if elapsed >= entry.lifetime {
-            self.entries.remove(key);
-            return None;
+impl LruCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            order: VecDeque::new(),
+            capacity,
         }
-        let mut response = entry.response;
-        response[..2].copy_from_slice(&identifier);
-        let rounded_seconds = elapsed
-            .as_secs()
-            .saturating_add(u64::from(elapsed.subsec_nanos() != 0));
-        let elapsed_seconds = u32::try_from(rounded_seconds).unwrap_or(u32::MAX);
-        age_ttls(&mut response, elapsed_seconds).ok()?;
-        Some(response)
+    }
+
+    fn get(&mut self, key: &[u8], identifier: [u8; 2], now: Instant) -> Option<CacheLookup> {
+        let entry = self.entries.get(key)?.clone();
+        touch(&mut self.order, key);
+        Some(cache_lookup(entry, identifier, now))
     }
 
     fn insert(&mut self, key: Vec<u8>, response: Vec<u8>, ttl: u32, now: Instant) {
-        if self.entries.len() >= CACHE_CAPACITY
-            && !self.entries.contains_key(&key)
-            && let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.sequence)
-                .map(|(key, _)| key.clone())
+        if !self.entries.contains_key(&key)
+            && self.entries.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
         {
             self.entries.remove(&oldest);
         }
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.entries.insert(
-            key,
-            CacheEntry {
-                response,
-                stored_at: now,
-                lifetime: Duration::from_secs(u64::from(ttl)),
-                sequence,
+        touch(&mut self.order, &key);
+        self.entries.insert(key, cache_entry(response, ttl, now));
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ArcList {
+    T1,
+    T2,
+    B1,
+    B2,
+}
+
+struct ArcRecord {
+    entry: Option<CacheEntry>,
+    list: ArcList,
+}
+
+struct ArcCache {
+    records: BTreeMap<Vec<u8>, ArcRecord>,
+    t1: VecDeque<Vec<u8>>,
+    t2: VecDeque<Vec<u8>>,
+    b1: VecDeque<Vec<u8>>,
+    b2: VecDeque<Vec<u8>>,
+    target_t1: usize,
+    capacity: usize,
+}
+
+impl ArcCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            records: BTreeMap::new(),
+            t1: VecDeque::new(),
+            t2: VecDeque::new(),
+            b1: VecDeque::new(),
+            b2: VecDeque::new(),
+            target_t1: 0,
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &[u8], identifier: [u8; 2], now: Instant) -> Option<CacheLookup> {
+        let entry = self.records.get(key)?.entry.clone();
+        self.request(key);
+        entry.map(|entry| cache_lookup(entry, identifier, now))
+    }
+
+    fn insert(&mut self, key: &[u8], response: Vec<u8>, ttl: u32, now: Instant) {
+        if let Some(record) = self.records.get_mut(key) {
+            record.entry = Some(cache_entry(response, ttl, now));
+            self.request(key);
+            return;
+        }
+        self.records.insert(
+            key.to_owned(),
+            ArcRecord {
+                entry: Some(cache_entry(response, ttl, now)),
+                list: ArcList::T1,
             },
         );
+        self.request_new(key);
+    }
+
+    fn request(&mut self, key: &[u8]) {
+        let Some(list) = self.records.get(key).map(|record| record.list) else {
+            return;
+        };
+        match list {
+            ArcList::T1 | ArcList::T2 => self.move_to(key, ArcList::T2),
+            ArcList::B1 => {
+                let delta = if self.b1.len() >= self.b2.len() {
+                    1
+                } else {
+                    self.b2.len() / self.b1.len().max(1)
+                };
+                self.target_t1 = self.target_t1.saturating_add(delta).min(self.capacity);
+                self.replace(Some(ArcList::B1));
+                self.move_to(key, ArcList::T2);
+            }
+            ArcList::B2 => {
+                let delta = if self.b2.len() >= self.b1.len() {
+                    1
+                } else {
+                    self.b1.len() / self.b2.len().max(1)
+                };
+                self.target_t1 = self.target_t1.saturating_sub(delta);
+                self.replace(Some(ArcList::B2));
+                self.move_to(key, ArcList::T2);
+            }
+        }
+    }
+
+    fn request_new(&mut self, key: &[u8]) {
+        if self.t1.len() + self.b1.len() == self.capacity {
+            if self.t1.len() < self.capacity {
+                self.remove_lru(ArcList::B1);
+                self.replace(None);
+            } else {
+                self.remove_lru(ArcList::T1);
+            }
+        } else if self.t1.len() + self.b1.len() < self.capacity {
+            let total = self.t1.len() + self.t2.len() + self.b1.len() + self.b2.len();
+            if total >= self.capacity {
+                if total == self.capacity.saturating_mul(2) {
+                    self.remove_lru(ArcList::B2);
+                }
+                self.replace(None);
+            }
+        }
+        self.move_to(key, ArcList::T1);
+    }
+
+    fn replace(&mut self, incoming: Option<ArcList>) {
+        if !self.t1.is_empty()
+            && (self.t1.len() > self.target_t1
+                || (incoming == Some(ArcList::B2) && self.t1.len() == self.target_t1))
+        {
+            if let Some(key) = self.t1.pop_back() {
+                self.make_ghost(&key, ArcList::B1);
+            }
+        } else if let Some(key) = self.t2.pop_back() {
+            self.make_ghost(&key, ArcList::B2);
+        }
+    }
+
+    fn make_ghost(&mut self, key: &[u8], list: ArcList) {
+        if let Some(record) = self.records.get_mut(key) {
+            record.entry = None;
+            record.list = list;
+        }
+        self.list_mut(list).push_front(key.to_vec());
+    }
+
+    fn move_to(&mut self, key: &[u8], target: ArcList) {
+        if let Some(current) = self.records.get(key).map(|record| record.list) {
+            remove_key(self.list_mut(current), key);
+        }
+        self.list_mut(target).push_front(key.to_vec());
+        if let Some(record) = self.records.get_mut(key) {
+            record.list = target;
+        }
+    }
+
+    fn remove_lru(&mut self, list: ArcList) {
+        if let Some(key) = self.list_mut(list).pop_back() {
+            self.records.remove(&key);
+        }
+    }
+
+    fn list_mut(&mut self, list: ArcList) -> &mut VecDeque<Vec<u8>> {
+        match list {
+            ArcList::T1 => &mut self.t1,
+            ArcList::T2 => &mut self.t2,
+            ArcList::B1 => &mut self.b1,
+            ArcList::B2 => &mut self.b2,
+        }
+    }
+}
+
+enum Cache {
+    Lru(LruCache),
+    Arc(ArcCache),
+}
+
+impl Cache {
+    fn new(algorithm: DnsCacheAlgorithm, capacity: usize) -> Self {
+        match algorithm {
+            DnsCacheAlgorithm::Lru => Self::Lru(LruCache::new(capacity)),
+            DnsCacheAlgorithm::Arc => Self::Arc(ArcCache::new(capacity)),
+        }
+    }
+
+    fn matches(&self, algorithm: DnsCacheAlgorithm, capacity: usize) -> bool {
+        match self {
+            Self::Lru(cache) => algorithm == DnsCacheAlgorithm::Lru && cache.capacity == capacity,
+            Self::Arc(cache) => algorithm == DnsCacheAlgorithm::Arc && cache.capacity == capacity,
+        }
+    }
+
+    fn get(&mut self, key: &[u8], identifier: [u8; 2], now: Instant) -> Option<CacheLookup> {
+        match self {
+            Self::Lru(cache) => cache.get(key, identifier, now),
+            Self::Arc(cache) => cache.get(key, identifier, now),
+        }
+    }
+
+    fn insert(&mut self, key: Vec<u8>, response: Vec<u8>, ttl: u32, now: Instant) {
+        match self {
+            Self::Lru(cache) => cache.insert(key, response, ttl, now),
+            Self::Arc(cache) => cache.insert(&key, response, ttl, now),
+        }
     }
 
     fn clear(&mut self) {
-        self.entries.clear();
+        match self {
+            Self::Lru(cache) => *cache = LruCache::new(cache.capacity),
+            Self::Arc(cache) => *cache = ArcCache::new(cache.capacity),
+        }
+    }
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self::new(DnsCacheAlgorithm::Lru, 4096)
+    }
+}
+
+fn cache_entry(response: Vec<u8>, ttl: u32, now: Instant) -> CacheEntry {
+    CacheEntry {
+        response,
+        stored_at: now,
+        lifetime: Duration::from_secs(u64::from(ttl)),
+    }
+}
+
+fn cache_lookup(entry: CacheEntry, identifier: [u8; 2], now: Instant) -> CacheLookup {
+    let elapsed = now.saturating_duration_since(entry.stored_at);
+    let mut response = entry.response;
+    response[..2].copy_from_slice(&identifier);
+    if elapsed >= entry.lifetime {
+        set_ttls(&mut response, 1).ok();
+        return CacheLookup::Stale(response);
+    }
+    let rounded_seconds = elapsed
+        .as_secs()
+        .saturating_add(u64::from(elapsed.subsec_nanos() != 0));
+    let elapsed_seconds = u32::try_from(rounded_seconds).unwrap_or(u32::MAX);
+    let _ = age_ttls(&mut response, elapsed_seconds);
+    CacheLookup::Fresh(response)
+}
+
+fn touch(order: &mut VecDeque<Vec<u8>>, key: &[u8]) {
+    remove_key(order, key);
+    order.push_back(key.to_vec());
+}
+
+fn remove_key(order: &mut VecDeque<Vec<u8>>, key: &[u8]) {
+    if let Some(position) = order.iter().position(|candidate| candidate == key) {
+        order.remove(position);
     }
 }
 
@@ -326,11 +546,82 @@ struct HttpConnectionPool {
     connections: Vec<TcpStream>,
 }
 
+type SharedDnsResult = Result<Vec<u8>, SharedDnsError>;
+
+#[derive(Clone)]
+enum SharedDnsError {
+    Io(String),
+    InvalidMessage(&'static str),
+    UpstreamTimeout,
+    Inactive,
+    NoAddress,
+    NoEchConfig,
+}
+
+impl SharedDnsError {
+    fn capture(error: &DnsError) -> Self {
+        match error {
+            DnsError::Io(error) => Self::Io(error.to_string()),
+            DnsError::InvalidMessage(message) => Self::InvalidMessage(message),
+            DnsError::UpstreamTimeout => Self::UpstreamTimeout,
+            DnsError::Inactive => Self::Inactive,
+            DnsError::NoAddress => Self::NoAddress,
+            DnsError::NoEchConfig => Self::NoEchConfig,
+        }
+    }
+
+    fn restore(self) -> DnsError {
+        match self {
+            Self::Io(message) => DnsError::Io(std::io::Error::other(message)),
+            Self::InvalidMessage(message) => DnsError::InvalidMessage(message),
+            Self::UpstreamTimeout => DnsError::UpstreamTimeout,
+            Self::Inactive => DnsError::Inactive,
+            Self::NoAddress => DnsError::NoAddress,
+            Self::NoEchConfig => DnsError::NoEchConfig,
+        }
+    }
+}
+
+struct InflightQuery {
+    result: StdMutex<Option<SharedDnsResult>>,
+    ready: Notify,
+}
+
+impl InflightQuery {
+    fn new() -> Self {
+        Self {
+            result: StdMutex::new(None),
+            ready: Notify::new(),
+        }
+    }
+
+    fn complete(&self, result: SharedDnsResult) {
+        if let Ok(mut stored) = self.result.lock() {
+            *stored = Some(result);
+        }
+        self.ready.notify_waiters();
+    }
+
+    async fn wait(&self) -> Result<Vec<u8>, DnsError> {
+        loop {
+            let notified = self.ready.notified();
+            if let Ok(stored) = self.result.lock()
+                && let Some(result) = stored.clone()
+            {
+                return result.map_err(SharedDnsError::restore);
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Resolver {
-    cache: Mutex<Cache>,
-    tls_pool: Mutex<TlsConnectionPool>,
-    http_pool: Mutex<HttpConnectionPool>,
-    system_hosts: BTreeMap<String, Vec<IpAddr>>,
+    cache: Arc<Mutex<Cache>>,
+    inflight: Arc<Mutex<BTreeMap<Vec<u8>, Arc<InflightQuery>>>>,
+    tls_pool: Arc<Mutex<TlsConnectionPool>>,
+    http_pool: Arc<Mutex<HttpConnectionPool>>,
+    system_hosts: Arc<BTreeMap<String, Vec<IpAddr>>>,
 }
 
 /// Resolver state shared by the local DNS listener and controller cache APIs.
@@ -452,10 +743,11 @@ pub struct RestDnsResponse {
 impl Resolver {
     fn new() -> Self {
         Self {
-            cache: Mutex::new(Cache::default()),
-            tls_pool: Mutex::new(TlsConnectionPool::default()),
-            http_pool: Mutex::new(HttpConnectionPool::default()),
-            system_hosts: load_system_hosts(),
+            cache: Arc::new(Mutex::new(Cache::default())),
+            inflight: Arc::new(Mutex::new(BTreeMap::new())),
+            tls_pool: Arc::new(Mutex::new(TlsConnectionPool::default())),
+            http_pool: Arc::new(Mutex::new(HttpConnectionPool::default())),
+            system_hosts: Arc::new(load_system_hosts()),
         }
     }
 
@@ -561,9 +853,121 @@ impl Resolver {
         let identifier = [query[0], query[1]];
         let key = resolution_cache_key(query, config, &question.name);
         let now = Instant::now();
-        if let Some(response) = self.cache.lock().await.get(&key, identifier, now) {
+        let cached = {
+            let mut cache = self.cache.lock().await;
+            if !cache.matches(config.cache_algorithm, config.cache_max_size) {
+                *cache = Cache::new(config.cache_algorithm, config.cache_max_size);
+            }
+            cache.get(&key, identifier, now)
+        };
+        match cached {
+            Some(CacheLookup::Fresh(response)) => return Ok(response),
+            Some(CacheLookup::Stale(response)) => {
+                let resolver = self.clone();
+                let query = query.to_vec();
+                let config = config.clone();
+                let refresh_key = key.clone();
+                tokio::spawn(async move {
+                    let _ = resolver
+                        .exchange_shared(&query, &config, refresh_key, false)
+                        .await;
+                });
+                return Ok(response);
+            }
+            None => {}
+        }
+
+        self.exchange_shared(query, config, key, true).await
+    }
+
+    async fn exchange_shared(
+        &self,
+        query: &[u8],
+        config: &DnsConfig,
+        key: Vec<u8>,
+        retry_on_failure: bool,
+    ) -> Result<Vec<u8>, DnsError> {
+        let (inflight, leader) = {
+            let mut queries = self.inflight.lock().await;
+            if let Some(inflight) = queries.get(&key) {
+                (Arc::clone(inflight), false)
+            } else {
+                let inflight = Arc::new(InflightQuery::new());
+                queries.insert(key.clone(), Arc::clone(&inflight));
+                (inflight, true)
+            }
+        };
+        if !leader {
+            let mut response = inflight.wait().await?;
+            response[..2].copy_from_slice(&query[..2]);
             return Ok(response);
         }
+
+        let result = self.exchange_once(query, config, key.clone()).await;
+        let shared = match &result {
+            Ok(response) => Ok(response.clone()),
+            Err(error) => Err(SharedDnsError::capture(error)),
+        };
+        inflight.complete(shared);
+        let mut queries = self.inflight.lock().await;
+        if queries
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &inflight))
+        {
+            queries.remove(&key);
+        }
+        drop(queries);
+
+        if retry_on_failure && result.is_err() {
+            let resolver = self.clone();
+            let query = query.to_vec();
+            let config = config.clone();
+            tokio::spawn(async move {
+                resolver.background_retry(&query, &config, key).await;
+            });
+        }
+        result
+    }
+
+    async fn background_retry(&self, query: &[u8], config: &DnsConfig, key: Vec<u8>) {
+        let (inflight, leader) = {
+            let mut queries = self.inflight.lock().await;
+            if let Some(inflight) = queries.get(&key) {
+                (Arc::clone(inflight), false)
+            } else {
+                let inflight = Arc::new(InflightQuery::new());
+                queries.insert(key.clone(), Arc::clone(&inflight));
+                (inflight, true)
+            }
+        };
+        if !leader {
+            let _ = inflight.wait().await;
+            return;
+        }
+        let result = self.exchange_once(query, config, key.clone()).await;
+        let shared = match &result {
+            Ok(response) => Ok(response.clone()),
+            Err(error) => Err(SharedDnsError::capture(error)),
+        };
+        inflight.complete(shared);
+        let mut queries = self.inflight.lock().await;
+        if queries
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &inflight))
+        {
+            queries.remove(&key);
+        }
+    }
+
+    async fn exchange_once(
+        &self,
+        query: &[u8],
+        config: &DnsConfig,
+        key: Vec<u8>,
+    ) -> Result<Vec<u8>, DnsError> {
+        let question = parse_question(query)?;
+        let per_client_wrappers = !config.main_resolvers.is_empty();
+        let identifier = [query[0], query[1]];
 
         let upstream_query = if per_client_wrappers {
             query.to_vec()
@@ -598,11 +1002,12 @@ impl Resolver {
         // The pinned Go local DNS service marks responses authoritative even
         // when their records came from an upstream resolver.
         response[2] |= 0x04;
-        if let Some(ttl) = positive_ttl(&response)? {
+        if let Some(ttl) = cache_ttl(&response)? {
+            let cached_response = without_opt_records(&response)?;
             self.cache
                 .lock()
                 .await
-                .insert(key, response.clone(), ttl, now);
+                .insert(key, cached_response, ttl, Instant::now());
         }
         Ok(response)
     }
@@ -3780,6 +4185,7 @@ fn policy_match_rank(pattern: &str, domain: &str) -> Option<Vec<u8>> {
     Some(rank)
 }
 
+#[cfg(test)]
 fn positive_ttl(response: &[u8]) -> Result<Option<u32>, DnsError> {
     if response[3] & 0x0f != 0 || u16::from_be_bytes([response[6], response[7]]) == 0 {
         return Ok(None);
@@ -3790,11 +4196,103 @@ fn positive_ttl(response: &[u8]) -> Result<Option<u32>, DnsError> {
         .min())
 }
 
+fn cache_ttl(response: &[u8]) -> Result<Option<u32>, DnsError> {
+    if response.len() < DNS_HEADER_LENGTH {
+        return Err(DnsError::InvalidMessage("header is truncated"));
+    }
+    if response[3] & 0x0f == 2 {
+        return Ok(Some(5));
+    }
+    Ok(resource_ttls(response)?
+        .into_iter()
+        .map(|(_, ttl)| ttl)
+        .min()
+        .filter(|ttl| *ttl > 0))
+}
+
 fn age_ttls(response: &mut [u8], elapsed: u32) -> Result<(), DnsError> {
     for (offset, ttl) in resource_ttls(response)? {
-        response[offset..offset + 4].copy_from_slice(&ttl.saturating_sub(elapsed).to_be_bytes());
+        let aged = ttl.saturating_sub(elapsed).max(1).min(ttl);
+        response[offset..offset + 4].copy_from_slice(&aged.to_be_bytes());
     }
     Ok(())
+}
+
+fn set_ttls(response: &mut [u8], ttl: u32) -> Result<(), DnsError> {
+    for (offset, _) in resource_ttls(response)? {
+        response[offset..offset + 4].copy_from_slice(&ttl.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn without_opt_records(message: &[u8]) -> Result<Vec<u8>, DnsError> {
+    if message.len() < DNS_HEADER_LENGTH {
+        return Err(DnsError::InvalidMessage("header is truncated"));
+    }
+    let questions = usize::from(u16::from_be_bytes([message[4], message[5]]));
+    let section_counts = [
+        usize::from(u16::from_be_bytes([message[6], message[7]])),
+        usize::from(u16::from_be_bytes([message[8], message[9]])),
+        usize::from(u16::from_be_bytes([message[10], message[11]])),
+    ];
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(message, offset)?;
+        offset = offset
+            .checked_add(4)
+            .filter(|end| *end <= message.len())
+            .ok_or(DnsError::InvalidMessage("question is truncated"))?;
+    }
+    let question_end = offset;
+    let mut records = Vec::new();
+    for (section, count) in section_counts.into_iter().enumerate() {
+        for _ in 0..count {
+            let start = offset;
+            offset = skip_name(message, offset)?;
+            if offset + 10 > message.len() {
+                return Err(DnsError::InvalidMessage("resource record is truncated"));
+            }
+            let record_type = u16::from_be_bytes([message[offset], message[offset + 1]]);
+            let data_length = usize::from(u16::from_be_bytes([
+                message[offset + 8],
+                message[offset + 9],
+            ]));
+            offset = offset
+                .checked_add(10 + data_length)
+                .filter(|end| *end <= message.len())
+                .ok_or(DnsError::InvalidMessage("resource data is truncated"))?;
+            records.push((section, record_type, start, offset));
+        }
+    }
+    if !records
+        .iter()
+        .any(|(_, record_type, _, _)| *record_type == 41)
+    {
+        return Ok(message.to_vec());
+    }
+    let first_opt = records
+        .iter()
+        .position(|(_, record_type, _, _)| *record_type == 41)
+        .expect("OPT presence checked");
+    if records[first_opt..]
+        .iter()
+        .any(|(_, record_type, _, _)| *record_type != 41)
+    {
+        return Ok(message.to_vec());
+    }
+    let mut response = message[..question_end].to_vec();
+    let mut kept = [0_u16; 3];
+    for (section, record_type, start, end) in records {
+        if record_type != 41 {
+            response.extend_from_slice(&message[start..end]);
+            kept[section] = kept[section].saturating_add(1);
+        }
+    }
+    for (index, count) in kept.into_iter().enumerate() {
+        let count_offset = 6 + index * 2;
+        response[count_offset..count_offset + 2].copy_from_slice(&count.to_be_bytes());
+    }
+    Ok(response)
 }
 
 fn resource_ttls(message: &[u8]) -> Result<Vec<(usize, u32)>, DnsError> {
@@ -3915,25 +4413,49 @@ mod tests {
     #[test]
     fn cache_restores_identifier_and_expires() {
         let now = Instant::now();
-        let mut cache = Cache::default();
+        let mut cache = Cache::new(DnsCacheAlgorithm::Lru, 2);
         cache.insert(vec![1], response(10, 2), 2, now);
-        let cached = cache
+        let CacheLookup::Fresh(cached) = cache
             .get(&[1], 20_u16.to_be_bytes(), now + Duration::from_secs(1))
-            .expect("cache hit");
+            .expect("cache hit")
+        else {
+            panic!("response should still be fresh");
+        };
         assert_eq!(&cached[..2], &20_u16.to_be_bytes());
         assert_eq!(positive_ttl(&cached).expect("valid response"), Some(1));
-        assert!(
-            cache
-                .get(&[1], 30_u16.to_be_bytes(), now + Duration::from_secs(2))
-                .is_none()
-        );
+        let CacheLookup::Stale(cached) = cache
+            .get(&[1], 30_u16.to_be_bytes(), now + Duration::from_secs(2))
+            .expect("stale cache hit")
+        else {
+            panic!("response should be stale");
+        };
+        assert_eq!(&cached[..2], &30_u16.to_be_bytes());
+        assert_eq!(positive_ttl(&cached).expect("valid response"), Some(1));
     }
 
     #[test]
-    fn does_not_cache_negative_response() {
+    fn derives_positive_and_negative_cache_lifetimes() {
         let mut message = response(1, 60);
         message[3] = 0x83;
         assert_eq!(positive_ttl(&message).expect("valid response"), None);
+        assert_eq!(cache_ttl(&message).expect("valid response"), Some(60));
+    }
+
+    #[test]
+    fn lru_and_arc_have_go_compatible_scan_behavior() {
+        let now = Instant::now();
+        let value = |id| response(id, 60);
+        let mut lru = Cache::new(DnsCacheAlgorithm::Lru, 2);
+        let mut arc = Cache::new(DnsCacheAlgorithm::Arc, 2);
+        for cache in [&mut lru, &mut arc] {
+            cache.insert(vec![1], value(1), 60, now);
+            cache.insert(vec![2], value(2), 60, now);
+            assert!(cache.get(&[1], [0, 1], now).is_some());
+            cache.insert(vec![3], value(3), 60, now);
+            cache.insert(vec![4], value(4), 60, now);
+        }
+        assert!(lru.get(&[1], [0, 1], now).is_none());
+        assert!(arc.get(&[1], [0, 1], now).is_some());
     }
 
     #[test]

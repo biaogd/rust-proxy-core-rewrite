@@ -50,11 +50,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F8 resolver policies | Complete in declared core; DNS-12 partial | Ordered main/proxy multi-resolver domain/GeoSite/inline-rule-set policies pass; external providers, attributes and adapter consumers remain |
 | Phase 4F9 fallback decision core | Complete in declared core; DNS-13 partial | GeoIP.dat/GeoSite/domain/IPv4/IPv6 filters, multiple fallback clients and eager/lazy failure/timeout ordering pass; MMDB and broader integration remain |
 | Phase 4F10 dual-stack/ECH/lazy tunnel | Complete in declared scope; DNS-14 parity | Concurrent A/AAAA with A-first ordering and configurable wait, primary IPv4, IP literals, HTTPS ECH extraction and tunnel lazy rule resolution pass |
+| Phase 4F11 DNS cache lifecycle | Complete in declared core; DNS-15 parity | LRU/ARC size eviction, positive/negative/stale TTL, concurrent singleflight, background retry and reload cache/reset behavior pass |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F10 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F11 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F10 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F11 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2527,6 +2528,60 @@ passed locally. Complete Phase 1–4F10 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+## Phase 4F11 deliverables and evidence
+
+Phase 4F11 replaces the fixed-size FIFO development cache with the configured
+Go cache lifecycle. `dns.cache-algorithm` selects LRU or ARC and
+`dns.cache-max-size` controls the live capacity (zero uses the Go default of
+4096). LRU reads update recency. ARC keeps separate recent/frequent and ghost
+lists, preserving the oracle's scan-resistant behavior.
+
+The cache now derives its lifetime from every non-OPT resource-record section,
+so positive answers and SOA-bearing NXDOMAIN responses share the same minimum
+TTL rule. OPT records are not stored when they form the normal trailing OPT
+suffix. Expired entries remain visible with all semantic TTLs set to one while
+one background refresh replaces them. Fresh hits restore the caller ID and age
+record TTLs without returning zero.
+
+Concurrent misses for the same resolver/cache identity share one upstream
+exchange and restore each waiting caller's transaction ID. SERVFAIL/REFUSED and
+transport failures remain uncached; the first failed unshared exchange returns
+SERVFAIL to the local client and starts the same immediately observable
+background retry as the pinned Go implementation. A validated SIGHUP generation
+clears the resolver cache and invokes the already shared encrypted/HTTP/QUIC
+connection reset path; the earlier Phase 4E11 and 4E18 suites remain the wire
+evidence for pooled transport teardown.
+
+`compat/scripts/phase4f11.py` runs both products against deterministic local UDP
+authorities and compares transaction IDs, RCODE/address/TTL classes and upstream
+request counts. It distinguishes LRU eviction from ARC scan resistance at
+capacity two, verifies positive stale-while-refresh, negative caching,
+eight-client singleflight, SERVFAIL background retry and same-config reload
+invalidation.
+
+Observed Phase 4F11 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared core passed; DNS-15 parity | Native `compat/scripts/phase4f11.py`; deterministic UDP authorities and product SIGHUP |
+| Linux amd64 | Pending | Default full differential includes Phase 4F11 and the prior transport-reset suites; no result is recorded before completion |
+
+### Phase 4F11 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f11.py
+```
+
+The focused Phase 4F11 differential, format check and strict workspace Clippy
+gate passed locally. Complete Phase 1–4F11 regression, workspace tests and
+Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
+pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2602,13 +2657,13 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F10 dual-stack/ECH/lazy-tunnel boundary.
+Rust behavior stops at the Phase 4F11 DNS cache-lifecycle boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` retain the database/adapter/provider/integration gaps above.
-Phase 4D3B, 4F11 or another implementation gate must not begin without a separate
+Phase 4D3B, 4F12 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
-selection/cache control, `respect-rules`, intercepted DNS, TUN, remote proxy
+selection/broader cache and REST control, `respect-rules`, intercepted DNS, TUN, remote proxy
 protocols, external providers and broader REST/platform
 compatibility are planned but not implied by this status.
