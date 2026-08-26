@@ -124,6 +124,19 @@ def finish(
     return exit_code, combined
 
 
+def wait_record(
+    process: subprocess.Popen[bytes], record: pathlib.Path, marker: str
+) -> None:
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(f"candidate exited before hook record {marker!r}")
+        if record.exists() and marker in record.read_text():
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"hook record {marker!r} did not become observable")
+
+
 def run_success(
     binary: pathlib.Path, scratch: pathlib.Path, source: str
 ) -> dict[str, Any]:
@@ -149,15 +162,7 @@ def run_success(
         start_new_session=True,
     )
     try:
-        deadline = time.monotonic() + IO_DEADLINE
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise AssertionError("candidate exited during post-up")
-            if record.exists() and "up:shell" in record.read_text():
-                break
-            time.sleep(0.02)
-        else:
-            raise TimeoutError("post-up did not complete")
+        wait_record(process, record, "up:shell")
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
         os.kill(process.pid, signal.SIGTERM)
@@ -221,6 +226,7 @@ def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, A
     )
     try:
         wait_ready(process, ports[0])
+        wait_record(process, launched_record, "up:ok")
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
         os.kill(process.pid, signal.SIGTERM)
