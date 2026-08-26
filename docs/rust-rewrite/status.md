@@ -1635,6 +1635,7 @@ Observed Phase 4E15 result on 2026-08-26:
 | Platform | Result | Environment |
 | --- | --- | --- |
 | Darwin arm64 | Passed | Native Go 1.26.5, Rust 1.95.0 and deterministic loopback TLS HTTP/2/HTTP/1.1 authorities |
+| Linux amd64 | Passed | GitHub Actions run `32923792731`; complete Phase 1–4E15 differential regression with Go 1.26.5 and Rust 1.95.0 |
 
 Dependency review for this gate:
 
@@ -1650,8 +1651,9 @@ distribution/legal review remains a Phase 9 gate. The crates are maintained in
 the Tokio/hyper ecosystem; this phase records resolved metadata and passing
 native evidence, not a broader maintenance or platform guarantee.
 
-All Phase 1–4E15 differential suites and the exit-gate commands below passed on
-2026-08-26. Phase 1 was rerun successfully after one isolated Go `-t` process
+All Phase 1–4E15 differential suites passed on Darwin arm64 and in the default
+Linux amd64 GitHub Actions regression on 2026-08-26. The exit-gate commands
+below also passed. Phase 1 was rerun successfully after one isolated Go `-t` process
 exceeded its five-second harness deadline while separate Cargo targets were
 still compiling. No Go source was modified.
 

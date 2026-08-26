@@ -250,7 +250,8 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4E14 domain HTTPS | Oracle | **Parity** | Native `compat/scripts/phase4e14.py`, 2026-08-26; deterministic bootstrap DNS and TLS HTTP/1.1 trust/SNI/Host observations |
 | Darwin arm64 — Phase 4E15 DoH HTTP/2 | Oracle | **Parity** | Native `compat/scripts/phase4e15.py`, 2026-08-26; deterministic local HTTP/2 TLS authority and HTTP/1.1 fallback |
 | Darwin arm64 beyond Phase 4E15 | Oracle | Not started | Capability-specific native evidence |
-| Linux amd64 beyond Phase 1 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
+| Linux amd64 beyond Phase 4E15 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64/arm64/386 | Oracle | Not started | Named pipe, process/socket behavior |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
