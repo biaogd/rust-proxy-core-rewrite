@@ -55,6 +55,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F13 redir-host local-inbound core | Complete in declared local core; DNS-17 inbound gates remain | HTTP/SOCKS/mixed TCP, SOCKS/mixed UDP, CNAME identity, reload preservation and baseline size-only LRU retention pass |
 | Phase 4F14 fake-IP lifecycle core | Complete in declared local core; DNS-18 provider/inbound/platform gates remain | All filter rule kinds, GeoSite/inline providers, v4/v6 bbolt interchange, reload/range lifecycle, TCP/UDP reverse routing, persistent flush/restart and malformed-cache recovery pass |
 | Phase 4F15 DNS control surface | Complete in declared loopback TCP core; DNS-19 exhaustive legacy-RDATA gate remains | All oracle RR type names, representative RR JSON, shared cache controls and public external DoH GET/fixed/chunked POST plus errors pass |
+| Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F15 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
@@ -2814,6 +2815,40 @@ The focused Phase 4F15 differential and affected-crate tests pass locally.
 Format and strict workspace Clippy are run locally before handoff. Complete
 Phase 1–4F15 regression, all workspace tests and Go/with-gVisor baseline remain
 delegated to GitHub Actions; no result is pre-claimed.
+
+## Controller HTTP infrastructure refactor
+
+The post-Phase 4F15 controller now uses Axum 0.8.9 over Hyper 1.11.0 instead of
+maintaining a local HTTP/1 request parser, chunk decoder, route switch and
+socket response writer. Static REST routes use typed Axum handlers; an outer
+middleware retains the runtime-configured external DoH mount before Bearer
+authentication. Hyper handles fixed-length/chunked request framing and
+connection lifecycle, while explicit response helpers retain the oracle's
+JSON, DNS-message, text and empty-body content classes. Traffic and log streams
+remain streaming bodies tied to the runtime cancellation token.
+
+This is intentionally a behavior-neutral infrastructure change. It does not
+claim TLS/Unix/pipe listeners, WebSockets, CORS, mutation APIs, external UI or
+any additional DNS/proxy protocol. `axum` is MIT licensed, has a Rust 1.80
+minimum below the workspace Rust 1.95 toolchain, is maintained in the Tokio
+project, and supports the existing portable Tokio TCP boundary. Its optional
+features are limited here to HTTP/1, JSON and Tokio integration.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE3_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase3.py
+PHASE4_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase4d4.py
+PHASE4_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase4f14.py
+PHASE4_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase4f15.py
+cargo test -p rewrite-controller -p rewrite-runtime -p rewrite-dns --all-features
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+The four focused Go/Rust differential suites and affected-crate tests pass.
+Format and strict workspace Clippy are required before handoff; the full
+Phase 1–4F15 regression remains delegated to GitHub Actions.
 
 ## Differential fixture timing stability
 

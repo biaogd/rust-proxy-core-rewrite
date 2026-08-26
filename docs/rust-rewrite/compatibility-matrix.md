@@ -218,7 +218,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Surface | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
 | TCP/TLS/Unix/Windows pipe listeners | Oracle | Partial | Phase 3 loopback TCP only; TLS/Unix/pipe are not started |
-| Secret auth, WebSocket token and CORS | Oracle | Partial | Phase 3 Bearer header auth parity; query token/WebSocket/CORS are not claimed |
+| Secret auth, WebSocket token and CORS | Oracle | Partial | Phase 3 Bearer header auth parity remains differential-tested after the Axum/Hyper controller refactor; query token/WebSocket/CORS are not claimed |
 | `/`, `/version`, `/memory`, `/traffic` | Oracle | Partial | Phase 3 root/version and first traffic stream frame; memory and full stream cadence are not claimed |
 | `/logs` WebSocket/stream | Oracle | Partial | Phase 3 plain HTTP info event and invalid-level contract; WebSocket/structured/full filters are not claimed |
 | `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | Phase 3 declared GET field subset only; all mutation/geo surfaces are not started |
@@ -226,11 +226,11 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | `/rules` and disable operation | Oracle | Not started | Ordering/statistics/mutation |
 | `/connections` stream/list/delete | Oracle | Partial | Phase 3 GET snapshot/tracker/totals subset; WebSocket and DELETE are not started |
 | Proxy and rule provider APIs | Oracle | Not started | Refresh, health and error behavior |
-| Cache, DNS and storage APIs | Oracle | Partial | Phase 4F15 completes `/dns/query` and both cache flush routes on the declared TCP controller; `/storage` remains unimplemented |
+| Cache, DNS and storage APIs | Oracle | Partial | Phase 4F15 completes `/dns/query` and both cache flush routes on the declared TCP controller; the Axum/Hyper refactor re-passes 4D4/4F14/4F15 status, method, header, body and side-effect differentials; `/storage` remains unimplemented |
 | Restart and upgrade APIs | Oracle | Not started | Subprocess/re-exec/download fixtures |
-| External UI and DoH mount | Oracle | Partial | Phase 4F15 proves the public configured DoH mount, exact and child paths, GET, fixed/chunked POST, DNS wire response and error contracts; external UI static paths and redirect remain unimplemented |
+| External UI and DoH mount | Oracle | Partial | Phase 4F15 proves the public configured DoH mount, exact and child paths, GET, fixed/chunked POST, DNS wire response and error contracts; the Axum/Hyper refactor preserves those framing and mount-before-auth observations; external UI static paths and redirect remain unimplemented |
 | Debug routes | Oracle when debug | Not started | Feature exposure and GC endpoint |
-| Exact route-wide error/stream/concurrency contracts | Oracle | Partial | Status, headers, JSON/body, WebSocket cadence, disconnect and concurrent mutation evidence per route |
+| Exact route-wide error/stream/concurrency contracts | Oracle | Partial | Phase 3 and 4D4/4F14/4F15 re-pass after framework migration, covering the declared status/header/body classes and first traffic/log stream frames; WebSocket cadence, disconnect and concurrent mutation evidence remain per-route gaps |
 
 ## Platforms, architectures and build profiles
 

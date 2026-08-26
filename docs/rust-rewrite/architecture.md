@@ -629,9 +629,15 @@ a crate. Phase 4F14 keeps those crate boundaries and adds the reviewed
 `bbolt-rs` persistence dependency to `rewrite-state`: config owns fake-IP
 matcher data, DNS owns filter evaluation, state owns pools/profile storage and
 controller exposes only the flush operation. Phase 4F15 keeps resolution in
-`rewrite-dns` and HTTP routing/body framing in `rewrite-controller`; the DoH
-mount deliberately precedes Bearer authentication like the oracle, while the
-REST DNS/cache routes remain inside it. `hickory-proto` is confined to DNS RR
+`rewrite-dns` and the HTTP boundary in `rewrite-controller`. After Phase 4F15,
+the controller's hand-written HTTP/1 parser, chunk decoder, router and response
+writer were replaced by Axum 0.8 over Hyper 1.1. Axum owns route/method
+dispatch and Hyper owns HTTP framing, connection reuse and graceful listener
+shutdown; controller response helpers still explicitly preserve the oracle's
+status, content-type and empty-body classes. One outer middleware evaluates
+the runtime-configured DoH mount before Bearer authentication like the oracle,
+then applies authentication to every REST route. Streaming traffic/log bodies
+observe the same cancellation token as listener shutdown. `hickory-proto` is confined to DNS RR
 wire decoding and zone-text rendering for the controller JSON boundary; it is
 not used to replace the existing resolver/cache/transport implementation.
 `rewrite-platform`

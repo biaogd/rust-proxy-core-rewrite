@@ -426,6 +426,12 @@ fixed-length/chunked POST, mount-prefix, content-type, method and malformed
 payload behavior. External UI/static serving and non-TCP controller transports
 remain Phase 5D/platform work rather than part of this DNS slice.
 
+After Phase 4F15, the controller HTTP infrastructure was refactored without
+expanding the phase boundary: Axum/Hyper now provide routing, request framing,
+connection handling and graceful shutdown. Phase 3, 4D4, 4F14 and 4F15
+differentials are the acceptance gate for that behavior-neutral migration. No
+new route, transport or protocol is credited by the refactor.
+
 Phase 4F3 implements the isolated system-resolver runtime path and platform
 contracts, but remains a **partial** matrix row until native deterministic
 Go/Rust port-53 wire fixtures pass on the advertised POSIX/Windows/Android

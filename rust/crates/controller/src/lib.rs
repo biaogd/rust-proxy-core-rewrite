@@ -1,40 +1,41 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::routing::{any, get};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures_util::{StreamExt, stream};
 use rewrite_config::Config;
 use rewrite_dns::DnsService;
 use rewrite_state::RuntimeState;
 use serde::Serialize;
 use serde_json::json;
-use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-const MAX_REQUEST_HEAD: usize = 64 * 1024;
 const MAX_DNS_MESSAGE: usize = 65_535;
-const MAX_CHUNKED_BODY_WIRE: usize = 128 * 1024;
 
-#[derive(Debug, Error)]
-pub enum ControllerError {
-    #[error("controller I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("controller JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("invalid controller request")]
-    InvalidRequest,
+#[derive(Clone)]
+struct ControllerState {
+    dns_service: Arc<DnsService>,
+    config: watch::Receiver<Arc<Config>>,
+    runtime: Arc<RuntimeState>,
+    shutdown: CancellationToken,
 }
 
-struct Request {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
+impl ControllerState {
+    fn current_config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.borrow())
+    }
 }
 
 /// Serves the declared REST subset and Phase 4F15 DNS control surface.
@@ -42,260 +43,68 @@ pub async fn serve(
     listener: TcpListener,
     dns_service: Arc<DnsService>,
     config: watch::Receiver<Arc<Config>>,
-    state: Arc<RuntimeState>,
+    runtime: Arc<RuntimeState>,
     shutdown: CancellationToken,
 ) {
-    let mut tasks = JoinSet::new();
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => break,
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _)) => {
-                        let config = Arc::clone(&config.borrow());
-                        let dns_service = Arc::clone(&dns_service);
-                        let state = Arc::clone(&state);
-                        let connection_shutdown = shutdown.child_token();
-                        tasks.spawn(async move {
-                            tokio::select! {
-                                () = connection_shutdown.cancelled() => {}
-                                _ = handle(stream, &dns_service, &config, &state) => {}
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        state.log("error", format!("controller accept failed: {error}"));
-                        break;
-                    }
-                }
-            }
-            _ = tasks.join_next(), if !tasks.is_empty() => {}
-        }
+    let state = ControllerState {
+        dns_service,
+        config,
+        runtime: Arc::clone(&runtime),
+        shutdown: shutdown.clone(),
+    };
+    let app = controller_router(state.clone()).layer(middleware::from_fn_with_state(
+        state,
+        authenticate_or_serve_doh,
+    ));
+    if let Err(error) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
+    {
+        runtime.log("error", format!("controller server failed: {error}"));
     }
-    drop(listener);
-    shutdown.cancel();
-    while tasks.join_next().await.is_some() {}
 }
 
-async fn handle(
-    mut stream: TcpStream,
-    dns_service: &DnsService,
-    config: &Config,
-    state: &RuntimeState,
-) -> Result<(), ControllerError> {
-    let request = read_request(&mut stream).await?;
-    let path = request.path.split('?').next().unwrap_or(&request.path);
-    if is_doh_path(path, &config.external_doh_server) {
-        return handle_doh(&mut stream, &request, dns_service, config, state).await;
+fn controller_router(state: ControllerState) -> Router {
+    Router::new()
+        .route("/", get(root))
+        .route("/version", get(version))
+        .route("/configs", get(configs))
+        .route("/configs/", get(configs))
+        .route("/connections", get(connections))
+        .route("/connections/", get(connections))
+        .route("/traffic", get(traffic))
+        .route("/logs", get(logs))
+        .route("/cache/dns/flush", any(flush_dns_cache))
+        .route("/cache/fakeip/flush", any(flush_fake_ip_cache))
+        .route("/dns/query", any(dns_query))
+        .method_not_allowed_fallback(method_not_allowed)
+        .fallback(not_found)
+        .with_state(state)
+}
+
+async fn authenticate_or_serve_doh(
+    State(state): State<ControllerState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let config = state.current_config();
+    if is_doh_path(request.uri().path(), &config.external_doh_server) {
+        return handle_doh(request, &state, &config).await;
     }
+    let expected = format!("Bearer {}", config.secret);
     if !config.secret.is_empty()
-        && request.headers.get("authorization") != Some(&format!("Bearer {}", config.secret))
+        && request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            != Some(expected.as_str())
     {
-        return write_json(&mut stream, 401, &json!({"message": "Unauthorized"})).await;
+        return json_response(
+            StatusCode::UNAUTHORIZED,
+            &json!({"message": "Unauthorized"}),
+        );
     }
-    if request.method == "POST" && path == "/cache/dns/flush" {
-        dns_service.clear_cache().await;
-        return write_empty(&mut stream, 204).await;
-    }
-    if request.method == "POST" && path == "/cache/fakeip/flush" {
-        if let Some(fake) = config.dns.as_ref().and_then(|dns| dns.fake_ip.as_ref()) {
-            state.flush_fake_ips(fake.ipv4_range, fake.ipv6_range, config.store_fake_ip);
-        }
-        return write_empty(&mut stream, 204).await;
-    }
-    if matches!(path, "/cache/dns/flush" | "/cache/fakeip/flush") {
-        return write_empty(&mut stream, 405).await;
-    }
-    if path == "/dns/query" && request.method != "GET" {
-        return write_empty(&mut stream, 405).await;
-    }
-    if request.method != "GET" {
-        return write_json(&mut stream, 405, &json!({"message": "Method Not Allowed"})).await;
-    }
-    match path {
-        "/" => write_json(&mut stream, 200, &json!({"hello": "mihomo"})).await,
-        "/version" => {
-            write_json(
-                &mut stream,
-                200,
-                &json!({"meta": true, "version": env!("CARGO_PKG_VERSION")}),
-            )
-            .await
-        }
-        "/configs" | "/configs/" => write_json(&mut stream, 200, &config_snapshot(config)).await,
-        "/connections" | "/connections/" => {
-            write_json(&mut stream, 200, &state.connections()).await
-        }
-        "/traffic" => stream_traffic(&mut stream, state).await,
-        "/logs" => stream_logs(&mut stream, state, &request.path).await,
-        "/dns/query" => {
-            let Some(dns) = config.dns.as_ref() else {
-                return write_json(
-                    &mut stream,
-                    500,
-                    &json!({"message": "DNS section is disabled"}),
-                )
-                .await;
-            };
-            let parameters: BTreeMap<_, _> = request
-                .path
-                .split_once('?')
-                .map(|(_, query)| {
-                    url::form_urlencoded::parse(query.as_bytes())
-                        .into_owned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            let name = parameters.get("name").map_or("", String::as_str);
-            let record_type = parameters
-                .get("type")
-                .map_or(Some(1), |value| dns_record_type(value));
-            let Some(record_type) = record_type else {
-                return write_json(&mut stream, 400, &json!({"message": "invalid query type"}))
-                    .await;
-            };
-            match dns_service.rest_query(dns, name, record_type).await {
-                Ok(response) => write_json(&mut stream, 200, &response).await,
-                Err(error) => {
-                    write_json(&mut stream, 500, &json!({"message": error.to_string()})).await
-                }
-            }
-        }
-        _ => write_json(&mut stream, 404, &json!({"message": "Not Found"})).await,
-    }
-}
-
-async fn read_request(stream: &mut TcpStream) -> Result<Request, ControllerError> {
-    let mut bytes = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 2048];
-    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 || bytes.len() + read > MAX_REQUEST_HEAD {
-            return Err(ControllerError::InvalidRequest);
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-    }
-    let head_end = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or(ControllerError::InvalidRequest)?
-        + 4;
-    let text =
-        std::str::from_utf8(&bytes[..head_end]).map_err(|_| ControllerError::InvalidRequest)?;
-    let mut lines = text.split("\r\n");
-    let mut request_line = lines
-        .next()
-        .ok_or(ControllerError::InvalidRequest)?
-        .split_whitespace();
-    let method = request_line
-        .next()
-        .ok_or(ControllerError::InvalidRequest)?
-        .to_owned();
-    let path = request_line
-        .next()
-        .ok_or(ControllerError::InvalidRequest)?
-        .to_owned();
-    if request_line.next().is_none() || request_line.next().is_some() {
-        return Err(ControllerError::InvalidRequest);
-    }
-    let headers: BTreeMap<_, _> = lines
-        .take_while(|line| !line.is_empty())
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.to_lowercase(), value.trim().to_owned()))
-        .collect();
-    let content_length = headers
-        .get("content-length")
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| ControllerError::InvalidRequest)
-        })
-        .transpose()?
-        .unwrap_or(0)
-        .min(MAX_DNS_MESSAGE);
-    let mut body = bytes[head_end..].to_vec();
-    if headers
-        .get("transfer-encoding")
-        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
-    {
-        loop {
-            if let Some(decoded) = decode_chunked_body(&body)? {
-                body = decoded;
-                break;
-            }
-            if body.len() > MAX_CHUNKED_BODY_WIRE {
-                return Err(ControllerError::InvalidRequest);
-            }
-            let read = stream.read(&mut chunk).await?;
-            if read == 0 {
-                return Err(ControllerError::InvalidRequest);
-            }
-            body.extend_from_slice(&chunk[..read]);
-        }
-    } else {
-        while body.len() < content_length {
-            let read = stream.read(&mut chunk).await?;
-            if read == 0 {
-                return Err(ControllerError::InvalidRequest);
-            }
-            body.extend_from_slice(&chunk[..read]);
-        }
-        body.truncate(content_length);
-    }
-    Ok(Request {
-        method,
-        path,
-        headers,
-        body,
-    })
-}
-
-fn decode_chunked_body(bytes: &[u8]) -> Result<Option<Vec<u8>>, ControllerError> {
-    let mut offset = 0;
-    let mut body = Vec::new();
-    loop {
-        let Some(line_end) = bytes[offset..]
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .map(|position| offset + position)
-        else {
-            return Ok(None);
-        };
-        let size_text = std::str::from_utf8(&bytes[offset..line_end])
-            .map_err(|_| ControllerError::InvalidRequest)?;
-        let size_text = size_text.split(';').next().unwrap_or(size_text).trim();
-        let size =
-            usize::from_str_radix(size_text, 16).map_err(|_| ControllerError::InvalidRequest)?;
-        offset = line_end + 2;
-        if size == 0 {
-            if bytes.len() < offset + 2 {
-                return Ok(None);
-            }
-            if &bytes[offset..offset + 2] == b"\r\n"
-                || bytes[offset..]
-                    .windows(4)
-                    .any(|window| window == b"\r\n\r\n")
-            {
-                return Ok(Some(body));
-            }
-            return Ok(None);
-        }
-        let chunk_end = offset
-            .checked_add(size)
-            .ok_or(ControllerError::InvalidRequest)?;
-        if bytes.len() < chunk_end + 2 {
-            return Ok(None);
-        }
-        if &bytes[chunk_end..chunk_end + 2] != b"\r\n" {
-            return Err(ControllerError::InvalidRequest);
-        }
-        let remaining = MAX_DNS_MESSAGE.saturating_sub(body.len());
-        body.extend_from_slice(&bytes[offset..chunk_end.min(offset + remaining)]);
-        if body.len() == MAX_DNS_MESSAGE {
-            return Ok(Some(body));
-        }
-        offset = chunk_end + 2;
-    }
+    next.run(request).await
 }
 
 fn is_doh_path(path: &str, mount: &str) -> bool {
@@ -306,47 +115,255 @@ fn is_doh_path(path: &str, mount: &str) -> bool {
                 .is_some_and(|suffix| suffix.starts_with('/')))
 }
 
-async fn handle_doh(
-    stream: &mut TcpStream,
-    request: &Request,
-    dns_service: &DnsService,
-    config: &Config,
-    state: &RuntimeState,
-) -> Result<(), ControllerError> {
+async fn handle_doh(request: Request, state: &ControllerState, config: &Config) -> Response {
     if config.dns.is_none() {
-        return write_plain(stream, 500, "DNS section is disabled").await;
+        return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "DNS section is disabled");
     }
-    let packet = match request.method.as_str() {
-        "GET" => {
-            let parameters: BTreeMap<_, _> = request
-                .path
-                .split_once('?')
-                .map(|(_, query)| {
-                    url::form_urlencoded::parse(query.as_bytes())
-                        .into_owned()
-                        .collect()
-                })
-                .unwrap_or_default();
+    let packet = match *request.method() {
+        Method::GET => {
+            let parameters = query_parameters(request.uri());
             let encoded = parameters.get("dns").map_or("", String::as_str);
             match URL_SAFE_NO_PAD.decode(encoded) {
                 Ok(packet) => packet,
-                Err(error) => return write_plain(stream, 500, &error.to_string()).await,
+                Err(error) => {
+                    return plain_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+                }
             }
         }
-        "POST" => {
-            if request.headers.get("content-type").map(String::as_str)
-                != Some("application/dns-message")
+        Method::POST => {
+            if request
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(axum::http::HeaderValue::as_bytes)
+                != Some(b"application/dns-message".as_slice())
             {
-                return write_plain(stream, 500, "invalid content-type").await;
+                return plain_response(StatusCode::INTERNAL_SERVER_ERROR, "invalid content-type");
             }
-            request.body.clone()
+            match read_limited_body(request.into_body()).await {
+                Ok(packet) => packet,
+                Err(error) => return plain_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+            }
         }
-        _ => return write_plain(stream, 405, "method not allowed").await,
+        _ => return plain_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
     };
-    match dns_service.relay_query(config, state, &packet).await {
-        Ok(response) => write_dns_message(stream, &response).await,
-        Err(error) => write_plain(stream, 500, &error.to_string()).await,
+    match state
+        .dns_service
+        .relay_query(config, &state.runtime, &packet)
+        .await
+    {
+        Ok(response) => dns_message_response(response),
+        Err(error) => plain_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
+}
+
+async fn read_limited_body(body: Body) -> Result<Vec<u8>, String> {
+    let mut stream = body.into_data_stream();
+    let mut result = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        let remaining = MAX_DNS_MESSAGE.saturating_sub(result.len());
+        if remaining == 0 {
+            break;
+        }
+        if chunk.len() <= remaining {
+            result.extend_from_slice(&chunk);
+        } else {
+            result.extend_from_slice(&chunk[..remaining]);
+            break;
+        }
+    }
+    Ok(result)
+}
+
+async fn root() -> Response {
+    json_response(StatusCode::OK, &json!({"hello": "mihomo"}))
+}
+
+async fn version() -> Response {
+    json_response(
+        StatusCode::OK,
+        &json!({"meta": true, "version": env!("CARGO_PKG_VERSION")}),
+    )
+}
+
+async fn configs(State(state): State<ControllerState>) -> Response {
+    json_response(StatusCode::OK, &config_snapshot(&state.current_config()))
+}
+
+async fn connections(State(state): State<ControllerState>) -> Response {
+    json_response(StatusCode::OK, &state.runtime.connections())
+}
+
+async fn flush_dns_cache(State(state): State<ControllerState>, method: Method) -> Response {
+    if method != Method::POST {
+        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    state.dns_service.clear_cache().await;
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn flush_fake_ip_cache(State(state): State<ControllerState>, method: Method) -> Response {
+    if method != Method::POST {
+        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let config = state.current_config();
+    if let Some(fake) = config.dns.as_ref().and_then(|dns| dns.fake_ip.as_ref()) {
+        state
+            .runtime
+            .flush_fake_ips(fake.ipv4_range, fake.ipv6_range, config.store_fake_ip);
+    }
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn dns_query(State(state): State<ControllerState>, method: Method, uri: Uri) -> Response {
+    if method != Method::GET {
+        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
+    }
+    let config = state.current_config();
+    let Some(dns) = config.dns.as_ref() else {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": "DNS section is disabled"}),
+        );
+    };
+    let parameters = query_parameters(&uri);
+    let name = parameters.get("name").map_or("", String::as_str);
+    let record_type = parameters
+        .get("type")
+        .map_or(Some(1), |value| dns_record_type(value));
+    let Some(record_type) = record_type else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"message": "invalid query type"}),
+        );
+    };
+    match state.dns_service.rest_query(dns, name, record_type).await {
+        Ok(response) => json_response(StatusCode::OK, &response),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": error.to_string()}),
+        ),
+    }
+}
+
+async fn traffic(State(state): State<ControllerState>) -> Response {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+    let runtime = Arc::clone(&state.runtime);
+    let shutdown = state.shutdown.clone();
+    let body = Body::from_stream(stream::unfold(
+        (interval, runtime, shutdown),
+        |(mut interval, runtime, shutdown)| async move {
+            tokio::select! {
+                () = shutdown.cancelled() => None,
+                _ = interval.tick() => {
+                    let line = json_line(&runtime.traffic());
+                    Some((Ok::<Bytes, Infallible>(line), (interval, runtime, shutdown)))
+                }
+            }
+        },
+    ));
+    typed_response(StatusCode::OK, "application/json", body)
+}
+
+async fn logs(State(state): State<ControllerState>, uri: Uri) -> Response {
+    if uri
+        .query()
+        .is_some_and(|query| query.contains("level=invalid"))
+    {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    }
+    let receiver = state.runtime.subscribe_logs();
+    let shutdown = state.shutdown.clone();
+    let body = Body::from_stream(stream::unfold(
+        (receiver, shutdown),
+        |(mut receiver, shutdown)| async move {
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => return None,
+                    result = receiver.recv() => match result {
+                        Ok(event) => {
+                            let line = json_line(&event);
+                            return Some((Ok::<Bytes, Infallible>(line), (receiver, shutdown)));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            }
+        },
+    ));
+    typed_response(StatusCode::OK, "application/json", body)
+}
+
+async fn method_not_allowed() -> Response {
+    json_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        &json!({"message": "Method Not Allowed"}),
+    )
+}
+
+async fn not_found(method: Method) -> Response {
+    if method == Method::GET {
+        json_response(StatusCode::NOT_FOUND, &json!({"message": "Not Found"}))
+    } else {
+        method_not_allowed().await
+    }
+}
+
+fn query_parameters(uri: &Uri) -> BTreeMap<String, String> {
+    uri.query()
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_line<T: Serialize>(value: &T) -> Bytes {
+    let mut body = serde_json::to_vec(value)
+        .unwrap_or_else(|_| br#"{"message":"controller JSON error"}"#.to_vec());
+    body.push(b'\n');
+    Bytes::from(body)
+}
+
+fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+    match serde_json::to_vec(value) {
+        Ok(body) => typed_response(status, "application/json", Body::from(body)),
+        Err(error) => plain_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+fn plain_response(status: StatusCode, message: &str) -> Response {
+    typed_response(
+        status,
+        "text/plain; charset=utf-8",
+        Body::from(message.to_owned()),
+    )
+}
+
+fn dns_message_response(message: Vec<u8>) -> Response {
+    typed_response(
+        StatusCode::OK,
+        "application/dns-message",
+        Body::from(message),
+    )
+}
+
+fn typed_response(status: StatusCode, content_type: &'static str, body: Body) -> Response {
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+fn empty_response(status: StatusCode) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    response
 }
 
 fn dns_record_type(value: &str) -> Option<u16> {
@@ -473,140 +490,6 @@ fn config_snapshot(config: &Config) -> serde_json::Value {
     })
 }
 
-async fn write_json<T: Serialize>(
-    stream: &mut TcpStream,
-    status: u16,
-    value: &T,
-) -> Result<(), ControllerError> {
-    let body = serde_json::to_vec(value)?;
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        500 => "Internal Server Error",
-        _ => "Error",
-    };
-    stream
-        .write_all(
-            format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    stream.write_all(&body).await?;
-    Ok(())
-}
-
-async fn write_empty(stream: &mut TcpStream, status: u16) -> Result<(), ControllerError> {
-    let reason = match status {
-        204 => "No Content",
-        405 => "Method Not Allowed",
-        _ => "Error",
-    };
-    stream
-        .write_all(
-            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .await?;
-    Ok(())
-}
-
-async fn write_plain(
-    stream: &mut TcpStream,
-    status: u16,
-    message: &str,
-) -> Result<(), ControllerError> {
-    let reason = match status {
-        405 => "Method Not Allowed",
-        500 => "Internal Server Error",
-        _ => "Error",
-    };
-    stream
-        .write_all(
-            format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message}",
-                message.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    Ok(())
-}
-
-async fn write_dns_message(stream: &mut TcpStream, message: &[u8]) -> Result<(), ControllerError> {
-    stream
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                message.len()
-            )
-            .as_bytes(),
-        )
-        .await?;
-    stream.write_all(message).await?;
-    Ok(())
-}
-
-async fn write_stream_head(stream: &mut TcpStream) -> Result<(), ControllerError> {
-    stream
-        .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
-        )
-        .await?;
-    Ok(())
-}
-
-async fn write_chunk<T: Serialize>(
-    stream: &mut TcpStream,
-    value: &T,
-) -> Result<(), ControllerError> {
-    let mut body = serde_json::to_vec(value)?;
-    body.push(b'\n');
-    stream
-        .write_all(format!("{:x}\r\n", body.len()).as_bytes())
-        .await?;
-    stream.write_all(&body).await?;
-    stream.write_all(b"\r\n").await?;
-    Ok(())
-}
-
-async fn stream_traffic(
-    stream: &mut TcpStream,
-    state: &RuntimeState,
-) -> Result<(), ControllerError> {
-    write_stream_head(stream).await?;
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    interval.tick().await;
-    loop {
-        interval.tick().await;
-        write_chunk(stream, &state.traffic()).await?;
-    }
-}
-
-async fn stream_logs(
-    stream: &mut TcpStream,
-    state: &RuntimeState,
-    path: &str,
-) -> Result<(), ControllerError> {
-    if path.contains("level=invalid") {
-        return write_json(stream, 400, &json!({"message": "Body invalid"})).await;
-    }
-    let mut receiver = state.subscribe_logs();
-    write_stream_head(stream).await?;
-    loop {
-        match receiver.recv().await {
-            Ok(event) => write_chunk(stream, &event).await?,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,23 +511,5 @@ mod tests {
         assert!(is_doh_path("/dns-query/child", "/dns-query"));
         assert!(!is_doh_path("/dns-query-other", "/dns-query"));
         assert!(!is_doh_path("/dns-query", "dns-query"));
-    }
-
-    #[test]
-    fn decodes_chunked_dns_bodies_and_trailers() {
-        assert_eq!(
-            decode_chunked_body(b"3;fixture=yes\r\nabc\r\n2\r\nde\r\n0\r\n\r\n")
-                .expect("valid chunks"),
-            Some(b"abcde".to_vec())
-        );
-        assert_eq!(
-            decode_chunked_body(b"1\r\na\r\n0\r\nFixture: yes\r\n\r\n").expect("valid trailer"),
-            Some(b"a".to_vec())
-        );
-        assert!(
-            decode_chunked_body(b"3\r\nab")
-                .expect("incomplete chunks are not malformed")
-                .is_none()
-        );
     }
 }
