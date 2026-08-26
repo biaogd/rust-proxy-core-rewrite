@@ -140,8 +140,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Inbound type/user/name matchers | Oracle | **Partial** | Phases 5B3a–5B3c prove local TCP `IN-TYPE`, `IN-USER` and `IN-NAME`, including `DEFAULT-HTTP`/`SOCKS`/`MIXED`, lists, aliases and case-sensitive users; UDP, named listeners and future protocols remain pending |
 | GEOIP/GEOSITE/ASN | Oracle | Not started | Pinned geodata corpus |
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
-| SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references, PASS-RULE and cycles; Phase 5B3d proves basic AND/OR/NOT mixed-TCP DIRECT/REJECT routing; live SUB-RULE and lazy DNS/process helpers remain pending |
-| PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan, metadata mutation, sub-rule switch and rematch cycles; Phase 5B3e proves live PASS continuation to DIRECT and REJECT; live PASS-RULE/REMATCH remain pending |
+| SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references and cycles; Phases 5B3d/5B3f prove basic AND/OR/NOT and SUB-RULE mixed-TCP DIRECT/REJECT routing; lazy DNS/process helpers and the broader nested corpus remain pending |
+| PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan, metadata mutation, sub-rule switch and rematch cycles; Phases 5B3e–5B3f prove live PASS and PASS-RULE continuation; live REMATCH remains pending |
 | Proxy groups/select/fallback/url-test/load-balance | Oracle | Not started | Deterministic health/delay fixtures |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
 | Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |

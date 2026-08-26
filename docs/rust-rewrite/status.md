@@ -92,9 +92,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
 | Phase 5B3d live logical routing | Complete in declared basic-local-TCP scope; RULE-11 remains partial | AND/OR/NOT combine domain and inbound-type metadata and drive distinct DIRECT/REJECT network outcomes |
 | Phase 5B3e live PASS routing | Complete in declared local-TCP scope; RULE-12 remains partial | A matched PASS continues ordered scanning into later DIRECT and REJECT results instead of becoming an outbound |
+| Phase 5B3f live sub-rule routing | Complete in declared local-TCP scope; RULE-11/12 remain partial | SUB-RULE enters a named branch; PASS-RULE continues within it and returns to the main scan when exhausted |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3e rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3f rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3195,6 +3196,30 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 Live `PASS-RULE`, sub-rule escape and rematch mutation/rescan remain pending,
 so aggregate RULE-12 remains partial.
+
+## Phase 5B3f deliverables and evidence
+
+Phase 5B3f adds live `SUB-RULE` entry and `PASS-RULE` continuation. A TCP
+condition selects a named branch; PASS-RULE skips only the matching child and
+does not select an outbound. When the child list is exhausted without a final
+target, evaluation resumes at the next main rule.
+
+`compat/scripts/phase5b3f.py` proves both control-flow paths. In the first,
+`localhost` passes one child and reaches a later branch DIRECT while the IP
+literal reaches the branch REJECT. In the second, the only child returns
+PASS-RULE and the main MATCH selects DIRECT. The prior Phase 5B3e script is
+rerun because its live fixture is now shared with this phase.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B3E_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3e.py
+PHASE5B3F_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3f.py
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Lazy DNS/process helpers and broader nested/cycle live behavior remain pending
+for RULE-11; live REMATCH remains pending for RULE-12.
 
 ## Controller HTTP infrastructure refactor
 

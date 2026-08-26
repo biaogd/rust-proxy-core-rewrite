@@ -972,6 +972,14 @@ rule to choose either DIRECT or REJECT, with both outcomes compared to the Go
 oracle. `PASS-RULE`, live sub-rule escape and REMATCH mutation/rescan remain
 separate RULE-12 gates.
 
+### Phase 5B3f accepted scope
+
+Phase 5B3f accepts live `SUB-RULE` entry and `PASS-RULE` control flow on the
+local mixed TCP path. Acceptance requires one PASS-RULE to continue within a
+named branch, one exhausted branch to resume the main scan, and observable
+DIRECT/REJECT outcomes against the oracle. Lazy helper evaluation, live nested
+cycles and REMATCH remain separate gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

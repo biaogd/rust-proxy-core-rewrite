@@ -23,6 +23,7 @@ def exercise_rules(
     scratch: pathlib.Path,
     rules: list[str],
     probes: list[tuple[str, str]],
+    extra_config: str = "",
 ) -> dict[str, str]:
     server = ThreadingServer(("0.0.0.0", 0), EchoHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -38,6 +39,7 @@ log-level: info
 ipv6: false
 rules:
 {rendered_rules}
+{extra_config}
 """
     )
     process, stdout, stderr = launch(binary, config, scratch)
