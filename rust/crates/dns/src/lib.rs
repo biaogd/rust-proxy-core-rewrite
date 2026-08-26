@@ -1579,22 +1579,18 @@ async fn select_doh_protocol(
     tokio::pin!(h3_probe);
     tokio::pin!(http_probe);
     let choice = tokio::select! {
-        h3 = &mut h3_probe => match h3 {
-            Ok(()) => DohProtocol::Http3Only,
-            Err(_) => {
+        h3 = &mut h3_probe => if let Ok(()) = h3 {
+            DohProtocol::Http3Only
+        } else {
                 drop(http_probe.await?);
                 DohProtocol::Http
-            }
         },
-        http = &mut http_probe => match http {
-            Ok(stream) => {
-                drop(stream);
-                DohProtocol::Http
-            }
-            Err(_) => {
-                h3_probe.await?;
-                DohProtocol::Http3Only
-            }
+        http = &mut http_probe => if let Ok(stream) = http {
+            drop(stream);
+            DohProtocol::Http
+        } else {
+            h3_probe.await?;
+            DohProtocol::Http3Only
         },
     };
     if let Some(pool) = pool {
