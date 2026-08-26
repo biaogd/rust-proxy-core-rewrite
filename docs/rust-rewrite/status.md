@@ -87,9 +87,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
 | Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
+| Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3a rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3b rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3066,6 +3067,34 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 The focused differential passed twice consecutively after the readiness
 barrier. `IN-USER`, `IN-NAME`, UDP metadata and future inbound protocol kinds
 remain separate phases.
+
+## Phase 5B3b deliverables and evidence
+
+Phase 5B3b adds `IN-USER` and carries the authenticated identity into shared
+metadata. HTTP Basic returns the configured username after credential
+validation, SOCKS5 records the RFC 1929 username, and SOCKS4 records USERID.
+The connection/controller metadata snapshot now exposes the same value instead
+of an unconditional empty string. With authentication disabled, the field
+remains empty.
+
+The rule parser accepts one exact case-sensitive username or a slash-separated
+list, rejecting empty members. `compat/scripts/phase5b3b.py` authenticates the
+same `alice` identity through HTTP and SOCKS5, a passwordless `socks4` USERID
+through SOCKS4, and a distinct valid `Alice` identity to prove case sensitivity.
+Exact and list configurations produce separate DIRECT echo and REJECT-close
+observations in both products after the same readiness barrier as Phase 5B3a.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B3B_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3b.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-inbound -p rewrite-rules -p rewrite-state --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Invalid UTF-8 protocol usernames, UDP-association user propagation, remote
+inbound protocols and `IN-NAME` remain outside this phase.
 
 ## Controller HTTP infrastructure refactor
 

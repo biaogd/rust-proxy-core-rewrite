@@ -93,6 +93,7 @@ enum Matcher {
     },
     Network(Network),
     InType(Vec<rewrite_model::InboundProtocol>),
+    InUser(Vec<String>),
     RematchName(Vec<String>),
     And(Vec<Matcher>),
     Or(Vec<Matcher>),
@@ -448,6 +449,7 @@ impl Matcher {
             }
             Self::Network(network) => MatchResult::from_bool(metadata.network == *network),
             Self::InType(types) => MatchResult::from_bool(types.contains(&metadata.inbound)),
+            Self::InUser(users) => MatchResult::from_bool(users.contains(&metadata.inbound_user)),
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
@@ -504,6 +506,7 @@ impl Matcher {
             } => "InPort",
             Self::Network(_) => "Network",
             Self::InType(_) => "InType",
+            Self::InUser(_) => "InUser",
             Self::RematchName(_) => "RematchName",
             Self::And(_) => "AND",
             Self::Or(_) => "OR",
@@ -664,6 +667,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
             _ => Err(RuleError::Unsupported("NETWORK".to_owned())),
         },
         "IN-TYPE" => parse_in_type(payload),
+        "IN-USER" => parse_in_user(payload),
         "REMATCH-NAME" => {
             let names: Vec<_> = payload
                 .split('/')
@@ -787,6 +791,18 @@ fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
         return Err(RuleError::InvalidPayload);
     }
     Ok(Matcher::InType(types))
+}
+
+fn parse_in_user(payload: &str) -> Result<Matcher, RuleError> {
+    let users = payload
+        .split('/')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if users.is_empty() || users.iter().any(String::is_empty) {
+        return Err(RuleError::InvalidPayload);
+    }
+    Ok(Matcher::InUser(users))
 }
 
 fn ip_suffix_matches(pattern: std::net::IpAddr, bits: u8, candidate: std::net::IpAddr) -> bool {
@@ -1083,6 +1099,20 @@ mod tests {
         let alias = vec!["IN-TYPE,SOCKS,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
         let program = RuleSet::parse(&alias, &BTreeMap::new(), &[]).expect("valid rules");
         assert_eq!(program.evaluate(&input).target, "REJECT");
+    }
+
+    #[test]
+    fn matches_inbound_users_exactly() {
+        let rules = vec![
+            "IN-USER,alice/socks4,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let mut input = metadata("user.test", 80);
+        input.inbound_user = "alice".to_owned();
+        assert_eq!(program.evaluate(&input).target, "REJECT");
+        input.inbound_user = "Alice".to_owned();
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
     }
 
     #[test]

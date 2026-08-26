@@ -930,6 +930,15 @@ observable DIRECT echo or REJECT close after an explicit provider-readiness
 barrier. `IN-USER`, `IN-NAME`, UDP and protocol kinds without a Rust inbound
 remain later RULE-08 gates.
 
+### Phase 5B3b accepted scope
+
+Phase 5B3b accepts `IN-USER` on authenticated HTTP CONNECT, SOCKS5 and SOCKS4
+local TCP inputs. Successful authentication must populate one shared metadata
+field; exact and slash-list rules are case-sensitive and must create distinct
+DIRECT/REJECT outcomes for `alice`, `Alice` and `socks4`. Authentication error
+behavior remains owned by Phase 3. Invalid UTF-8 usernames, UDP associations,
+remote inbound families and `IN-NAME` remain later gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

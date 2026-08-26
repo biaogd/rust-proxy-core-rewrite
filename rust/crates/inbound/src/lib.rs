@@ -216,9 +216,11 @@ async fn accept_socks5(
         0
     };
     client.write_all(&[5, selected_method]).await?;
-    if selected_method == 2 {
-        authenticate_socks5(&mut client, users).await?;
-    }
+    let inbound_user = if selected_method == 2 {
+        authenticate_socks5(&mut client, users).await?
+    } else {
+        String::new()
+    };
 
     let mut request = [0_u8; 4];
     client.read_exact(&mut request).await?;
@@ -269,8 +271,11 @@ async fn accept_socks5(
     reply.extend_from_slice(&local.port().to_be_bytes());
     client.write_all(&reply).await?;
 
+    let mut metadata =
+        socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks5);
+    metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
-        metadata: socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks5),
+        metadata,
         client,
         preface: Vec::new(),
         command,
@@ -280,7 +285,7 @@ async fn accept_socks5(
 async fn authenticate_socks5(
     client: &mut TcpStream,
     users: &[AuthUser],
-) -> Result<(), InboundError> {
+) -> Result<String, InboundError> {
     let mut header = [0_u8; 2];
     client.read_exact(&mut header).await?;
     let user_len = usize::from(header[1]);
@@ -303,7 +308,7 @@ async fn authenticate_socks5(
         });
     client.write_all(&[1, u8::from(!accepted)]).await?;
     if accepted {
-        Ok(())
+        Ok(String::from_utf8_lossy(&username).into_owned())
     } else {
         Err(InboundError::Authentication)
     }
@@ -340,8 +345,12 @@ async fn accept_socks4(
     if !accepted {
         return Err(InboundError::Authentication);
     }
+    let inbound_user = String::from_utf8_lossy(&username).into_owned();
+    let mut metadata =
+        socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks4);
+    metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
-        metadata: socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks4),
+        metadata,
         client,
         preface: Vec::new(),
         command: InboundCommand::Connect,
@@ -367,15 +376,18 @@ async fn accept_http(
     users: &[AuthUser],
 ) -> Result<AcceptedTcp, InboundError> {
     let (bytes, request) = read_http_head(&mut client).await?;
-    authenticate_http(&mut client, request.version, &request.headers, users).await?;
+    let inbound_user =
+        authenticate_http(&mut client, request.version, &request.headers, users).await?;
 
     if request.method.eq_ignore_ascii_case("CONNECT") {
         let destination = parse_authority(&request.target, None)?;
         client
             .write_all(format!("{} 200 Connection established\r\n\r\n", request.version).as_bytes())
             .await?;
+        let mut metadata = socket_metadata(&client, destination, InboundProtocol::Https);
+        metadata.inbound_user = inbound_user;
         return Ok(AcceptedTcp {
-            metadata: socket_metadata(&client, destination, InboundProtocol::Https),
+            metadata,
             client,
             preface: bytes[request.body_offset..].to_vec(),
             command: InboundCommand::Connect,
@@ -418,8 +430,10 @@ async fn accept_http(
     rewritten.extend_from_slice(b"\r\n");
     rewritten.extend_from_slice(&bytes[request.body_offset..]);
 
+    let mut metadata = socket_metadata(&client, destination, InboundProtocol::Http);
+    metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
-        metadata: socket_metadata(&client, destination, InboundProtocol::Http),
+        metadata,
         client,
         preface: rewritten,
         command: InboundCommand::Connect,
@@ -431,9 +445,9 @@ async fn authenticate_http(
     version: &str,
     headers: &[(String, Vec<u8>)],
     users: &[AuthUser],
-) -> Result<(), InboundError> {
+) -> Result<String, InboundError> {
     if users.is_empty() {
-        return Ok(());
+        return Ok(String::new());
     }
     let credential = headers.iter().find_map(|(name, value)| {
         name.eq_ignore_ascii_case("proxy-authorization")
@@ -464,13 +478,14 @@ async fn authenticate_http(
             let split = plain.iter().position(|byte| *byte == b':')?;
             Some((plain[..split].to_vec(), plain[(split + 1)..].to_vec()))
         });
-    let accepted = decoded.is_some_and(|(username, password)| {
-        users.iter().any(|candidate| {
-            candidate.username.as_bytes() == username && candidate.password.as_bytes() == password
+    let authenticated = decoded.and_then(|(username, password)| {
+        users.iter().find_map(|candidate| {
+            (candidate.username.as_bytes() == username && candidate.password.as_bytes() == password)
+                .then(|| candidate.username.clone())
         })
     });
-    if accepted {
-        Ok(())
+    if let Some(username) = authenticated {
+        Ok(username)
     } else {
         client
             .write_all(format!("{version} 403 Forbidden\r\nContent-Length: 0\r\n\r\n").as_bytes())
