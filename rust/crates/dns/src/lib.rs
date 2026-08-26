@@ -12,7 +12,11 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
 use hickory_proto::rr::{RData, Record};
 use hickory_proto::serialize::binary::{BinDecodable, BinDecoder};
-use http::{Method, Request};
+use http::header::{ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, HOST, USER_AGENT};
+use http::{HeaderValue, Method, Request};
+use http_body_util::{BodyExt, Empty};
+use hyper::client::conn::http1::SendRequest as Http1SendRequest;
+use hyper_util::rt::TokioIo;
 use rewrite_config::{
     Config, DnsCacheAlgorithm, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig,
     DnsFallbackConfig, DnsMainKind, DnsMode, DnsPolicy, DnsPolicyMatcher, DnsResolverClient,
@@ -530,6 +534,8 @@ fn remove_key(order: &mut VecDeque<Vec<u8>>, key: &[u8]) {
 struct TlsConnectionPool {
     key: Vec<u8>,
     connections: Vec<TlsStream<TcpStream>>,
+    h1_key: Vec<u8>,
+    h1_senders: Vec<Http1Sender>,
     h2_key: Vec<u8>,
     h2_sender: Option<h2::client::SendRequest<Bytes>>,
     h3_key: Vec<u8>,
@@ -546,8 +552,10 @@ struct TlsConnectionPool {
 #[derive(Default)]
 struct HttpConnectionPool {
     key: Vec<u8>,
-    connections: Vec<TcpStream>,
+    senders: Vec<Http1Sender>,
 }
+
+type Http1Sender = Http1SendRequest<Empty<Bytes>>;
 
 type SharedDnsResult = Result<Vec<u8>, SharedDnsError>;
 
@@ -699,6 +707,8 @@ impl DnsService {
         let mut pool = self.resolver.tls_pool.lock().await;
         pool.key.clear();
         pool.connections.clear();
+        pool.h1_key.clear();
+        pool.h1_senders.clear();
         pool.h2_key.clear();
         pool.h2_sender = None;
         pool.h3_key.clear();
@@ -715,7 +725,7 @@ impl DnsService {
         drop(pool);
         let mut pool = self.resolver.http_pool.lock().await;
         pool.key.clear();
-        pool.connections.clear();
+        pool.senders.clear();
     }
 }
 
@@ -2623,6 +2633,17 @@ async fn return_tls_connection(
     pool.connections.push(stream);
 }
 
+async fn return_tls_http1_sender(pool: &Mutex<TlsConnectionPool>, key: &[u8], sender: Http1Sender) {
+    let mut pool = pool.lock().await;
+    if pool.h1_key != key {
+        return;
+    }
+    if pool.h1_senders.len() >= MAX_POOLED_TLS_CONNECTIONS {
+        pool.h1_senders.remove(0);
+    }
+    pool.h1_senders.push(sender);
+}
+
 async fn query_tls_verified_reuse(
     query: &[u8],
     upstream: SocketAddr,
@@ -2684,15 +2705,29 @@ async fn query_tls_insecure_reuse(
     Ok(response)
 }
 
-async fn exchange_doh<S>(
+async fn start_http1<S>(stream: S) -> Result<Http1Sender, DnsError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (sender, connection) = tokio::time::timeout(
+        UPSTREAM_TIMEOUT,
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)),
+    )
+    .await
+    .map_err(|_| DnsError::UpstreamTimeout)?
+    .map_err(std::io::Error::other)?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    Ok(sender)
+}
+
+async fn exchange_doh_http1(
     query: &[u8],
     upstream: SocketAddr,
     tls: &DnsTlsConfig,
-    stream: &mut S,
-) -> Result<(Vec<u8>, bool), DnsError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+    sender: &mut Http1Sender,
+) -> Result<(Vec<u8>, bool), DnsError> {
     let path = tls
         .doh_path
         .as_deref()
@@ -2707,21 +2742,28 @@ where
     );
 
     for request_number in 0..MAX_DOH_REDIRECT_REQUESTS {
-        let authorization =
-            tls.doh_basic_credentials
-                .as_ref()
-                .map_or_else(String::new, |credentials| {
-                    format!(
-                        "Authorization: Basic {}\r\n",
-                        STANDARD.encode(credentials.as_bytes())
-                    )
-                });
-        let request = format!(
-            "GET {target} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-message\r\nUser-Agent: \r\n{authorization}\r\n"
-        );
-        stream.write_all(request.as_bytes()).await?;
-
-        let (status, location, mut response, reusable) = read_doh_response(stream).await?;
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(&target)
+            .header(HOST, &authority)
+            .header(ACCEPT, "application/dns-message")
+            .header(USER_AGENT, "");
+        if let Some(credentials) = &tls.doh_basic_credentials {
+            let authorization = HeaderValue::from_str(&format!(
+                "Basic {}",
+                STANDARD.encode(credentials.as_bytes())
+            ))
+            .map_err(|_| DnsError::InvalidMessage("invalid DoH authorization"))?;
+            request = request.header(AUTHORIZATION, authorization);
+        }
+        let request = request
+            .body(Empty::new())
+            .map_err(|_| DnsError::InvalidMessage("invalid DoH request"))?;
+        let response = tokio::time::timeout(UPSTREAM_TIMEOUT, sender.send_request(request))
+            .await
+            .map_err(|_| DnsError::UpstreamTimeout)?
+            .map_err(std::io::Error::other)?;
+        let (status, location, mut response, reusable) = read_doh_http1_response(response).await?;
         if status == 200 {
             if response.len() < DNS_HEADER_LENGTH || response[..2] != [0, 0] {
                 return Err(DnsError::InvalidMessage("DoH response DNS ID is not zero"));
@@ -2753,81 +2795,49 @@ where
     Err(DnsError::InvalidMessage("DoH redirect limit exceeded"))
 }
 
-async fn read_doh_response<S>(
-    stream: &mut S,
-) -> Result<(u16, Option<String>, Vec<u8>, bool), DnsError>
-where
-    S: AsyncRead + Unpin,
-{
-    let mut raw = Vec::with_capacity(4096);
-    let mut chunk = [0_u8; 4096];
-    let mut expected_length = None;
-    loop {
-        let length = tokio::time::timeout(UPSTREAM_TIMEOUT, stream.read(&mut chunk))
-            .await
-            .map_err(|_| DnsError::UpstreamTimeout)??;
-        if length == 0 {
-            break;
-        }
-        if raw.len().saturating_add(length) > MAX_DNS_MESSAGE + 16_384 {
-            return Err(DnsError::InvalidMessage("DoH response is too large"));
-        }
-        raw.extend_from_slice(&chunk[..length]);
-        if expected_length.is_none()
-            && let Some(offset) = raw.windows(4).position(|window| window == b"\r\n\r\n")
-        {
-            let header_end = offset + 4;
-            let headers = std::str::from_utf8(&raw[..header_end])
-                .map_err(|_| DnsError::InvalidMessage("DoH response headers are not ASCII"))?;
-            let content_length = header_value(headers, "content-length")
-                .and_then(|value| value.parse::<usize>().ok())
-                .ok_or(DnsError::InvalidMessage(
-                    "DoH response Content-Length is missing",
-                ))?;
-            expected_length = header_end.checked_add(content_length);
-        }
-        if expected_length.is_some_and(|expected| raw.len() >= expected) {
-            break;
+async fn read_doh_http1_response(
+    response: http::Response<hyper::body::Incoming>,
+) -> Result<(u16, Option<String>, Vec<u8>, bool), DnsError> {
+    let status = response.status().as_u16();
+    let location = response
+        .headers()
+        .get(http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let reusable = !response
+        .headers()
+        .get(CONNECTION)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"close"));
+    let expected_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or(DnsError::InvalidMessage(
+            "DoH response Content-Length is missing",
+        ))?;
+    if expected_length > MAX_DNS_MESSAGE {
+        return Err(DnsError::InvalidMessage("DoH response is too large"));
+    }
+    let mut body = response.into_body();
+    let mut message = Vec::with_capacity(expected_length);
+    while let Some(frame) = tokio::time::timeout(UPSTREAM_TIMEOUT, body.frame())
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .transpose()
+        .map_err(std::io::Error::other)?
+    {
+        if let Some(data) = frame.data_ref() {
+            if message.len().saturating_add(data.len()) > expected_length {
+                return Err(DnsError::InvalidMessage("DoH response is too large"));
+            }
+            message.extend_from_slice(data);
         }
     }
-    let header_end = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|offset| offset + 4)
-        .ok_or(DnsError::InvalidMessage(
-            "DoH response headers are truncated",
-        ))?;
-    let headers = std::str::from_utf8(&raw[..header_end])
-        .map_err(|_| DnsError::InvalidMessage("DoH response headers are not ASCII"))?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_ascii_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or(DnsError::InvalidMessage("DoH response status is invalid"))?;
-    let location = header_value(headers, "location").map(ToOwned::to_owned);
-    let reusable = !header_value(headers, "connection")
-        .is_some_and(|value| value.eq_ignore_ascii_case("close"));
-    let response_end = expected_length.ok_or(DnsError::InvalidMessage(
-        "DoH response Content-Length is missing",
-    ))?;
-    if raw.len() < response_end {
+    if message.len() != expected_length {
         return Err(DnsError::InvalidMessage("DoH response body is truncated"));
     }
-    Ok((
-        status,
-        location,
-        raw[header_end..response_end].to_vec(),
-        reusable,
-    ))
-}
-
-fn header_value<'a>(headers: &'a str, expected_name: &str) -> Option<&'a str> {
-    headers
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case(expected_name))
-        .map(|(_, value)| value.trim())
+    Ok((status, location, message, reusable))
 }
 
 fn http_pool_key(upstream: SocketAddr, http: &DnsTlsConfig) -> Vec<u8> {
@@ -2844,15 +2854,15 @@ fn http_pool_key(upstream: SocketAddr, http: &DnsTlsConfig) -> Vec<u8> {
     key
 }
 
-async fn return_http_connection(pool: &Mutex<HttpConnectionPool>, key: &[u8], stream: TcpStream) {
+async fn return_http_sender(pool: &Mutex<HttpConnectionPool>, key: &[u8], sender: Http1Sender) {
     let mut pool = pool.lock().await;
     if pool.key != key {
         return;
     }
-    if pool.connections.len() >= MAX_POOLED_TLS_CONNECTIONS {
-        pool.connections.remove(0);
+    if pool.senders.len() >= MAX_POOLED_TLS_CONNECTIONS {
+        pool.senders.remove(0);
     }
-    pool.connections.push(stream);
+    pool.senders.push(sender);
 }
 
 async fn query_http_reuse(
@@ -2863,30 +2873,32 @@ async fn query_http_reuse(
 ) -> Result<Vec<u8>, DnsError> {
     let key = http_pool_key(upstream, http);
     if let Some(pool) = pool {
-        let old_stream = {
+        let old_sender = {
             let mut pool = pool.lock().await;
             if pool.key != key {
-                pool.connections.clear();
+                pool.senders.clear();
                 pool.key.clone_from(&key);
             }
-            pool.connections.pop()
+            pool.senders.pop()
         };
-        if let Some(mut stream) = old_stream
-            && let Ok((response, reusable)) = exchange_doh(query, upstream, http, &mut stream).await
+        if let Some(mut sender) = old_sender
+            && let Ok((response, reusable)) =
+                exchange_doh_http1(query, upstream, http, &mut sender).await
         {
             if reusable {
-                return_http_connection(pool, &key, stream).await;
+                return_http_sender(pool, &key, sender).await;
             }
             return Ok(response);
         }
     }
 
-    let mut stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
+    let stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
         .await
         .map_err(|_| DnsError::UpstreamTimeout)??;
-    let (response, reusable) = exchange_doh(query, upstream, http, &mut stream).await?;
+    let mut sender = start_http1(stream).await?;
+    let (response, reusable) = exchange_doh_http1(query, upstream, http, &mut sender).await?;
     if reusable && let Some(pool) = pool {
-        return_http_connection(pool, &key, stream).await;
+        return_http_sender(pool, &key, sender).await;
     }
     Ok(response)
 }
@@ -3310,28 +3322,29 @@ async fn query_https_http_reuse(
         }
     }
 
-    let old_stream = {
+    let old_sender = {
         if let Some(pool) = pool {
             let mut pool = pool.lock().await;
-            if pool.key != key {
-                pool.connections.clear();
-                pool.key.clone_from(&key);
+            if pool.h1_key != key {
+                pool.h1_senders.clear();
+                pool.h1_key.clone_from(&key);
             }
-            pool.connections.pop()
+            pool.h1_senders.pop()
         } else {
             None
         }
     };
-    if let Some(mut stream) = old_stream
-        && let Ok((response, reusable)) = exchange_doh(query, upstream, tls, &mut stream).await
+    if let Some(mut sender) = old_sender
+        && let Ok((response, reusable)) =
+            exchange_doh_http1(query, upstream, tls, &mut sender).await
     {
         if reusable && let Some(pool) = pool {
-            return_tls_connection(pool, &key, stream).await;
+            return_tls_http1_sender(pool, &key, sender).await;
         }
         return Ok(response);
     }
 
-    let mut stream = connect_https_verified(upstream, tls).await?;
+    let stream = connect_https_verified(upstream, tls).await?;
     if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
         let (sender, connection) =
             tokio::time::timeout(UPSTREAM_TIMEOUT, h2::client::handshake(stream))
@@ -3349,9 +3362,10 @@ async fn query_https_http_reuse(
         }
         return Ok(response);
     }
-    let (response, reusable) = exchange_doh(query, upstream, tls, &mut stream).await?;
+    let mut sender = start_http1(stream).await?;
+    let (response, reusable) = exchange_doh_http1(query, upstream, tls, &mut sender).await?;
     if reusable && let Some(pool) = pool {
-        return_tls_connection(pool, &key, stream).await;
+        return_tls_http1_sender(pool, &key, sender).await;
     }
     Ok(response)
 }

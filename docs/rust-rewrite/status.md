@@ -37,6 +37,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E13 HTTPS URL semantics | Complete in declared scope | `DNS-07`; root/default-port, discarded configured query, ASCII Basic userinfo and persistent same-origin relative redirect differential suite passed |
 | Phase 4E14 domain HTTPS bootstrap/trust | Complete in declared scope | `DNS-07`; one loopback UDP bootstrap, URL-domain Host/SNI and default/name-override/skip verification-precedence differential suite passed |
 | Phase 4E15 DoH HTTP/2 | Complete in declared scope | `DNS-08`; ALPN `h2`, RFC 8484 GET, sequential stream reuse and HTTP/1.1 fallback differential suite passed |
+| DoH HTTP/1 Hyper refactor | Complete in the existing Phase 4E scope | Hand-written HTTP/1 serialization/parsing removed; 4E5–4E8 and 4E12–4E15 Go/Rust differentials re-pass |
 | Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
 | Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
 | Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
@@ -2857,6 +2858,23 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 The four focused Go/Rust differential suites and affected-crate tests pass.
 Format and strict workspace Clippy are required before handoff; the full
 Phase 1–4F15 regression remains delegated to GitHub Actions.
+
+## DoH HTTP/1 client infrastructure refactor
+
+The plaintext and TLS HTTP/1 DoH paths now use Hyper 1.11's client-connection
+API instead of serializing request lines and parsing status/header/body framing
+inside `rewrite-dns`. Hyper connection drivers own each TCP/TLS stream; the
+resolver pools bounded request senders and still owns transport identity,
+reload invalidation, one fresh retry after a stale pooled connection and the
+separate H2/H3/DoQ paths. The compatibility layer continues to require an
+explicit `Content-Length`, bounds the DNS body, enforces same-origin relative
+redirects and the ten-request limit, verifies zero upstream DNS IDs and
+restores the client ID.
+
+`compat/scripts/phase4e5.py` through `phase4e8.py` and `phase4e12.py` through
+`phase4e15.py` all re-pass locally on 2026-08-26. This infrastructure change
+does not expand supported DoH URL forms, transports, concurrency or retry
+behavior.
 
 ## Differential fixture timing stability
 

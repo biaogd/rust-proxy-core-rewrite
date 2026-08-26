@@ -349,12 +349,15 @@ five-second upstream deadline. Every successfully applied configuration
 generation clears the idle pool and invalidates pre-reload returns, so a later
 miss cannot inherit an obsolete encrypted connection.
 
-Phase 4E12 adds a separate plaintext HTTP/1.1 DoH pool whose entries are raw
-TCP streams and can never be confused with TLS streams. Loopback URLs use port
+Phase 4E12 adds a separate plaintext HTTP/1.1 DoH pool whose entries can never
+be confused with TLS streams. After Phase 4F15, both plaintext and TLS HTTP/1
+pools store Hyper request senders rather than raw streams; Hyper owns request/
+response framing and drives each connection, while the resolver retains pool
+identity, bounded LIFO return, fresh-connect retry and reload reset. Loopback URLs use port
 80 when omitted; an empty path and `/` both canonicalize to the HTTP root,
 while an already accepted unreserved absolute path is preserved. The shared
 DoH exchange emits a zero-ID RFC 8484 GET, validates the response framing,
-restores the client ID and returns persistent streams to the transport-specific
+restores the client ID and returns persistent senders to the transport-specific
 pool. Successful reload resets both plaintext and TLS pools.
 
 There is no dependency on the Go binary at runtime; Go is invoked only by the

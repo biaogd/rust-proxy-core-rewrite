@@ -13,6 +13,9 @@ h3.workspace = true
 h3-quinn.workspace = true
 hickory-proto.workspace = true
 http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 quinn.workspace = true
 rewrite-config = { path = "../config" }
 regex.workspace = true
