@@ -122,7 +122,10 @@ system resolver discovery and cache retry state remain separate later gates.
 
 Phases 4F3 and 4F4 route system and DHCP-discovered resolver addresses through
 the same classic exchange boundary while keeping interface discovery and
-platform cache decisions in `rewrite-platform`. Phase 4F5 adds two deliberately
+platform cache decisions in `rewrite-platform`. After Phase 4F15, `dhcproto`
+owns DHCPv4 message and option encoding/decoding; the platform crate retains
+interface selection, socket binding, transaction matching and refresh policy.
+Phase 4F5 adds two deliberately
 small non-socket clients. The synthetic RCODE client turns the original query
 into an authoritative response without retrying SERVFAIL or REFUSED and without
 creating a positive cache entry. The Tailscale client looks up an async resolver
@@ -627,7 +630,8 @@ Phase 4A added the classic DNS crate; Phases 4B through 4F2 extended the
 existing config, DNS, state, controller and runtime boundaries. Phase 4F3
 introduced `rewrite-platform` for system resolver discovery and Phase 4F4
 extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
-refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
+refresh decisions. The post-Phase 4F15 wire cleanup adds `dhcproto` inside that
+same platform boundary without changing resolver ownership. Phase 4F5 stays inside the existing config/DNS crates and
 adds no protocol or platform dependency; Phase 4F6 extends those same crates
 with per-classic-upstream wrapper state, Phase 4F7 adds resolver-set
 composition, Phase 4F8 adds ordered policy matchers, Phase 4F9 adds owned

@@ -15,6 +15,11 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dhcproto::v4::borrowed::Message as BorrowedDhcpMessage;
+use dhcproto::v4::{
+    DhcpOption as WireOption, Flags, Message as DhcpMessage, MessageType, Opcode, OptionCode,
+};
+use dhcproto::{Encodable, Encoder};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -22,16 +27,20 @@ pub const INTERFACE_TTL: Duration = Duration::from_secs(20);
 pub const DHCP_TTL: Duration = Duration::from_hours(1);
 pub const DHCP_TIMEOUT: Duration = Duration::from_mins(1);
 
+#[cfg(test)]
 const BOOTP_FIXED_LENGTH: usize = 236;
+#[cfg(test)]
 const DHCP_OPTIONS_OFFSET: usize = 240;
 const BOOTP_MINIMUM_LENGTH: usize = 300;
+#[cfg(test)]
 const DHCP_MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
-const OPTION_PAD: u8 = 0;
+#[cfg(test)]
 const OPTION_DNS: u8 = 6;
+#[cfg(test)]
 const OPTION_MESSAGE_TYPE: u8 = 53;
-const OPTION_PARAMETER_REQUEST_LIST: u8 = 55;
+#[cfg(test)]
 const OPTION_END: u8 = 255;
-const MESSAGE_DISCOVER: u8 = 1;
+#[cfg(test)]
 const MESSAGE_OFFER: u8 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,76 +144,68 @@ fn parse_hardware_address(value: &str) -> Option<[u8; 6]> {
     parts.next().is_none().then_some(result)
 }
 
-#[must_use]
-pub fn build_dhcp_discover(transaction_id: u32, hardware_address: [u8; 6]) -> Vec<u8> {
-    let mut packet = vec![0_u8; BOOTP_FIXED_LENGTH];
-    packet[0] = 1;
-    packet[1] = 1;
-    packet[2] = 6;
-    packet[4..8].copy_from_slice(&transaction_id.to_be_bytes());
-    packet[10..12].copy_from_slice(&0x8000_u16.to_be_bytes());
-    packet[28..34].copy_from_slice(&hardware_address);
-    packet.extend_from_slice(&DHCP_MAGIC_COOKIE);
-    packet.extend_from_slice(&[OPTION_MESSAGE_TYPE, 1, MESSAGE_DISCOVER]);
-    packet.extend_from_slice(&[OPTION_PARAMETER_REQUEST_LIST, 4, 1, 3, 15, OPTION_DNS]);
-    packet.push(OPTION_END);
-    packet.resize(BOOTP_MINIMUM_LENGTH, OPTION_PAD);
-    packet
+/// Encodes the oracle-compatible DHCPDISCOVER packet.
+///
+/// # Errors
+///
+/// Returns an error if the DHCP message encoder rejects the fixed message.
+pub fn build_dhcp_discover(transaction_id: u32, hardware_address: [u8; 6]) -> io::Result<Vec<u8>> {
+    let unspecified = Ipv4Addr::UNSPECIFIED;
+    let mut message = DhcpMessage::new_with_id(
+        transaction_id,
+        unspecified,
+        unspecified,
+        unspecified,
+        unspecified,
+        &hardware_address,
+    );
+    message.set_flags(Flags::default().set_broadcast());
+    message
+        .opts_mut()
+        .insert(WireOption::MessageType(MessageType::Discover));
+    message
+        .opts_mut()
+        .insert(WireOption::ParameterRequestList(vec![
+            OptionCode::SubnetMask,
+            OptionCode::Router,
+            OptionCode::DomainName,
+            OptionCode::DomainNameServer,
+        ]));
+    let mut packet = Vec::with_capacity(BOOTP_MINIMUM_LENGTH);
+    message
+        .encode(&mut Encoder::new(&mut packet))
+        .map_err(io::Error::other)?;
+    packet.resize(BOOTP_MINIMUM_LENGTH, 0);
+    Ok(packet)
 }
 
 #[must_use]
 pub fn parse_dhcp_offer(packet: &[u8], transaction_id: u32) -> DhcpOffer {
-    if packet.len() < DHCP_OPTIONS_OFFSET
-        || packet[0] != 2
-        || packet[4..8] != transaction_id.to_be_bytes()
-        || packet[BOOTP_FIXED_LENGTH..DHCP_OPTIONS_OFFSET] != DHCP_MAGIC_COOKIE
-    {
+    let Ok(message) = BorrowedDhcpMessage::new(packet) else {
+        return DhcpOffer::Ignored;
+    };
+    if message.opcode() != Opcode::BootReply || message.xid() != transaction_id {
         return DhcpOffer::Ignored;
     }
     let mut message_type = None;
     let mut dns = None;
-    let mut found_end = false;
-    let mut offset = DHCP_OPTIONS_OFFSET;
-    while offset < packet.len() {
-        let code = packet[offset];
-        offset += 1;
-        if code == OPTION_END {
-            found_end = true;
-            break;
-        }
-        if code == OPTION_PAD {
-            continue;
-        }
-        let Some(&length) = packet.get(offset) else {
-            return DhcpOffer::Ignored;
-        };
-        offset += 1;
-        let end = offset.saturating_add(usize::from(length));
-        let Some(value) = packet.get(offset..end) else {
-            return DhcpOffer::Ignored;
-        };
-        match code {
-            OPTION_MESSAGE_TYPE if value.len() == 1 => message_type = value.first().copied(),
-            OPTION_DNS => {
-                if value.is_empty() || value.len() % 4 != 0 {
-                    dns = None;
-                    offset = end;
-                    continue;
+    for option in message.opts() {
+        match option.code() {
+            OptionCode::MessageType => {
+                if let Ok(WireOption::MessageType(value)) = option.into_option() {
+                    message_type = Some(value);
                 }
-                dns = Some(
-                    value
-                        .chunks_exact(4)
-                        .map(|address| {
-                            Ipv4Addr::new(address[0], address[1], address[2], address[3])
-                        })
-                        .collect::<Vec<_>>(),
-                );
             }
+            OptionCode::DomainNameServer => match option.into_option() {
+                Ok(WireOption::DomainNameServer(servers)) if !servers.is_empty() => {
+                    dns = Some(servers);
+                }
+                _ => dns = None,
+            },
             _ => {}
         }
-        offset = end;
     }
-    if !found_end || message_type != Some(MESSAGE_OFFER) {
+    if message_type != Some(MessageType::Offer) {
         return DhcpOffer::Ignored;
     }
     dns.map_or(DhcpOffer::MissingDns, DhcpOffer::DnsServers)
@@ -220,7 +221,7 @@ pub fn parse_dhcp_offer(packet: &[u8], transaction_id: u32) -> DhcpOffer {
 pub fn resolve_dns_from_dhcp(interface: &DhcpInterfaceSnapshot) -> io::Result<Vec<SocketAddr>> {
     let socket = dhcp_socket(interface)?;
     let transaction_id = next_transaction_id();
-    let discovery = build_dhcp_discover(transaction_id, interface.hardware_address);
+    let discovery = build_dhcp_discover(transaction_id, interface.hardware_address)?;
     socket.send_to(&discovery, SocketAddr::from(([255, 255, 255, 255], 67)))?;
     let started = std::time::Instant::now();
     let mut buffer = [0_u8; 4096];
@@ -335,7 +336,7 @@ mod tests {
     fn discover_matches_oracle_defaults_and_sets_broadcast_flag() {
         let transaction_id = 0x1234_5678;
         let hardware_address = [0, 1, 2, 3, 4, 5];
-        let packet = build_dhcp_discover(transaction_id, hardware_address);
+        let packet = build_dhcp_discover(transaction_id, hardware_address).expect("DHCPDISCOVER");
         assert_eq!(&packet[4..8], &transaction_id.to_be_bytes());
         assert_eq!(&packet[10..12], &0x8000_u16.to_be_bytes());
         assert_eq!(&packet[28..34], &hardware_address);

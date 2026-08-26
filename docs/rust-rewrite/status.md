@@ -46,7 +46,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
 | Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
 | Phase 4F3 system resolver | Partial, native gates pending | `DNS-03`; config/runtime path and POSIX/Windows/Android-CMFA contracts implemented, but deterministic native port-53 wire parity is not claimed |
-| Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; config/runtime, exact DHCPv4 wire and interface/invalidation contracts implemented; native UDP 67/68 parity remains pending |
+| Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; `dhcproto` now owns packet/options codecs; config/runtime, exact DHCPv4 wire and interface/invalidation contracts re-pass; native UDP 67/68 parity remains pending |
 | Phase 4F5 RCODE/Tailscale DNS boundary | Complete in declared scope; DNS-05 partial | Six synthetic RCODE wire paths and the named Tailscale resolver registration lifecycle pass; actual tsnet transport remains Phase 7K |
 | Phase 4F6 classic DNS wrappers | Complete in declared scope; DNS-10 partial | Per-upstream ECS/disable wrappers pass on UDP/TCP, including invalid/false values, multi-section filtering and wrapper identity; proxy/rule routing remains |
 | Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; complete bootstrap/proxy consumers remain |
@@ -2196,6 +2196,14 @@ malformed-DNS, wrong-message-type and wrong-transaction DHCPOFFER
 classifications. Nine
 `rewrite-platform` tests cover those packet contracts plus interface selection,
 20-second/one-hour invalidation and IPv4-address changes.
+
+After Phase 4F15, DHCPv4 BOOTP fields and options are encoded with
+`dhcproto` 0.15.0. Its borrowed message/option decoder replaces the local
+offset/length loop while preserving the oracle's malformed-DNS classification.
+The exact 300-byte discovery and all five offer classifications re-pass. The
+crate is MIT licensed, requires Rust 1.87 (below the workspace Rust 1.95), and
+is confined to `rewrite-platform`; it reuses `hickory-proto`, `ipnet`, `rand`
+and `thiserror` versions already present in the workspace dependency graph.
 
 This remains a **partial** `DNS-04` result. The local Darwin environment cannot
 bind privileged UDP ports 67/68 or safely replace the host network interface,

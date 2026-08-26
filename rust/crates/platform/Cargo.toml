@@ -10,6 +10,7 @@ default = []
 android-cmfa = []
 
 [dependencies]
+dhcproto.workspace = true
 network-interface.workspace = true
 socket2.workspace = true
 

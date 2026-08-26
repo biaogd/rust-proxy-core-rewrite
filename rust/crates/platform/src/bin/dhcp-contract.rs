@@ -6,10 +6,9 @@ fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
         [command] if command == "discover" => {
-            println!(
-                "{}",
-                encode_hex(&build_dhcp_discover(0x1234_5678, [0, 1, 2, 3, 4, 5]))
-            );
+            let packet =
+                build_dhcp_discover(0x1234_5678, [0, 1, 2, 3, 4, 5]).expect("fixed DHCPDISCOVER");
+            println!("{}", encode_hex(&packet));
         }
         [command, wire] if command == "parse" => {
             let Ok(packet) = decode_hex(wire) else {
