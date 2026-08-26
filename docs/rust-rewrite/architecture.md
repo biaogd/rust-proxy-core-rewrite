@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F13 Rust boundary now implemented
+## Phase 1–4F14 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -60,7 +60,7 @@ Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
 resource is created. The spec layer overlays the declared Go defaults, validates
 the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
 spec into executable `Config` is a separate fallible step which accepts only
-the incrementally declared Phase 1–4F13 runtime slices. This prevents parser
+the incrementally declared Phase 1–4F14 runtime slices. This prevents parser
 coverage from being mistaken for implemented protocol behavior.
 
 `rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
@@ -218,9 +218,24 @@ from a TTL redir-host mapping. It replaces the rule-visible host with the
 original domain, then DIRECT bypasses fake response generation and issues both
 AAAA and A questions to the configured classic upstream when IPv6 is enabled
 before dialing.
-Profile-enabled pools persist mapping and offset into Rust-specific JSON files
-under the candidate home. This proves restart behavior but intentionally does
-not claim compatibility with Go's bbolt `cache.db` file format.
+Profile-enabled pools persisted mapping and offset into Rust-specific JSON
+files in the Phase 4C slice. Phase 4F14 replaces those sidecars with the Go
+profile layout: one bbolt `cache.db`, `fakeip`/`fakeip6` buckets,
+bidirectional host/address keys and the oracle's offset/cycle keys. The state
+crate opens the database only at the persistence boundary and keeps filtering,
+allocation and routing code free of database types. The dependency is
+`bbolt-rs` 1.3.10 with its explicit Go-compatibility feature; it is MIT
+licensed, supports the declared Darwin/Linux architectures, and is used only
+because the gate reads and commits the pinned Go oracle's real files in both
+directions.
+
+Phase 4F14 also moves fake-IP filtering from an exact string list to owned
+domain/GeoSite/rule-set matchers and ordered rule actions. DNS evaluates those
+matchers before allocation. Runtime state clones a nonpersistent family map
+when a reload changes its prefix, while a persistent prefix mismatch follows
+Go's stored-offset guard and clears that family bucket. The controller invokes
+the same pool flush through `POST /cache/fakeip/flush`; current TCP and UDP
+inbounds both consume the reverse map before rule evaluation.
 
 Phase 4D1's original single-classic-upstream policy remains compatibility
 evidence but its implementation is subsumed by the Phase 4F8 ordered
@@ -610,7 +625,10 @@ portable interface enumeration, native hosts-file refresh and tunnel address
 selection; it also adds no crate. Phase 4F13 replaces the reverse mapping's
 nominal TTL eviction with the oracle's size-only access-order LRU and extends
 its differential coverage across existing local listener types without adding
-a crate.
+a crate. Phase 4F14 keeps those crate boundaries and adds the reviewed
+`bbolt-rs` persistence dependency to `rewrite-state`: config owns fake-IP
+matcher data, DNS owns filter evaluation, state owns pools/profile storage and
+controller exposes only the flush operation.
 `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:

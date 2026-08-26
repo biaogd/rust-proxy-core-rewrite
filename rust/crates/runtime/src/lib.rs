@@ -113,6 +113,7 @@ pub async fn run_with_reload(
     if let Some((_, task)) = dns {
         stop_task(task).await;
     }
+    state.store_fake_ip_state();
     Ok(())
 }
 
@@ -420,7 +421,7 @@ async fn handle_udp(
         }
     };
     let mut metadata = accepted.metadata.clone();
-    apply_host_mapping(&mut metadata, &config, &state);
+    let fake_host = apply_host_mapping(&mut metadata, &config, &state);
     let decision = config.rules.evaluate(&metadata);
     if config.rules.select(&metadata) != Route::Direct {
         return;
@@ -430,7 +431,7 @@ async fn handle_udp(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
-    let target = match resolve_udp_target(&metadata, config.ipv6).await {
+    let target = match resolve_udp_target(&metadata, fake_host.as_deref(), &config).await {
         Ok(target) => target,
         Err(error) => {
             state.log("error", format!("DIRECT UDP resolution failed: {error}"));
@@ -463,10 +464,22 @@ async fn handle_udp(
     }
 }
 
-async fn resolve_udp_target(metadata: &Metadata, allow_ipv6: bool) -> std::io::Result<SocketAddr> {
+async fn resolve_udp_target(
+    metadata: &Metadata,
+    fake_host: Option<&str>,
+    config: &Config,
+) -> std::io::Result<SocketAddr> {
+    if let Some(host) = fake_host
+        && let Some(dns) = config.dns.as_ref()
+    {
+        return rewrite_dns::resolve_domain(dns, host, config.ipv6)
+            .await
+            .map(|address| SocketAddr::new(address, metadata.destination.port))
+            .map_err(std::io::Error::other);
+    }
     match &metadata.destination.host {
         Host::Ip(address) => {
-            if address.is_ipv6() && !allow_ipv6 {
+            if address.is_ipv6() && !config.ipv6 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
                     "IPv6 is disabled",
@@ -477,7 +490,7 @@ async fn resolve_udp_target(metadata: &Metadata, allow_ipv6: bool) -> std::io::R
         Host::Domain(domain) => {
             tokio::net::lookup_host((domain.as_str(), metadata.destination.port))
                 .await?
-                .find(|address| allow_ipv6 || address.is_ipv4())
+                .find(|address| config.ipv6 || address.is_ipv4())
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::AddrNotAvailable,

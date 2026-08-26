@@ -24,6 +24,7 @@ publish = false
 
 [workspace.dependencies]
 base64 = "0.22"
+bbolt-rs = { version = "1.3.10", features = ["compat"] }
 bytes = "1"
 clap = { version = "4.5", features = ["derive"] }
 ipnet = "2"

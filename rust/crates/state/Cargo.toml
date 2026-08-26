@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bbolt-rs.workspace = true
 ipnet.workspace = true
 rewrite-model = { path = "../model" }
 serde.workspace = true

@@ -518,6 +518,19 @@ TTL rather than claiming idealized expiration. Redir-port, TProxy, TUN and
 future inbound families remain their owning inbound/platform gates, so
 `DNS-17` stays partial outside the implemented local-inbound surface.
 
+Phase 4F14 accepts the `DNS-18` lifecycle core on the current local surface.
+Blacklist/whitelist filters cover Go domain-trie syntax, GeoSite and inline
+domain/classical rule providers; ordered rule mode covers every accepted
+domain rule kind plus MATCH and the `fake-ip`/`real-ip` actions. Persistent
+IPv4/IPv6 pools use the oracle's bbolt buckets and allocation-state keys, with
+an explicit Go-to-Rust-to-Go interchange gate. Reload proves memory cloning
+and persistent prefix reset, the REST flush proves on-disk deletion across a
+restart, malformed cache recovery is compared, and current mixed TCP/UDP
+inbounds prove reverse routing. External file/HTTP/MRS provider vehicles,
+redir/TProxy/TUN and future inbound/platform consumers remain their owning
+gates, so the full inventory row stays partial rather than implying those
+subsystems from local evidence.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

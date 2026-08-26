@@ -53,11 +53,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F11 DNS cache lifecycle | Complete in declared core; DNS-15 parity | LRU/ARC size eviction, positive/negative/stale TTL, concurrent singleflight, background retry and reload cache/reset behavior pass |
 | Phase 4F12 complete hosts core | Complete in declared portable core; DNS-16 platform gates remain | Wildcard/suffix priority, `lan`, IP/domain/multi-value aliases, DNS query pass-through, system hosts and randomized tunnel routing pass on Darwin |
 | Phase 4F13 redir-host local-inbound core | Complete in declared local core; DNS-17 inbound gates remain | HTTP/SOCKS/mixed TCP, SOCKS/mixed UDP, CNAME identity, reload preservation and baseline size-only LRU retention pass |
+| Phase 4F14 fake-IP lifecycle core | Complete in declared local core; DNS-18 provider/inbound/platform gates remain | All filter rule kinds, GeoSite/inline providers, v4/v6 bbolt interchange, reload/range lifecycle, TCP/UDP reverse routing, persistent flush/restart and malformed-cache recovery pass |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F13 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F14 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F13 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F14 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2697,6 +2698,66 @@ strict workspace Clippy gate passed locally. Complete Phase 1–4F13 regression,
 workspace tests and Go/with-gVisor baseline remain delegated to GitHub Actions;
 no result is pre-claimed.
 
+## Phase 4F14 deliverables and evidence
+
+Phase 4F14 completes the fake-IP lifecycle on the currently implemented local
+DNS, mixed TCP and mixed UDP surface. Blacklist and whitelist mode now accept
+the Go domain trie syntax, GeoSite entries and inline domain/classical
+rule-set providers. Rule mode evaluates the first matching DOMAIN,
+DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX, DOMAIN-WILDCARD, GEOSITE,
+RULE-SET or MATCH entry and applies its ordered `fake-ip`/`real-ip` action.
+IP-CIDR providers and non-domain rule kinds are rejected like the oracle.
+
+Persistent pools now use the Go profile's bbolt `cache.db` rather than the
+Phase 4C Rust JSON sidecars. IPv4 and IPv6 retain separate `fakeip` and
+`fakeip6` buckets with the same bidirectional keys and allocation state keys.
+The gate starts Go, continues both families in Rust, then continues Rust's
+new mappings in Go. It also replaces a malformed cache file through the same
+observable recovery path. `bbolt-rs` 1.3.10 is enabled with its explicit Go
+compatibility feature; its MIT license is compatible with this GPL-3.0-only
+workspace, and no database type escapes `rewrite-state`.
+
+On SIGHUP, nonpersistent pools clone their mappings into the replacement
+family even when the prefix changes, preserving the pinned Go pool's
+observable old-address reverse entry while allocating fresh names from the new
+prefix. Persistent pools instead restore the shared file and clear a family
+when its saved offset is outside the new prefix. Both paths are differential
+tested. `POST /cache/fakeip/flush` resets allocation and deletes both current
+family buckets; a persistent restart proves that the side effect reached disk.
+Mixed SOCKS TCP and UDP requests addressed only by a fake IPv4 recover the
+domain before rule evaluation and reach deterministic interface-local echo
+services.
+
+`compat/scripts/phase4f14.py` covers these paths plus IPv4/IPv6 allocation,
+REST status/body, process exit and direct Go/Rust file interchange. File/HTTP/
+MRS provider loading remains owned by later provider phases. Redir-port,
+TProxy, TUN and future inbound families remain their own integration gates, so
+the full-product `DNS-18` inventory row stays partial outside the declared
+local surface.
+
+Observed Phase 4F14 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared fake-IP lifecycle core passed; DNS-18 external-provider/inbound/platform gates remain | Native `compat/scripts/phase4f14.py`; local DNS/echo services, temporary homes and bidirectional Go/Rust bbolt files |
+| Linux amd64 | Pending | Default full differential now includes Phase 4F14; no result is recorded before completion |
+
+### Phase 4F14 local exit gates
+
+```sh
+python3 compat/scripts/phase4f14.py
+
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rewrite-config -p rewrite-state -p rewrite-dns -p rewrite-controller -p rewrite-runtime
+```
+
+The focused Phase 4F14 differential/interchange and affected-crate tests pass
+locally. Format and strict workspace Clippy are run locally before handoff.
+Complete Phase 1–4F14 regression, all workspace tests and Go/with-gVisor
+baseline remain delegated to GitHub Actions; no result is pre-claimed.
+
 ## Differential fixture timing stability
 
 The shared DNS fixture cleanup normalizes `-SIGTERM` only when that exact
@@ -2790,11 +2851,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F13 redir-host local-inbound boundary.
+Rust behavior stops at the Phase 4F14 fake-IP lifecycle local-inbound boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
-`DNS-10`–`DNS-13`, `DNS-16` and `DNS-17` retain the platform/database/adapter/
+`DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.
-Phase 4D3B, 4F14 or another implementation gate must not begin without a separate
+Phase 4D3B, 4F15 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

@@ -89,6 +89,12 @@ async fn handle(
         dns_service.clear_cache().await;
         return write_empty(&mut stream, 204).await;
     }
+    if request.method == "POST" && path == "/cache/fakeip/flush" {
+        if let Some(fake) = config.dns.as_ref().and_then(|dns| dns.fake_ip.as_ref()) {
+            state.flush_fake_ips(fake.ipv4_range, fake.ipv6_range, config.store_fake_ip);
+        }
+        return write_empty(&mut stream, 204).await;
+    }
     if request.method != "GET" {
         return write_json(&mut stream, 405, &json!({"message": "Method Not Allowed"})).await;
     }

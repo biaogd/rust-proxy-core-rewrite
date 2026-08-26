@@ -120,13 +120,45 @@ pub enum DnsCacheAlgorithm {
 pub enum FakeIpFilterMode {
     Blacklist,
     Whitelist,
+    Rule,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FakeIpRuleAction {
+    FakeIp,
+    RealIp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FakeIpRuleMatcher {
+    Domain(String),
+    DomainSuffix(String),
+    DomainKeyword(String),
+    DomainRegex(String),
+    DomainWildcard(String),
+    Geosite {
+        name: String,
+        domains: Vec<GeositeDomain>,
+    },
+    RuleSet {
+        name: String,
+        domains: Vec<RuleSetDomain>,
+    },
+    Match,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FakeIpRule {
+    pub matcher: FakeIpRuleMatcher,
+    pub action: FakeIpRuleAction,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FakeIpConfig {
     pub ipv4_range: Option<IpNet>,
     pub ipv6_range: Option<IpNet>,
-    pub filter: Vec<String>,
+    pub filter: Vec<DnsPolicyMatcher>,
+    pub rules: Vec<FakeIpRule>,
     pub filter_mode: FakeIpFilterMode,
     pub ttl: u32,
 }
@@ -917,7 +949,7 @@ fn parse_dns(
         }
     };
 
-    let fake_ip = parse_fake_ip_config(&mut raw, mode)?;
+    let fake_ip = parse_fake_ip_config(&mut raw, mode, rule_providers, config_directory)?;
 
     let listen_text = raw
         .listen
@@ -1633,7 +1665,7 @@ fn validate_rule_provider_usage(
     providers: &BTreeMap<String, ParsedRuleProvider>,
     dns: Option<&DnsConfig>,
 ) -> Result<(), ConfigError> {
-    let used = dns
+    let mut used = dns
         .into_iter()
         .flat_map(|dns| dns.policies.iter().chain(&dns.proxy_policies))
         .filter_map(|policy| match &policy.matcher {
@@ -1641,6 +1673,18 @@ fn validate_rule_provider_usage(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
+    if let Some(fake) = dns.and_then(|dns| dns.fake_ip.as_ref()) {
+        for matcher in &fake.filter {
+            if let DnsPolicyMatcher::RuleSet { name, .. } = matcher {
+                used.insert(name);
+            }
+        }
+        for rule in &fake.rules {
+            if let FakeIpRuleMatcher::RuleSet { name, .. } = &rule.matcher {
+                used.insert(name);
+            }
+        }
+    }
     if let Some(name) = providers.keys().find(|name| !used.contains(name.as_str())) {
         return Err(ConfigError::UnsupportedKey(format!(
             "rule-providers.{name} outside DNS policy"
@@ -2393,6 +2437,8 @@ fn normalize_tls_server_name(value: &str) -> Result<String, ConfigError> {
 fn parse_fake_ip_config(
     raw: &mut RawDns,
     mode: DnsMode,
+    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
 ) -> Result<Option<FakeIpConfig>, ConfigError> {
     if mode != DnsMode::FakeIp {
         return Ok(None);
@@ -2422,11 +2468,7 @@ fn parse_fake_ip_config(
     {
         "blacklist" => FakeIpFilterMode::Blacklist,
         "whitelist" => FakeIpFilterMode::Whitelist,
-        "rule" => {
-            return Err(ConfigError::InvalidDns(
-                "dns.fake-ip-filter-mode rule is outside Phase 4C".to_owned(),
-            ));
-        }
+        "rule" => FakeIpFilterMode::Rule,
         _ => {
             return Err(ConfigError::InvalidDns(
                 "invalid dns.fake-ip-filter-mode".to_owned(),
@@ -2440,22 +2482,145 @@ fn parse_fake_ip_config(
             "www.msftconnecttest.com".to_owned(),
         ]
     });
-    let filter = filter
-        .into_iter()
-        .map(|name| {
-            normalize_host_name(&name, "dns.fake-ip-filter").map_err(|error| {
-                ConfigError::InvalidDns(format!("invalid dns.fake-ip-filter: {error}"))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let (filter, rules) = if filter_mode == FakeIpFilterMode::Rule {
+        (
+            Vec::new(),
+            parse_fake_ip_rules(&filter, rule_providers, config_directory)?,
+        )
+    } else {
+        (
+            parse_fake_ip_matchers(&filter, rule_providers, config_directory)?,
+            Vec::new(),
+        )
+    };
     let ttl = u32::try_from(raw.fake_ip_ttl.unwrap_or(1).max(1)).unwrap_or(u32::MAX);
     Ok(Some(FakeIpConfig {
         ipv4_range,
         ipv6_range,
         filter,
+        rules,
         filter_mode,
         ttl,
     }))
+}
+
+fn parse_fake_ip_matchers(
+    entries: &[String],
+    providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
+) -> Result<Vec<DnsPolicyMatcher>, ConfigError> {
+    let mut matchers = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        expand_policy_matchers(entry, providers, config_directory)
+            .map_err(|error| {
+                ConfigError::InvalidDns(format!("dns.fake-ip-filter[{index}] {error}"))
+            })
+            .map(|expanded| matchers.extend(expanded))?;
+    }
+    Ok(matchers)
+}
+
+fn parse_fake_ip_rules(
+    entries: &[String],
+    providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
+) -> Result<Vec<FakeIpRule>, ConfigError> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| parse_fake_ip_rule(index, entry, providers, config_directory))
+        .collect()
+}
+
+fn parse_fake_ip_rule(
+    index: usize,
+    entry: &str,
+    providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
+) -> Result<FakeIpRule, ConfigError> {
+    let fields = entry.split(',').map(str::trim).collect::<Vec<_>>();
+    let kind = fields
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let action_index = match kind.as_str() {
+        "MATCH" => 1,
+        "DOMAIN-REGEX" => fields.len().saturating_sub(1),
+        _ => 2,
+    };
+    let action = fields
+        .get(action_index)
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let action = match action.as_str() {
+        "fake-ip" => FakeIpRuleAction::FakeIp,
+        "real-ip" => FakeIpRuleAction::RealIp,
+        _ => {
+            return Err(ConfigError::InvalidDns(format!(
+                "dns.fake-ip-filter[{index}] [{entry}] error: invalid action '{action}', must be 'fake-ip' or 'real-ip'"
+            )));
+        }
+    };
+    let payload = if kind == "DOMAIN-REGEX" && fields.len() >= 3 {
+        fields[1..fields.len() - 1].join(",")
+    } else {
+        fields.get(1).copied().unwrap_or_default().to_owned()
+    };
+    let matcher = match kind.as_str() {
+        "MATCH" if fields.len() == 2 => FakeIpRuleMatcher::Match,
+        "DOMAIN" if fields.len() >= 3 => {
+            FakeIpRuleMatcher::Domain(normalize_host_name(&payload, "dns.fake-ip-filter")?)
+        }
+        "DOMAIN-SUFFIX" if fields.len() >= 3 => {
+            FakeIpRuleMatcher::DomainSuffix(normalize_host_name(&payload, "dns.fake-ip-filter")?)
+        }
+        "DOMAIN-KEYWORD" if fields.len() >= 3 && !payload.is_empty() => {
+            FakeIpRuleMatcher::DomainKeyword(payload.to_ascii_lowercase())
+        }
+        "DOMAIN-REGEX" if fields.len() >= 3 => {
+            regex::Regex::new(&payload).map_err(|error| {
+                ConfigError::InvalidDns(format!(
+                    "dns.fake-ip-filter[{index}] [{entry}] error: {error}"
+                ))
+            })?;
+            FakeIpRuleMatcher::DomainRegex(payload)
+        }
+        "DOMAIN-WILDCARD" if fields.len() >= 3 && !payload.is_empty() => {
+            FakeIpRuleMatcher::DomainWildcard(payload.to_ascii_lowercase())
+        }
+        "GEOSITE" if fields.len() >= 3 => {
+            let DnsPolicyMatcher::Geosite { name, domains } =
+                load_geosite_matcher(&payload, config_directory)?
+            else {
+                unreachable!("GeoSite loader always returns a GeoSite matcher")
+            };
+            FakeIpRuleMatcher::Geosite { name, domains }
+        }
+        "RULE-SET" if fields.len() >= 3 => {
+            let provider = providers.get(&payload).ok_or_else(|| {
+                ConfigError::InvalidDns(format!(
+                    "dns.fake-ip-filter[{index}] [{entry}] error: rule-set '{payload}' not found"
+                ))
+            })?;
+            if provider.behavior == RuleProviderBehavior::IpCidr {
+                return Err(ConfigError::InvalidDns(format!(
+                    "dns.fake-ip-filter[{index}] [{entry}] error: rule-set behavior is ipcidr, must be domain or classical"
+                )));
+            }
+            FakeIpRuleMatcher::RuleSet {
+                name: payload,
+                domains: provider.domains.clone(),
+            }
+        }
+        _ => {
+            return Err(ConfigError::InvalidDns(format!(
+                "dns.fake-ip-filter[{index}] [{entry}] error: rule type '{kind}' not supported, only domain-based rules allowed"
+            )));
+        }
+    };
+    Ok(FakeIpRule { matcher, action })
 }
 
 fn parse_fake_ip_range(value: &str, ipv6: bool, field: &str) -> Result<Option<IpNet>, ConfigError> {

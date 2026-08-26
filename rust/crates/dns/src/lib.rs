@@ -15,7 +15,8 @@ use rewrite_config::{
     Config, DnsCacheAlgorithm, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig,
     DnsFallbackConfig, DnsMainKind, DnsMode, DnsPolicy, DnsPolicyMatcher, DnsResolverClient,
     DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
-    FakeIpFilterMode, GeositeDomainKind, HostEntry, RuleSetDomainKind, SyntheticRcode,
+    FakeIpFilterMode, FakeIpRuleAction, FakeIpRuleMatcher, GeositeDomainKind, HostEntry,
+    RuleSetDomainKind, SyntheticRcode,
 };
 use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
@@ -1877,11 +1878,83 @@ fn fake_ip_response(
 }
 
 fn fake_ip_skipped(host: &str, config: &FakeIpConfig) -> bool {
-    let matched = config.filter.iter().any(|pattern| pattern == host);
+    if config.filter_mode == FakeIpFilterMode::Rule {
+        return config
+            .rules
+            .iter()
+            .find_map(|rule| {
+                fake_ip_rule_matches(&rule.matcher, host)
+                    .then_some(rule.action == FakeIpRuleAction::RealIp)
+            })
+            .unwrap_or(false);
+    }
+    let matched = config
+        .filter
+        .iter()
+        .any(|matcher| policy_matcher_matches(matcher, host));
     match config.filter_mode {
         FakeIpFilterMode::Blacklist => matched,
         FakeIpFilterMode::Whitelist => !matched,
+        FakeIpFilterMode::Rule => unreachable!("rule mode returned above"),
     }
+}
+
+fn fake_ip_rule_matches(matcher: &FakeIpRuleMatcher, host: &str) -> bool {
+    match matcher {
+        FakeIpRuleMatcher::Domain(domain) => host.eq_ignore_ascii_case(domain),
+        FakeIpRuleMatcher::DomainSuffix(suffix) => {
+            host.eq_ignore_ascii_case(suffix)
+                || host
+                    .strip_suffix(suffix)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        }
+        FakeIpRuleMatcher::DomainKeyword(keyword) => host.contains(keyword),
+        FakeIpRuleMatcher::DomainRegex(pattern) => {
+            regex::Regex::new(pattern).is_ok_and(|expression| expression.is_match(host))
+        }
+        FakeIpRuleMatcher::DomainWildcard(pattern) => wildcard_matches(pattern, host),
+        FakeIpRuleMatcher::Geosite { name, domains } => policy_matcher_matches(
+            &DnsPolicyMatcher::Geosite {
+                name: name.clone(),
+                domains: domains.clone(),
+            },
+            host,
+        ),
+        FakeIpRuleMatcher::RuleSet { name, domains } => policy_matcher_matches(
+            &DnsPolicyMatcher::RuleSet {
+                name: name.clone(),
+                domains: domains.clone(),
+            },
+            host,
+        ),
+        FakeIpRuleMatcher::Match => true,
+    }
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut star, mut star_value) = (None, 0);
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star = Some(pattern_index);
+            pattern_index += 1;
+            star_value = value_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index + 1;
+            star_value += 1;
+            value_index = star_value;
+        } else {
+            return false;
+        }
+    }
+    pattern[pattern_index..].iter().all(|byte| *byte == b'*')
 }
 
 fn alias_response(

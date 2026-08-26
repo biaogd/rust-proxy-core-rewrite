@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bbolt_rs::{
+    Bolt, BucketApi, BucketRwApi, CursorApi, DbApi, DbRwAPI, Error as BoltError, TxApi, TxRwRefApi,
+};
 use ipnet::IpNet;
 use rewrite_model::{Host, InboundProtocol, Metadata, Network};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
@@ -260,9 +263,6 @@ impl RuntimeState {
         address: IpAddr,
         persistent: bool,
     ) -> Option<String> {
-        if !network.contains(&address) {
-            return None;
-        }
         let mut registry = self
             .fake_ips
             .lock()
@@ -270,6 +270,29 @@ impl RuntimeState {
         registry
             .pool_mut(network, persistent)
             .look_back(address.to_canonical())
+    }
+
+    pub fn flush_fake_ips(&self, ipv4: Option<IpNet>, ipv6: Option<IpNet>, persistent: bool) {
+        let mut registry = self
+            .fake_ips
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for network in ipv4.into_iter().chain(ipv6) {
+            registry.pool_mut(network, persistent).flush();
+        }
+    }
+
+    pub fn store_fake_ip_state(&self) {
+        let mut registry = self
+            .fake_ips
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pool) = registry.ipv4.as_mut() {
+            pool.store_state();
+        }
+        if let Some(pool) = registry.ipv6.as_mut() {
+            pool.store_state();
+        }
     }
 }
 
@@ -291,11 +314,11 @@ impl FakeIpRegistry {
             .as_ref()
             .is_none_or(|pool| pool.network != network || pool.persistent != persistent)
         {
-            *slot = Some(FakeIpPool::new(
-                network,
-                persistent,
-                persistent.then(|| fake_ip_state_path(network)),
-            ));
+            let mut replacement = FakeIpPool::new(network, persistent);
+            if !persistent && let Some(previous) = slot.as_ref().filter(|pool| !pool.persistent) {
+                replacement.clone_memory_from(previous);
+            }
+            *slot = Some(replacement);
         }
         slot.as_mut().expect("fake-IP pool was initialized")
     }
@@ -309,7 +332,6 @@ struct FakeIpPool {
     offset: u128,
     cycle: bool,
     persistent: bool,
-    path: Option<PathBuf>,
     tick: u64,
     by_host: BTreeMap<String, FakeIpEntry>,
     by_ip: BTreeMap<IpAddr, String>,
@@ -321,16 +343,8 @@ struct FakeIpEntry {
     touched: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct PersistedFakeIpPool {
-    prefix: String,
-    offset: String,
-    cycle: bool,
-    mappings: BTreeMap<String, String>,
-}
-
 impl FakeIpPool {
-    fn new(network: IpNet, persistent: bool, path: Option<PathBuf>) -> Self {
+    fn new(network: IpNet, persistent: bool) -> Self {
         let (network_number, last) = network_bounds(network);
         let first = network_number + 4;
         let mut pool = Self {
@@ -340,13 +354,18 @@ impl FakeIpPool {
             offset: first - 1,
             cycle: false,
             persistent,
-            path,
             tick: 0,
             by_host: BTreeMap::new(),
             by_ip: BTreeMap::new(),
         };
         pool.restore();
         pool
+    }
+
+    fn clone_memory_from(&mut self, previous: &Self) {
+        self.tick = previous.tick;
+        self.by_host.clone_from(&previous.by_host);
+        self.by_ip.clone_from(&previous.by_ip);
     }
 
     fn lookup(&mut self, host: &str) -> IpAddr {
@@ -413,82 +432,215 @@ impl FakeIpPool {
         }
     }
 
+    fn flush(&mut self) {
+        self.offset = self.first - 1;
+        self.cycle = false;
+        self.tick = 0;
+        self.by_host.clear();
+        self.by_ip.clear();
+        if self.persistent {
+            flush_fake_ip_bucket(self.network);
+        }
+    }
+
     fn restore(&mut self) {
-        let Some(path) = self.path.as_deref() else {
-            return;
-        };
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            return;
-        };
-        let Ok(saved) = serde_json::from_str::<PersistedFakeIpPool>(&contents) else {
-            return;
-        };
-        if saved.prefix != self.network.to_string() {
+        if !self.persistent {
             return;
         }
-        if let Ok(address) = saved.offset.parse::<IpAddr>() {
-            let number = ip_to_number(address);
-            if self.network.contains(&address) && number >= self.first && number < self.last {
-                self.offset = number;
-                self.cycle = saved.cycle;
+        let path = fake_ip_state_path();
+        let database = match Bolt::open(&path) {
+            Ok(database) => database,
+            Err(
+                BoltError::InvalidDatabase(_)
+                | BoltError::ChecksumMismatch
+                | BoltError::VersionMismatch
+                | BoltError::FileSizeTooSmall(_),
+            ) => {
+                let _ = std::fs::remove_file(path);
+                return;
             }
-        }
-        for (host, address) in saved.mappings {
-            let Ok(address) = address.parse::<IpAddr>() else {
-                continue;
+            Err(_) => return,
+        };
+        let mut incompatible = false;
+        let bucket_name = fake_ip_bucket(self.network);
+        let _ = database.view(|transaction| {
+            let Some(bucket) = transaction.bucket(bucket_name) else {
+                return Ok(());
             };
-            let address = address.to_canonical();
-            if !self.network.contains(&address) {
-                continue;
+            if let Some(bytes) = bucket.get(FAKE_IP_OFFSET_KEY) {
+                if let Some(address) = address_from_bytes(bytes) {
+                    let number = ip_to_number(address);
+                    if self.network.contains(&address) && number >= self.first && number < self.last
+                    {
+                        self.offset = number;
+                        self.cycle = bucket.get(FAKE_IP_CYCLE_KEY).is_some();
+                    } else {
+                        incompatible = true;
+                    }
+                } else if bucket
+                    .get(ip_bytes(number_to_ip(self.first, self.network)))
+                    .is_some()
+                {
+                    incompatible = true;
+                }
+            } else if bucket
+                .get(ip_bytes(number_to_ip(self.first, self.network)))
+                .is_some()
+            {
+                incompatible = true;
             }
-            self.tick = self.tick.wrapping_add(1);
-            self.by_ip.insert(address, host.clone());
-            self.by_host.insert(
-                host,
-                FakeIpEntry {
-                    address,
-                    touched: self.tick,
-                },
-            );
+            if incompatible {
+                return Ok(());
+            }
+            let mut cursor = bucket.cursor();
+            let mut item = cursor.first();
+            while let Some((key, Some(value))) = item {
+                if key != FAKE_IP_OFFSET_KEY
+                    && key != FAKE_IP_CYCLE_KEY
+                    && address_from_bytes(key).is_none()
+                    && let Ok(host) = std::str::from_utf8(key)
+                    && let Some(address) = address_from_bytes(value)
+                {
+                    let host = host.to_owned();
+                    self.tick = self.tick.wrapping_add(1);
+                    self.by_ip.insert(address, host.clone());
+                    self.by_host.insert(
+                        host,
+                        FakeIpEntry {
+                            address,
+                            touched: self.tick,
+                        },
+                    );
+                }
+                item = cursor.next();
+            }
+            Ok(())
+        });
+        drop(database);
+        if incompatible {
+            self.flush();
         }
     }
 
     fn persist(&self) {
-        let Some(path) = self.path.as_deref() else {
+        if !self.persistent {
             return;
-        };
-        let saved = PersistedFakeIpPool {
-            prefix: self.network.to_string(),
-            offset: number_to_ip(self.offset, self.network).to_string(),
-            cycle: self.cycle,
-            mappings: self
-                .by_host
-                .iter()
-                .map(|(host, entry)| (host.clone(), entry.address.to_string()))
-                .collect(),
-        };
-        let Ok(contents) = serde_json::to_vec(&saved) else {
-            return;
-        };
+        }
+        let path = fake_ip_state_path();
         let Some(parent) = path.parent() else {
             return;
         };
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
-        let temporary = path.with_extension("json.tmp");
-        if std::fs::write(&temporary, contents).is_ok() {
-            let _ = std::fs::rename(temporary, path);
+        let Ok(mut database) = Bolt::open(path) else {
+            return;
+        };
+        let bucket_name = fake_ip_bucket(self.network);
+        let _ = database.update(|mut transaction| {
+            let saved_offset = transaction
+                .bucket(bucket_name)
+                .and_then(|bucket| bucket.get(FAKE_IP_OFFSET_KEY).map(<[u8]>::to_vec));
+            let saved_cycle = transaction
+                .bucket(bucket_name)
+                .and_then(|bucket| bucket.get(FAKE_IP_CYCLE_KEY).map(<[u8]>::to_vec));
+            if transaction.bucket(bucket_name).is_some() {
+                transaction.delete_bucket(bucket_name)?;
+            }
+            let mut bucket = transaction.create_bucket(bucket_name)?;
+            for (host, entry) in &self.by_host {
+                let address = ip_bytes(entry.address);
+                bucket.put(host.as_bytes(), &address)?;
+                bucket.put(&address, host.as_bytes())?;
+            }
+            if let Some(offset) = saved_offset {
+                bucket.put(FAKE_IP_OFFSET_KEY, offset)?;
+            }
+            if let Some(cycle) = saved_cycle {
+                bucket.put(FAKE_IP_CYCLE_KEY, cycle)?;
+            }
+            Ok(())
+        });
+    }
+
+    fn store_state(&mut self) {
+        if !self.persistent {
+            return;
         }
+        let path = fake_ip_state_path();
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let Ok(mut database) = Bolt::open(path) else {
+            return;
+        };
+        let bucket_name = fake_ip_bucket(self.network);
+        let offset = ip_bytes(number_to_ip(self.offset, self.network));
+        let _ = database.update(|mut transaction| {
+            let mut bucket = transaction.create_bucket_if_not_exists(bucket_name)?;
+            bucket.put(FAKE_IP_OFFSET_KEY, &offset)?;
+            if self.cycle {
+                bucket.put(FAKE_IP_CYCLE_KEY, &offset)?;
+            }
+            Ok(())
+        });
     }
 }
 
-fn fake_ip_state_path(network: IpNet) -> PathBuf {
+const FAKE_IP_OFFSET_KEY: &[u8] = b"key-offset-fake-ip";
+const FAKE_IP_CYCLE_KEY: &[u8] = b"key-cycle-fake-ip";
+
+fn fake_ip_state_path() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
-    let family = if network.addr().is_ipv4() { "v4" } else { "v6" };
-    home.join(".config")
-        .join("mihomo")
-        .join(format!("rust-fakeip-{family}.json"))
+    home.join(".config").join("mihomo").join("cache.db")
+}
+
+fn fake_ip_bucket(network: IpNet) -> &'static [u8] {
+    if network.addr().is_ipv4() {
+        b"fakeip"
+    } else {
+        b"fakeip6"
+    }
+}
+
+fn flush_fake_ip_bucket(network: IpNet) {
+    let path = fake_ip_state_path();
+    if !path.exists() {
+        return;
+    }
+    let Ok(mut database) = Bolt::open(path) else {
+        return;
+    };
+    let bucket_name = fake_ip_bucket(network);
+    let _ = database.update(|mut transaction| {
+        if transaction.bucket(bucket_name).is_some() {
+            transaction.delete_bucket(bucket_name)?;
+        }
+        Ok(())
+    });
+}
+
+fn ip_bytes(address: IpAddr) -> Vec<u8> {
+    match address {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    }
+}
+
+fn address_from_bytes(bytes: &[u8]) -> Option<IpAddr> {
+    match bytes.len() {
+        4 => Some(IpAddr::V4(Ipv4Addr::new(
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ))),
+        16 => <[u8; 16]>::try_from(bytes)
+            .ok()
+            .map(Ipv6Addr::from)
+            .map(IpAddr::V6),
+        _ => None,
+    }
 }
 
 fn network_bounds(network: IpNet) -> (u128, u128) {
@@ -651,7 +803,7 @@ mod tests {
     #[test]
     fn fake_ip_pool_starts_at_four_and_wraps_before_last() {
         let network = "198.19.0.1/29".parse().expect("prefix");
-        let mut pool = FakeIpPool::new(network, false, None);
+        let mut pool = FakeIpPool::new(network, false);
         assert_eq!(pool.lookup("one.test").to_string(), "198.19.0.4");
         assert_eq!(pool.lookup("two.test").to_string(), "198.19.0.5");
         assert_eq!(pool.lookup("three.test").to_string(), "198.19.0.6");
@@ -669,7 +821,7 @@ mod tests {
     #[test]
     fn fake_ip_pool_is_case_insensitive_and_memory_bounded() {
         let network = "198.19.0.1/16".parse().expect("prefix");
-        let mut pool = FakeIpPool::new(network, false, None);
+        let mut pool = FakeIpPool::new(network, false);
         let first = pool.lookup("First.Test");
         assert_eq!(pool.lookup("first.test"), first);
         for index in 0..FAKE_IP_MEMORY_CAPACITY {
