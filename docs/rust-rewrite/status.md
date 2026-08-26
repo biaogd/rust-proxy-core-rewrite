@@ -43,11 +43,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
 | Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
 | Phase 4F3 system resolver | Partial, native gates pending | `DNS-03`; config/runtime path and POSIX/Windows/Android-CMFA contracts implemented, but deterministic native port-53 wire parity is not claimed |
+| Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; config/runtime, exact DHCPv4 wire and interface/invalidation contracts implemented; native UDP 67/68 parity remains pending |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F3 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F4 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3 boundary remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F4 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2143,6 +2144,72 @@ workflow; their result is not pre-claimed here.
 The local format check, complete workspace Clippy gate, Phase 4F3 config
 differential, five `rewrite-platform` tests and Windows GNU target check passed.
 
+## Phase 4F4 deliverables and evidence
+
+Phase 4F4 accepts a single `dhcp://<interface>` main nameserver and preserves
+the Go compatibility alias `dhcp://system`. `rewrite-platform` enumerates the
+named interface, selects the first non-link-local IPv4 address and parses its
+six-byte hardware address. It builds the same 300-byte broadcast DHCPDISCOVER
+as the Go DHCP library, requests the oracle's default option set, binds the
+client socket to the interface where the platform API permits it and accepts
+only a matching DHCPOFFER with DNS option 6. Discovered addresses enter the
+existing Phase 4F2 UDP/TC-retry upstream path on port 53.
+
+The DHCP cache checks interface metadata at most every 20 seconds, retains DNS
+discovery for one hour while the IPv4 address is unchanged and triggers a new
+discovery after an observed address change. Discovery executes on a blocking
+worker with one serialized cache decision, so it does not block the async DNS
+executor. A matching offer without DNS, socket failure or the one-minute
+deadline becomes the cached oracle-style DHCP error.
+
+`compat/scripts/phase4f4.py` uses the real Go configuration-test process and a
+Go helper built against the pinned DHCP library. It compares named-interface
+and system-alias acceptance, exact DHCPDISCOVER bytes, and valid/missing-DNS,
+malformed-DNS, wrong-message-type and wrong-transaction DHCPOFFER
+classifications. Nine
+`rewrite-platform` tests cover those packet contracts plus interface selection,
+20-second/one-hour invalidation and IPv4-address changes.
+
+This remains a **partial** `DNS-04` result. The local Darwin environment cannot
+bind privileged UDP ports 67/68 or safely replace the host network interface,
+so no native DHCP server exchange is claimed. Native Linux, Windows and Android
+socket behavior, hardware/interface changes during a live exchange, same-name
+configuration reload reset behavior and multi-resolver-set interaction remain
+pending platform or Phase 4F7 gates.
+
+Observed Phase 4F4 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Partial contracts passed | Native `compat/scripts/phase4f4.py`; exact Go/Rust DHCP wire/config observations and nine platform tests, without privileged exchange |
+| Linux amd64 | Pending | Default full differential and platform-contract jobs include Phase 4F4; no result is recorded before completion |
+| Windows amd64 | Cross-check passed; native pending | Rust 1.95 GNU target check compiles interface, packet and socket code; native contract job is configured |
+| Android | Contract only | Portable packet/invalidation contracts pass; native interface/socket/package execution remains pending |
+
+Phase 4F4 adds `network-interface` 2.0.5 (MIT OR Apache-2.0) and makes the
+existing `socket2` 0.6 dependency direct with its safe extended socket API.
+The interface crate documents its API as subject to change, so it is isolated
+inside `rewrite-platform`; final maintenance, license and platform review
+remains a release gate.
+
+### Phase 4F4 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rewrite-platform --all-features
+
+cd ..
+python3 compat/scripts/phase4f4.py
+```
+
+The local format check, complete workspace Clippy gate, Phase 4F4 config/wire
+differential, nine `rewrite-platform` tests and Windows GNU target check passed.
+The complete Phase 1–4F4 regression, workspace tests, Go/with-gVisor baseline
+and privileged native DHCP exchanges remain delegated to GitHub Actions or
+later platform runners; no result is pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2218,8 +2285,8 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the partial Phase 4F3 system-resolver boundary. Phase 4D3B,
-4F4 or another implementation gate must not begin without a separate
+Rust behavior stops at the partial Phase 4F4 DHCP-resolver boundary. Phase 4D3B,
+4F5 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

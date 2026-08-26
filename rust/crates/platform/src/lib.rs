@@ -1,5 +1,13 @@
 //! Small, testable operating-system boundaries used by the Rust rewrite.
 
+mod dhcp;
+
+pub use dhcp::{
+    DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
+    DhcpRefreshTracker, INTERFACE_TTL, build_dhcp_discover, dhcp_interface_snapshot,
+    parse_dhcp_offer, resolve_dns_from_dhcp,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};

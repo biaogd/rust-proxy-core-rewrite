@@ -506,8 +506,9 @@ Phase 1 introduced the smallest workspace needed by the first vertical slice;
 Phase 2 added the test-support helper; Phase 3 added state and controller;
 Phase 4A added the classic DNS crate; Phases 4B through 4F2 extended the
 existing config, DNS, state, controller and runtime boundaries. Phase 4F3
-introduced `rewrite-platform` for system resolver discovery and pure platform
-contracts; it is not a general TUN/routing implementation.
+introduced `rewrite-platform` for system resolver discovery and Phase 4F4
+extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
+refresh decisions; it is not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
 ```text

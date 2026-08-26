@@ -49,6 +49,23 @@ struct SystemDnsCache {
     last_refresh: Option<Instant>,
 }
 
+#[derive(Default)]
+struct DhcpDnsCacheEntry {
+    tracker: rewrite_platform::DhcpRefreshTracker,
+    servers: Vec<SocketAddr>,
+    error: Option<(std::io::ErrorKind, String)>,
+}
+
+fn dhcp_dns_cache() -> &'static StdMutex<BTreeMap<String, DhcpDnsCacheEntry>> {
+    static CACHE: OnceLock<StdMutex<BTreeMap<String, DhcpDnsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+fn dhcp_clock_start() -> Instant {
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+    *STARTED.get_or_init(Instant::now)
+}
+
 fn system_dns_cache() -> &'static StdMutex<SystemDnsCache> {
     static CACHE: OnceLock<StdMutex<SystemDnsCache>> = OnceLock::new();
     CACHE.get_or_init(|| StdMutex::new(SystemDnsCache::default()))
@@ -2751,9 +2768,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
     }
 
     let mut key = cache_key(query, config.transport, config.upstream);
-    if config.main_kind == DnsMainKind::System {
-        key.push(0xf4);
-    }
+    append_main_kind_cache_identity(&mut key, &config.main_kind);
     if !config.classic_upstreams.is_empty() {
         key.push(0xf5);
         for upstream in &config.classic_upstreams {
@@ -2848,6 +2863,18 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
     key
 }
 
+fn append_main_kind_cache_identity(key: &mut Vec<u8>, main_kind: &DnsMainKind) {
+    match main_kind {
+        DnsMainKind::Configured => {}
+        DnsMainKind::System => key.push(0xf4),
+        DnsMainKind::Dhcp(interface) => {
+            key.push(0xf3);
+            key.extend_from_slice(interface.as_bytes());
+            key.push(0);
+        }
+    }
+}
+
 fn selected_policy(config: &DnsConfig, domain: &str) -> Option<DnsUpstream> {
     config
         .policies
@@ -2912,8 +2939,10 @@ async fn query_main(
     tls_pool: Option<&Mutex<TlsConnectionPool>>,
     http_pool: Option<&Mutex<HttpConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
-    if config.main_kind == DnsMainKind::System {
-        return query_system(query).await;
+    match &config.main_kind {
+        DnsMainKind::System => return query_system(query).await,
+        DnsMainKind::Dhcp(interface) => return query_dhcp(query, interface).await,
+        DnsMainKind::Configured => {}
     }
     if !config.classic_upstreams.is_empty() {
         return query_classic_group(query, &config.classic_upstreams).await;
@@ -2929,6 +2958,67 @@ async fn query_main(
         http_pool,
     )
     .await
+}
+
+async fn query_dhcp(query: &[u8], interface: &str) -> Result<Vec<u8>, DnsError> {
+    let interface = interface.to_owned();
+    let servers = tokio::task::spawn_blocking(move || active_dhcp_dns(&interface))
+        .await
+        .map_err(|_| DnsError::InvalidMessage("DHCP discovery task failed"))??;
+    let upstreams = servers
+        .into_iter()
+        .map(|address| DnsClassicUpstream {
+            endpoint: DnsClassicEndpoint::Socket(address),
+            transport: DnsTransport::Udp,
+        })
+        .collect::<Vec<_>>();
+    if upstreams.is_empty() {
+        return Err(DnsError::InvalidMessage(
+            "DHCP discovery returned no DNS servers",
+        ));
+    }
+    query_classic_group(query, &upstreams).await
+}
+
+fn active_dhcp_dns(interface: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let snapshot = rewrite_platform::dhcp_interface_snapshot(interface);
+    let now = Instant::now().saturating_duration_since(dhcp_clock_start());
+    let mut cache = dhcp_dns_cache()
+        .lock()
+        .map_err(|_| std::io::Error::other("DHCP DNS cache lock poisoned"))?;
+    let entry = cache.entry(interface.to_owned()).or_default();
+    let decision = entry
+        .tracker
+        .observe(now, snapshot.as_ref().ok().map(|snapshot| snapshot.ipv4));
+    match decision {
+        rewrite_platform::DhcpRefreshDecision::Cached => return cached_dhcp_result(entry),
+        rewrite_platform::DhcpRefreshDecision::InterfaceError => {
+            let error = snapshot.expect_err("interface error decision requires an error");
+            entry.error = Some((error.kind(), error.to_string()));
+            return Err(error);
+        }
+        rewrite_platform::DhcpRefreshDecision::Refresh => {}
+    }
+    let snapshot = snapshot.expect("refresh decision requires an interface snapshot");
+    match rewrite_platform::resolve_dns_from_dhcp(&snapshot) {
+        Ok(servers) => {
+            entry.servers.clone_from(&servers);
+            entry.error = None;
+            Ok(servers)
+        }
+        Err(error) => {
+            entry.servers.clear();
+            entry.error = Some((error.kind(), error.to_string()));
+            Err(error)
+        }
+    }
+}
+
+fn cached_dhcp_result(entry: &DhcpDnsCacheEntry) -> std::io::Result<Vec<SocketAddr>> {
+    match &entry.error {
+        Some((kind, message)) => Err(std::io::Error::new(*kind, message.clone())),
+        None => Ok(entry.servers.clone()),
+    }
 }
 
 async fn query_system(query: &[u8]) -> Result<Vec<u8>, DnsError> {

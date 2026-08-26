@@ -424,6 +424,11 @@ Go/Rust port-53 wire fixtures pass on the advertised POSIX/Windows/Android
 targets. Configuration acceptance and pure platform contracts alone do not
 close `DNS-03`.
 
+Phase 4F4 similarly keeps `DNS-04` **partial** after the portable DHCPv4 wire,
+interface-selection and invalidation contracts land. Closing the row requires
+privileged native DHCP client/server fixtures on advertised platforms; config
+acceptance and packet vectors are necessary but not sufficient evidence.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

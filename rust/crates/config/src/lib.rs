@@ -141,10 +141,11 @@ pub struct DnsConfig {
     pub query_options: DnsQueryOptions,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DnsMainKind {
     Configured,
     System,
+    Dhcp(String),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -782,11 +783,28 @@ fn parse_main_nameservers(
     prefer_h3: bool,
     trust_certificates: &[String],
 ) -> Result<ParsedMainNameservers, ConfigError> {
-    if nameservers.len() == 1 && matches!(nameservers[0].as_str(), "system" | "system://") {
+    if nameservers.len() == 1
+        && matches!(
+            nameservers[0].as_str(),
+            "system" | "system://" | "dhcp://system"
+        )
+    {
         return Ok(ParsedMainNameservers {
             transport: DnsTransport::Udp,
             upstream: "0.0.0.0:53".parse().expect("system DNS sentinel"),
             main_kind: DnsMainKind::System,
+            classic_upstreams: Vec::new(),
+            tls: None,
+            query_options: DnsQueryOptions::default(),
+        });
+    }
+    if nameservers.len() == 1
+        && let Some(interface) = nameservers[0].strip_prefix("dhcp://")
+    {
+        return Ok(ParsedMainNameservers {
+            transport: DnsTransport::Udp,
+            upstream: "0.0.0.0:53".parse().expect("DHCP DNS sentinel"),
+            main_kind: DnsMainKind::Dhcp(interface.to_owned()),
             classic_upstreams: Vec::new(),
             tls: None,
             query_options: DnsQueryOptions::default(),
@@ -1969,7 +1987,7 @@ dns:
 
     #[test]
     fn parses_phase_four_f_three_system_resolver_spellings() {
-        for nameserver in ["system", "system://"] {
+        for nameserver in ["system", "system://", "dhcp://system"] {
             let source = format!(
                 "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - {nameserver}\n"
             );
@@ -1980,6 +1998,17 @@ dns:
             assert_eq!(dns.main_kind, DnsMainKind::System);
             assert!(dns.classic_upstreams.is_empty());
         }
+    }
+
+    #[test]
+    fn parses_phase_four_f_four_dhcp_interface() {
+        let source = "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - dhcp://fixture0\n";
+        let dns = Config::from_yaml(source)
+            .expect("Phase 4F4 DHCP resolver config")
+            .dns
+            .expect("enabled DNS");
+        assert_eq!(dns.main_kind, DnsMainKind::Dhcp("fixture0".to_owned()));
+        assert!(dns.classic_upstreams.is_empty());
     }
 
     #[test]

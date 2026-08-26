@@ -9,6 +9,10 @@ publish.workspace = true
 default = []
 android-cmfa = []
 
+[dependencies]
+network-interface.workspace = true
+socket2.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 ipconfig = "0.3.4"
 
