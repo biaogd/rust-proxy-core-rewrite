@@ -418,6 +418,14 @@ DNS. Each subphase is an independent Go/Rust differential gate:
 15. **4F15:** arbitrary DNS REST queries, complete cache controls and external
     DoH GET/POST (`DNS-19`).
 
+Phase 4F15 is accepted on the loopback TCP controller boundary. The focused
+gate compares the complete Go RR type-name table, representative address,
+name, character-string and structured RR JSON, shared-cache hit/flush/refetch,
+cache authentication and method handling, plus public external DoH GET,
+fixed-length/chunked POST, mount-prefix, content-type, method and malformed
+payload behavior. External UI/static serving and non-TCP controller transports
+remain Phase 5D/platform work rather than part of this DNS slice.
+
 Phase 4F3 implements the isolated system-resolver runtime path and platform
 contracts, but remains a **partial** matrix row until native deterministic
 Go/Rust port-53 wire fixtures pass on the advertised POSIX/Windows/Android

@@ -54,11 +54,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F12 complete hosts core | Complete in declared portable core; DNS-16 platform gates remain | Wildcard/suffix priority, `lan`, IP/domain/multi-value aliases, DNS query pass-through, system hosts and randomized tunnel routing pass on Darwin |
 | Phase 4F13 redir-host local-inbound core | Complete in declared local core; DNS-17 inbound gates remain | HTTP/SOCKS/mixed TCP, SOCKS/mixed UDP, CNAME identity, reload preservation and baseline size-only LRU retention pass |
 | Phase 4F14 fake-IP lifecycle core | Complete in declared local core; DNS-18 provider/inbound/platform gates remain | All filter rule kinds, GeoSite/inline providers, v4/v6 bbolt interchange, reload/range lifecycle, TCP/UDP reverse routing, persistent flush/restart and malformed-cache recovery pass |
+| Phase 4F15 DNS control surface | Complete in declared loopback TCP core; DNS-19 exhaustive legacy-RDATA gate remains | All oracle RR type names, representative RR JSON, shared cache controls and public external DoH GET/fixed/chunked POST plus errors pass |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F14 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F15 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F14 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2758,6 +2759,62 @@ locally. Format and strict workspace Clippy are run locally before handoff.
 Complete Phase 1–4F14 regression, all workspace tests and Go/with-gVisor
 baseline remain delegated to GitHub Actions; no result is pre-claimed.
 
+## Phase 4F15 deliverables and evidence
+
+Phase 4F15 delivers the declared `DNS-19` controller core and completes
+`API-09` on loopback TCP. `external-doh-server` is now executable configuration. Its mount
+is outside Bearer authentication like the Go router, accepts exact and child
+paths, RFC 8484 raw-URL GET plus fixed-length or chunked POST bodies, limits
+decoded DNS input to 65,535 bytes and returns `application/dns-message`.
+Malformed base64/DNS, disabled DNS, wrong content type and unsupported methods
+retain the oracle status and text/empty body classes.
+
+`/dns/query` accepts every symbolic name in the pinned miekg/dns
+`StringToType` table with the same case sensitivity and empty-type default.
+The DNS crate decodes address, domain-name, character-string and structured RR
+data into the Go controller's zone-text JSON shape; unknown wire types retain
+RFC 3597 hex form. `hickory-proto` 0.26.1 is used only for bounded RR wire
+decoding/rendering; its Rust 1.88 floor is below the workspace's pinned 1.95,
+its maintained upstream supports the declared portable core, and its
+MIT-or-Apache-2.0 license is compatible with this GPL-3.0-only workspace.
+`POST /cache/dns/flush` and
+`POST /cache/fakeip/flush` keep Bearer authentication, no-content success and
+method behavior. The ordinary cache gate proves a cached repeat followed by a
+post-flush upstream refetch; Phases 4F11 and 4F14 retain the deeper
+negative/stale and persistent fake-IP lifecycle evidence.
+
+`compat/scripts/phase4f15.py` compares Go and Rust REST status, headers and
+JSON for SOA, MX, TXT, SRV, CAA, HTTPS, ANY and default A queries; cache
+authentication/method/side effects; and external DoH GET, fixed/chunked POST,
+mount-prefix and error paths. External UI/static serving, debug/GC and
+TLS/Unix/pipe controller transports remain later API/platform gates.
+Exhaustive Go/Rust zone-text vectors for every legacy or obsolete Go-known
+RDATA structure remain a documented `DNS-19` gap; no full-product DNS REST
+parity is claimed from the representative corpus alone.
+
+Observed Phase 4F15 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared DNS control surface passed | Native `compat/scripts/phase4f15.py`; local UDP authority, loopback controller and deterministic wire queries |
+| Linux amd64 | Pending | Default full differential now includes Phase 4F15; no result is recorded before completion |
+
+### Phase 4F15 local exit gates
+
+```sh
+python3 compat/scripts/phase4f15.py
+
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rewrite-config -p rewrite-controller -p rewrite-dns
+```
+
+The focused Phase 4F15 differential and affected-crate tests pass locally.
+Format and strict workspace Clippy are run locally before handoff. Complete
+Phase 1–4F15 regression, all workspace tests and Go/with-gVisor baseline remain
+delegated to GitHub Actions; no result is pre-claimed.
+
 ## Differential fixture timing stability
 
 The shared DNS fixture cleanup normalizes `-SIGTERM` only when that exact
@@ -2851,14 +2908,14 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F14 fake-IP lifecycle local-inbound boundary.
+Rust behavior stops at the Phase 4F15 DNS control-surface boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.
-Phase 4D3B, 4F15 or another implementation gate must not begin without a separate
+Phase 4D3B, Phase 5 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
-selection/broader cache and REST control, `respect-rules`, intercepted DNS, TUN, remote proxy
+selection and broader REST control, `respect-rules`, intercepted DNS, TUN, remote proxy
 protocols, external providers and broader REST/platform
 compatibility are planned but not implied by this status.

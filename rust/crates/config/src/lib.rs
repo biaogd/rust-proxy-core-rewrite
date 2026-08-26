@@ -56,6 +56,7 @@ pub struct ConfigSpec {
     pub etag_support: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
+    pub external_doh_server: String,
     pub secret: String,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
@@ -77,6 +78,7 @@ pub struct Config {
     pub ipv6: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
+    pub external_doh_server: String,
     pub secret: String,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
@@ -465,6 +467,7 @@ struct RawConfig {
     etag_support: Option<bool>,
     authentication: Option<Vec<String>>,
     external_controller: Option<String>,
+    external_doh_server: Option<String>,
     secret: Option<String>,
     profile: Option<RawProfile>,
     tls: Option<RawTls>,
@@ -648,6 +651,7 @@ impl ConfigSpec {
             etag_support: raw.etag_support.unwrap_or(true),
             authentication: parse_authentication(raw.authentication.unwrap_or_default()),
             external_controller: raw.external_controller.unwrap_or_default(),
+            external_doh_server: raw.external_doh_server.unwrap_or_default(),
             secret: raw.secret.unwrap_or_default(),
             store_fake_ip,
             dns,
@@ -749,6 +753,7 @@ impl TryFrom<ConfigSpec> for Config {
             ipv6: spec.ipv6,
             authentication: spec.authentication,
             external_controller: spec.external_controller,
+            external_doh_server: spec.external_doh_server,
             secret: spec.secret,
             store_fake_ip: spec.store_fake_ip,
             dns: spec.dns,
@@ -2908,6 +2913,15 @@ rules:
         assert_eq!(config.mixed_port, 7890);
         assert_eq!(config.mode, Mode::Rule);
         assert_eq!(config.listener_port().expect("valid port"), 7890);
+    }
+
+    #[test]
+    fn accepts_external_doh_mount_for_controller_runtime() {
+        let source = format!(
+            "{MINIMAL}\nexternal-controller: 127.0.0.1:9090\nexternal-doh-server: /dns-query\n"
+        );
+        let config = Config::from_yaml(&source).expect("external DoH mount must parse");
+        assert_eq!(config.external_doh_server, "/dns-query");
     }
 
     #[test]

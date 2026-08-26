@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-dns = { path = "../dns" }
 rewrite-state = { path = "../state" }

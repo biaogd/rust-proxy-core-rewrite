@@ -211,7 +211,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | EDNS0 echo, UDP size and truncation | Oracle | **Parity** | Phase 4F1; 1232 OPT echo with DO preservation, upstream OPT preservation, implicit 512, advertised 256-as-512 and advertised 900 truncation, plus untruncated TCP evidence |
 | DNS hijack through TUN | Oracle | Not started | Platform TUN integration |
 | Phase 4D4 local DNS REST A/AAAA/CNAME query and positive-cache flush subset | Oracle | **Parity** | Authenticated query JSON plus REST/local-listener shared cache hit/flush/refetch behavior in `compat/scripts/phase4d4.py` |
-| Full DNS REST query and cache control | Oracle | Partial | Phase 4F14 proves fake-IP flush and persistent restart side effects; arbitrary RR types, negative/stale ordinary cache state and complete method/error behavior remain unclaimed |
+| Full DNS REST query and cache control | Oracle | Partial | Phase 4F15 accepts the oracle RR type-name table, renders representative simple/structured/character-string RR JSON, and proves authenticated DNS/fake-IP flush status, method handling and ordinary cache invalidation; exhaustive presentation vectors for every legacy/obsolete Go-known RDATA type remain unclaimed |
 
 ## REST controller
 
@@ -226,9 +226,9 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | `/rules` and disable operation | Oracle | Not started | Ordering/statistics/mutation |
 | `/connections` stream/list/delete | Oracle | Partial | Phase 3 GET snapshot/tracker/totals subset; WebSocket and DELETE are not started |
 | Proxy and rule provider APIs | Oracle | Not started | Refresh, health and error behavior |
-| Cache, DNS and storage APIs | Oracle | Partial | Phase 4D4 local query/positive-cache flush subset only; fake-IP/storage and complete cache surfaces remain unclaimed |
+| Cache, DNS and storage APIs | Oracle | Partial | Phase 4F15 completes `/dns/query` and both cache flush routes on the declared TCP controller; `/storage` remains unimplemented |
 | Restart and upgrade APIs | Oracle | Not started | Subprocess/re-exec/download fixtures |
-| External UI and DoH mount | Oracle | Not started | Static paths, redirect and DNS messages |
+| External UI and DoH mount | Oracle | Partial | Phase 4F15 proves the public configured DoH mount, exact and child paths, GET, fixed/chunked POST, DNS wire response and error contracts; external UI static paths and redirect remain unimplemented |
 | Debug routes | Oracle when debug | Not started | Feature exposure and GC endpoint |
 | Exact route-wide error/stream/concurrency contracts | Oracle | Partial | Status, headers, JSON/body, WebSocket cadence, disconnect and concurrent mutation evidence per route |
 

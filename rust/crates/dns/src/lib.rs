@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
+use hickory_proto::rr::{RData, Record};
+use hickory_proto::serialize::binary::{BinDecodable, BinDecoder};
 use http::{Method, Request};
 use rewrite_config::{
     Config, DnsCacheAlgorithm, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig,
@@ -656,6 +658,34 @@ impl DnsService {
         let query = make_query(name, record_type)?;
         let response = self.resolver.resolve_upstream(&query, config).await?;
         rest_response(&response)
+    }
+
+    /// Relays one RFC 8484 DNS message through the local DNS service path.
+    ///
+    /// Resolver failures become a DNS `SERVFAIL` response, matching the Go
+    /// relay boundary; malformed wire input remains an HTTP-visible error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DnsError`] when the request or generated response is not a
+    /// valid DNS message.
+    pub async fn relay_query(
+        &self,
+        config: &Config,
+        state: &RuntimeState,
+        query: &[u8],
+    ) -> Result<Vec<u8>, DnsError> {
+        validate_query(query)?;
+        let response = match self.resolver.resolve(query, config, state).await {
+            Ok(response) => Ok(response),
+            Err(_) => server_failure_response(query),
+        }?;
+        let response = local_response(query, response, true)?;
+        if response.len() > 2 * 1024 {
+            truncate_udp_response(&response, 2 * 1024)
+        } else {
+            Ok(response)
+        }
     }
 
     /// Clears the positive resolver cache shared by DNS and REST queries.
@@ -3501,6 +3531,7 @@ fn rest_records(
 ) -> Result<(Vec<RestRecord>, usize), DnsError> {
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
+        let record_start = offset;
         let (name, next) = read_name(message, offset)?;
         offset = next;
         if offset + 10 > message.len() {
@@ -3522,7 +3553,7 @@ fn rest_records(
             .checked_add(data_length)
             .filter(|end| *end <= message.len())
             .ok_or(DnsError::InvalidMessage("resource data is truncated"))?;
-        let data = rest_record_data(message, record_type, data_offset, data_end)?;
+        let data = rest_record_data(message, record_type, record_start, data_offset, data_end)?;
         records.push(RestRecord {
             name: fqdn(&name),
             record_type,
@@ -3537,26 +3568,72 @@ fn rest_records(
 fn rest_record_data(
     message: &[u8],
     record_type: u16,
-    start: usize,
+    record_start: usize,
+    data_start: usize,
     end: usize,
 ) -> Result<String, DnsError> {
-    match (record_type, end - start) {
-        (1, 4) => Ok(Ipv4Addr::new(
-            message[start],
-            message[start + 1],
-            message[start + 2],
-            message[start + 3],
-        )
-        .to_string()),
-        (28, 16) => {
-            let octets: [u8; 16] = message[start..end]
-                .try_into()
-                .map_err(|_| DnsError::InvalidMessage("invalid AAAA record"))?;
-            Ok(Ipv6Addr::from(octets).to_string())
-        }
-        (2 | 5 | 12, _) => read_name(message, start).map(|(name, _)| fqdn(&name)),
-        _ => Err(DnsError::InvalidMessage("unsupported REST resource record")),
+    let record_start = u16::try_from(record_start)
+        .map_err(|_| DnsError::InvalidMessage("resource record offset exceeds DNS message"))?;
+    let decoder = BinDecoder::new(message);
+    let mut decoder = decoder.clone(record_start);
+    let record = Record::read(&mut decoder)
+        .map_err(|_| DnsError::InvalidMessage("unsupported REST resource record"))?;
+    if decoder.index() != end {
+        return Err(DnsError::InvalidMessage(
+            "resource record length does not match",
+        ));
     }
+    if matches!(record_type, 13 | 16 | 19 | 20 | 56 | 99 | 258) {
+        return format_character_strings(&message[data_start..end]);
+    }
+    match &record.data {
+        RData::Unknown { rdata, .. } => Ok(format_rfc3597(&rdata.anything)),
+        RData::NULL(null) => Ok(format_rfc3597(&null.anything)),
+        RData::OPT(_) => Ok(String::new()),
+        data => Ok(data.to_string()),
+    }
+}
+
+fn format_character_strings(data: &[u8]) -> Result<String, DnsError> {
+    let mut offset = 0;
+    let mut rendered = Vec::new();
+    while offset < data.len() {
+        let length = usize::from(data[offset]);
+        offset += 1;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= data.len())
+            .ok_or(DnsError::InvalidMessage(
+                "character string exceeds resource record",
+            ))?;
+        let mut value = String::from("\"");
+        for byte in &data[offset..end] {
+            match *byte {
+                b'"' | b'\\' => {
+                    value.push('\\');
+                    value.push(char::from(*byte));
+                }
+                b' '..=b'~' => value.push(char::from(*byte)),
+                _ => {
+                    use std::fmt::Write;
+                    let _ = write!(value, "\\{byte:03}");
+                }
+            }
+        }
+        value.push('"');
+        rendered.push(value);
+        offset = end;
+    }
+    Ok(rendered.join(" "))
+}
+
+fn format_rfc3597(data: &[u8]) -> String {
+    let mut hex = String::with_capacity(data.len() * 2);
+    for byte in data {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("\\# {} {hex}", data.len())
 }
 
 fn read_name(message: &[u8], start: usize) -> Result<(String, usize), DnsError> {
@@ -4541,6 +4618,50 @@ mod tests {
         message.extend_from_slice(&ttl.to_be_bytes());
         message.extend_from_slice(&[0, 4, 192, 0, 2, 42]);
         message
+    }
+
+    fn response_with_record(record_type: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut message = 1_u16.to_be_bytes().to_vec();
+        message.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
+        message.extend_from_slice(&[7]);
+        message.extend_from_slice(b"example");
+        message.extend_from_slice(&[4]);
+        message.extend_from_slice(b"test");
+        message.extend_from_slice(&[0]);
+        message.extend_from_slice(&record_type.to_be_bytes());
+        message.extend_from_slice(&1_u16.to_be_bytes());
+        message.extend_from_slice(&[0xc0, 0x0c]);
+        message.extend_from_slice(&record_type.to_be_bytes());
+        message.extend_from_slice(&1_u16.to_be_bytes());
+        message.extend_from_slice(&30_u32.to_be_bytes());
+        message.extend_from_slice(
+            &u16::try_from(rdata.len())
+                .expect("test resource data fits DNS length")
+                .to_be_bytes(),
+        );
+        message.extend_from_slice(rdata);
+        message
+    }
+
+    #[test]
+    fn renders_complex_rest_resource_records() {
+        let mx = response_with_record(
+            15,
+            &[
+                0, 10, 4, b'm', b'a', b'i', b'l', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 4,
+                b't', b'e', b's', b't', 0,
+            ],
+        );
+        let parsed = rest_response(&mx).expect("MX response");
+        assert_eq!(parsed.answer[0].data, "10 mail.example.test.");
+
+        let txt = response_with_record(16, &[5, b'h', b'e', b'l', b'l', b'o']);
+        let parsed = rest_response(&txt).expect("TXT response");
+        assert_eq!(parsed.answer[0].data, "\"hello\"");
+
+        let unknown = response_with_record(65400, &[0xde, 0xad, 0xbe, 0xef]);
+        let parsed = rest_response(&unknown).expect("RFC3597 response");
+        assert_eq!(parsed.answer[0].data, "\\# 4 deadbeef");
     }
 
     #[test]

@@ -628,7 +628,12 @@ its differential coverage across existing local listener types without adding
 a crate. Phase 4F14 keeps those crate boundaries and adds the reviewed
 `bbolt-rs` persistence dependency to `rewrite-state`: config owns fake-IP
 matcher data, DNS owns filter evaluation, state owns pools/profile storage and
-controller exposes only the flush operation.
+controller exposes only the flush operation. Phase 4F15 keeps resolution in
+`rewrite-dns` and HTTP routing/body framing in `rewrite-controller`; the DoH
+mount deliberately precedes Bearer authentication like the oracle, while the
+REST DNS/cache routes remain inside it. `hickory-proto` is confined to DNS RR
+wire decoding and zone-text rendering for the controller JSON boundary; it is
+not used to replace the existing resolver/cache/transport implementation.
 `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:

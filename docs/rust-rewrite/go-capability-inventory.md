@@ -194,7 +194,7 @@ runtime behavior is under [`dns`](../../dns).
 | DNS-16 | Hosts: exact/wildcard/`lan`, IP/CNAME/multiple values, system hosts, randomized selection and all query types/platforms | Complete in the Phase 4F12 portable core: trie priority, alias chains, DNS interception/pass-through, native-file lookup and tunnel multi-address selection pass on Darwin; native Windows refresh and Linux CI remain pending | 4F12 plus native platform gates |
 | DNS-17 | Redir-host mapping: TCP/UDP, all inbounds, CNAME identity, reload and expiry | Partial: Phase 4F13 covers HTTP/SOCKS/mixed TCP plus SOCKS/mixed UDP, upstream/configured CNAME identity, reload preservation and the baseline's non-expiring size-only LRU behavior; redir/TProxy/TUN and later inbound families remain | 4F13 plus inbound/platform gates |
 | DNS-18 | Fake IP v4/v6, all filter modes/rules/providers, persistence/interchange, reverse routing, reload/range migration and flush | Partial: Phase 4F14 covers all domain rule kinds, GeoSite and inline domain/classical providers, v4/v6 Go bbolt interchange, current TCP/UDP reverse routing, memory/persistent range behavior, REST flush/restart and malformed-cache recovery; external provider vehicles and later inbound/platform consumers remain | 4F14 plus provider/inbound/platform gates |
-| DNS-19 | Local DNS REST and external DoH server: GET/POST, arbitrary RR JSON, auth/errors and all cache controls | Partial | 4F15/5D6 |
+| DNS-19 | Local DNS REST and external DoH server: GET/POST, arbitrary RR JSON, auth/errors and all cache controls | Partial: Go RR type-name acceptance, representative RR JSON, shared cache controls and public DoH GET/fixed/chunked POST pass on loopback TCP; exhaustive legacy/obsolete RDATA presentation and alternate controller transports remain | 4F15/5D6 |
 | DNS-20 | TUN DNS hijack and intercepted routing on each supported stack/OS | Not started | 8A–8D |
 
 The 4E numbering is therefore extended only through DoQ and encrypted-transport
@@ -233,10 +233,10 @@ the mounted route files below [`hub/route`](../../hub/route).
 | API-06 | `/rules` list/statistics and disable mutation | Not started | 5D8 |
 | API-07 | `/connections` list/WebSocket/delete-one/delete-all | Partial list subset | 5D9 |
 | API-08 | Proxy/rule provider list/detail/update/health endpoints | Not started | 5D10 |
-| API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Partial | 4F15 |
+| API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
 | API-10 | `/storage/{key}` GET/PUT/DELETE | Not started | 5D11 |
 | API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Not started | 5D12 |
-| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Not started | 5D13 |
+| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: external DoH mount passes Phase 4F15; UI and debug/GC remain | 5D13 |
 | API-13 | Exact JSON fields, headers, status/error bodies, stream cadence and concurrent behavior across all routes | Partial | Required in each API gate |
 
 ## Supporting services and persistence
