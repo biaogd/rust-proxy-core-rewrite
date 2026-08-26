@@ -75,6 +75,12 @@ a watch channel; new TCP/UDP/controller sockets are all bound before the config
 is published, and obsolete tasks are cancelled afterward. SIGHUP parsing stays
 in `rewrite-cli` and sends only validated owned configs to runtime.
 
+The post-Phase 4F15 inbound cleanup delegates HTTP/1 request-line and header
+syntax parsing to `httparse`. `rewrite-inbound` still owns mixed-protocol
+detection, proxy authentication, CONNECT handling, absolute-form rewriting and
+unread preface bytes because those are proxy-product behavior rather than
+generic HTTP server behavior. SOCKS framing is unchanged.
+
 `rewrite-state` owns bounded log broadcasting, active connection snapshots and
 byte totals. `rewrite-controller` reads that state and current config; its only
 declared mutation path is the Phase 4D4 clear operation on the runtime-owned DNS

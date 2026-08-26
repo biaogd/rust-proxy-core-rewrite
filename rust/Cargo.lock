@@ -1585,6 +1585,7 @@ name = "rewrite-inbound"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "httparse",
  "rewrite-model",
  "thiserror 2.0.20",
  "tokio",

@@ -14,6 +14,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed |
+| Inbound HTTP parser refactor | Complete in the existing Phase 1/3 scope | HTTP/1 syntax parsing uses `httparse`; Phase 1 and Phase 3 Go/Rust differentials re-pass with proxy behavior unchanged |
 | Phase 4A classic local DNS | Complete in declared scope | Native UDP/TCP client × UDP/TCP upstream differential suite passed |
 | Phase 4B hosts and redir-host mapping | Complete in declared scope | Configured/system hosts, CNAME and DNS-to-SOCKS mapping differential suite passed |
 | Phase 4C fake IP | Complete in declared scope | IPv4/IPv6 allocation, filters, bounded pool, TCP reverse mapping and restart differential suite passed |
@@ -258,6 +259,13 @@ Phase 3 evidence by itself does not claim controller mutation, WebSocket
 parity, general-purpose UDP NAT, DNS, TUN, remote adapters, REJECT-DROP timing
 or non-Darwin runtime evidence. The separate narrow DNS claim begins in Phase
 4A below.
+
+After Phase 4F15, the inbound HTTP parser was migrated from manual request-line
+and header splitting to `httparse` 1.10.1. Mixed HTTP/SOCKS detection,
+CONNECT/absolute-form proxy semantics, Basic authentication, header filtering
+and unread payload forwarding remain owned by `rewrite-inbound`. The Phase 1
+and Phase 3 differential suites re-pass locally on 2026-08-26; this
+infrastructure cleanup adds no inbound protocol or compatibility claim.
 
 ### Phase 3 exit-gate commands
 

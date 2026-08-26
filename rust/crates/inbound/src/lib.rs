@@ -9,6 +9,14 @@ use url::Url;
 
 const MAX_HTTP_HEADER: usize = 64 * 1024;
 
+struct ParsedHttpHead {
+    method: String,
+    target: String,
+    version: &'static str,
+    headers: Vec<(String, Vec<u8>)>,
+    body_offset: usize,
+}
+
 pub struct AcceptedTcp {
     pub client: TcpStream,
     pub metadata: Metadata,
@@ -358,39 +366,24 @@ async fn accept_http(
     mut client: TcpStream,
     users: &[AuthUser],
 ) -> Result<AcceptedTcp, InboundError> {
-    let bytes = read_http_head(&mut client).await?;
-    let head_end = find_header_end(&bytes).ok_or(InboundError::Http("missing header end"))?;
-    let head = std::str::from_utf8(&bytes[..head_end])
-        .map_err(|_| InboundError::Http("header is not UTF-8"))?;
-    let mut lines = head.split("\r\n");
-    let request_line = lines
-        .next()
-        .ok_or(InboundError::Http("missing request line"))?;
-    let mut fields = request_line.split_whitespace();
-    let method = fields.next().ok_or(InboundError::Http("missing method"))?;
-    let target = fields.next().ok_or(InboundError::Http("missing target"))?;
-    let version = fields.next().ok_or(InboundError::Http("missing version"))?;
-    if fields.next().is_some() || !version.starts_with("HTTP/") {
-        return Err(InboundError::Http("malformed request line"));
-    }
+    let (bytes, request) = read_http_head(&mut client).await?;
+    authenticate_http(&mut client, request.version, &request.headers, users).await?;
 
-    let header_lines: Vec<_> = lines.filter(|line| !line.is_empty()).collect();
-    authenticate_http(&mut client, version, &header_lines, users).await?;
-
-    if method.eq_ignore_ascii_case("CONNECT") {
-        let destination = parse_authority(target, None)?;
+    if request.method.eq_ignore_ascii_case("CONNECT") {
+        let destination = parse_authority(&request.target, None)?;
         client
-            .write_all(format!("{version} 200 Connection established\r\n\r\n").as_bytes())
+            .write_all(format!("{} 200 Connection established\r\n\r\n", request.version).as_bytes())
             .await?;
         return Ok(AcceptedTcp {
             metadata: socket_metadata(&client, destination, InboundProtocol::Http),
             client,
-            preface: bytes[(head_end + 4)..].to_vec(),
+            preface: bytes[request.body_offset..].to_vec(),
             command: InboundCommand::Connect,
         });
     }
 
-    let url = Url::parse(target).map_err(|_| InboundError::Http("target is not absolute-form"))?;
+    let url = Url::parse(&request.target)
+        .map_err(|_| InboundError::Http("target is not absolute-form"))?;
     if url.scheme() != "http" {
         return Err(InboundError::Http("only http absolute-form is in Phase 1"));
     }
@@ -403,12 +396,9 @@ async fn accept_http(
         None => url.path().to_owned(),
     };
 
-    let mut rewritten = format!("{method} {origin} {version}\r\n").into_bytes();
+    let mut rewritten = format!("{} {origin} {}\r\n", request.method, request.version).into_bytes();
     let mut saw_host = false;
-    for line in header_lines {
-        let (name, value) = line
-            .split_once(':')
-            .ok_or(InboundError::Http("malformed header"))?;
+    for (name, value) in request.headers {
         if name.eq_ignore_ascii_case("host") {
             saw_host = true;
         }
@@ -418,15 +408,15 @@ async fn accept_http(
             continue;
         }
         rewritten.extend_from_slice(name.as_bytes());
-        rewritten.extend_from_slice(b":");
-        rewritten.extend_from_slice(value.as_bytes());
+        rewritten.extend_from_slice(b": ");
+        rewritten.extend_from_slice(&value);
         rewritten.extend_from_slice(b"\r\n");
     }
     if !saw_host {
         rewritten.extend_from_slice(format!("Host: {}\r\n", destination.authority()).as_bytes());
     }
     rewritten.extend_from_slice(b"\r\n");
-    rewritten.extend_from_slice(&bytes[(head_end + 4)..]);
+    rewritten.extend_from_slice(&bytes[request.body_offset..]);
 
     Ok(AcceptedTcp {
         metadata: socket_metadata(&client, destination, InboundProtocol::Http),
@@ -439,16 +429,16 @@ async fn accept_http(
 async fn authenticate_http(
     client: &mut TcpStream,
     version: &str,
-    headers: &[&str],
+    headers: &[(String, Vec<u8>)],
     users: &[AuthUser],
 ) -> Result<(), InboundError> {
     if users.is_empty() {
         return Ok(());
     }
-    let credential = headers.iter().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
+    let credential = headers.iter().find_map(|(name, value)| {
         name.eq_ignore_ascii_case("proxy-authorization")
-            .then(|| value.trim())
+            .then(|| std::str::from_utf8(value).ok())
+            .flatten()
     });
     let basic_credential = credential.and_then(|value| {
         value
@@ -505,10 +495,13 @@ fn socket_metadata(
     metadata
 }
 
-async fn read_http_head(client: &mut TcpStream) -> Result<Vec<u8>, InboundError> {
+async fn read_http_head(client: &mut TcpStream) -> Result<(Vec<u8>, ParsedHttpHead), InboundError> {
     let mut bytes = Vec::with_capacity(1024);
     let mut chunk = [0_u8; 4096];
-    while find_header_end(&bytes).is_none() {
+    loop {
+        if let Some(request) = parse_http_head(&bytes)? {
+            return Ok((bytes, request));
+        }
         let read = client.read(&mut chunk).await?;
         if read == 0 {
             return Err(InboundError::Http("unexpected EOF"));
@@ -518,11 +511,45 @@ async fn read_http_head(client: &mut TcpStream) -> Result<Vec<u8>, InboundError>
             return Err(InboundError::Http("header is too large"));
         }
     }
-    Ok(bytes)
 }
 
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+fn parse_http_head(bytes: &[u8]) -> Result<Option<ParsedHttpHead>, InboundError> {
+    let capacity = (bytes.len() / 2).max(1);
+    let mut headers = vec![httparse::EMPTY_HEADER; capacity];
+    let mut request = httparse::Request::new(&mut headers);
+    let status = request
+        .parse(bytes)
+        .map_err(|_| InboundError::Http("malformed HTTP request"))?;
+    let httparse::Status::Complete(body_offset) = status else {
+        return Ok(None);
+    };
+    std::str::from_utf8(&bytes[..body_offset])
+        .map_err(|_| InboundError::Http("header is not UTF-8"))?;
+    let method = request
+        .method
+        .ok_or(InboundError::Http("missing method"))?
+        .to_owned();
+    let target = request
+        .path
+        .ok_or(InboundError::Http("missing target"))?
+        .to_owned();
+    let version = match request.version {
+        Some(0) => "HTTP/1.0",
+        Some(1) => "HTTP/1.1",
+        _ => return Err(InboundError::Http("unsupported HTTP version")),
+    };
+    let headers = request
+        .headers
+        .iter()
+        .map(|header| (header.name.to_owned(), header.value.to_vec()))
+        .collect();
+    Ok(Some(ParsedHttpHead {
+        method,
+        target,
+        version,
+        headers,
+        body_offset,
+    }))
 }
 
 fn parse_authority(
@@ -582,5 +609,18 @@ mod tests {
                 .authority(),
             "[::1]:80"
         );
+    }
+
+    #[test]
+    fn parses_http_head_with_library_and_preserves_body_offset() {
+        let bytes = b"POST http://example.com/a HTTP/1.1\r\nHost: example.com\r\nX-Test: value\r\n\r\npayload";
+        let request = parse_http_head(bytes)
+            .expect("valid HTTP request")
+            .expect("complete HTTP request");
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "http://example.com/a");
+        assert_eq!(request.version, "HTTP/1.1");
+        assert_eq!(&bytes[request.body_offset..], b"payload");
+        assert_eq!(request.headers[1].1, b"value");
     }
 }

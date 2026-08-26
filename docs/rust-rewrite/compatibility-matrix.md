@@ -75,9 +75,9 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 
 | Listener | TCP | UDP | Go | Rust | Differential evidence |
 | --- | --- | --- | --- | --- | --- |
-| Phase 1 mixed HTTP/SOCKS5 TCP subset | Yes | No | Oracle | **Parity** | Fragmented HTTP absolute-form, CONNECT, SOCKS5 IPv4/domain, disabled-IPv6 close and auth-method reply |
+| Phase 1 mixed HTTP/SOCKS5 TCP subset | Yes | No | Oracle | **Parity** | Fragmented HTTP absolute-form, CONNECT, SOCKS5 IPv4/domain, disabled-IPv6 close and auth-method reply; Phase 1 re-passes after HTTP syntax parsing moved to `httparse` |
 | Full mixed HTTP/SOCKS listener | Yes | SOCKS UDP | Oracle | Partial | Phase 3 declared HTTP/SOCKS4/4a/5 TCP and local SOCKS5 UDP subset; broader HTTP/UDP semantics remain |
-| Phase 3 fixed HTTP TCP subset | Yes | No | Oracle | **Parity** | Absolute-form/CONNECT, Basic 407/403/success, relay and half-close observations |
+| Phase 3 fixed HTTP TCP subset | Yes | No | Oracle | **Parity** | Absolute-form/CONNECT, Basic 407/403/success, relay and half-close observations re-pass after the `httparse` migration |
 | Phase 3 fixed/mixed SOCKS subset | Yes | Yes | Oracle | **Parity** | SOCKS4/4a/5 CONNECT, USERID/user-pass, UDP ASSOCIATE, IPv4 DIRECT write-back and FRAG drop |
 | Redir | Yes | Platform-dependent | Oracle | Not started | Linux/Darwin/FreeBSD socket tests |
 | TProxy | Yes | Linux-real semantics | Oracle | Not started | Linux network namespace tests |
