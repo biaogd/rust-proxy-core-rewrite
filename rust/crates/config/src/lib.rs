@@ -625,6 +625,19 @@ impl ConfigSpec {
         Self::from_source(source, None, geodata_mode)
     }
 
+    /// Parses YAML while resolving relative resources from a configuration path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] under the same conditions as [`Self::from_yaml`].
+    pub fn from_yaml_at_path_with_geodata_mode(
+        source: &str,
+        path: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        Self::from_source(source, path.parent(), geodata_mode)
+    }
+
     fn from_source(
         source: &str,
         config_directory: Option<&Path>,
@@ -820,6 +833,19 @@ impl Config {
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
         ConfigSpec::from_yaml_with_geodata_mode(source, geodata_mode)?.try_into()
+    }
+
+    /// Parses runtime YAML while resolving relative resources from a path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for specification or runtime-scope errors.
+    pub fn from_yaml_at_path_with_geodata_mode(
+        source: &str,
+        path: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        ConfigSpec::from_yaml_at_path_with_geodata_mode(source, path, geodata_mode)?.try_into()
     }
 
     /// Reads, parses and converts a configuration for the current runtime.

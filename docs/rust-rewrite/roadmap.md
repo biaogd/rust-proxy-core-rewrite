@@ -652,6 +652,19 @@ selected listener, absence of superseded listeners, Bearer authentication and
 reload persistence through live REST requests. Controller TLS/Unix/Windows
 pipe, UI fields, routing mark and their platform behavior remain 5A3b onward.
 
+### Phase 5A4a accepted scope
+
+Phase 5A4a accepts the single native X25519 identity subset of `CLI-07`.
+ASCII-armored age configuration can be supplied through a file or base64
+configuration string and is decrypted before validation/application and again
+on reload. CLI, environment and explicit-empty precedence match the oracle;
+wrong/absent keys fail encrypted input, while an invalid configured key only
+warns when the input is plaintext. The implementation delegates the age wire
+format and cryptography to pure-Rust `age` 0.12.1 (MIT OR Apache-2.0), whose
+documented wire format interoperates with the reference Go implementation.
+Multiple identities, hybrid/PQ, SSH, encrypted-identity and plugin identities
+remain outside this claim.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

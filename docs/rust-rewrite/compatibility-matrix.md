@@ -38,7 +38,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Controller/UI/secret CLI overrides | Oracle | Not started | Config plus override differential |
 | `convert-ruleset` | Oracle | Not started | Fixture files and byte/record comparison |
 | `generate` | Oracle | Not started | Subcommand-specific golden fixtures |
-| `age` and encrypted config | Oracle | Not started | Valid/wrong-key/malformed fixtures |
+| Phase 5A4a X25519 age-encrypted config | Oracle | **Parity** | File/base64 input, CLI/environment/explicit-empty precedence, wrong key, invalid-key warning on plaintext and live applied config in `compat/scripts/phase5a4a.py` |
+| Full age identities and encrypted config | Oracle | Partial | Multiple identities and hybrid/PQ, SSH, encrypted-identity and plugin forms remain unclaimed |
 | Phase 1 SIGTERM cleanup | Oracle | **Parity** | Exit 0, listener/idle stream closure and bounded task drain |
 | Phase 5A7b SIGINT/SIGTERM local-resource shutdown | Oracle | **Parity** | Zero exit, bounded idle-stream closure and immediate mixed/controller/DNS TCP plus DNS UDP port release in `compat/scripts/phase5a7b.py` |
 | Full shutdown/profile semantics | Oracle | Partial | Local resources and Phase 4F14 fake-IP persistence have evidence; future providers, TUN and remote adapters require their own shutdown gates |
@@ -294,6 +295,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A2a default version output | Oracle | **Parity** | Native default-banner and configuration-short-circuit differential passed, 2026-08-26; tagged profiles remain unclaimed |
 | Darwin arm64 — Phase 5A2b geodata-mode CLI default | Oracle | **Parity** | Native four-case live controller differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A3a controller/secret overrides | Oracle | **Parity** | Native CLI/environment/empty-precedence, listener, auth and reload differential passed, 2026-08-26 |
+| Darwin arm64 — Phase 5A4a X25519 encrypted config | Oracle | **Parity** | Native file/base64, key precedence, live application and failure differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
@@ -321,6 +323,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A2a default version output | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A2b geodata-mode CLI default | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A3a controller/secret overrides | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
+| Linux amd64 — Phase 5A4a X25519 encrypted config | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7a invalid SIGHUP recovery | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

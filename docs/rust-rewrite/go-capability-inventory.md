@@ -44,7 +44,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-04 | `-v` version, OS/architecture, implementation compiler, build time and feature-tag output | Partial: default untagged banner parity | Accepted 5A2a; build-tag variants remain |
 | CLI-05 | `-m` geodata-mode default override with explicit-YAML precedence | **Parity** | Accepted 5A2b |
 | CLI-06 | Controller/UI/secret/routing-mark override flags and environment variables | Partial: controller address and secret parity | Accepted 5A3a; UI/TLS/Unix/pipe/routing-mark remain |
-| CLI-07 | `-age-secret-key` and encrypted configuration loading | Not started | 5A4 |
+| CLI-07 | `-age-secret-key` and encrypted configuration loading | Partial: single X25519 identity parity | Accepted 5A4a; multiple, hybrid, SSH and plugin identities remain |
 | CLI-08 | `convert-ruleset` subcommand and MRS/classical/domain/IP output | Not started | 5A5 |
 | CLI-09 | `generate` subcommand family | Not started | 5A6 |
 | CLI-10 | `age` subcommand family | Not started | 5A4 |

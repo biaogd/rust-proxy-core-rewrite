@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::Parser;
-use rewrite_config::{Config, ConfigError, ConfigSpec};
+use rewrite_config::{Config, ConfigSpec};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,10 @@ struct Arguments {
     /// Override external controller secret
     #[arg(long = "secret", value_name = "SECRET")]
     secret: Option<String>,
+
+    /// Use one X25519 age identity to decrypt configuration
+    #[arg(long = "age-secret-key", value_name = "IDENTITY")]
+    age_secret_key: Option<String>,
 
     /// Run a shell command after startup
     #[arg(long = "post-up", value_name = "COMMAND")]
@@ -96,19 +100,39 @@ impl RuntimeOverrides {
 }
 
 impl ConfigInput {
-    fn specification(&self, geodata_mode: bool) -> Result<ConfigSpec, ConfigError> {
+    fn specification(
+        &self,
+        geodata_mode: bool,
+        age_secret_key: &str,
+    ) -> Result<ConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::File(path) => ConfigSpec::from_path_with_geodata_mode(path, geodata_mode),
-            Self::FrozenYaml(source) => {
-                ConfigSpec::from_yaml_with_geodata_mode(source, geodata_mode)
-            }
+            Self::File(path) => Ok(ConfigSpec::from_yaml_at_path_with_geodata_mode(
+                &decrypt_yaml(std::fs::read(path)?.as_slice(), age_secret_key)?,
+                path,
+                geodata_mode,
+            )?),
+            Self::FrozenYaml(source) => Ok(ConfigSpec::from_yaml_with_geodata_mode(
+                &decrypt_yaml(source.as_bytes(), age_secret_key)?,
+                geodata_mode,
+            )?),
         }
     }
 
-    fn runtime_config(&self, geodata_mode: bool) -> Result<Config, ConfigError> {
+    fn runtime_config(
+        &self,
+        geodata_mode: bool,
+        age_secret_key: &str,
+    ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::File(path) => Config::from_path_with_geodata_mode(path, geodata_mode),
-            Self::FrozenYaml(source) => Config::from_yaml_with_geodata_mode(source, geodata_mode),
+            Self::File(path) => Ok(Config::from_yaml_at_path_with_geodata_mode(
+                &decrypt_yaml(std::fs::read(path)?.as_slice(), age_secret_key)?,
+                path,
+                geodata_mode,
+            )?),
+            Self::FrozenYaml(source) => Ok(Config::from_yaml_with_geodata_mode(
+                &decrypt_yaml(source.as_bytes(), age_secret_key)?,
+                geodata_mode,
+            )?),
         }
     }
 
@@ -129,15 +153,25 @@ async fn main() {
     }
 }
 
-async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if arguments.version {
         print_version();
         return Ok(());
     }
+    let age_secret_key = arguments
+        .age_secret_key
+        .clone()
+        .or_else(|| std::env::var("CLASH_AGE_SECRET_KEY").ok())
+        .unwrap_or_default();
+    if !age_secret_key.is_empty()
+        && let Err(error) = rewrite_age::validate_x25519_identity(&age_secret_key)
+    {
+        eprintln!("Parse age-secret-key error: {error}");
+    }
     let input = resolve_config_input(&arguments)?;
     if arguments.test {
         input
-            .specification(arguments.geodata_mode)?
+            .specification(arguments.geodata_mode, &age_secret_key)?
             .validate_declared_surface()?;
         println!(
             "configuration file {} test is successful",
@@ -147,7 +181,7 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
     }
 
     let overrides = RuntimeOverrides::from_arguments(&arguments);
-    let config = overrides.apply(input.runtime_config(arguments.geodata_mode)?);
+    let config = overrides.apply(input.runtime_config(arguments.geodata_mode, &age_secret_key)?);
     let post_up = arguments
         .post_up
         .as_deref()
@@ -194,6 +228,7 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
         shutdown.clone(),
         input,
         arguments.geodata_mode,
+        age_secret_key,
         overrides,
         reload_sender,
     );
@@ -256,6 +291,16 @@ fn print_version() {
     );
 }
 
+fn decrypt_yaml(
+    data: &[u8],
+    age_secret_key: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(String::from_utf8(rewrite_age::decrypt_config(
+        data,
+        age_secret_key,
+    )?)?)
+}
+
 fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut normalized = Vec::new();
     let mut value_follows = false;
@@ -271,18 +316,27 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
             normalized.push(argument);
         } else if matches!(
             argument.to_str(),
-            Some("-config" | "-ext-ctl" | "-secret" | "-post-up" | "-post-down")
+            Some(
+                "-config" | "-ext-ctl" | "-secret" | "-age-secret-key" | "-post-up" | "-post-down"
+            )
         ) {
             normalized.push(OsString::from(format!("-{}", argument.to_string_lossy())));
             value_follows = true;
         } else if let Some((name, value)) = argument.to_str().and_then(|value| {
-            ["config", "ext-ctl", "secret", "post-up", "post-down"]
-                .into_iter()
-                .find_map(|name| {
-                    value
-                        .strip_prefix(&format!("-{name}="))
-                        .map(|value| (name, value))
-                })
+            [
+                "config",
+                "ext-ctl",
+                "secret",
+                "age-secret-key",
+                "post-up",
+                "post-down",
+            ]
+            .into_iter()
+            .find_map(|name| {
+                value
+                    .strip_prefix(&format!("-{name}="))
+                    .map(|value| (name, value))
+            })
         }) {
             normalized.push(OsString::from(format!("--{name}={value}")));
         } else {
@@ -293,6 +347,7 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
                         | "--config"
                         | "--ext-ctl"
                         | "--secret"
+                        | "--age-secret-key"
                         | "--post-up"
                         | "--post-down"
                 )
@@ -303,7 +358,9 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
     normalized
 }
 
-fn resolve_config_input(arguments: &Arguments) -> Result<ConfigInput, Box<dyn std::error::Error>> {
+fn resolve_config_input(
+    arguments: &Arguments,
+) -> Result<ConfigInput, Box<dyn std::error::Error + Send + Sync>> {
     let current_directory = std::env::current_dir()?;
     let home_value = arguments
         .home
@@ -401,6 +458,7 @@ fn install_signals(
     shutdown: CancellationToken,
     input: ConfigInput,
     geodata_mode: bool,
+    age_secret_key: String,
     overrides: RuntimeOverrides,
     reload_sender: mpsc::Sender<Config>,
 ) {
@@ -441,7 +499,7 @@ fn install_signals(
                             break;
                         }
                         match input
-                            .runtime_config(geodata_mode)
+                            .runtime_config(geodata_mode, &age_secret_key)
                             .map(|config| overrides.apply(config))
                         {
                             Ok(config) => {
@@ -479,6 +537,7 @@ mod tests {
             OsString::from("-ext-ctl"),
             OsString::from("127.0.0.1:9090"),
             OsString::from("-secret=token"),
+            OsString::from("-age-secret-key=AGE-SECRET-KEY-1EXAMPLE"),
             OsString::from("-post-up"),
             OsString::from("echo up"),
             OsString::from("-post-down=echo down"),
@@ -495,6 +554,7 @@ mod tests {
                 "--ext-ctl",
                 "127.0.0.1:9090",
                 "--secret=token",
+                "--age-secret-key=AGE-SECRET-KEY-1EXAMPLE",
                 "--post-up",
                 "echo up",
                 "--post-down=echo down",
