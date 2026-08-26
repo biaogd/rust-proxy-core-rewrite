@@ -1616,20 +1616,87 @@ async fn probe_h3(upstream: SocketAddr, tls: &DnsTlsConfig) -> Result<(), DnsErr
 }
 
 fn h3_endpoint(tls: &DnsTlsConfig) -> Result<quinn::Endpoint, DnsError> {
+    verified_quic_endpoint(tls, b"h3", true)
+}
+
+fn verified_quic_endpoint(
+    tls: &DnsTlsConfig,
+    alpn: &[u8],
+    disable_resumption: bool,
+) -> Result<quinn::Endpoint, DnsError> {
     let mut crypto = verified_client_config(tls)?;
-    crypto.alpn_protocols = vec![b"h3".to_vec()];
+    crypto.alpn_protocols = vec![alpn.to_vec()];
     // The pinned Go DoH client leaves ClientSessionCache unset. It labels H3
     // GETs as 0-RTT-capable, but reconnects cannot actually resume TLS and the
     // authority observes a full handshake. Disable rustls resumption to keep
     // that externally visible behavior until the oracle changes.
-    crypto.enable_early_data = false;
-    crypto.resumption = tokio_rustls::rustls::client::Resumption::disabled();
+    if disable_resumption {
+        crypto.enable_early_data = false;
+        crypto.resumption = tokio_rustls::rustls::client::Resumption::disabled();
+    }
     let crypto =
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(std::io::Error::other)?;
     let config = quinn::ClientConfig::new(Arc::new(crypto));
     let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0)))?;
     endpoint.set_default_client_config(config);
     Ok(endpoint)
+}
+
+async fn query_quic_verified(
+    query: &[u8],
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+) -> Result<Vec<u8>, DnsError> {
+    let endpoint = verified_quic_endpoint(tls, b"doq", false)?;
+    let address = resolve_tls_endpoint(upstream, tls).await?;
+    let connecting = endpoint
+        .connect(address, &tls.tls_server_name)
+        .map_err(std::io::Error::other)?;
+    let connection = tokio::time::timeout(UPSTREAM_TIMEOUT, connecting)
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)?;
+    let result = tokio::time::timeout(UPSTREAM_TIMEOUT, async {
+        let (mut sender, mut receiver) =
+            connection.open_bi().await.map_err(std::io::Error::other)?;
+        let mut upstream_query = query.to_vec();
+        upstream_query[..2].fill(0);
+        let length = u16::try_from(upstream_query.len())
+            .map_err(|_| DnsError::InvalidMessage("DoQ query is too large"))?;
+        sender
+            .write_all(&length.to_be_bytes())
+            .await
+            .map_err(std::io::Error::other)?;
+        sender
+            .write_all(&upstream_query)
+            .await
+            .map_err(std::io::Error::other)?;
+        sender.finish().map_err(std::io::Error::other)?;
+
+        let mut length = [0_u8; 2];
+        receiver
+            .read_exact(&mut length)
+            .await
+            .map_err(std::io::Error::other)?;
+        let response_length = usize::from(u16::from_be_bytes(length));
+        if response_length == 0 {
+            return Err(DnsError::InvalidMessage("DoQ response is empty"));
+        }
+        let mut response = vec![0_u8; response_length];
+        receiver
+            .read_exact(&mut response)
+            .await
+            .map_err(std::io::Error::other)?;
+        if response.len() < DNS_HEADER_LENGTH {
+            return Err(DnsError::InvalidMessage("DoQ response is too short"));
+        }
+        response[..2].copy_from_slice(&query[..2]);
+        Ok(response)
+    })
+    .await
+    .map_err(|_| DnsError::UpstreamTimeout)?;
+    connection.close(0_u32.into(), b"Phase 4E17 one-shot DoQ complete");
+    result
 }
 
 async fn connect_h3(
@@ -2153,6 +2220,7 @@ fn cache_key(query: &[u8], transport: DnsTransport, upstream: SocketAddr) -> Vec
         DnsTransport::TlsVerifiedReuse => 5,
         DnsTransport::HttpReuse => 6,
         DnsTransport::HttpsVerifiedReuse => 7,
+        DnsTransport::QuicVerifiedNoReuse => 8,
     });
     key.extend_from_slice(upstream.to_string().as_bytes());
     key.push(0);
@@ -2208,6 +2276,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
             DnsTransport::TlsVerifiedReuse => 5,
             DnsTransport::HttpReuse => 6,
             DnsTransport::HttpsVerifiedReuse => 7,
+            DnsTransport::QuicVerifiedNoReuse => 8,
         });
         key.extend_from_slice(fallback.upstream.address.to_string().as_bytes());
         key.push(u8::from(fallback.lazy));
@@ -2323,6 +2392,12 @@ async fn query_one(
                 "verified HTTPS upstream lacks verification configuration",
             ))?;
             query_https_verified_reuse(query, upstream.address, tls, tls_pool).await
+        }
+        DnsTransport::QuicVerifiedNoReuse => {
+            let tls = tls.ok_or(DnsError::InvalidMessage(
+                "verified DoQ upstream lacks verification configuration",
+            ))?;
+            query_quic_verified(query, upstream.address, tls).await
         }
     }
 }

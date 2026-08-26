@@ -37,11 +37,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E14 domain HTTPS bootstrap/trust | Complete in declared scope | `DNS-07`; one loopback UDP bootstrap, URL-domain Host/SNI and default/name-override/skip verification-precedence differential suite passed |
 | Phase 4E15 DoH HTTP/2 | Complete in declared scope | `DNS-08`; ALPN `h2`, RFC 8484 GET, sequential stream reuse and HTTP/1.1 fallback differential suite passed |
 | Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
+| Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E16 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E17 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E16 subset remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E17 subset remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -1773,6 +1774,61 @@ workspace `fmt`/`clippy`/`test`, and Go/with-gVisor baseline gates are configure
 in `.github/workflows/rust-rewrite.yml`; their result is intentionally left to
 GitHub Actions and is not pre-claimed here.
 
+## Phase 4E17 deliverables and evidence
+
+Phase 4E17 adds the declared verified DNS-over-QUIC framing slice. The Rust
+configuration accepts exactly one explicit-port loopback `quic://` main
+upstream with an explicit `name-cert-verify` value. It uses the existing inline
+custom-root trust path and opens a QUIC connection with ALPN `doq`.
+
+For one query, Rust opens one bidirectional stream, copies and clears the DNS
+message ID, writes a two-octet big-endian length followed by the DNS message,
+and finishes the sending direction before reading. It rejects a zero response
+length, reads exactly the declared response payload and restores the original
+client ID. The connection is deliberately one-shot in this phase so no reuse,
+retry or token behavior is implied.
+
+`compat/scripts/phase4e17.py` runs the pinned Go oracle and Rust candidate
+against `compat/helpers/doq-authority`, a deterministic local QUIC authority.
+The authority records established connections, streams, negotiated ALPN, SNI,
+declared/payload/trailing lengths, zero DNS ID and observed FIN. The suite
+compares configuration validation, a verified answer, wrong certificate-name
+SERVFAIL and zero-length-response SERVFAIL, including process exit status and
+response-ID restoration.
+
+Observed Phase 4E17 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4e17.py`; Go 1.26.5, Rust 1.95.0 and deterministic loopback DoQ authority |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4E17; no result is recorded before that run completes |
+
+No new Rust dependency was introduced for this gate. It reuses locked
+`quinn` 0.11.11 (MIT OR Apache-2.0) and the existing rustls trust path. The Go
+authority reuses the oracle module's already-pinned `metacubex/quic-go` and
+`metacubex/tls` dependencies as a development-only fixture.
+
+Default-port and domain/bootstrap DoQ, IP-name/default/system/skip trust
+matrices, connection reuse, multiple/concurrent streams, stale-connection
+retry, token and 0-RTT behavior, reload reset, cancellation stress, proxy
+routing and encrypted-upstream wrapper parameters remain unclaimed.
+
+### Phase 4E17 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4e17.py
+```
+
+The format check, complete workspace Clippy gate and Phase 4E17 differential
+suite passed locally. The complete Phase 1–4E17 differential regression,
+workspace tests and Go/with-gVisor baseline gates remain delegated to the
+default GitHub Actions workflow; their result is not pre-claimed here.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -1848,10 +1904,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4E16 DoH HTTP/3 boundary. Phase 4D3B, 4E17 or
-another implementation gate must not begin without a separate instruction and
-the exact inventory IDs/matrix rows. Accepted 0-RTT and broader HTTP/3/HTTP/2
-lifecycle, general encrypted-DNS pool/retry behavior, concurrent DoH
-scheduling, DoQ, arbitrary RR/cache control, proxy-server nameservers,
-`respect-rules`, intercepted DNS, TUN, remote proxy protocols, providers and
-broader REST/platform compatibility are planned but not implied by this status.
+Rust behavior stops at the Phase 4E17 verified DoQ framing boundary. Phase
+4D3B, 4E18 or another implementation gate must not begin without a separate
+instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
+HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
+DoH and DoQ scheduling, broader DoQ lifecycle, arbitrary RR/cache control,
+proxy-server nameservers, `respect-rules`, intercepted DNS, TUN, remote proxy
+protocols, providers and broader REST/platform compatibility are planned but
+not implied by this status.

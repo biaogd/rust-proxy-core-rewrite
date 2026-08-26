@@ -349,7 +349,15 @@ must not be used to claim a later resolver or mapping behavior:
    classification but the authority observes `Used0RTT=false`; Rust must match
    that observable result and must not claim accepted 0-RTT. QUIC token and
    rejection matrices, accepted resumption, concurrent streams,
-   flow-control/GOAWAY behavior, proxy routing and DoQ remain later gates.
+   flow-control/GOAWAY behavior and proxy routing remain later gates. Phase
+   4E17 accepts one explicit-port loopback `quic://` main upstream with one
+   inline custom root and an explicit certificate-name override. It verifies
+   ALPN `doq`, one bidirectional QUIC stream, the two-octet request and response
+   length fields, zero upstream DNS ID, request FIN, response-ID restoration,
+   wrong-name rejection and zero-length-response failure. The test sends only
+   one successful request per runtime, so it does not claim connection reuse,
+   multiple streams, retry, token/0-RTT, reset or concurrency; those remain
+   Phase 4E18.
 
 Phase 4A does not claim system resolvers, multiple-upstream selection,
 negative/stale/singleflight cache behavior, EDNS rewriting, hosts, fake IP,

@@ -91,6 +91,7 @@ pub enum DnsTransport {
     TlsVerifiedReuse,
     HttpReuse,
     HttpsVerifiedReuse,
+    QuicVerifiedNoReuse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -986,9 +987,55 @@ fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, Con
     if value.starts_with("https://") {
         return parse_http_dns_upstream(value, field, true);
     }
+    if let Some(value) = value.strip_prefix("quic://") {
+        return parse_quic_dns_upstream(value, field);
+    }
     Err(ConfigError::InvalidDns(format!(
         "{field} must use a declared UDP, TCP or Phase 4E encrypted upstream"
     )))
+}
+
+fn parse_quic_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, ConfigError> {
+    if field != "dns.nameserver" {
+        return Err(ConfigError::InvalidDns(
+            "Phase 4E17 permits quic:// only for dns.nameserver".to_owned(),
+        ));
+    }
+    let (endpoint, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let mut verification_name = None;
+    for parameter in fragment
+        .split('&')
+        .filter(|parameter| !parameter.is_empty())
+    {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err(ConfigError::InvalidDns(
+                "Phase 4E17 does not permit DoQ proxy-name fragments".to_owned(),
+            ));
+        };
+        if name != "name-cert-verify" || value.is_empty() || verification_name.is_some() {
+            return Err(ConfigError::InvalidDns(format!(
+                "Phase 4E17 does not permit DoQ parameter {name}"
+            )));
+        }
+        verification_name = Some(normalize_tls_server_name(value)?);
+    }
+    let server_name = verification_name.ok_or_else(|| {
+        ConfigError::InvalidDns(
+            "Phase 4E17 requires an explicit DoQ name-cert-verify parameter".to_owned(),
+        )
+    })?;
+    let address = parse_loopback_dns_addr(endpoint, field)?;
+    Ok(ParsedDnsUpstream {
+        transport: DnsTransport::QuicVerifiedNoReuse,
+        address,
+        server_name: Some(server_name),
+        tls_server_name: Some(address.ip().to_string()),
+        skip_certificate_verification: false,
+        doh_path: None,
+        doh_basic_credentials: None,
+        endpoint_host: None,
+        doh_h3_only: false,
+    })
 }
 
 fn parse_tls_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, ConfigError> {
@@ -2210,6 +2257,39 @@ dns:
         assert!(matches!(
             Config::from_yaml(&invalid),
             Err(ConfigError::InvalidDns(_))
+        ));
+    }
+
+    #[test]
+    fn parses_phase_four_e_seventeen_verified_doq() {
+        let source = r"
+tls:
+  custom-certifactes:
+    - |-
+      -----BEGIN CERTIFICATE-----
+      issuing-root
+      -----END CERTIFICATE-----
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  nameserver:
+    - quic://127.0.0.1:8853#name-cert-verify=dot.phase4.test
+";
+        let dns = Config::from_yaml(source)
+            .expect("Phase 4E17 config")
+            .dns
+            .expect("DNS");
+        assert_eq!(dns.transport, DnsTransport::QuicVerifiedNoReuse);
+        assert_eq!(dns.upstream, "127.0.0.1:8853".parse().expect("address"));
+        let tls = dns.tls.expect("verification settings");
+        assert_eq!(tls.server_name, "dot.phase4.test");
+        assert_eq!(tls.tls_server_name, "127.0.0.1");
+        assert_eq!(tls.trust_certificates.len(), 1);
+
+        let missing_name = source.replace("#name-cert-verify=dot.phase4.test", "");
+        assert!(matches!(
+            Config::from_yaml(&missing_name),
+            Err(ConfigError::InvalidDns(message)) if message.contains("Phase 4E17")
         ));
     }
 }
