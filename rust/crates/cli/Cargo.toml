@@ -20,6 +20,7 @@ rewrite-ruleset = { path = "../ruleset" }
 tokio.workspace = true
 tokio-util.workspace = true
 time.workspace = true
+uuid.workspace = true
 
 [build-dependencies]
 rustc_version.workspace = true

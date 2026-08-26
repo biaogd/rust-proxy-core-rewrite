@@ -742,6 +742,17 @@ failure path. Invalid-entry warning log parity, permissive streaming-YAML
 recovery, classical records and runtime provider consumption remain later
 slices.
 
+### Phase 5A6a accepted scope
+
+Phase 5A6a accepts only `generate uuid` from `CLI-09`. Rust delegates random
+UUID construction and canonical formatting to `uuid` 1.25.0 (Apache-2.0 OR
+MIT), a maintained portable crate requiring no platform-specific implementation
+in this slice. The differential validates lowercase canonical shape, RFC 4122
+variant and version 4 bits rather than comparing random values, plus ignored
+trailing arguments, configuration-startup short-circuit, the oracle's silent
+unknown-command result and missing-command exit class. Reality/WireGuard/ECH,
+VLESS and Sudoku key generators remain later 5A6 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

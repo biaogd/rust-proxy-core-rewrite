@@ -147,6 +147,13 @@ impl ConfigInput {
 #[tokio::main]
 async fn main() {
     let raw_arguments: Vec<_> = std::env::args_os().collect();
+    if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("generate") {
+        if let Err(error) = run_generate_subcommand(&raw_arguments[2..]) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("convert-ruleset") {
         if let Err(error) = run_convert_ruleset_subcommand(&raw_arguments[2..]) {
             eprintln!("{error}");
@@ -166,6 +173,21 @@ async fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn run_generate_subcommand(
+    arguments: &[OsString],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(command) = arguments.first() else {
+        return Err(std::io::Error::other(
+            "Using: generate uuid/reality-keypair/wg-keypair/ech-keypair/vless-mlkem768/vless-x25519/sudoku-keypair",
+        )
+        .into());
+    };
+    if command.to_str() == Some("uuid") {
+        println!("{}", uuid::Uuid::new_v4());
+    }
+    Ok(())
 }
 
 fn run_convert_ruleset_subcommand(
