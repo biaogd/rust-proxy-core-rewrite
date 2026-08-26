@@ -454,6 +454,16 @@ multi-client default set is wired through every domain-bootstrap consumer and a
 real remote outbound consumes the proxy-server resolver; those consumers must
 not be inferred from the development lookup contract.
 
+Phase 4F8 accepts ordered main and proxy-server resolver policies. Policy
+values may contain multiple clients from the already accepted resolver set;
+domain entries retain exact/wildcard/suffix trie priority and later writes to
+the same node win. GeoSite and rule-set matchers are order barriers exactly as
+in the Go resolver. The gate covers all four GeoSite domain matcher types and
+inline `domain` plus domain-bearing `classical` rule providers. File/HTTP/MRS
+rule-provider loading, GeoSite attributes, `respect-rules`, and consumption by
+a real remote proxy outbound remain later integration gates rather than
+implicit Phase 4F8 claims.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

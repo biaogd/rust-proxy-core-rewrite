@@ -1,5 +1,5 @@
 use std::env;
-use std::fs;
+use std::path::Path;
 
 use rewrite_config::Config;
 use rewrite_dns::{
@@ -15,8 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if arguments.next().is_some() {
         return Err("unexpected extra argument".into());
     }
-    let source = fs::read_to_string(config_path)?;
-    let config = Config::from_yaml(&source)?;
+    let config = Config::from_path(Path::new(&config_path))?;
     let dns = config.dns.as_ref().ok_or("DNS is disabled")?;
     let address = match resolver_set.as_str() {
         "main" => resolve_domain(dns, &host, false).await?,

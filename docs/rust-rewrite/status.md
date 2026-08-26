@@ -47,11 +47,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F5 RCODE/Tailscale DNS boundary | Complete in declared scope; DNS-05 partial | Six synthetic RCODE wire paths and the named Tailscale resolver registration lifecycle pass; actual tsnet transport remains Phase 7K |
 | Phase 4F6 classic DNS wrappers | Complete in declared scope; DNS-10 partial | Per-upstream ECS/disable wrappers pass on UDP/TCP, including invalid/false values, multi-section filtering and wrapper identity; proxy/rule routing remains |
 | Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; complete bootstrap/proxy consumers remain |
+| Phase 4F8 resolver policies | Complete in declared core; DNS-12 partial | Ordered main/proxy multi-resolver domain/GeoSite/inline-rule-set policies pass; external providers, attributes and adapter consumers remain |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F7 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F8 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F7 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F8 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2357,6 +2358,61 @@ Clippy gate passed locally. Complete Phase 1–4F7 regression, workspace tests a
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+## Phase 4F8 deliverables and evidence
+
+Phase 4F8 changes both `dns.nameserver-policy` and
+`dns.proxy-server-nameserver-policy` into ordered streams of resolver sets.
+YAML insertion order is retained. Contiguous domain entries behave as one Go
+trie group, including exact-over-wildcard priority and later overwrite of an
+equal node; GeoSite and rule-set matchers terminate a domain group and are
+checked in their declared order. Direct-follow-policy reuses the expanded main
+policy stream, while proxy lookups use an independent proxy policy stream.
+
+File-backed Rust configurations decode a local `GeoSite.dat` and support its
+Plain, Regex, Domain and Full domain matcher types. Inline rule providers with
+`domain` behavior and domain-bearing `classical` rules are accepted solely as
+DNS matcher data. `prost` 0.14 is used only for the stable GeoSite protobuf wire
+format and `regex` 1.x only for the corresponding regex matcher. Both are
+maintained pure-Rust crates under MIT/Apache-2.0-compatible licensing and add no
+platform API or runtime network dependency.
+
+`compat/scripts/phase4f8.py` creates the GeoSite protobuf fixture locally and
+starts distinct loopback authorities. It compares product configuration exits,
+selected addresses and authority contacts for: a domain group before a matcher,
+a matcher before a later domain group, same-node overwrite, comma expansion,
+all four GeoSite types, inline domain/classical rule sets, main multi-client
+selection and proxy-policy multi-client selection. Protocol-specific handshakes
+are retained from Phase 4E; the composition gate uses deterministic UDP/TCP.
+Product validation additionally places every previously accepted resolver
+transport and special client in a policy value without re-claiming its wire
+handshake.
+
+This remains a **partial** `DNS-12` result. File/HTTP/MRS rule-provider vehicles,
+GeoSite attributes, dynamic provider refresh, `respect-rules`, and use by a real
+remote proxy outbound remain separate provider/adapter integration gates.
+
+Observed Phase 4F8 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared core passed; DNS-12 partial | Native `compat/scripts/phase4f8.py`; generated GeoSite data and deterministic main/proxy UDP/TCP policy sets |
+| Linux amd64 | Pending | Default full differential includes Phase 4F8; no result is recorded before completion |
+
+### Phase 4F8 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f8.py
+```
+
+The Phase 4F8 differential, format check and strict workspace Clippy gate passed
+locally. Complete Phase 1–4F8 regression, workspace tests and Go/with-gVisor
+baseline remain delegated to GitHub Actions; no result is pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2432,13 +2488,13 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the partial Phase 4F7 resolver-set boundary. `DNS-03`–`DNS-05`
-retain the platform/integration gaps documented above, while `DNS-10` still
-excludes proxy/rule routing and `DNS-11` retains the consumer gaps above. Phase 4D3B,
-4F8 or another implementation gate must not begin without a separate
+Rust behavior stops at the partial Phase 4F8 resolver-policy boundary.
+`DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
+`DNS-10`–`DNS-12` retain the adapter/provider consumer gaps above. Phase 4D3B,
+4F9 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
-selection/cache control, proxy-server nameservers, `respect-rules`, intercepted
-DNS, TUN, remote proxy protocols, providers and broader REST/platform
+selection/cache control, `respect-rules`, intercepted DNS, TUN, remote proxy
+protocols, external providers and broader REST/platform
 compatibility are planned but not implied by this status.

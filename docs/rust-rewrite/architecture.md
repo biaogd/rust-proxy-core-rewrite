@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F7 Rust boundary now implemented
+## Phase 1–4F8 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -60,7 +60,7 @@ Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
 resource is created. The spec layer overlays the declared Go defaults, validates
 the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
 spec into executable `Config` is a separate fallible step which accepts only
-the incrementally declared Phase 1–4D1 runtime slices. This prevents parser
+the incrementally declared Phase 1–4F8 runtime slices. This prevents parser
 coverage from being mistaken for implemented protocol behavior.
 
 `rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
@@ -139,6 +139,17 @@ already proven transport wire paths. Direct-follow-policy is evaluated before
 the direct set. Default and proxy sets expose the same lookup boundary used by
 their future product consumers, without introducing a remote proxy adapter.
 
+Phase 4F8 replaces the Phase 4D1 single-socket policy value with an ordered
+`DnsPolicy` stream whose value is a resolver set. Contiguous domain entries
+are evaluated as one Go-compatible trie group: exact labels outrank wildcard
+labels, and later entries overwrite an equal trie node. GeoSite and rule-set
+matchers split those groups and are evaluated in YAML order. Main and
+proxy-server resolver policies are independent; a selected policy enters the
+same multi-client query path and cache identity as every other resolver set.
+File-backed configs load `GeoSite.dat` beside the config, while Phase 4F8 rule
+sets deliberately accept inline `domain` and domain-bearing `classical`
+providers only.
+
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
 paths and can read the native Unix host file when enabled. DNS A/AAAA answers
@@ -163,12 +174,11 @@ Profile-enabled pools persist mapping and offset into Rust-specific JSON files
 under the candidate home. This proves restart behavior but intentionally does
 not claim compatibility with Go's bbolt `cache.db` file format.
 
-Phase 4D1 represents each declared `nameserver-policy` entry as an owned
-pattern plus one classic upstream. `rewrite-dns` ranks matching patterns before
-the cache lookup: static labels outrank a whole-label wildcard, and both
-outrank the `+.` suffix fallback. The selected transport and socket address are
-part of the existing cache key. This stays inside the DNS crate and does not
-introduce proxy routing or a callback into the tunnel.
+Phase 4D1's original single-classic-upstream policy remains compatibility
+evidence but its implementation is subsumed by the Phase 4F8 ordered
+multi-resolver policy stream. The selected resolver-set identity is part of the
+cache key. This stays inside the DNS crate and does not introduce a callback
+into the tunnel or claim a real remote proxy outbound.
 
 Phase 4D2 adds a single classic fallback and answer filters within the same DNS
 boundary. Phase 4D3A lets ordered IP rules request lazy main resolution and
@@ -541,8 +551,9 @@ introduced `rewrite-platform` for system resolver discovery and Phase 4F4
 extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
 refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
 adds no protocol or platform dependency; Phase 4F6 extends those same crates
-with per-classic-upstream wrapper state, and Phase 4F7 adds resolver-set
-composition plus a development-only differential helper. `rewrite-platform`
+with per-classic-upstream wrapper state, Phase 4F7 adds resolver-set
+composition, and Phase 4F8 adds ordered policy matchers plus development-only
+differential helpers. `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 

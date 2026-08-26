@@ -14,6 +14,7 @@ h3-quinn.workspace = true
 http.workspace = true
 quinn.workspace = true
 rewrite-config = { path = "../config" }
+regex.workspace = true
 rewrite-platform = { path = "../platform" }
 rewrite-state = { path = "../state" }
 serde.workspace = true

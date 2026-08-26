@@ -1,12 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use ipnet::IpNet;
+use prost::Message;
+use regex::Regex;
 use rewrite_model::AuthUser;
 use rewrite_rules::{RematchSpec, RuleError, RuleSet};
 use serde::{Deserialize, Serialize};
-use serde_yaml_ng::Value;
+use serde_yaml_ng::{Mapping, Value};
 use thiserror::Error;
 use url::Url;
 
@@ -138,6 +140,7 @@ pub struct DnsConfig {
     pub mode: DnsMode,
     pub fake_ip: Option<FakeIpConfig>,
     pub policies: Vec<DnsPolicy>,
+    pub proxy_policies: Vec<DnsPolicy>,
     pub fallback: Option<DnsFallbackConfig>,
     pub direct: Option<DnsDirectConfig>,
     pub tls: Option<DnsTlsConfig>,
@@ -257,9 +260,47 @@ pub struct DnsDirectConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsPolicy {
-    pub pattern: String,
-    pub upstream: SocketAddr,
-    pub transport: DnsTransport,
+    pub matcher: DnsPolicyMatcher,
+    pub resolvers: Vec<DnsResolverClient>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsPolicyMatcher {
+    Domain(String),
+    Geosite {
+        name: String,
+        domains: Vec<GeositeDomain>,
+    },
+    RuleSet {
+        name: String,
+        domains: Vec<RuleSetDomain>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeositeDomainKind {
+    Plain,
+    Regex,
+    Domain,
+    Full,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeositeDomain {
+    pub kind: GeositeDomainKind,
+    pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleSetDomainKind {
+    Trie,
+    Keyword,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleSetDomain {
+    pub kind: RuleSetDomainKind,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -326,6 +367,7 @@ struct RawConfig {
     rules: Option<Vec<String>>,
     sub_rules: Option<BTreeMap<String, Vec<String>>>,
     proxies: Option<Vec<RawProxy>>,
+    rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -362,13 +404,14 @@ struct RawDns {
     fake_ip_ttl: Option<i64>,
     default_nameserver: Option<Vec<String>>,
     nameserver: Option<Vec<String>>,
-    nameserver_policy: Option<BTreeMap<String, RawNameserverValue>>,
+    nameserver_policy: Option<Mapping>,
     fallback: Option<Vec<String>>,
     fallback_filter: Option<RawFallbackFilter>,
     fallback_lazy_query: Option<bool>,
     direct_nameserver: Option<Vec<String>>,
     direct_nameserver_follow_policy: Option<bool>,
     proxy_server_nameserver: Option<Vec<String>>,
+    proxy_server_nameserver_policy: Option<Mapping>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -384,11 +427,14 @@ struct RawFallbackFilter {
     extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawNameserverValue {
-    One(String),
-    Many(Vec<String>),
+#[derive(Debug, Default, Deserialize)]
+struct RawRuleProvider {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    behavior: Option<String>,
+    payload: Option<Vec<String>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -448,6 +494,10 @@ impl ConfigSpec {
     /// Returns [`ConfigError`] for malformed YAML, invalid enums, unsupported
     /// proxy specifications or invalid pure rules.
     pub fn from_yaml(source: &str) -> Result<Self, ConfigError> {
+        Self::from_source(source, None)
+    }
+
+    fn from_source(source: &str, config_directory: Option<&Path>) -> Result<Self, ConfigError> {
         let raw = serde_yaml_ng::from_str::<Option<RawConfig>>(source)?.unwrap_or_default();
         let mode = parse_mode(raw.mode.as_deref().unwrap_or("rule"))?;
         let log_level = parse_log_level(raw.log_level.as_deref().unwrap_or("info"))?;
@@ -457,6 +507,14 @@ impl ConfigSpec {
         let rules = RuleSet::parse(&raw_rules, &raw_sub_rules, &rematches)?;
         let store_fake_ip = parse_profile(raw.profile)?;
         let trust_certificates = parse_tls(raw.tls)?;
+        let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
+        let dns = parse_dns(
+            raw.dns,
+            &trust_certificates,
+            &rule_providers,
+            config_directory,
+        )?;
+        validate_rule_provider_usage(&rule_providers, dns.as_ref())?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -481,7 +539,7 @@ impl ConfigSpec {
             external_controller: raw.external_controller.unwrap_or_default(),
             secret: raw.secret.unwrap_or_default(),
             store_fake_ip,
-            dns: parse_dns(raw.dns, &trust_certificates)?,
+            dns,
             hosts: parse_hosts(raw.hosts.unwrap_or_default())?,
             raw_rules,
             raw_sub_rules,
@@ -497,7 +555,7 @@ impl ConfigSpec {
     ///
     /// Returns [`ConfigError`] for file I/O or specification errors.
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
-        Self::from_yaml(&std::fs::read_to_string(path)?)
+        Self::from_source(&std::fs::read_to_string(path)?, path.parent())
     }
 
     /// Ensures no top-level feature outside the declared Phase 2 parser surface
@@ -740,6 +798,8 @@ fn parse_tls(raw: Option<RawTls>) -> Result<Vec<String>, ConfigError> {
 fn parse_dns(
     raw: Option<RawDns>,
     trust_certificates: &[String],
+    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
 ) -> Result<Option<DnsConfig>, ConfigError> {
     let Some(mut raw) = raw else {
         return Ok(None);
@@ -773,7 +833,32 @@ fn parse_dns(
         .ok_or_else(|| ConfigError::InvalidDns("dns.listen is required".to_owned()))?;
     let listen = parse_loopback_dns_addr(&listen_text, "dns.listen")?;
     let resolver_sets = parse_dns_resolver_sets(&mut raw, trust_certificates)?;
-    let policies = parse_dns_policies(raw.nameserver_policy.take().unwrap_or_default())?;
+    let policies = parse_dns_policies(
+        raw.nameserver_policy.take().unwrap_or_default(),
+        "dns.nameserver-policy",
+        &resolver_sets.default_nameservers,
+        raw.prefer_h3.unwrap_or(false),
+        trust_certificates,
+        rule_providers,
+        config_directory,
+    )?;
+    let proxy_policies = parse_dns_policies(
+        raw.proxy_server_nameserver_policy
+            .take()
+            .unwrap_or_default(),
+        "dns.proxy-server-nameserver-policy",
+        &resolver_sets.default_nameservers,
+        raw.prefer_h3.unwrap_or(false),
+        trust_certificates,
+        rule_providers,
+        config_directory,
+    )?;
+    if !proxy_policies.is_empty() && resolver_sets.proxy_resolvers.is_empty() {
+        return Err(ConfigError::InvalidDns(
+            "disallow empty dns.proxy-server-nameserver when proxy-server-nameserver-policy is set"
+                .to_owned(),
+        ));
+    }
     let main = resolver_sets.main;
     Ok(Some(DnsConfig {
         listen,
@@ -790,6 +875,7 @@ fn parse_dns(
         mode,
         fake_ip,
         policies,
+        proxy_policies,
         fallback: resolver_sets.fallback,
         direct: resolver_sets.direct,
         tls: main.tls,
@@ -801,6 +887,7 @@ struct ParsedDnsResolverSets {
     main: ParsedMainNameservers,
     main_resolvers: Vec<DnsResolverClient>,
     default_resolvers: Vec<DnsResolverClient>,
+    default_nameservers: Vec<String>,
     proxy_resolvers: Vec<DnsResolverClient>,
     fallback: Option<DnsFallbackConfig>,
     direct: Option<DnsDirectConfig>,
@@ -852,6 +939,7 @@ fn parse_dns_resolver_sets(
         main,
         main_resolvers,
         default_resolvers,
+        default_nameservers: defaults,
         proxy_resolvers,
         fallback,
         direct,
@@ -1359,33 +1447,284 @@ fn parse_fallback(
     }))
 }
 
-fn parse_dns_policies(
-    raw: BTreeMap<String, RawNameserverValue>,
-) -> Result<Vec<DnsPolicy>, ConfigError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuleProviderBehavior {
+    Domain,
+    Classical,
+    IpCidr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedRuleProvider {
+    behavior: RuleProviderBehavior,
+    domains: Vec<RuleSetDomain>,
+}
+
+fn parse_rule_providers(
+    raw: BTreeMap<String, RawRuleProvider>,
+) -> Result<BTreeMap<String, ParsedRuleProvider>, ConfigError> {
     raw.into_iter()
-        .map(|(pattern, value)| {
-            let pattern = normalize_policy_pattern(&pattern)?;
-            let servers = match value {
-                RawNameserverValue::One(server) => vec![server],
-                RawNameserverValue::Many(servers) => servers,
-            };
-            if servers.len() != 1 {
+        .map(|(name, provider)| {
+            if provider.kind.as_deref() != Some("inline") {
                 return Err(ConfigError::InvalidDns(format!(
-                    "dns.nameserver-policy {pattern} requires exactly one upstream in Phase 4D1"
+                    "Phase 4F8 rule provider {name} must use type inline"
                 )));
             }
-            let parsed = parse_dns_upstream(&servers[0], "dns.nameserver-policy")?;
-            debug_assert!(parsed.server_name.is_none());
-            debug_assert!(parsed.doh_path.is_none());
-            debug_assert!(parsed.doh_basic_credentials.is_none());
-            debug_assert!(parsed.endpoint_host.is_none());
-            Ok(DnsPolicy {
-                pattern,
-                upstream: parsed.address,
-                transport: parsed.transport,
-            })
+            if let Some(key) = provider.extra.keys().next() {
+                return Err(ConfigError::InvalidDns(format!(
+                    "unsupported Phase 4F8 rule provider field {name}.{key}"
+                )));
+            }
+            let behavior = match provider.behavior.as_deref() {
+                Some("domain") => RuleProviderBehavior::Domain,
+                Some("classical") => RuleProviderBehavior::Classical,
+                Some("ipcidr") => RuleProviderBehavior::IpCidr,
+                _ => {
+                    return Err(ConfigError::InvalidDns(format!(
+                        "Phase 4F8 rule provider {name} has unsupported behavior"
+                    )));
+                }
+            };
+            let domains = provider
+                .payload
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|entry| parse_rule_provider_domain(behavior, &entry).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((name, ParsedRuleProvider { behavior, domains }))
         })
         .collect()
+}
+
+fn validate_rule_provider_usage(
+    providers: &BTreeMap<String, ParsedRuleProvider>,
+    dns: Option<&DnsConfig>,
+) -> Result<(), ConfigError> {
+    let used = dns
+        .into_iter()
+        .flat_map(|dns| dns.policies.iter().chain(&dns.proxy_policies))
+        .filter_map(|policy| match &policy.matcher {
+            DnsPolicyMatcher::RuleSet { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if let Some(name) = providers.keys().find(|name| !used.contains(name.as_str())) {
+        return Err(ConfigError::UnsupportedKey(format!(
+            "rule-providers.{name} outside DNS policy"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_rule_provider_domain(
+    behavior: RuleProviderBehavior,
+    entry: &str,
+) -> Result<Option<RuleSetDomain>, ConfigError> {
+    match behavior {
+        RuleProviderBehavior::Domain => Ok(Some(RuleSetDomain {
+            kind: RuleSetDomainKind::Trie,
+            value: normalize_policy_pattern(entry)?,
+        })),
+        RuleProviderBehavior::IpCidr => Ok(None),
+        RuleProviderBehavior::Classical => {
+            let mut fields = entry.split(',');
+            let kind = fields.next().unwrap_or_default().to_ascii_uppercase();
+            let payload = fields.next().unwrap_or_default();
+            if fields.next().is_some() || payload.is_empty() {
+                return Ok(None);
+            }
+            match kind.as_str() {
+                "DOMAIN" | "DOMAIN-WILDCARD" => Ok(Some(RuleSetDomain {
+                    kind: RuleSetDomainKind::Trie,
+                    value: normalize_policy_pattern(payload)?,
+                })),
+                "DOMAIN-SUFFIX" => Ok(Some(RuleSetDomain {
+                    kind: RuleSetDomainKind::Trie,
+                    value: normalize_policy_pattern(&format!("+.{payload}"))?,
+                })),
+                "DOMAIN-KEYWORD" => Ok(Some(RuleSetDomain {
+                    kind: RuleSetDomainKind::Keyword,
+                    value: payload.to_ascii_lowercase(),
+                })),
+                _ => Ok(None),
+            }
+        }
+    }
+}
+
+fn parse_dns_policies(
+    raw: Mapping,
+    field: &str,
+    default_nameservers: &[String],
+    prefer_h3: bool,
+    trust_certificates: &[String],
+    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
+) -> Result<Vec<DnsPolicy>, ConfigError> {
+    let mut policies = Vec::new();
+    for (key, value) in raw {
+        let key = key
+            .as_str()
+            .ok_or_else(|| ConfigError::InvalidDns(format!("{field} keys must be strings")))?;
+        let servers = parse_policy_servers(&value, field)?;
+        let resolvers =
+            parse_resolver_clients(&servers, default_nameservers, prefer_h3, trust_certificates)?;
+        if resolvers.is_empty() {
+            return Err(ConfigError::InvalidDns(format!(
+                "{field} {key} requires at least one upstream"
+            )));
+        }
+        for matcher in expand_policy_matchers(key, rule_providers, config_directory)? {
+            policies.push(DnsPolicy {
+                matcher,
+                resolvers: resolvers.clone(),
+            });
+        }
+    }
+    Ok(policies)
+}
+
+fn parse_policy_servers(value: &Value, field: &str) -> Result<Vec<String>, ConfigError> {
+    match value {
+        Value::String(server) => Ok(vec![server.clone()]),
+        Value::Sequence(servers) => servers
+            .iter()
+            .map(|server| {
+                server.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    ConfigError::InvalidDns(format!("{field} upstreams must be strings"))
+                })
+            })
+            .collect(),
+        _ => Err(ConfigError::InvalidDns(format!(
+            "{field} values must be a string or string list"
+        ))),
+    }
+}
+
+fn expand_policy_matchers(
+    key: &str,
+    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    config_directory: Option<&Path>,
+) -> Result<Vec<DnsPolicyMatcher>, ConfigError> {
+    let lower = key.to_ascii_lowercase();
+    if lower.starts_with("geosite:") {
+        return key[8..]
+            .split(',')
+            .map(|name| load_geosite_matcher(name, config_directory))
+            .collect();
+    }
+    if lower.starts_with("rule-set:") {
+        return key[9..]
+            .split(',')
+            .map(|name| {
+                let provider = rule_providers.get(name).ok_or_else(|| {
+                    ConfigError::InvalidDns(format!("not found rule-set: {name}"))
+                })?;
+                if provider.behavior == RuleProviderBehavior::IpCidr {
+                    return Err(ConfigError::InvalidDns(format!(
+                        "rule provider type error for {name}: expected domain"
+                    )));
+                }
+                Ok(DnsPolicyMatcher::RuleSet {
+                    name: name.to_owned(),
+                    domains: provider.domains.clone(),
+                })
+            })
+            .collect();
+    }
+    key.split(',')
+        .map(|pattern| normalize_policy_pattern(pattern).map(DnsPolicyMatcher::Domain))
+        .collect()
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeoSiteListWire {
+    #[prost(message, repeated, tag = "1")]
+    entries: Vec<GeoSiteWire>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeoSiteWire {
+    #[prost(string, tag = "1")]
+    country_code: String,
+    #[prost(message, repeated, tag = "2")]
+    domains: Vec<GeoSiteDomainWire>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeoSiteDomainWire {
+    #[prost(enumeration = "GeoSiteDomainTypeWire", tag = "1")]
+    kind: i32,
+    #[prost(string, tag = "2")]
+    value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+enum GeoSiteDomainTypeWire {
+    Plain = 0,
+    Regex = 1,
+    Domain = 2,
+    Full = 3,
+}
+
+fn load_geosite_matcher(
+    name: &str,
+    config_directory: Option<&Path>,
+) -> Result<DnsPolicyMatcher, ConfigError> {
+    if name.is_empty() || name.contains('@') {
+        return Err(ConfigError::InvalidDns(
+            "Phase 4F8 geosite names must be non-empty and cannot use attributes".to_owned(),
+        ));
+    }
+    let directory = config_directory.ok_or_else(|| {
+        ConfigError::InvalidDns(
+            "geosite policy requires file-backed configuration beside GeoSite.dat".to_owned(),
+        )
+    })?;
+    let data = std::fs::read(directory.join("GeoSite.dat"))
+        .map_err(|error| ConfigError::InvalidDns(format!("cannot read GeoSite.dat: {error}")))?;
+    let list = GeoSiteListWire::decode(data.as_slice())
+        .map_err(|error| ConfigError::InvalidDns(format!("cannot decode GeoSite.dat: {error}")))?;
+    let site = list
+        .entries
+        .into_iter()
+        .find(|site| site.country_code.eq_ignore_ascii_case(name))
+        .ok_or_else(|| ConfigError::InvalidDns(format!("geosite list {name} not found")))?;
+    let domains = site
+        .domains
+        .into_iter()
+        .map(|domain| {
+            let kind = match GeoSiteDomainTypeWire::try_from(domain.kind) {
+                Ok(GeoSiteDomainTypeWire::Plain) => GeositeDomainKind::Plain,
+                Ok(GeoSiteDomainTypeWire::Regex) => {
+                    Regex::new(&domain.value).map_err(|error| {
+                        ConfigError::InvalidDns(format!(
+                            "invalid geosite regular expression {}: {error}",
+                            domain.value
+                        ))
+                    })?;
+                    GeositeDomainKind::Regex
+                }
+                Ok(GeoSiteDomainTypeWire::Domain) => GeositeDomainKind::Domain,
+                Ok(GeoSiteDomainTypeWire::Full) => GeositeDomainKind::Full,
+                Err(_) => {
+                    return Err(ConfigError::InvalidDns(format!(
+                        "unsupported geosite domain type {}",
+                        domain.kind
+                    )));
+                }
+            };
+            Ok(GeositeDomain {
+                kind,
+                value: domain.value,
+            })
+        })
+        .collect::<Result<Vec<_>, ConfigError>>()?;
+    Ok(DnsPolicyMatcher::Geosite {
+        name: name.to_owned(),
+        domains,
+    })
 }
 
 fn normalize_policy_pattern(value: &str) -> Result<String, ConfigError> {
@@ -2187,6 +2526,7 @@ dns:
                 mode: DnsMode::RedirHost,
                 fake_ip: None,
                 policies: Vec::new(),
+                proxy_policies: Vec::new(),
                 fallback: None,
                 direct: None,
                 tls: None,
@@ -2454,10 +2794,24 @@ dns:
             .expect("DNS");
         assert_eq!(dns.policies.len(), 2);
         assert!(dns.policies.iter().any(|policy| {
-            policy.pattern == "+.suffix.phase4.test" && policy.transport == DnsTransport::Tcp
+            policy.matcher == DnsPolicyMatcher::Domain("+.suffix.phase4.test".to_owned())
+                && matches!(
+                    policy.resolvers.as_slice(),
+                    [DnsResolverClient::Classic(DnsClassicUpstream {
+                        transport: DnsTransport::Tcp,
+                        ..
+                    })]
+                )
         }));
         assert!(dns.policies.iter().any(|policy| {
-            policy.pattern == "*.one.phase4.test" && policy.transport == DnsTransport::Udp
+            policy.matcher == DnsPolicyMatcher::Domain("*.one.phase4.test".to_owned())
+                && matches!(
+                    policy.resolvers.as_slice(),
+                    [DnsResolverClient::Classic(DnsClassicUpstream {
+                        transport: DnsTransport::Udp,
+                        ..
+                    })]
+                )
         }));
     }
 

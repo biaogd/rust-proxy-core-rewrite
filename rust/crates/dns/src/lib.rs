@@ -13,8 +13,9 @@ use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
     Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMainKind,
-    DnsMode, DnsResolverClient, DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig,
-    FakeIpConfig, FakeIpFilterMode, HostEntry, SyntheticRcode,
+    DnsMode, DnsPolicy, DnsPolicyMatcher, DnsResolverClient, DnsTlsConfig, DnsTransport,
+    DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig, FakeIpFilterMode, GeositeDomainKind,
+    HostEntry, RuleSetDomainKind, SyntheticRcode,
 };
 use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
@@ -646,7 +647,12 @@ pub async fn resolve_proxy_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    resolve_domain_from_set(&config.proxy_resolvers, host, allow_ipv6).await
+    resolve_domain_from_set(
+        selected_policy(&config.proxy_policies, host).unwrap_or(&config.proxy_resolvers),
+        host,
+        allow_ipv6,
+    )
+    .await
 }
 
 /// Resolves a bootstrap name through `dns.default-nameserver`.
@@ -707,9 +713,9 @@ async fn resolve_domain_with(
         let identifier = [query[0], query[1]];
         let response = if direct && let Some(direct_config) = &config.direct {
             if direct_config.follow_policy
-                && let Some(upstream) = selected_policy(config, host)
+                && let Some(resolvers) = selected_policy(&config.policies, host)
             {
-                query_one(&query, upstream, None, None, None).await?
+                query_resolver_set(&query, resolvers, None, None).await?
             } else {
                 query_resolver_set(&query, &direct_config.resolvers, None, None).await?
             }
@@ -2883,8 +2889,11 @@ fn cache_key(query: &[u8], transport: DnsTransport, upstream: SocketAddr) -> Vec
 }
 
 fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u8> {
-    if let Some(policy) = selected_policy(config, domain) {
-        return cache_key(query, policy.transport, policy.address);
+    if let Some(resolvers) = selected_policy(&config.policies, domain) {
+        let mut key = cache_key(query, config.transport, config.upstream);
+        key.push(0xed);
+        append_resolver_clients_cache_identity(&mut key, resolvers);
+        return key;
     }
 
     let mut key = cache_key(query, config.transport, config.upstream);
@@ -3010,16 +3019,61 @@ fn append_main_kind_cache_identity(key: &mut Vec<u8>, main_kind: &DnsMainKind) {
     }
 }
 
-fn selected_policy(config: &DnsConfig, domain: &str) -> Option<DnsUpstream> {
-    config
-        .policies
-        .iter()
-        .filter_map(|policy| policy_match_rank(&policy.pattern, domain).map(|rank| (rank, policy)))
-        .max_by(|(left, _), (right, _)| left.cmp(right))
-        .map(|(_, policy)| DnsUpstream {
-            address: policy.upstream,
-            transport: policy.transport,
-        })
+fn selected_policy<'a>(policies: &'a [DnsPolicy], domain: &str) -> Option<&'a [DnsResolverClient]> {
+    let mut index = 0;
+    while index < policies.len() {
+        if matches!(policies[index].matcher, DnsPolicyMatcher::Domain(_)) {
+            let start = index;
+            while index < policies.len()
+                && matches!(policies[index].matcher, DnsPolicyMatcher::Domain(_))
+            {
+                index += 1;
+            }
+            if let Some(policy) = policies[start..index]
+                .iter()
+                .filter_map(|policy| {
+                    let DnsPolicyMatcher::Domain(pattern) = &policy.matcher else {
+                        return None;
+                    };
+                    policy_match_rank(pattern, domain).map(|rank| (rank, policy))
+                })
+                .max_by(|(left, _), (right, _)| left.cmp(right))
+                .map(|(_, policy)| policy)
+            {
+                return Some(&policy.resolvers);
+            }
+            continue;
+        }
+        let policy = &policies[index];
+        index += 1;
+        if policy_matcher_matches(&policy.matcher, domain) {
+            return Some(&policy.resolvers);
+        }
+    }
+    None
+}
+
+fn policy_matcher_matches(matcher: &DnsPolicyMatcher, domain: &str) -> bool {
+    match matcher {
+        DnsPolicyMatcher::Domain(pattern) => policy_match_rank(pattern, domain).is_some(),
+        DnsPolicyMatcher::Geosite { domains, .. } => domains.iter().any(|entry| match entry.kind {
+            GeositeDomainKind::Plain => domain.contains(&entry.value),
+            GeositeDomainKind::Regex => {
+                regex::Regex::new(&entry.value).is_ok_and(|expression| expression.is_match(domain))
+            }
+            GeositeDomainKind::Domain => {
+                domain == entry.value
+                    || domain
+                        .strip_suffix(&entry.value)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+            GeositeDomainKind::Full => domain == entry.value,
+        }),
+        DnsPolicyMatcher::RuleSet { domains, .. } => domains.iter().any(|entry| match entry.kind {
+            RuleSetDomainKind::Trie => policy_match_rank(&entry.value, domain).is_some(),
+            RuleSetDomainKind::Keyword => domain.contains(&entry.value),
+        }),
+    }
 }
 
 async fn query_configured(
@@ -3029,8 +3083,8 @@ async fn query_configured(
     tls_pool: Option<&Mutex<TlsConnectionPool>>,
     http_pool: Option<&Mutex<HttpConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
-    if let Some(policy) = selected_policy(config, domain) {
-        return query_one(query, policy, None, None, None).await;
+    if let Some(resolvers) = selected_policy(&config.policies, domain) {
+        return query_resolver_set(query, resolvers, tls_pool, http_pool).await;
     }
 
     let Some(fallback_config) = &config.fallback else {

@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 ipnet.workspace = true
+prost.workspace = true
+regex.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-rules = { path = "../rules" }
 serde.workspace = true
