@@ -78,6 +78,17 @@ protocol work when the environment can tolerate their runtime and network use.
   cleanup.
 - Preserve wire bytes and error classes before optimizing. Performance claims
   require a reproducible benchmark against the pinned Go baseline.
+- Prefer a maintained, appropriately scoped Rust library for standardized
+  protocol parsing, HTTP serving/client framing, codecs, persistence and async
+  lifecycle primitives. Before adding a hand-written implementation, record
+  why available libraries cannot preserve the required oracle behavior.
+- Keep product policy outside third-party library adapters. Wrap a library at a
+  narrow tested boundary so authentication, routing, retry, cache and platform
+  semantics remain explicit and independently differential-tested.
+- A library migration is behavior-neutral work, not a compatibility expansion.
+  Run the existing slice differential before removing the old implementation,
+  and retain explicit custom logic where the library's behavior differs from
+  the Go oracle.
 - Do not introduce a Rust dependency only because a Go dependency has a similar
   name. Record protocol coverage, maintenance, licensing, and platform support.
 

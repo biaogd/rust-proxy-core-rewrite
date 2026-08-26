@@ -432,6 +432,13 @@ connection handling and graceful shutdown. Phase 3, 4D4, 4F14 and 4F15
 differentials are the acceptance gate for that behavior-neutral migration. No
 new route, transport or protocol is credited by the refactor.
 
+The same behavior-neutral cleanup then moved mixed-inbound HTTP syntax parsing
+to `httparse`, DoH HTTP/1 framing to Hyper, common DNS query/name codecs to the
+existing `hickory-proto`, and DHCPv4 packet/options codecs to `dhcproto`. Each
+change is an independent commit accepted by its existing Phase 1/3, 4E, 4A/
+4F1/4F15 or 4F4 differential gate. Product policy remains in the owning crate,
+and none of these library migrations advances the Phase 5 boundary.
+
 Phase 4F3 implements the isolated system-resolver runtime path and platform
 contracts, but remains a **partial** matrix row until native deterministic
 Go/Rust port-53 wire fixtures pass on the advertised POSIX/Windows/Android
