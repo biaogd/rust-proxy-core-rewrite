@@ -641,6 +641,17 @@ value from `/configs` for all four default/CLI/YAML combinations. It does not
 claim geodata loaders, matchers, updates or individual GEOIP/GEOSITE rules,
 which retain their existing Phase 4/5B/5E gates.
 
+### Phase 5A3a accepted scope
+
+Phase 5A3a accepts the external-controller address and secret subset of
+`CLI-06`. `-ext-ctl` and `-secret` override their corresponding environment
+variables, while an explicitly empty CLI value disables the environment value
+and leaves YAML authoritative. Non-empty process overrides are applied after
+initial parsing and after every successful SIGHUP parse. The gate proves the
+selected listener, absence of superseded listeners, Bearer authentication and
+reload persistence through live REST requests. Controller TLS/Unix/Windows
+pipe, UI fields, routing mark and their platform behavior remain 5A3b onward.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

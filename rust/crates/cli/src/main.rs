@@ -20,6 +20,14 @@ struct Arguments {
     #[arg(short = 'm')]
     geodata_mode: bool,
 
+    /// Override external controller address
+    #[arg(long = "ext-ctl", value_name = "ADDRESS")]
+    external_controller: Option<String>,
+
+    /// Override external controller secret
+    #[arg(long = "secret", value_name = "SECRET")]
+    secret: Option<String>,
+
     /// Set configuration directory
     #[arg(short = 'd', value_name = "DIRECTORY")]
     home: Option<PathBuf>,
@@ -41,6 +49,41 @@ struct Arguments {
 enum ConfigInput {
     File(PathBuf),
     FrozenYaml(String),
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeOverrides {
+    external_controller: String,
+    secret: String,
+}
+
+impl RuntimeOverrides {
+    fn from_arguments(arguments: &Arguments) -> Self {
+        Self {
+            external_controller: arguments
+                .external_controller
+                .clone()
+                .or_else(|| std::env::var("CLASH_OVERRIDE_EXTERNAL_CONTROLLER").ok())
+                .unwrap_or_default(),
+            secret: arguments
+                .secret
+                .clone()
+                .or_else(|| std::env::var("CLASH_OVERRIDE_SECRET").ok())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn apply(&self, mut config: Config) -> Config {
+        if !self.external_controller.is_empty() {
+            config
+                .external_controller
+                .clone_from(&self.external_controller);
+        }
+        if !self.secret.is_empty() {
+            config.secret.clone_from(&self.secret);
+        }
+        config
+    }
 }
 
 impl ConfigInput {
@@ -94,13 +137,15 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    let config = input.runtime_config(arguments.geodata_mode)?;
+    let overrides = RuntimeOverrides::from_arguments(&arguments);
+    let config = overrides.apply(input.runtime_config(arguments.geodata_mode)?);
     let shutdown = CancellationToken::new();
     let (reload_sender, reload_receiver) = mpsc::channel(4);
     install_signals(
         shutdown.clone(),
         input,
         arguments.geodata_mode,
+        overrides,
         reload_sender,
     );
     rewrite_runtime::run_with_reload(config, reload_receiver, shutdown).await?;
@@ -139,16 +184,24 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
         if argument == "--" {
             options = false;
             normalized.push(argument);
-        } else if argument == "-config" {
-            normalized.push(OsString::from("--config"));
+        } else if matches!(argument.to_str(), Some("-config" | "-ext-ctl" | "-secret")) {
+            normalized.push(OsString::from(format!("-{}", argument.to_string_lossy())));
             value_follows = true;
-        } else if let Some(value) = argument
-            .to_str()
-            .and_then(|value| value.strip_prefix("-config="))
-        {
-            normalized.push(OsString::from(format!("--config={value}")));
+        } else if let Some((name, value)) = argument.to_str().and_then(|value| {
+            ["config", "ext-ctl", "secret"]
+                .into_iter()
+                .find_map(|name| {
+                    value
+                        .strip_prefix(&format!("-{name}="))
+                        .map(|value| (name, value))
+                })
+        }) {
+            normalized.push(OsString::from(format!("--{name}={value}")));
         } else {
-            value_follows = matches!(argument.to_str(), Some("-d" | "-f" | "--config"));
+            value_follows = matches!(
+                argument.to_str(),
+                Some("-d" | "-f" | "--config" | "--ext-ctl" | "--secret")
+            );
             normalized.push(argument);
         }
     }
@@ -253,6 +306,7 @@ fn install_signals(
     shutdown: CancellationToken,
     input: ConfigInput,
     geodata_mode: bool,
+    overrides: RuntimeOverrides,
     reload_sender: mpsc::Sender<Config>,
 ) {
     tokio::spawn(async move {
@@ -291,7 +345,10 @@ fn install_signals(
                         if received.is_none() {
                             break;
                         }
-                        match input.runtime_config(geodata_mode) {
+                        match input
+                            .runtime_config(geodata_mode)
+                            .map(|config| overrides.apply(config))
+                        {
                             Ok(config) => {
                                 if reload_sender.send(config).await.is_err() {
                                     break;
@@ -324,6 +381,9 @@ mod tests {
             OsString::from("-config"),
             OsString::from("one"),
             OsString::from("-config=two"),
+            OsString::from("-ext-ctl"),
+            OsString::from("127.0.0.1:9090"),
+            OsString::from("-secret=token"),
             OsString::from("-f"),
             OsString::from("config.yaml"),
         ]);
@@ -334,6 +394,9 @@ mod tests {
                 "--config",
                 "one",
                 "--config=two",
+                "--ext-ctl",
+                "127.0.0.1:9090",
+                "--secret=token",
                 "-f",
                 "config.yaml",
             ]

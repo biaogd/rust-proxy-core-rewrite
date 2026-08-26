@@ -61,9 +61,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A1 configuration input | Complete in declared scope | `CLI-01`/`CLI-02`; 25-case Go/Rust home, path, environment, creation, base64/stdin/file/default precedence, empty-source fallthrough, frozen reload and error differential passed |
 | Phase 5A2a default version output | Complete in declared scope; tagged profiles remain | `CLI-04`; default `-v` banner and configuration short-circuit differential pass while Rust truthfully identifies rustc |
 | Phase 5A2b geodata-mode CLI default | Complete in declared scope | `CLI-05`; default, `-m` and explicit YAML precedence pass through live `/configs` observations |
+| Phase 5A3a controller/secret overrides | Complete in declared scope; CLI-06 remains partial | CLI/environment/explicit-empty precedence, listener selection, Bearer auth and SIGHUP reapplication pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A2b CLI suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A3a CLI suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3073,11 +3074,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 5A2b geodata-mode CLI boundary.
+Rust behavior stops at the Phase 5A3a controller/secret override boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.
-Phase 4D3B, Phase 5A3a or another implementation gate must not begin without a
+Phase 4D3B, Phase 5A3b or another implementation gate must not begin without a
 separate instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

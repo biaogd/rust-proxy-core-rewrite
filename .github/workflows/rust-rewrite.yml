@@ -95,6 +95,7 @@ jobs:
       PHASE5A1_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A2A_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5A2B_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5A3A_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -125,6 +126,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5a3a.py \
             compat/scripts/phase5a2b.py \
             compat/scripts/phase5a2a.py \
             compat/scripts/phase5a1.py \

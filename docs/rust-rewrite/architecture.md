@@ -422,6 +422,12 @@ inputs retain their original bytes instead of reopening stdin or an unrelated
 file. Versioning, override flags, encrypted configuration and subcommands stay
 outside this input-selection boundary.
 
+Process-level configuration defaults and overrides remain outside the YAML
+source itself. Phase 5A2b supplies `-m` as a parse default that explicit YAML
+may replace. Phase 5A3a applies controller address and secret overrides after
+each successful parse, including SIGHUP reloads, so the immutable process
+options cannot be silently replaced by changed file contents.
+
 CLI overrides for controller/UI/secret are applied after parsing and before
 the configuration is dispatched.
 
