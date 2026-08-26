@@ -3,7 +3,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
 use rewrite_model::{Host, InboundProtocol, Metadata, Network};
@@ -97,14 +96,20 @@ pub struct RuntimeState {
     downloaded: AtomicU64,
     connections: Mutex<BTreeMap<u64, ConnectionInfo>>,
     logs: broadcast::Sender<LogEvent>,
-    dns_mappings: Mutex<BTreeMap<IpAddr, DnsMapping>>,
+    dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
 }
 
 #[derive(Clone, Debug)]
 struct DnsMapping {
     host: String,
-    expires_at: Instant,
+    recency: u64,
+}
+
+#[derive(Debug, Default)]
+struct DnsMappingCache {
+    entries: BTreeMap<IpAddr, DnsMapping>,
+    clock: u64,
 }
 
 impl Default for RuntimeState {
@@ -116,7 +121,7 @@ impl Default for RuntimeState {
             downloaded: AtomicU64::new(0),
             connections: Mutex::new(BTreeMap::new()),
             logs,
-            dns_mappings: Mutex::new(BTreeMap::new()),
+            dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
         }
     }
@@ -193,29 +198,33 @@ impl RuntimeState {
         self.logs.subscribe()
     }
 
-    pub fn insert_dns_mapping(&self, address: IpAddr, host: &str, ttl: u32) {
+    pub fn insert_dns_mapping(&self, address: IpAddr, host: &str, _ttl: u32) {
         const CAPACITY: usize = 4096;
-        let now = Instant::now();
+        // The pinned Go enhancer calls SetWithExpire but constructs this cache
+        // with WithSize only. Its LRU therefore never consults the timestamp;
+        // preserve that observable size-only behavior until the oracle moves.
         let mut mappings = self
             .dns_mappings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        mappings.retain(|_, entry| entry.expires_at > now);
         let address = address.to_canonical();
-        if mappings.len() >= CAPACITY
-            && !mappings.contains_key(&address)
-            && let Some(expiring_first) = mappings
+        if mappings.entries.len() >= CAPACITY
+            && !mappings.entries.contains_key(&address)
+            && let Some(least_recent) = mappings
+                .entries
                 .iter()
-                .min_by_key(|(_, entry)| entry.expires_at)
+                .min_by_key(|(_, entry)| entry.recency)
                 .map(|(address, _)| *address)
         {
-            mappings.remove(&expiring_first);
+            mappings.entries.remove(&least_recent);
         }
-        mappings.insert(
+        mappings.clock = mappings.clock.wrapping_add(1);
+        let recency = mappings.clock;
+        mappings.entries.insert(
             address,
             DnsMapping {
                 host: host.to_owned(),
-                expires_at: now + Duration::from_secs(u64::from(ttl.max(1))),
+                recency,
             },
         );
     }
@@ -227,13 +236,12 @@ impl RuntimeState {
             .dns_mappings
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if mappings
-            .get(&address)
-            .is_some_and(|entry| entry.expires_at <= Instant::now())
-        {
-            mappings.remove(&address);
-        }
-        mappings.get(&address).map(|entry| entry.host.clone())
+        mappings.clock = mappings.clock.wrapping_add(1);
+        let recency = mappings.clock;
+        mappings.entries.get_mut(&address).map(|entry| {
+            entry.recency = recency;
+            entry.host.clone()
+        })
     }
 
     #[must_use]
@@ -606,6 +614,39 @@ impl From<&Metadata> for MetadataSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mapping_address(index: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((index >> 16) & 0xff) as u8,
+            ((index >> 8) & 0xff) as u8,
+            (index & 0xff) as u8,
+        ))
+    }
+
+    #[test]
+    fn redir_host_mapping_uses_the_go_size_only_lru_contract() {
+        let state = RuntimeState::default();
+        let first = mapping_address(1);
+        let second = mapping_address(2);
+        state.insert_dns_mapping(first, "first.test", 1);
+        state.insert_dns_mapping(second, "second.test", 1);
+        for index in 3..=4096 {
+            state.insert_dns_mapping(mapping_address(index), "filler.test", 1);
+        }
+
+        assert_eq!(
+            state.lookup_dns_mapping(first).as_deref(),
+            Some("first.test")
+        );
+        state.insert_dns_mapping(mapping_address(4097), "overflow.test", 1);
+
+        assert_eq!(
+            state.lookup_dns_mapping(first).as_deref(),
+            Some("first.test")
+        );
+        assert!(state.lookup_dns_mapping(second).is_none());
+    }
 
     #[test]
     fn fake_ip_pool_starts_at_four_and_wraps_before_last() {

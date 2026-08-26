@@ -505,6 +505,19 @@ boundary and `DISABLE_SYSTEM_HOSTS` switch. The deterministic gate proves these
 paths on Darwin; native Linux and Windows refresh evidence remains a platform
 gate rather than an implicit cross-platform claim.
 
+Phase 4F13 accepts the `DNS-17` core across every local inbound currently
+implemented by the Rust product: HTTP, SOCKS and both mixed TCP protocol paths,
+plus SOCKS and mixed UDP. Ordinary upstream CNAME answers retain the original
+query identity in the reverse map, while a configured external hosts alias
+retains the rewritten target identity. Mapping state survives a validated
+same-listener SIGHUP and uses the oracle's 4096-entry access-order LRU.
+Although Go inserts mappings with a DNS-derived expiration timestamp, the
+pinned baseline creates this LRU with size only and therefore never consults
+that timestamp; Phase 4F13 records and reproduces the observable retention past
+TTL rather than claiming idealized expiration. Redir-port, TProxy, TUN and
+future inbound families remain their owning inbound/platform gates, so
+`DNS-17` stays partial outside the implemented local-inbound surface.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

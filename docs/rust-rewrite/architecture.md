@@ -28,12 +28,12 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F12 Rust boundary now implemented
+## Phase 1–4F13 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
 product, observability and generation boundaries; Phase 4A adds a narrow
-classic local DNS path; Phase 4B adds exact hosts and TTL-bounded redir-host
+classic local DNS path; Phase 4B adds exact hosts and bounded redir-host
 state; Phase 4C adds the declared fake-IP pool and TCP reverse-resolution
 slice; Phases 4D1 through 4D4 add the declared resolver policy, fallback,
 direct-resolution and REST-control slices; Phases 4E1 and 4E2 add insecure and
@@ -60,7 +60,7 @@ Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
 resource is created. The spec layer overlays the declared Go defaults, validates
 the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
 spec into executable `Config` is a separate fallible step which accepts only
-the incrementally declared Phase 1–4F12 runtime slices. This prevents parser
+the incrementally declared Phase 1–4F13 runtime slices. This prevents parser
 coverage from being mistaken for implemented protocol behavior.
 
 `rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
@@ -189,10 +189,19 @@ the same configured table independently of DNS middleware enablement and
 randomly selects a mapped address before rule evaluation. The host table owns
 no sockets and the Rust product retains no Go runtime dependency.
 
+Phase 4F13 makes the reverse DNS map an access-order 4096-entry LRU shared by
+all current listener generations. DNS writes either the original query identity
+or the configured-alias target according to the same middleware position as
+Go; HTTP, SOCKS and mixed TCP plus SOCKS/mixed UDP read it before rule
+evaluation. Runtime state ownership naturally preserves entries across SIGHUP.
+The pinned Go cache is constructed without a max-age option, so its stored
+per-entry timestamps are not consulted; Rust reproduces that observable
+TTL-past retention and documents it instead of claiming expiration.
+
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
 paths and can read the native Unix host file when enabled. DNS A/AAAA answers
-publish TTL-bounded reverse entries into `rewrite-state`; the runtime consults
+publish capacity-bounded reverse entries into `rewrite-state`; the runtime consults
 that state before rule evaluation so an IP-addressed inbound can recover the
 queried domain. This is shared runtime state, not a package global, and remains
 separate from the DNS response cache.
@@ -598,7 +607,10 @@ Phase 4F11 replaces the development FIFO cache with the configured LRU/ARC,
 singleflight, stale-refresh and retry lifecycle without adding a crate. Phase
 4F12 extends the existing config/DNS/runtime boundary with host-trie lookup,
 portable interface enumeration, native hosts-file refresh and tunnel address
-selection; it also adds no crate.
+selection; it also adds no crate. Phase 4F13 replaces the reverse mapping's
+nominal TTL eviction with the oracle's size-only access-order LRU and extends
+its differential coverage across existing local listener types without adding
+a crate.
 `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:

@@ -52,11 +52,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F10 dual-stack/ECH/lazy tunnel | Complete in declared scope; DNS-14 parity | Concurrent A/AAAA with A-first ordering and configurable wait, primary IPv4, IP literals, HTTPS ECH extraction and tunnel lazy rule resolution pass |
 | Phase 4F11 DNS cache lifecycle | Complete in declared core; DNS-15 parity | LRU/ARC size eviction, positive/negative/stale TTL, concurrent singleflight, background retry and reload cache/reset behavior pass |
 | Phase 4F12 complete hosts core | Complete in declared portable core; DNS-16 platform gates remain | Wildcard/suffix priority, `lan`, IP/domain/multi-value aliases, DNS query pass-through, system hosts and randomized tunnel routing pass on Darwin |
+| Phase 4F13 redir-host local-inbound core | Complete in declared local core; DNS-17 inbound gates remain | HTTP/SOCKS/mixed TCP, SOCKS/mixed UDP, CNAME identity, reload preservation and baseline size-only LRU retention pass |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F12 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F13 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F12 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F13 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -334,7 +335,7 @@ can answer configured A/AAAA records directly with TTL 10, produce configured
 CNAME responses, rewrite an A/AAAA question to an external CNAME terminal and
 fall back to the native Unix host file when enabled.
 
-`rewrite-state` now owns a 4096-entry TTL-bounded IP-to-domain map. Classic DNS
+`rewrite-state` owns a 4096-entry IP-to-domain map. Classic DNS
 answers populate it, and the runtime consults it before TCP or UDP rule
 evaluation. The declared live evidence is narrower: an authoritative local A
 answer for a native non-loopback interface address is queried first, then a
@@ -2636,7 +2637,67 @@ gate passed locally. Complete Phase 1–4F12 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
-### Differential fixture timing stability
+## Phase 4F13 deliverables and evidence
+
+Phase 4F13 completes the redir-host core for every local inbound currently
+implemented in Rust. One DNS A mapping is consumed through the dedicated HTTP
+listener, dedicated SOCKS listener and both protocol branches of a mixed
+listener over TCP. The same mapping is consumed by SOCKS and mixed UDP
+datagrams. In every case the inbound supplies only the destination IP, the
+runtime restores the mapped domain before rule evaluation, and
+`DOMAIN,...,DIRECT` reaches an interface-local deterministic echo service.
+
+The mapping identity follows middleware position. An ordinary upstream answer
+containing CNAME plus terminal A records maps the address to the original query
+name. A configured external hosts alias rewrites the question before the
+mapping middleware, so its terminal address maps to the configured target
+name. Separate rule gates prove both identities rather than comparing DNS wire
+records alone.
+
+Mapping state remains runtime-owned across a validated SIGHUP. The reload gate
+starts with a rejecting domain rule, publishes a DNS mapping, changes that rule
+to DIRECT and succeeds only when both the new rule generation and old mapping
+are visible together. The cache now matches Go's access-order capacity of 4096
+instead of evicting the earliest nominal expiry.
+
+The pinned Go baseline passes a DNS-derived timestamp to `SetWithExpire`, but
+constructs the mapping LRU with `WithSize(4096)` and no `WithAge`. Its `Get`
+therefore never evaluates that timestamp. The differential deliberately waits
+beyond a one-second DNS TTL and observes that the mapping remains usable in
+both products. This is recorded as baseline-compatible TTL-past retention, not
+as a claim that redir-host entries expire by TTL.
+
+`compat/scripts/phase4f13.py` compares all of the paths above on a native
+non-loopback IPv4 interface. Exact same-name cache refresh counts are excluded
+from this gate because Phase 4F11 owns them; the queried-name set remains exact.
+Redir-port, TProxy, TUN and future inbound families remain outside the current
+Rust runtime and keep `DNS-17` partial at the full-product level.
+
+Observed Phase 4F13 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared local-inbound core passed; DNS-17 broader inbound gates remain | Native `compat/scripts/phase4f13.py`; local UDP authority plus interface-bound TCP/UDP echo services |
+| Linux amd64 | Pending | Default full differential now includes Phase 4F13; no result is recorded before completion |
+
+### Phase 4F13 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rewrite-state redir_host_mapping_uses_the_go_size_only_lru_contract
+
+cd ..
+python3 compat/scripts/phase4f13.py
+```
+
+The focused Phase 4F13 differential, state LRU contract, format check and
+strict workspace Clippy gate passed locally. Complete Phase 1–4F13 regression,
+workspace tests and Go/with-gVisor baseline remain delegated to GitHub Actions;
+no result is pre-claimed.
+
+## Differential fixture timing stability
 
 The shared DNS fixture cleanup normalizes `-SIGTERM` only when that exact
 signal was sent by the harness to a still-running product. A process that exits
@@ -2729,11 +2790,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F12 complete-hosts boundary.
+Rust behavior stops at the Phase 4F13 redir-host local-inbound boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
-`DNS-10`–`DNS-13` and `DNS-16` retain the platform/database/adapter/provider/
-integration gaps above.
-Phase 4D3B, 4F13 or another implementation gate must not begin without a separate
+`DNS-10`–`DNS-13`, `DNS-16` and `DNS-17` retain the platform/database/adapter/
+provider/inbound integration gaps above.
+Phase 4D3B, 4F14 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
