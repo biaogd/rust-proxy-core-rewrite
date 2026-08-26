@@ -44,11 +44,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
 | Phase 4F3 system resolver | Partial, native gates pending | `DNS-03`; config/runtime path and POSIX/Windows/Android-CMFA contracts implemented, but deterministic native port-53 wire parity is not claimed |
 | Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; config/runtime, exact DHCPv4 wire and interface/invalidation contracts implemented; native UDP 67/68 parity remains pending |
+| Phase 4F5 RCODE/Tailscale DNS boundary | Complete in declared scope; DNS-05 partial | Six synthetic RCODE wire paths and the named Tailscale resolver registration lifecycle pass; actual tsnet transport remains Phase 7K |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F4 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F5 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F4 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F5 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2210,6 +2211,52 @@ The complete Phase 1–4F4 regression, workspace tests, Go/with-gVisor baseline
 and privileged native DHCP exchanges remain delegated to GitHub Actions or
 later platform runners; no result is pre-claimed.
 
+## Phase 4F5 deliverables and evidence
+
+Phase 4F5 accepts the six Go RCODE names (`success`, `format_error`,
+`server_failure`, `name_error`, `not_implemented` and `refused`) as one main
+DNS client. It converts the original query to an authoritative response,
+preserves the question and request flags, and returns SERVFAIL/REFUSED directly
+instead of treating them as retryable upstream failures. Empty synthetic
+answers never enter the positive cache.
+
+The same slice accepts `tailscale://<proxy>` and its `ts://<proxy>` alias and
+adds an async named-resolver registry in `rewrite-dns`. Registrations carry a
+monotonic identity: a replacement becomes visible immediately, dropping the
+old guard leaves the replacement intact, and dropping the active guard restores
+the missing-resolver error. No Tailscale library or platform transport is linked
+into the Rust product in this phase.
+
+`compat/scripts/phase4f5.py` compares real Go and Rust processes for valid and
+invalid configuration, all six RCODE responses over local UDP and TCP, exact
+flags/counts/question preservation, and missing Tailscale registrations falling
+back to SERVFAIL. It also runs matching focused Go and Rust registry contracts.
+The Go addition is test-only; no existing oracle implementation file changes.
+
+Observed Phase 4F5 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared contracts passed; DNS-05 partial | Native `compat/scripts/phase4f5.py`; product-level UDP/TCP RCODE parity plus focused Go/Rust registry lifecycle tests |
+| Linux amd64 | Pending | Default full differential includes Phase 4F5; no result is recorded before completion |
+| Tailscale/tsnet integration | Not started | Actual adapter startup, `LocalClient.QueryDNS`, shutdown and tailnet behavior remain Phase 7K |
+
+### Phase 4F5 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f5.py
+```
+
+The focused registry contracts and Phase 4F5 process/wire differential passed
+locally. The complete Phase 1–4F5 regression, workspace tests and
+Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
+pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2285,8 +2332,9 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the partial Phase 4F4 DHCP-resolver boundary. Phase 4D3B,
-4F5 or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4F5 synthetic/registered-client boundary;
+`DNS-03`–`DNS-05` retain the platform/integration gaps documented above. Phase 4D3B,
+4F6 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

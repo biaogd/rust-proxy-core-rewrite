@@ -34,6 +34,7 @@ MIGRATION_PATHS = {
     ".gitignore",
     "AGENTS.md",
     "README.md",
+    "dns/phase4f5_contract_test.go",
 }
 
 

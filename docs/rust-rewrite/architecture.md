@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4E12 Rust boundary now implemented
+## Phase 1–4F5 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -107,6 +107,17 @@ window, accepts the first valid non-SERVFAIL/non-REFUSED response and cancels
 the remainder. A UDP response with TC set is retried over TCP against the same
 resolved socket. Cache identity includes the complete main-resolver list;
 system resolver discovery and cache retry state remain separate later gates.
+
+Phases 4F3 and 4F4 route system and DHCP-discovered resolver addresses through
+the same classic exchange boundary while keeping interface discovery and
+platform cache decisions in `rewrite-platform`. Phase 4F5 adds two deliberately
+small non-socket clients. The synthetic RCODE client turns the original query
+into an authoritative response without retrying SERVFAIL or REFUSED and without
+creating a positive cache entry. The Tailscale client looks up an async resolver
+by proxy name in a generation-safe registry: the newest registration wins and
+dropping an older guard cannot remove its replacement. The registry accepts no
+tsnet or outbound dependency; a future Tailscale adapter supplies the actual
+resolver only at the Phase 7K boundary.
 
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
@@ -508,7 +519,9 @@ Phase 4A added the classic DNS crate; Phases 4B through 4F2 extended the
 existing config, DNS, state, controller and runtime boundaries. Phase 4F3
 introduced `rewrite-platform` for system resolver discovery and Phase 4F4
 extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
-refresh decisions; it is not a general TUN/routing implementation.
+refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
+adds no protocol or platform dependency; `rewrite-platform` is still not a
+general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
 ```text

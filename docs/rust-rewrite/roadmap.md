@@ -429,6 +429,13 @@ interface-selection and invalidation contracts land. Closing the row requires
 privileged native DHCP client/server fixtures on advertised platforms; config
 acceptance and packet vectors are necessary but not sufficient evidence.
 
+Phase 4F5 closes the synthetic RCODE behavior and the named Tailscale resolver
+registry contract. Its differential gate covers all six accepted RCODE names
+over both local DNS transports, invalid configuration, missing registrations,
+replacement ordering and unregister guards. `DNS-05` remains **partial** until
+the Phase 7K Tailscale outbound supplies and proves the real tsnet `QueryDNS`
+lifecycle; Phase 4F5 does not introduce TUN, tsnet startup or tailnet traffic.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

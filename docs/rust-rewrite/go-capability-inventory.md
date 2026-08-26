@@ -180,7 +180,7 @@ runtime behavior is under [`dns`](../../dns).
 | DNS-02 | Classic UDP/TCP upstreams: IP/domain targets, multiple servers, parallel selection, timeout/failure and UDP-TC retry over TCP | Complete in the Phase 4F2 declared classic-main scope | 4F2 |
 | DNS-03 | System resolver on POSIX/Windows/Android-CMFA, refresh/reset behavior | Partial: config/runtime and host-side platform contracts; native wire/platform gates pending | 4F3 plus platform gates |
 | DNS-04 | DHCP-discovered upstream and invalidation | Partial: config, DHCPv4 wire and refresh/interface-change contracts; privileged native discovery pending | 4F4 plus platform gates |
-| DNS-05 | RCODE synthetic upstream and Tailscale DNS upstream | Not started | 4F5/7K |
+| DNS-05 | RCODE synthetic upstream and Tailscale DNS upstream | Partial: all synthetic RCODE behavior and named resolver registration/replacement/missing lifecycle pass Phase 4F5; real tsnet `QueryDNS` transport remains | 4F5/7K |
 | DNS-06 | DoT URL/default-port/bootstrap, TLS trust/name options, reuse/retry/reset/concurrency | Partial | 4E9–4E11 |
 | DNS-07 | DoH HTTP and HTTPS URL semantics, GET wire behavior, redirects/auth, bootstrap and HTTP/1.1 pooling | Partial | 4E12–4E14 |
 | DNS-08 | DoH HTTP/2 and HTTP/3 forced/preferred/race/fallback/0-RTT behavior | Partial: 4E15 HTTP/2 and 4E16 declared H3 subset accepted; broader lifecycle remains | 4E15–4E16 plus later lifecycle gates |

@@ -146,6 +146,33 @@ pub enum DnsMainKind {
     Configured,
     System,
     Dhcp(String),
+    Rcode(SyntheticRcode),
+    Tailscale(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SyntheticRcode {
+    Success = 0,
+    FormatError = 1,
+    ServerFailure = 2,
+    NameError = 3,
+    NotImplemented = 4,
+    Refused = 5,
+}
+
+impl SyntheticRcode {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "success" => Some(Self::Success),
+            "format_error" => Some(Self::FormatError),
+            "server_failure" => Some(Self::ServerFailure),
+            "name_error" => Some(Self::NameError),
+            "not_implemented" => Some(Self::NotImplemented),
+            "refused" => Some(Self::Refused),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -783,32 +810,8 @@ fn parse_main_nameservers(
     prefer_h3: bool,
     trust_certificates: &[String],
 ) -> Result<ParsedMainNameservers, ConfigError> {
-    if nameservers.len() == 1
-        && matches!(
-            nameservers[0].as_str(),
-            "system" | "system://" | "dhcp://system"
-        )
-    {
-        return Ok(ParsedMainNameservers {
-            transport: DnsTransport::Udp,
-            upstream: "0.0.0.0:53".parse().expect("system DNS sentinel"),
-            main_kind: DnsMainKind::System,
-            classic_upstreams: Vec::new(),
-            tls: None,
-            query_options: DnsQueryOptions::default(),
-        });
-    }
-    if nameservers.len() == 1
-        && let Some(interface) = nameservers[0].strip_prefix("dhcp://")
-    {
-        return Ok(ParsedMainNameservers {
-            transport: DnsTransport::Udp,
-            upstream: "0.0.0.0:53".parse().expect("DHCP DNS sentinel"),
-            main_kind: DnsMainKind::Dhcp(interface.to_owned()),
-            classic_upstreams: Vec::new(),
-            tls: None,
-            query_options: DnsQueryOptions::default(),
-        });
+    if let Some(parsed) = parse_special_main_nameserver(nameservers)? {
+        return Ok(parsed);
     }
     let all_classic = nameservers
         .iter()
@@ -854,6 +857,46 @@ fn parse_main_nameservers(
         tls,
         query_options,
     })
+}
+
+fn parse_special_main_nameserver(
+    nameservers: &[String],
+) -> Result<Option<ParsedMainNameservers>, ConfigError> {
+    let [nameserver] = nameservers else {
+        return Ok(None);
+    };
+    let main_kind = if matches!(
+        nameserver.as_str(),
+        "system" | "system://" | "dhcp://system"
+    ) {
+        DnsMainKind::System
+    } else if let Some(interface) = nameserver.strip_prefix("dhcp://") {
+        DnsMainKind::Dhcp(interface.to_owned())
+    } else if let Some(name) = nameserver.strip_prefix("rcode://") {
+        let rcode = SyntheticRcode::parse(name)
+            .ok_or_else(|| ConfigError::InvalidDns(format!("unsupported RCode type: {name}")))?;
+        DnsMainKind::Rcode(rcode)
+    } else if let Some(name) = nameserver
+        .strip_prefix("tailscale://")
+        .or_else(|| nameserver.strip_prefix("ts://"))
+    {
+        if name.is_empty() {
+            return Err(ConfigError::InvalidDns(
+                "missing Tailscale proxy name".to_owned(),
+            ));
+        }
+        DnsMainKind::Tailscale(name.to_owned())
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(ParsedMainNameservers {
+        transport: DnsTransport::Udp,
+        upstream: "0.0.0.0:53".parse().expect("special DNS client sentinel"),
+        main_kind,
+        classic_upstreams: Vec::new(),
+        tls: None,
+        query_options: DnsQueryOptions::default(),
+    }))
 }
 
 fn parse_classic_main_upstreams(
@@ -2009,6 +2052,53 @@ dns:
             .expect("enabled DNS");
         assert_eq!(dns.main_kind, DnsMainKind::Dhcp("fixture0".to_owned()));
         assert!(dns.classic_upstreams.is_empty());
+    }
+
+    #[test]
+    fn parses_phase_four_f_five_synthetic_rcodes() {
+        for (name, expected) in [
+            ("success", SyntheticRcode::Success),
+            ("format_error", SyntheticRcode::FormatError),
+            ("server_failure", SyntheticRcode::ServerFailure),
+            ("name_error", SyntheticRcode::NameError),
+            ("not_implemented", SyntheticRcode::NotImplemented),
+            ("refused", SyntheticRcode::Refused),
+        ] {
+            let source = format!(
+                "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - rcode://{name}\n"
+            );
+            let dns = Config::from_yaml(&source)
+                .expect("Phase 4F5 RCODE resolver config")
+                .dns
+                .expect("enabled DNS");
+            assert_eq!(dns.main_kind, DnsMainKind::Rcode(expected));
+            assert!(dns.classic_upstreams.is_empty());
+        }
+    }
+
+    #[test]
+    fn parses_phase_four_f_five_tailscale_aliases() {
+        for nameserver in ["tailscale://fixture", "ts://fixture"] {
+            let source = format!(
+                "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - {nameserver}\n"
+            );
+            let dns = Config::from_yaml(&source)
+                .expect("Phase 4F5 Tailscale resolver config")
+                .dns
+                .expect("enabled DNS");
+            assert_eq!(dns.main_kind, DnsMainKind::Tailscale("fixture".to_owned()));
+            assert!(dns.classic_upstreams.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_phase_four_f_five_nameservers() {
+        for nameserver in ["rcode://unknown", "tailscale://", "ts://"] {
+            let source = format!(
+                "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - {nameserver}\n"
+            );
+            assert!(Config::from_yaml(&source).is_err(), "accepted {nameserver}");
+        }
     }
 
     #[test]

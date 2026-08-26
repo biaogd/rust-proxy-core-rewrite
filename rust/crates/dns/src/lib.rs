@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -11,7 +14,7 @@ use http::{Method, Request};
 use rewrite_config::{
     Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMainKind,
     DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
-    FakeIpFilterMode, HostEntry,
+    FakeIpFilterMode, HostEntry, SyntheticRcode,
 };
 use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
@@ -42,6 +45,59 @@ const CACHE_CAPACITY: usize = 256;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_POOLED_TLS_CONNECTIONS: usize = 8;
 const SYSTEM_DNS_REFRESH_INTERVAL: Duration = Duration::from_mins(5);
+
+/// Async DNS transport supplied by a future Tailscale outbound implementation.
+pub trait TailscaleDnsResolver: Send + Sync {
+    fn exchange<'a>(
+        &'a self,
+        query: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DnsError>> + Send + 'a>>;
+}
+
+struct TailscaleResolverEntry {
+    id: u64,
+    resolver: Arc<dyn TailscaleDnsResolver>,
+}
+
+fn tailscale_resolvers() -> &'static RwLock<BTreeMap<String, TailscaleResolverEntry>> {
+    static RESOLVERS: OnceLock<RwLock<BTreeMap<String, TailscaleResolverEntry>>> = OnceLock::new();
+    RESOLVERS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+/// Registration guard for one named Tailscale DNS transport.
+pub struct TailscaleDnsRegistration {
+    name: String,
+    id: u64,
+}
+
+impl Drop for TailscaleDnsRegistration {
+    fn drop(&mut self) {
+        let Ok(mut resolvers) = tailscale_resolvers().write() else {
+            return;
+        };
+        if resolvers
+            .get(&self.name)
+            .is_some_and(|entry| entry.id == self.id)
+        {
+            resolvers.remove(&self.name);
+        }
+    }
+}
+
+/// Registers or replaces a named Tailscale DNS transport.
+#[must_use]
+pub fn register_tailscale_dns_resolver(
+    name: impl Into<String>,
+    resolver: Arc<dyn TailscaleDnsResolver>,
+) -> TailscaleDnsRegistration {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let name = name.into();
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut resolvers) = tailscale_resolvers().write() {
+        resolvers.insert(name.clone(), TailscaleResolverEntry { id, resolver });
+    }
+    TailscaleDnsRegistration { name, id }
+}
 
 #[derive(Default)]
 struct SystemDnsCache {
@@ -518,7 +574,9 @@ impl Resolver {
         .await?;
         response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
         validate_response(&response, identifier)?;
-        if matches!(response[3] & 0x0f, 2 | 5) {
+        if !matches!(&config.main_kind, DnsMainKind::Rcode(_))
+            && matches!(response[3] & 0x0f, 2 | 5)
+        {
             return Err(DnsError::InvalidMessage(
                 "upstream returned a retryable failure rcode",
             ));
@@ -2872,6 +2930,15 @@ fn append_main_kind_cache_identity(key: &mut Vec<u8>, main_kind: &DnsMainKind) {
             key.extend_from_slice(interface.as_bytes());
             key.push(0);
         }
+        DnsMainKind::Rcode(rcode) => {
+            key.push(0xf2);
+            key.push(*rcode as u8);
+        }
+        DnsMainKind::Tailscale(name) => {
+            key.push(0xf1);
+            key.extend_from_slice(name.as_bytes());
+            key.push(0);
+        }
     }
 }
 
@@ -2942,6 +3009,8 @@ async fn query_main(
     match &config.main_kind {
         DnsMainKind::System => return query_system(query).await,
         DnsMainKind::Dhcp(interface) => return query_dhcp(query, interface).await,
+        DnsMainKind::Rcode(rcode) => return Ok(query_rcode(query, *rcode)),
+        DnsMainKind::Tailscale(name) => return query_tailscale(query, name).await,
         DnsMainKind::Configured => {}
     }
     if !config.classic_upstreams.is_empty() {
@@ -2958,6 +3027,25 @@ async fn query_main(
         http_pool,
     )
     .await
+}
+
+fn query_rcode(query: &[u8], rcode: SyntheticRcode) -> Vec<u8> {
+    let mut response = query.to_vec();
+    response[2] |= 0x80;
+    response[3] = (response[3] & 0xf0) | rcode as u8;
+    response
+}
+
+async fn query_tailscale(query: &[u8], name: &str) -> Result<Vec<u8>, DnsError> {
+    let resolver = tailscale_resolvers()
+        .read()
+        .map_err(|_| DnsError::InvalidMessage("Tailscale DNS registry lock poisoned"))?
+        .get(name)
+        .map(|entry| Arc::clone(&entry.resolver))
+        .ok_or(DnsError::InvalidMessage(
+            "proxy does not provide Tailscale DNS",
+        ))?;
+    resolver.exchange(query).await
 }
 
 async fn query_dhcp(query: &[u8], interface: &str) -> Result<Vec<u8>, DnsError> {
@@ -3301,6 +3389,24 @@ fn skip_name(message: &[u8], mut offset: usize) -> Result<usize, DnsError> {
 mod tests {
     use super::*;
 
+    struct FixtureTailscaleResolver {
+        marker: u8,
+    }
+
+    impl TailscaleDnsResolver for FixtureTailscaleResolver {
+        fn exchange<'a>(
+            &'a self,
+            query: &'a [u8],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, DnsError>> + Send + 'a>> {
+            Box::pin(async move {
+                let mut response = query.to_vec();
+                response[2] |= 0x80;
+                response.push(self.marker);
+                Ok(response)
+            })
+        }
+    }
+
     fn response(identifier: u16, ttl: u32) -> Vec<u8> {
         let mut message = identifier.to_be_bytes().to_vec();
         message.extend_from_slice(&[0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]);
@@ -3355,6 +3461,45 @@ mod tests {
         for value in ["", "0", "f", "FALSE", "yes", " true"] {
             assert!(!go_style_true(value));
         }
+    }
+
+    #[tokio::test]
+    async fn tailscale_registry_replacement_guard_matches_go_contract() {
+        const NAME: &str = "phase4f5-registry-contract";
+        let query = response(0x4f05, 30);
+        assert!(query_tailscale(&query, NAME).await.is_err());
+
+        let first =
+            register_tailscale_dns_resolver(NAME, Arc::new(FixtureTailscaleResolver { marker: 1 }));
+        assert_eq!(
+            query_tailscale(&query, NAME)
+                .await
+                .expect("first resolver")
+                .last(),
+            Some(&1)
+        );
+
+        let replacement =
+            register_tailscale_dns_resolver(NAME, Arc::new(FixtureTailscaleResolver { marker: 2 }));
+        assert_eq!(
+            query_tailscale(&query, NAME)
+                .await
+                .expect("replacement resolver")
+                .last(),
+            Some(&2)
+        );
+
+        drop(first);
+        assert_eq!(
+            query_tailscale(&query, NAME)
+                .await
+                .expect("old guard must preserve replacement")
+                .last(),
+            Some(&2)
+        );
+
+        drop(replacement);
+        assert!(query_tailscale(&query, NAME).await.is_err());
     }
 
     #[test]
