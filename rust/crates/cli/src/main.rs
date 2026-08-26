@@ -12,6 +12,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Parser)]
 #[command(name = "rewrite-core", about = "Mihomo Rust compatibility candidate")]
 struct Arguments {
+    /// Show version and build information
+    #[arg(short = 'v')]
+    version: bool,
+
     /// Set configuration directory
     #[arg(short = 'd', value_name = "DIRECTORY")]
     home: Option<PathBuf>,
@@ -68,6 +72,10 @@ async fn main() {
 }
 
 async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+    if arguments.version {
+        print_version();
+        return Ok(());
+    }
     let input = resolve_config_input(&arguments)?;
     if arguments.test {
         input.specification()?.validate_declared_surface()?;
@@ -84,6 +92,25 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
     install_signals(shutdown.clone(), input, reload_sender);
     rewrite_runtime::run_with_reload(config, reload_receiver, shutdown).await?;
     Ok(())
+}
+
+fn print_version() {
+    let version = option_env!("MIHOMO_VERSION").unwrap_or("1.10.0");
+    let build_time = option_env!("MIHOMO_BUILD_TIME").unwrap_or("unknown time");
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        "x86" => "386",
+        other => other,
+    };
+    println!(
+        "Mihomo Meta {version} {os} {architecture} with rustc{} {build_time}",
+        env!("MIHOMO_RUSTC_VERSION")
+    );
 }
 
 fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {

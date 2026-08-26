@@ -620,6 +620,17 @@ It does not expand the configuration schema, full `-t` corpus, version/build
 output, CLI overrides, age encryption, subcommands, hooks or lifecycle/resource
 application; those remain 5A2 onward.
 
+### Phase 5A2a accepted scope
+
+Phase 5A2a accepts only the default, untagged portion of `CLI-04`. `-v`
+short-circuits configuration initialization and prints the pinned product
+version, Go-compatible OS/architecture names, implementation compiler version
+and build time. The Rust binary deliberately identifies `rustc`; claiming a Go
+compiler would make diagnostics misleading. Release builds may inject
+`MIHOMO_VERSION` and `MIHOMO_BUILD_TIME` at compile time. CMFA, gVisor,
+low-memory and negative feature-tag banners remain separate build-profile
+gates and are not claimed by this slice.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

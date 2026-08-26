@@ -1554,6 +1554,7 @@ dependencies = [
  "home",
  "rewrite-config",
  "rewrite-runtime",
+ "rustc_version",
  "tokio",
  "tokio-util",
 ]

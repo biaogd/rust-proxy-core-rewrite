@@ -18,5 +18,8 @@ rewrite-runtime = { path = "../runtime" }
 tokio.workspace = true
 tokio-util.workspace = true
 
+[build-dependencies]
+rustc_version.workspace = true
+
 [lints]
 workspace = true

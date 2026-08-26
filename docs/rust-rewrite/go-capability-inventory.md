@@ -41,7 +41,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-01 | Home/config resolution: default home, `-d`, `CLASH_HOME_DIR`, `-f`, `CLASH_CONFIG_FILE`, relative/absolute paths | **Parity** | Accepted 5A1 |
 | CLI-02 | Configuration input precedence: base64 `-config`/`CLASH_CONFIG_STRING`, `-f -` stdin, file/default file | **Parity** | Accepted 5A1 |
 | CLI-03 | `-t` full configuration validation, exit status and output/error classes | Partial | One corpus gate per config family |
-| CLI-04 | `-v` version, OS/architecture, Go version, build time and feature-tag output | Not started | 5A2 |
+| CLI-04 | `-v` version, OS/architecture, implementation compiler, build time and feature-tag output | Partial: default untagged banner parity | Accepted 5A2a; build-tag variants remain |
 | CLI-05 | `-m` geodata-mode override | Not started | 5A2 |
 | CLI-06 | Controller/UI/secret/routing-mark override flags and environment variables | Not started | 5A3 |
 | CLI-07 | `-age-secret-key` and encrypted configuration loading | Not started | 5A4 |
