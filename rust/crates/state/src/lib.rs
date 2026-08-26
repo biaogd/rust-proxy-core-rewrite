@@ -758,7 +758,7 @@ impl From<&Metadata> for MetadataSnapshot {
             special_proxy: String::new(),
             special_rules: metadata.special_rules.clone(),
             remote_destination,
-            dscp: 0,
+            dscp: metadata.dscp,
             sniff_host: metadata.sniff_host.clone(),
         }
     }

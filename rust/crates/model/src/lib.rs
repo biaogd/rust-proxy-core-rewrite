@@ -65,6 +65,7 @@ pub struct Metadata {
     pub inbound_port: u16,
     pub inbound_name: String,
     pub inbound_user: String,
+    pub dscp: u8,
     pub rematch_name: String,
     pub special_rules: String,
 }
@@ -88,6 +89,7 @@ impl Metadata {
             inbound_port: 0,
             inbound_name: String::new(),
             inbound_user: String::new(),
+            dscp: 0,
             rematch_name: String::new(),
             special_rules: String::new(),
         }

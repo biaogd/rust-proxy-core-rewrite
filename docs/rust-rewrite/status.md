@@ -86,6 +86,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B1b domain wildcard routing | Complete in declared byte-wildcard/local-TCP scope; RULE-03 remains partial | Exact Go byte-level `*`/`?` matching, empty/non-ASCII unit boundaries, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
+| Phase 5B2c default DSCP routing | Complete in declared local-mixed-TCP/default-metadata scope; RULE-06 remains partial | DSCP zero/nonzero, slash and reversed ranges, wildcard, invalid 64, and DIRECT/REJECT outcomes pass |
 | Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
 | Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
 | Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
@@ -3040,6 +3041,31 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 IPv6, partial-byte suffixes, mapped-address family behavior and observable
 resolver invocation remain pending before RULE-05 can be called complete.
+
+## Phase 5B2c deliverables and evidence
+
+Phase 5B2c adds the `DSCP` matcher and makes the metadata value explicit across
+the runtime and controller snapshot boundary. The current ordinary mixed TCP
+listener does not recover a packet DSCP value, so its honest value is `0`; the
+implementation does not synthesize nonzero metadata to widen this claim.
+
+The matcher accepts slash-separated values and inclusive ranges, normalizes a
+reversed range like the oracle, treats `*` as a wildcard, and rejects values
+above the six-bit DSCP limit. `compat/scripts/phase5b2c.py` proves `0` reaches
+DIRECT, `1` falls through to REJECT, `1/2-0` and `*` reach DIRECT, and `64` is a
+configuration error in both products.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B2C_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b2c.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-model -p rewrite-rules -p rewrite-state --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+The focused differential and checks pass locally. Capturing nonzero DSCP from
+transparent proxy, TUN or UDP paths remains pending, so RULE-06 remains partial.
 
 ## Phase 5B3a deliverables and evidence
 

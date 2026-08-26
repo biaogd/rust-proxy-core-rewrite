@@ -95,6 +95,7 @@ enum Matcher {
     InType(Vec<rewrite_model::InboundProtocol>),
     InUser(Vec<String>),
     InName(Vec<String>),
+    Dscp(Vec<DscpRange>),
     RematchName(Vec<String>),
     And(Vec<Matcher>),
     Or(Vec<Matcher>),
@@ -130,6 +131,12 @@ enum PortField {
 struct PortRange {
     start: u16,
     end: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DscpRange {
+    start: u8,
+    end: u8,
 }
 
 enum RuleMatchResult {
@@ -452,6 +459,12 @@ impl Matcher {
             Self::InType(types) => MatchResult::from_bool(types.contains(&metadata.inbound)),
             Self::InUser(users) => MatchResult::from_bool(users.contains(&metadata.inbound_user)),
             Self::InName(names) => MatchResult::from_bool(names.contains(&metadata.inbound_name)),
+            Self::Dscp(ranges) => MatchResult::from_bool(
+                ranges.is_empty()
+                    || ranges
+                        .iter()
+                        .any(|range| (range.start..=range.end).contains(&metadata.dscp)),
+            ),
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
@@ -510,6 +523,7 @@ impl Matcher {
             Self::InType(_) => "InType",
             Self::InUser(_) => "InUser",
             Self::InName(_) => "InName",
+            Self::Dscp(_) => "DSCP",
             Self::RematchName(_) => "RematchName",
             Self::And(_) => "AND",
             Self::Or(_) => "OR",
@@ -672,6 +686,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
         "IN-TYPE" => parse_in_type(payload),
         "IN-USER" => parse_in_user(payload),
         "IN-NAME" => parse_in_name(payload),
+        "DSCP" => parse_dscp(payload),
         "REMATCH-NAME" => {
             let names: Vec<_> = payload
                 .split('/')
@@ -819,6 +834,44 @@ fn parse_in_name(payload: &str) -> Result<Matcher, RuleError> {
         return Err(RuleError::InvalidPayload);
     }
     Ok(Matcher::InName(names))
+}
+
+fn parse_dscp(payload: &str) -> Result<Matcher, RuleError> {
+    if payload == "*" {
+        return Ok(Matcher::Dscp(Vec::new()));
+    }
+    let parts = payload.split('/').filter(|part| !part.is_empty());
+    let mut ranges = Vec::new();
+    for part in parts {
+        let bounds = part.split('-').map(str::trim).collect::<Vec<_>>();
+        let (start, end) = match bounds.as_slice() {
+            [single] => {
+                let value = parse_dscp_value(single)?;
+                (value, value)
+            }
+            [start, end] => {
+                let start = parse_dscp_value(start)?;
+                let end = parse_dscp_value(end)?;
+                (start.min(end), start.max(end))
+            }
+            _ => return Err(RuleError::InvalidPayload),
+        };
+        ranges.push(DscpRange { start, end });
+        if ranges.len() > 28 {
+            return Err(RuleError::InvalidPayload);
+        }
+    }
+    if ranges.is_empty() {
+        return Err(RuleError::InvalidPayload);
+    }
+    Ok(Matcher::Dscp(ranges))
+}
+
+fn parse_dscp_value(value: &str) -> Result<u8, RuleError> {
+    let value = value.parse::<u8>().map_err(|_| RuleError::InvalidPayload)?;
+    (value <= 63)
+        .then_some(value)
+        .ok_or(RuleError::InvalidPayload)
 }
 
 fn ip_suffix_matches(pattern: std::net::IpAddr, bits: u8, candidate: std::net::IpAddr) -> bool {
@@ -1143,6 +1196,22 @@ mod tests {
         assert_eq!(program.evaluate(&input).target, "REJECT");
         input.inbound_name = "default-mixed".to_owned();
         assert_eq!(program.evaluate(&input).target, "DIRECT");
+    }
+
+    #[test]
+    fn matches_dscp_ranges_and_rejects_values_over_sixty_three() {
+        let rules = vec!["DSCP,1/4-2,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let mut input = metadata("dscp.test", 80);
+        input.dscp = 3;
+        assert_eq!(program.evaluate(&input).target, "REJECT");
+        input.dscp = 0;
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
+        let invalid = vec!["DSCP,64,DIRECT".to_owned()];
+        assert!(matches!(
+            RuleSet::parse(&invalid, &BTreeMap::new(), &[]),
+            Err(RuleError::InvalidPayload)
+        ));
     }
 
     #[test]

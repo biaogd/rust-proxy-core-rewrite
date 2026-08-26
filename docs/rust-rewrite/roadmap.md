@@ -920,6 +920,15 @@ REJECT, and both matches must report the source rule kind. IPv6, partial-byte
 suffixes, mapped addresses and resolver-call instrumentation remain later
 RULE-05 gates.
 
+### Phase 5B2c accepted scope
+
+Phase 5B2c accepts `DSCP` matching against the current local mixed TCP
+metadata, whose observable default is zero. Acceptance requires a zero hit,
+nonzero miss, slash-separated and reversed inclusive range, wildcard, invalid
+value above 63, and distinct DIRECT/REJECT network outcomes in both products.
+Nonzero socket metadata from transparent proxy, TUN and UDP paths remains a
+later RULE-06 gate and must not be simulated by this slice.
+
 ### Phase 5B3a accepted scope
 
 Phase 5B3a accepts `IN-TYPE` for the current mixed TCP input set. HTTP

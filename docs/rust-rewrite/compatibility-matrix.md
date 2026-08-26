@@ -134,7 +134,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 2 IPv4/IPv6 CIDR source/destination subset | Oracle | **Parity** | `IP-CIDR`, `IP-CIDR6`, `SRC-IP-CIDR` and `src` parameter observations |
 | IP suffix, unmap, no-resolve and resolver interaction | Oracle | **Partial** | Phases 5B2a–5B2b prove destination/source IPv4 `IP-SUFFIX`, `SRC-IP-SUFFIX`, `src`, host-bit-preserving byte suffixes, invalid width and mixed TCP hit/fallback; IPv6, mapped addresses, partial bits and resolver-call semantics remain pending |
 | Phase 2 source/destination/inbound ports and TCP/UDP network | Oracle | **Parity** | Fixed range/list/reversal/error cases plus seeded matcher observations |
-| DSCP and remaining metadata matchers | Oracle | Not started | Metadata matrix |
+| DSCP and remaining metadata matchers | Oracle | **Partial** | Phase 5B2c proves local mixed-TCP default DSCP `0`, nonzero miss, slash/reversed ranges, wildcard and invalid values above 63; capture of nonzero DSCP from transparent/UDP inbounds remains pending |
 | Process name/path variants and UID | Oracle | Not started | Per-OS process fixtures |
 | Phase 2 rematch-name pure metadata matcher | Oracle | **Parity** | Rematch mutation followed by `REMATCH-NAME` observation |
 | Inbound type/user/name matchers | Oracle | **Partial** | Phases 5B3a–5B3c prove local TCP `IN-TYPE`, `IN-USER` and `IN-NAME`, including `DEFAULT-HTTP`/`SOCKS`/`MIXED`, lists, aliases and case-sensitive users; UDP, named listeners and future protocols remain pending |
