@@ -177,7 +177,7 @@ runtime behavior is under [`dns`](../../dns).
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | DNS-01 | Local UDP/TCP server: complete question validation, all RR types, flags, rcode, EDNS, truncation and UDP-size behavior | Complete in the Phase 4F1 declared local-listener scope | 4F1 |
-| DNS-02 | Classic UDP/TCP upstreams: IP/domain targets, multiple servers, parallel selection, timeout/failure and UDP-TC retry over TCP | Partial | 4F2 |
+| DNS-02 | Classic UDP/TCP upstreams: IP/domain targets, multiple servers, parallel selection, timeout/failure and UDP-TC retry over TCP | Complete in the Phase 4F2 declared classic-main scope | 4F2 |
 | DNS-03 | System resolver on POSIX/Windows/Android-CMFA, refresh/reset behavior | Not started | 4F3 plus platform gates |
 | DNS-04 | DHCP-discovered upstream and invalidation | Not started | 4F4 |
 | DNS-05 | RCODE synthetic upstream and Tailscale DNS upstream | Not started | 4F5/7K |

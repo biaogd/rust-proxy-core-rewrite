@@ -162,7 +162,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4A UDP/TCP DNS server subset | Oracle | **Parity** | UDP and TCP queries, framing, ID echo, AA/flags and A response semantics in `compat/scripts/phase4.py` |
 | Phase 4F1 full local UDP/TCP DNS server semantics | Oracle | **Parity** | `DNS-01`; header accept/reject/ignore matrix, malformed wire, representative name-bearing/text/address/SOA/unknown RR relay, RCODE behavior, EDNS and UDP truncation in `compat/scripts/phase4f1.py` |
 | Phase 4A IP-literal UDP/TCP upstream | Oracle | **Parity** | Both transports observed by the deterministic loopback authoritative server |
-| System and general classic upstream selection | Oracle | Not started | System resolver, domains, multiple upstreams, retries and selection order |
+| Phase 4F2 general classic main-upstream selection | Oracle | **Parity** | `DNS-02`; non-loopback config, UDP/TCP domain bootstrap, concurrent fastest-valid selection, connection/RCODE failover, five-second timeout and UDP-TC retry in `compat/scripts/phase4f2.py` |
+| System resolver selection | Oracle | Not started | POSIX, Windows and Android-CMFA fixtures remain Phase 4F3 |
 | Phase 4E1 loopback insecure DoT main-upstream subset | Oracle | **Parity** | Local TLS server, DNS/TCP framing, cache behavior and config/process observations in `compat/scripts/phase4e1.py` |
 | Phase 4E2 custom-CA verified DoT main-upstream subset | Oracle | **Parity** | Inline root/leaf chain, explicit SNI/name verification, wrong-name SERVFAIL, DNS/TCP framing and cache observations in `compat/scripts/phase4e2.py` |
 | Phase 4E3 multiple inline custom roots for verified DoT | Oracle | **Parity** | Decoy + issuing root selection, issuing-root order, untrusted-chain SERVFAIL and cache observations in `compat/scripts/phase4e3.py` |
@@ -258,14 +259,16 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4E18 DoQ lifecycle | Oracle | **Parity** | Native `compat/scripts/phase4e18.py`, 2026-08-26; deterministic reuse/concurrency/retry/reset/full-handshake observations |
 | Darwin arm64 — Phase 4E19 encrypted wrappers | Oracle | **Parity** | Native `compat/scripts/phase4e19.py`, 2026-08-26; deterministic ECS and disabled request/response observations over DoQ |
 | Darwin arm64 — Phase 4F1 local DNS semantics | Oracle | **Parity** | Native `compat/scripts/phase4f1.py`, 2026-08-26; deterministic validation, RR/RCODE, EDNS and UDP-size observations |
-| Darwin arm64 beyond Phase 4F1 | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 4F2 classic upstreams | Oracle | **Parity** | Native `compat/scripts/phase4f2.py`, 2026-08-26; deterministic domain/bootstrap, scheduling, timeout and TC-retry observations |
+| Darwin arm64 beyond Phase 4F2 | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E18 DoQ lifecycle | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E19 encrypted wrappers | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4F1 local DNS semantics | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
-| Linux amd64 beyond Phase 4F1 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 4F2 classic upstreams | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
+| Linux amd64 beyond Phase 4F2 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64/arm64/386 | Oracle | Not started | Named pipe, process/socket behavior |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |

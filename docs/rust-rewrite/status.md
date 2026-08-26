@@ -41,11 +41,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
 | Phase 4E19 encrypted DNS wrappers | Complete in declared scope | `DNS-10`; verified-DoQ ECS inject/preserve/override, disabled request types and one disabled response-RR filter differential suite passed |
 | Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
+| Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F1 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F2 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices through Phase 4F1 remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices through Phase 4F2 remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2017,6 +2018,72 @@ suite passed locally. The complete Phase 1–4F1 differential regression,
 workspace tests and Go/with-gVisor baseline gates remain delegated to the
 default GitHub Actions workflow; their result is not pre-claimed here.
 
+## Phase 4F2 deliverables and evidence
+
+Phase 4F2 completes the declared `DNS-02` classic main-upstream boundary.
+Configuration now accepts an ordered list of UDP/TCP nameservers, removes exact
+duplicates and permits nonzero non-loopback IP sockets. A domain endpoint keeps
+its host and port plus one explicit IP-based `dns.default-nameserver`; the
+bootstrap A result supplies the target socket without using the host system
+resolver.
+
+For a cache miss, Rust starts every classic main exchange concurrently under a
+shared five-second deadline. The first response with a matching ID and QR bit
+whose RCODE is neither SERVFAIL nor REFUSED wins; connection failures and those
+two RCODEs leave other candidates eligible. Remaining tasks are cancelled when
+a winner is selected. A UDP response carrying TC is discarded and the original
+query is retried over TCP against the same socket, matching the oracle client.
+The cache key includes transport and endpoint/bootstrap identity for the full
+main list.
+
+`compat/scripts/phase4f2.py` runs both candidates against deterministic local
+UDP/TCP authorities and proves:
+
+- two UDP authorities are contacted concurrently and the delayed response
+  loses to the faster valid answer;
+- a refused TCP connection and a UDP SERVFAIL can each be bypassed by a healthy
+  concurrent resolver;
+- a UDP TC response causes exactly one UDP request and one TCP retry, while a
+  configured TCP resolver uses TCP directly;
+- UDP and TCP domain endpoints each perform one A lookup through the explicit
+  UDP bootstrap before contacting the target transport;
+- one UDP blackhole produces local SERVFAIL in the shared five-second timeout
+  class;
+- multiple classic, domain/bootstrap and non-loopback configurations are
+  accepted, while an explicitly empty nameserver list is rejected.
+
+Observed Phase 4F2 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4f2.py`; Go 1.26.5, Rust 1.95.0 and deterministic loopback UDP/TCP/bootstrap authorities |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4F2; no result is recorded before that run completes |
+
+No new dependency was introduced. The classic endpoint model lives in
+`rewrite-config`; bootstrap, scheduling and transport fallback live in
+`rewrite-dns`.
+
+System and DHCP discovery remain Phases 4F3–4F4, synthetic RCODE/Tailscale
+clients remain 4F5, classic wrapper parameters remain 4F6, and combining full
+resolver sets/policies remains 4F7–4F9. Phase 4F2 does not claim negative,
+stale, singleflight or background retry/cache behavior reserved for 4F11.
+
+### Phase 4F2 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f2.py
+```
+
+The format check, complete workspace Clippy gate and Phase 4F2 differential
+suite passed locally. The complete Phase 1–4F2 differential regression,
+workspace tests and Go/with-gVisor baseline gates remain delegated to the
+default GitHub Actions workflow; their result is not pre-claimed here.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2092,8 +2159,8 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F1 local DNS message boundary. Phase 4D3B,
-4F2 or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4F2 classic DNS upstream boundary. Phase 4D3B,
+4F3 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

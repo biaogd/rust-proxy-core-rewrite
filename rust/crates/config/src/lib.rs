@@ -127,6 +127,7 @@ pub struct DnsConfig {
     pub listen: SocketAddr,
     pub upstream: SocketAddr,
     pub transport: DnsTransport,
+    pub classic_upstreams: Vec<DnsClassicUpstream>,
     pub ipv6: bool,
     pub use_hosts: bool,
     pub use_system_hosts: bool,
@@ -169,6 +170,22 @@ pub struct DnsTlsConfig {
 pub struct DnsUpstream {
     pub address: SocketAddr,
     pub transport: DnsTransport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsClassicUpstream {
+    pub endpoint: DnsClassicEndpoint,
+    pub transport: DnsTransport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsClassicEndpoint {
+    Socket(SocketAddr),
+    Domain {
+        host: String,
+        port: u16,
+        bootstrap: DnsUpstream,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -702,18 +719,16 @@ fn parse_dns(
         .ok_or_else(|| ConfigError::InvalidDns("dns.listen is required".to_owned()))?;
     let listen = parse_loopback_dns_addr(&listen_text, "dns.listen")?;
     let nameservers = raw.nameserver.take().unwrap_or_default();
-    if nameservers.len() != 1 {
+    if nameservers.is_empty() {
         return Err(ConfigError::InvalidDns(
-            "exactly one dns.nameserver is required".to_owned(),
+            "at least one dns.nameserver is required".to_owned(),
         ));
     }
-    let parsed = parse_dns_upstream(&nameservers[0], "dns.nameserver")?;
-    let query_options = parse_dns_query_options(&nameservers[0])?;
     let default_nameservers = raw.default_nameserver.take().unwrap_or_default();
-    let (transport, upstream, tls) = parse_main_dns_tls(
-        parsed,
-        raw.prefer_h3.unwrap_or(false),
+    let main = parse_main_nameservers(
+        &nameservers,
         &default_nameservers,
+        raw.prefer_h3.unwrap_or(false),
         trust_certificates,
     )?;
     let policies = parse_dns_policies(raw.nameserver_policy.take().unwrap_or_default())?;
@@ -728,8 +743,9 @@ fn parse_dns(
         );
     Ok(Some(DnsConfig {
         listen,
-        upstream,
-        transport,
+        upstream: main.upstream,
+        transport: main.transport,
+        classic_upstreams: main.classic_upstreams,
         ipv6,
         use_hosts,
         use_system_hosts,
@@ -738,9 +754,140 @@ fn parse_dns(
         policies,
         fallback,
         direct,
+        tls: main.tls,
+        query_options: main.query_options,
+    }))
+}
+
+struct ParsedMainNameservers {
+    transport: DnsTransport,
+    upstream: SocketAddr,
+    classic_upstreams: Vec<DnsClassicUpstream>,
+    tls: Option<DnsTlsConfig>,
+    query_options: DnsQueryOptions,
+}
+
+fn parse_main_nameservers(
+    nameservers: &[String],
+    default_nameservers: &[String],
+    prefer_h3: bool,
+    trust_certificates: &[String],
+) -> Result<ParsedMainNameservers, ConfigError> {
+    let all_classic = nameservers
+        .iter()
+        .all(|server| server.starts_with("udp://") || server.starts_with("tcp://"));
+    if all_classic {
+        let bootstrap = parse_optional_dns_upstream(
+            default_nameservers,
+            "dns.default-nameserver",
+            "Phase 4F2 domain classic upstream",
+        )?;
+        let classic_upstreams = parse_classic_main_upstreams(nameservers, bootstrap)?;
+        let first = classic_upstreams
+            .first()
+            .expect("nonempty classic nameserver list");
+        let upstream = match &first.endpoint {
+            DnsClassicEndpoint::Socket(address) => *address,
+            DnsClassicEndpoint::Domain { bootstrap, .. } => bootstrap.address,
+        };
+        return Ok(ParsedMainNameservers {
+            transport: first.transport,
+            upstream,
+            classic_upstreams,
+            tls: None,
+            query_options: DnsQueryOptions::default(),
+        });
+    }
+    if nameservers.len() != 1 {
+        return Err(ConfigError::InvalidDns(
+            "Phase 4F2 permits multiple dns.nameserver entries only when all are classic UDP/TCP"
+                .to_owned(),
+        ));
+    }
+    let parsed = parse_dns_upstream(&nameservers[0], "dns.nameserver")?;
+    let query_options = parse_dns_query_options(&nameservers[0])?;
+    let (transport, upstream, tls) =
+        parse_main_dns_tls(parsed, prefer_h3, default_nameservers, trust_certificates)?;
+    Ok(ParsedMainNameservers {
+        transport,
+        upstream,
+        classic_upstreams: Vec::new(),
         tls,
         query_options,
-    }))
+    })
+}
+
+fn parse_classic_main_upstreams(
+    servers: &[String],
+    bootstrap: Option<DnsUpstream>,
+) -> Result<Vec<DnsClassicUpstream>, ConfigError> {
+    let mut upstreams = Vec::new();
+    for server in servers {
+        let url = Url::parse(server).map_err(|_| {
+            ConfigError::InvalidDns("dns.nameserver classic URL is invalid".to_owned())
+        })?;
+        let transport = match url.scheme() {
+            "udp" => DnsTransport::Udp,
+            "tcp" => DnsTransport::Tcp,
+            _ => {
+                return Err(ConfigError::InvalidDns(
+                    "Phase 4F2 accepts only UDP/TCP classic upstreams".to_owned(),
+                ));
+            }
+        };
+        if url.cannot_be_a_base()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !matches!(url.path(), "" | "/")
+        {
+            return Err(ConfigError::InvalidDns(
+                "Phase 4F2 classic upstream must contain only host and optional port".to_owned(),
+            ));
+        }
+        let host = url.host_str().ok_or_else(|| {
+            ConfigError::InvalidDns("Phase 4F2 classic upstream host is required".to_owned())
+        })?;
+        let port = url.port().unwrap_or(53);
+        if port == 0 {
+            return Err(ConfigError::InvalidDns(
+                "Phase 4F2 classic upstream port must be nonzero".to_owned(),
+            ));
+        }
+        let endpoint = if let Ok(address) = host.parse::<IpAddr>() {
+            DnsClassicEndpoint::Socket(SocketAddr::new(address, port))
+        } else {
+            let valid = host.len() <= 253
+                && host
+                    .split('.')
+                    .all(|label| !label.is_empty() && label.len() <= 63 && label.is_ascii());
+            if !valid {
+                return Err(ConfigError::InvalidDns(
+                    "Phase 4F2 classic upstream domain is invalid".to_owned(),
+                ));
+            }
+            let bootstrap = bootstrap.ok_or_else(|| {
+                ConfigError::InvalidDns(
+                    "Phase 4F2 domain classic upstream requires one dns.default-nameserver"
+                        .to_owned(),
+                )
+            })?;
+            DnsClassicEndpoint::Domain {
+                host: host.to_lowercase(),
+                port,
+                bootstrap,
+            }
+        };
+        let upstream = DnsClassicUpstream {
+            endpoint,
+            transport,
+        };
+        if !upstreams.contains(&upstream) {
+            upstreams.push(upstream);
+        }
+    }
+    Ok(upstreams)
 }
 
 fn is_dns_wrapper_parameter(name: &str) -> bool {
@@ -1046,7 +1193,7 @@ fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, Con
     if let Some(address) = value.strip_prefix("udp://") {
         return Ok(ParsedDnsUpstream {
             transport: DnsTransport::Udp,
-            address: parse_loopback_dns_addr(address, field)?,
+            address: parse_dns_socket_addr(address, field)?,
             server_name: None,
             tls_server_name: None,
             skip_certificate_verification: false,
@@ -1059,7 +1206,7 @@ fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, Con
     if let Some(address) = value.strip_prefix("tcp://") {
         return Ok(ParsedDnsUpstream {
             transport: DnsTransport::Tcp,
-            address: parse_loopback_dns_addr(address, field)?,
+            address: parse_dns_socket_addr(address, field)?,
             server_name: None,
             tls_server_name: None,
             skip_certificate_verification: false,
@@ -1615,12 +1762,22 @@ fn validate_host_cycles(hosts: &BTreeMap<String, HostEntry>) -> Result<(), Confi
 }
 
 fn parse_loopback_dns_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigError> {
+    let address = parse_dns_socket_addr(value, field)?;
+    if !address.ip().is_loopback() {
+        return Err(ConfigError::InvalidDns(format!(
+            "{field} must be a nonzero loopback socket address"
+        )));
+    }
+    Ok(address)
+}
+
+fn parse_dns_socket_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigError> {
     let address: SocketAddr = value
         .parse()
         .map_err(|_| ConfigError::InvalidDns(format!("{field} must be an IP socket address")))?;
-    if address.port() == 0 || !address.ip().is_loopback() {
+    if address.port() == 0 {
         return Err(ConfigError::InvalidDns(format!(
-            "{field} must be a nonzero loopback socket address"
+            "{field} must use a nonzero port"
         )));
     }
     Ok(address)
@@ -1768,6 +1925,12 @@ dns:
                 listen: "127.0.0.1:5353".parse().expect("literal"),
                 upstream: "127.0.0.1:15353".parse().expect("literal"),
                 transport: DnsTransport::Tcp,
+                classic_upstreams: vec![DnsClassicUpstream {
+                    endpoint: DnsClassicEndpoint::Socket(
+                        "127.0.0.1:15353".parse().expect("literal"),
+                    ),
+                    transport: DnsTransport::Tcp,
+                }],
                 ipv6: false,
                 use_hosts: false,
                 use_system_hosts: false,

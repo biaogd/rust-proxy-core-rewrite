@@ -428,6 +428,15 @@ answer independent of the advertised UDP size. Classic upstream domain names,
 multiple-server selection, failure scheduling and UDP-TC retry remain Phase
 4F2; cache retry/negative/stale behavior remains Phase 4F11.
 
+Phase 4F2 accepts classic main-upstream behavior for nonzero IP sockets and
+explicit-port domain endpoints bootstrapped by one classic IP resolver. It
+proves UDP and TCP domain targets, ordered duplicate removal, concurrent
+fastest-valid selection, connection-error and SERVFAIL failover, one shared
+five-second all-upstream timeout, direct TCP exchange and same-endpoint UDP-TC
+retry over TCP. System/DHCP/RCODE clients remain 4F3–4F5, classic wrapper
+parameters remain 4F6, combining multiple encrypted and policy resolver sets
+remains 4F7–4F9, and background/cache retry behavior remains 4F11.
+
 No 4F gate may pull TUN or remote proxy protocols forward merely because DNS
 can consume them. Those end-to-end claims close only in Phase 8 or the relevant
 Phase 6/7 adapter gate.

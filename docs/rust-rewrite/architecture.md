@@ -99,6 +99,15 @@ UDP replies pass through RR-boundary truncation using the client's advertised
 size (with the RFC minimum of 512). Upstream selection and UDP-to-TCP retry stay
 behind the resolver boundary for Phase 4F2.
 
+Phase 4F2 represents classic main resolvers as an ordered, deduplicated list.
+Each UDP/TCP entry is either a socket address or a domain plus port and one
+explicit classic bootstrap resolver. `rewrite-dns` resolves domain endpoints
+before transport exchange, races all main entries under one five-second
+window, accepts the first valid non-SERVFAIL/non-REFUSED response and cancels
+the remainder. A UDP response with TC set is retried over TCP against the same
+resolved socket. Cache identity includes the complete main-resolver list;
+system resolver discovery and cache retry state remain separate later gates.
+
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
 paths and can read the native Unix host file when enabled. DNS A/AAAA answers

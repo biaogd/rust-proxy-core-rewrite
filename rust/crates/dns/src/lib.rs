@@ -9,8 +9,9 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
-    Config, DnsConfig, DnsFallbackConfig, DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream,
-    DohProtocol, EcsConfig, FakeIpConfig, FakeIpFilterMode, HostEntry,
+    Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMode,
+    DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
+    FakeIpFilterMode, HostEntry,
 };
 use rewrite_state::RuntimeState;
 use serde::Serialize;
@@ -1441,6 +1442,15 @@ async fn query_udp(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, DnsErr
     Ok(response)
 }
 
+async fn query_udp_with_tcp_retry(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, DnsError> {
+    let response = query_udp(query, upstream).await?;
+    if response.len() >= DNS_HEADER_LENGTH && response[2] & 0x02 != 0 {
+        query_tcp(query, upstream).await
+    } else {
+        Ok(response)
+    }
+}
+
 async fn query_tcp(query: &[u8], upstream: SocketAddr) -> Result<Vec<u8>, DnsError> {
     let mut stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
         .await
@@ -2728,6 +2738,30 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
     }
 
     let mut key = cache_key(query, config.transport, config.upstream);
+    if !config.classic_upstreams.is_empty() {
+        key.push(0xf5);
+        for upstream in &config.classic_upstreams {
+            key.push(upstream.transport as u8);
+            match &upstream.endpoint {
+                DnsClassicEndpoint::Socket(address) => {
+                    key.push(0);
+                    key.extend_from_slice(address.to_string().as_bytes());
+                }
+                DnsClassicEndpoint::Domain {
+                    host,
+                    port,
+                    bootstrap,
+                } => {
+                    key.push(1);
+                    key.extend_from_slice(host.as_bytes());
+                    key.extend_from_slice(&port.to_be_bytes());
+                    key.extend_from_slice(bootstrap.address.to_string().as_bytes());
+                    key.push(bootstrap.transport as u8);
+                }
+            }
+            key.push(0);
+        }
+    }
     if let Some(tls) = &config.tls {
         key.push(0xfd);
         key.extend_from_slice(tls.server_name.as_bytes());
@@ -2821,12 +2855,8 @@ async fn query_configured(
         return query_one(query, policy, None, None, None).await;
     }
 
-    let main = DnsUpstream {
-        address: config.upstream,
-        transport: config.transport,
-    };
     let Some(fallback_config) = &config.fallback else {
-        return query_one(query, main, config.tls.as_ref(), tls_pool, http_pool).await;
+        return query_main(query, config, tls_pool, http_pool).await;
     };
     let fallback = fallback_config.upstream;
 
@@ -2839,7 +2869,7 @@ async fn query_configured(
     }
 
     if fallback_config.lazy {
-        return match query_one(query, main, config.tls.as_ref(), tls_pool, http_pool).await {
+        return match query_main(query, config, tls_pool, http_pool).await {
             Ok(response) if response_passes_fallback_filter(&response, fallback_config)? => {
                 Ok(response)
             }
@@ -2850,13 +2880,92 @@ async fn query_configured(
     let fallback_query = query.to_vec();
     let fallback_task =
         tokio::spawn(async move { query_one(&fallback_query, fallback, None, None, None).await });
-    match query_one(query, main, config.tls.as_ref(), tls_pool, http_pool).await {
+    match query_main(query, config, tls_pool, http_pool).await {
         Ok(response) if response_passes_fallback_filter(&response, fallback_config)? => {
             Ok(response)
         }
         _ => fallback_task
             .await
             .map_err(|_| DnsError::InvalidMessage("fallback query task failed"))?,
+    }
+}
+
+async fn query_main(
+    query: &[u8],
+    config: &DnsConfig,
+    tls_pool: Option<&Mutex<TlsConnectionPool>>,
+    http_pool: Option<&Mutex<HttpConnectionPool>>,
+) -> Result<Vec<u8>, DnsError> {
+    if !config.classic_upstreams.is_empty() {
+        return query_classic_group(query, &config.classic_upstreams).await;
+    }
+    query_one(
+        query,
+        DnsUpstream {
+            address: config.upstream,
+            transport: config.transport,
+        },
+        config.tls.as_ref(),
+        tls_pool,
+        http_pool,
+    )
+    .await
+}
+
+async fn query_classic_group(
+    query: &[u8],
+    upstreams: &[DnsClassicUpstream],
+) -> Result<Vec<u8>, DnsError> {
+    let identifier = [query[0], query[1]];
+    let mut tasks = JoinSet::new();
+    for upstream in upstreams {
+        let query = query.to_vec();
+        let upstream = upstream.clone();
+        tasks.spawn(async move { query_classic(&query, &upstream).await });
+    }
+    let selected = tokio::time::timeout(UPSTREAM_TIMEOUT, async {
+        while let Some(result) = tasks.join_next().await {
+            let Ok(Ok(response)) = result else { continue };
+            if validate_response(&response, identifier).is_ok()
+                && !matches!(response[3] & 0x0f, 2 | 5)
+            {
+                return Ok(response);
+            }
+        }
+        Err(DnsError::InvalidMessage("all classic DNS upstreams failed"))
+    })
+    .await
+    .map_err(|_| DnsError::UpstreamTimeout)?;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    selected
+}
+
+async fn query_classic(query: &[u8], upstream: &DnsClassicUpstream) -> Result<Vec<u8>, DnsError> {
+    let address = match &upstream.endpoint {
+        DnsClassicEndpoint::Socket(address) => *address,
+        DnsClassicEndpoint::Domain {
+            host,
+            port,
+            bootstrap,
+        } => {
+            let bootstrap_query = make_query(host, 1)?;
+            let identifier = [bootstrap_query[0], bootstrap_query[1]];
+            let response = query_one(&bootstrap_query, *bootstrap, None, None, None).await?;
+            validate_response(&response, identifier)?;
+            let address = answer_addresses(&response)?
+                .into_iter()
+                .find_map(|(address, _)| address.is_ipv4().then_some(address))
+                .ok_or(DnsError::NoAddress)?;
+            SocketAddr::new(address, *port)
+        }
+    };
+    match upstream.transport {
+        DnsTransport::Udp => query_udp_with_tcp_retry(query, address).await,
+        DnsTransport::Tcp => query_tcp(query, address).await,
+        _ => Err(DnsError::InvalidMessage(
+            "classic upstream has a non-classic transport",
+        )),
     }
 }
 
@@ -2868,7 +2977,7 @@ async fn query_one(
     http_pool: Option<&Mutex<HttpConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
     match upstream.transport {
-        DnsTransport::Udp => query_udp(query, upstream.address).await,
+        DnsTransport::Udp => query_udp_with_tcp_retry(query, upstream.address).await,
         DnsTransport::Tcp => query_tcp(query, upstream.address).await,
         DnsTransport::TlsInsecureNoReuse => query_tls(query, upstream.address).await,
         DnsTransport::TlsInsecureReuse => {
