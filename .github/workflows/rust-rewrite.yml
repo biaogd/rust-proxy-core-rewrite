@@ -37,6 +37,8 @@ jobs:
       PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -50,7 +52,7 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Restore Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -75,7 +77,7 @@ jobs:
 
       - name: Upload differential failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: phase4e15-differential-failure
           path: compat/artifacts/
@@ -120,6 +122,8 @@ jobs:
       PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -133,7 +137,7 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Restore Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -178,7 +182,7 @@ jobs:
 
       - name: Upload differential failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: full-differential-failure
           path: compat/artifacts/
