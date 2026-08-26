@@ -63,6 +63,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A2b geodata-mode CLI default | Complete in declared scope | `CLI-05`; default, `-m` and explicit YAML precedence pass through live `/configs` observations |
 | Phase 5A3a controller/secret overrides | Complete in declared scope; CLI-06 remains partial | CLI/environment/explicit-empty precedence, listener selection, Bearer auth and SIGHUP reapplication pass |
 | Phase 5A4a X25519 encrypted configuration | Complete in declared single-identity scope; CLI-07 remains partial | File/base64, CLI/environment precedence, wrong/empty key and plaintext warning behavior pass using the Rust `age` library |
+| Phase 5A4b X25519 age convert | Complete in declared scope; CLI-10 remains partial | Exact public recipient, trailing argument and invalid/missing identity exit behavior pass |
 | Phase 5A7a invalid SIGHUP recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the same signal loop applies a following valid generation |
 | Phase 5A7b local-resource shutdown | Complete in declared scope; CLI-11 remains partial | SIGINT/SIGTERM close an idle tunnel and release current mixed/controller/DNS TCP and DNS UDP resources before zero exit |
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, startup readiness, Go-compatible live-resource shutdown-hook boundary and failure asymmetry pass |

@@ -146,7 +146,15 @@ impl ConfigInput {
 
 #[tokio::main]
 async fn main() {
-    let arguments = Arguments::parse_from(normalized_arguments(std::env::args_os()));
+    let raw_arguments: Vec<_> = std::env::args_os().collect();
+    if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("age") {
+        if let Err(error) = run_age_subcommand(&raw_arguments[2..]) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    let arguments = Arguments::parse_from(normalized_arguments(raw_arguments));
     if let Err(error) = execute(arguments).await {
         eprintln!("{error}");
         std::process::exit(1);
@@ -295,10 +303,34 @@ fn decrypt_yaml(
     data: &[u8],
     age_secret_key: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(String::from_utf8(rewrite_age::decrypt_config(
-        data,
-        age_secret_key,
-    )?)?)
+    let decrypted = rewrite_age::decrypt_config(data, age_secret_key)
+        .map_err(|error| std::io::Error::other(format!("decrypt config error: {error}")))?;
+    Ok(String::from_utf8(decrypted)?)
+}
+
+fn run_age_subcommand(
+    arguments: &[OsString],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match arguments.first().and_then(|value| value.to_str()) {
+        Some("convert") => {
+            let secret_key = arguments
+                .get(1)
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| std::io::Error::other("Using: age convert <secret_key>"))?;
+            println!(
+                "{}",
+                rewrite_age::recipient_for_x25519_identity(secret_key)?
+            );
+            Ok(())
+        }
+        Some(command) => Err(std::io::Error::other(format!(
+            "age subcommand is not implemented: {command}"
+        ))
+        .into()),
+        None => {
+            Err(std::io::Error::other("Using: age keygen/keygen-pq/convert/decrypt/encrypt").into())
+        }
+    }
 }
 
 fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<OsString> {

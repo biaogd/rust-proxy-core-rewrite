@@ -665,6 +665,15 @@ documented wire format interoperates with the reference Go implementation.
 Multiple identities, hybrid/PQ, SSH, encrypted-identity and plugin identities
 remain outside this claim.
 
+### Phase 5A4b accepted scope
+
+Phase 5A4b accepts only the native X25519 `age convert` subset of `CLI-10`.
+The subcommand short-circuits normal configuration startup, emits the exact
+public recipient for a valid identity, ignores trailing arguments like the
+oracle and preserves the oracle's exit class for invalid or missing keys.
+Key generation, hybrid/PQ conversion and encrypt/decrypt remain later 5A4
+slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

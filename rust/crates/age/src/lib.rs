@@ -7,9 +7,9 @@ const ARMOR_HEADER: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 
 #[derive(Debug, Error)]
 pub enum AgeError {
-    #[error("decrypt config error: invalid X25519 age identity: {0}")]
+    #[error("invalid X25519 age identity: {0}")]
     InvalidIdentity(&'static str),
-    #[error("decrypt config error: {0}")]
+    #[error("age decryption failed: {0}")]
     Decrypt(#[from] age::DecryptError),
 }
 
@@ -20,6 +20,15 @@ pub enum AgeError {
 /// Returns [`AgeError::InvalidIdentity`] for malformed or unsupported keys.
 pub fn validate_x25519_identity(secret_key: &str) -> Result<(), AgeError> {
     parse_identity(secret_key).map(drop)
+}
+
+/// Converts one native X25519 identity to its public recipient.
+///
+/// # Errors
+///
+/// Returns [`AgeError::InvalidIdentity`] for malformed or unsupported keys.
+pub fn recipient_for_x25519_identity(secret_key: &str) -> Result<String, AgeError> {
+    Ok(parse_identity(secret_key)?.to_public().to_string())
 }
 
 /// Decrypts an ASCII-armored age configuration, or returns plain input unchanged.
