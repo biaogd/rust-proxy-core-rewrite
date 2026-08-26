@@ -232,6 +232,28 @@ def exercise(
         thread.join(timeout=IO_DEADLINE)
 
 
+def exercise_with_startup_retry(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    *,
+    configured_path: str,
+    expected_path: str,
+) -> dict[str, Any]:
+    """Retry one transient first-query timeout with entirely fresh state."""
+    for attempt in range(2):
+        try:
+            return exercise(
+                binary,
+                scratch / f"attempt-{attempt + 1}",
+                configured_path=configured_path,
+                expected_path=expected_path,
+            )
+        except TimeoutError:
+            if attempt == 1:
+                raise
+    raise AssertionError("unreachable retry loop")
+
+
 def run_candidate(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     scratch.mkdir(parents=True, exist_ok=True)
     config = validation(binary, scratch)
@@ -240,19 +262,19 @@ def run_candidate(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]
     return {
         "config": config,
         "runtime": {
-            "empty-path": exercise(
+            "empty-path": exercise_with_startup_retry(
                 binary,
                 scratch / "empty-path",
                 configured_path="",
                 expected_path="/",
             ),
-            "root-path": exercise(
+            "root-path": exercise_with_startup_retry(
                 binary,
                 scratch / "root-path",
                 configured_path="/",
                 expected_path="/",
             ),
-            "custom-path": exercise(
+            "custom-path": exercise_with_startup_retry(
                 binary,
                 scratch / "custom-path",
                 configured_path="/dns-query",

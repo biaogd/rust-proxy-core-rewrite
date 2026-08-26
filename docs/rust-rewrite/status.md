@@ -1416,6 +1416,11 @@ scheme. Runtime authorities cover an omitted path, explicit `/` and
 persistent upstream connection, exact HTTP request metadata and path, then a
 cache hit with a third client ID.
 
+CI follow-up on 2026-08-26 hardens only fixture startup: if the first local UDP
+query times out, the case is retried once with a new product process and a new
+HTTP authority. A second timeout remains a failure; no response, wire or
+connection observation is normalized.
+
 Observed Phase 4E12 result on 2026-08-25:
 
 | Platform | Result | Environment |
@@ -2284,6 +2289,11 @@ false/invalid values, exact deduplication and two distinct wrappers sharing one
 raw endpoint. A focused Go contract verifies `Equal` versus `transportEqual`;
 matching Rust config tests verify the represented identities. The added Go file
 is test-only and no oracle implementation file changes.
+
+CI follow-up on 2026-08-26 normalizes only `-SIGTERM` produced by the harness's
+own cleanup signal after all DNS assertions. DNS readiness can precede Go's
+main signal-handler registration on a loaded runner; all other exit codes and
+every semantic observation remain exact.
 
 Observed Phase 4F6 result on 2026-08-26:
 

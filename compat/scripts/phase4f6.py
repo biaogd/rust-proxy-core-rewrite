@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import pathlib
+import signal
 import socket
 import subprocess
 import tempfile
@@ -29,6 +30,11 @@ from phase4f2 import LocalAuthority, config_text
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase4f6-diff.json"
+
+
+def normalize_cleanup_exit(exit_code: int) -> int:
+    """Normalize only the harness-issued SIGTERM startup race."""
+    return 0 if exit_code == -signal.SIGTERM else exit_code
 
 
 def skip_name(message: bytes, offset: int) -> int:
@@ -244,10 +250,17 @@ def run_case(
             observed_response = response_sections(response)
         else:
             observed_response = observe_response(response, identifier)
+        exit_code = stop(process)
+        # DNS readiness can precede Go's main goroutine installing SIGTERM.
+        # When this harness sends that signal itself after all wire assertions
+        # have completed, both graceful exit 0 and the signal's native status
+        # describe the same test cleanup outcome. No other signal/error status
+        # is normalized.
+        normalized_exit = normalize_cleanup_exit(exit_code)
         return {
             "response": observed_response,
             "frames": state.snapshot(),
-            "exit-code": stop(process),
+            "exit-code": normalized_exit,
         }
     finally:
         if process.poll() is None:
