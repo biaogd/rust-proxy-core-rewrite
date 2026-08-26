@@ -13,7 +13,7 @@ use rewrite_state::RuntimeState;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +28,29 @@ pub enum RuntimeError {
 struct RuntimeTask {
     shutdown: CancellationToken,
     handle: JoinHandle<()>,
+}
+
+/// One-shot process lifecycle barriers used by synchronous shell hooks.
+pub struct LifecycleSignals {
+    ready: oneshot::Sender<()>,
+    shutdown_hook_ready: oneshot::Sender<()>,
+    continue_shutdown: oneshot::Receiver<()>,
+}
+
+impl LifecycleSignals {
+    /// Creates lifecycle barriers owned by the runtime.
+    #[must_use]
+    pub fn new(
+        ready: oneshot::Sender<()>,
+        shutdown_hook_ready: oneshot::Sender<()>,
+        continue_shutdown: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            ready,
+            shutdown_hook_ready,
+            continue_shutdown,
+        }
+    }
 }
 
 /// Runs a fixed configuration until cancellation.
@@ -52,8 +75,38 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), Runt
 /// Later reload errors are logged and leave the current generation unchanged.
 pub async fn run_with_reload(
     initial: Config,
+    reloads: mpsc::Receiver<Config>,
+    shutdown: CancellationToken,
+) -> Result<(), RuntimeError> {
+    run_with_reload_inner(initial, reloads, shutdown, None).await
+}
+
+/// Runs transactional generations with startup and shutdown-hook barriers.
+///
+/// The readiness notification is sent only after every declared initial socket
+/// has been bound and its serving task has been started. After cancellation,
+/// profile state is stored and the shutdown-hook notification is sent while
+/// runtime services remain live; cleanup resumes when the caller acknowledges
+/// that notification.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] only when the initial generation cannot be created.
+/// Later reload errors are logged and leave the current generation unchanged.
+pub async fn run_with_reload_lifecycle(
+    initial: Config,
+    reloads: mpsc::Receiver<Config>,
+    shutdown: CancellationToken,
+    lifecycle: LifecycleSignals,
+) -> Result<(), RuntimeError> {
+    run_with_reload_inner(initial, reloads, shutdown, Some(lifecycle)).await
+}
+
+async fn run_with_reload_inner(
+    initial: Config,
     mut reloads: mpsc::Receiver<Config>,
     shutdown: CancellationToken,
+    lifecycle: Option<LifecycleSignals>,
 ) -> Result<(), RuntimeError> {
     let state = Arc::new(RuntimeState::default());
     let dns_service = Arc::new(rewrite_dns::DnsService::new());
@@ -68,12 +121,21 @@ pub async fn run_with_reload(
         &config_receiver,
         &state,
         &dns_service,
-        &shutdown,
         &mut listeners,
         &mut controller,
         &mut dns,
     )
     .await?;
+    let shutdown_barrier = lifecycle.map(
+        |LifecycleSignals {
+             ready,
+             shutdown_hook_ready,
+             continue_shutdown,
+         }| {
+            let _ = ready.send(());
+            (shutdown_hook_ready, continue_shutdown)
+        },
+    );
 
     loop {
         tokio::select! {
@@ -89,7 +151,6 @@ pub async fn run_with_reload(
                     &config_receiver,
                     &state,
                     &dns_service,
-                    &shutdown,
                     &mut listeners,
                     &mut controller,
                     &mut dns,
@@ -103,7 +164,11 @@ pub async fn run_with_reload(
         }
     }
 
-    shutdown.cancel();
+    state.store_fake_ip_state();
+    if let Some((shutdown_hook_ready, continue_shutdown)) = shutdown_barrier {
+        let _ = shutdown_hook_ready.send(());
+        let _ = continue_shutdown.await;
+    }
     for (_, task) in listeners {
         stop_task(task).await;
     }
@@ -113,7 +178,6 @@ pub async fn run_with_reload(
     if let Some((_, task)) = dns {
         stop_task(task).await;
     }
-    state.store_fake_ip_state();
     Ok(())
 }
 
@@ -124,7 +188,6 @@ async fn apply_generation(
     config_receiver: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
-    parent_shutdown: &CancellationToken,
     listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
     controller: &mut Option<(SocketAddr, RuntimeTask)>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
@@ -175,7 +238,7 @@ async fn apply_generation(
     dns_service.reset_connections().await;
 
     for (kind, port, listener, udp) in prepared_listeners {
-        let task_shutdown = parent_shutdown.child_token();
+        let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config_receiver.clone();
         let task_state = Arc::clone(state);
@@ -197,7 +260,6 @@ async fn apply_generation(
         config_receiver,
         state,
         dns_service,
-        parent_shutdown,
         controller,
     )
     .await;
@@ -208,7 +270,6 @@ async fn apply_generation(
         config_receiver,
         state,
         dns_service,
-        parent_shutdown,
         dns,
     )
     .await;
@@ -233,14 +294,13 @@ async fn apply_controller_task(
     config: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
-    parent_shutdown: &CancellationToken,
     current: &mut Option<(SocketAddr, RuntimeTask)>,
 ) {
     if let Some((address, listener)) = prepared {
         if let Some((_, previous)) = current.take() {
             stop_task(previous).await;
         }
-        let task_shutdown = parent_shutdown.child_token();
+        let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config.clone();
         let task_state = Arc::clone(state);
@@ -275,14 +335,13 @@ async fn apply_dns_task(
     config: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
-    parent_shutdown: &CancellationToken,
     current: &mut Option<(SocketAddr, RuntimeTask)>,
 ) {
     if let Some((address, tcp, udp)) = prepared {
         if let Some((_, previous)) = current.take() {
             stop_task(previous).await;
         }
-        let task_shutdown = parent_shutdown.child_token();
+        let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config.clone();
         let task_state = Arc::clone(state);

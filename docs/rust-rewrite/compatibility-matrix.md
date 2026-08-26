@@ -45,7 +45,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 3 local SIGHUP rule/listener reload | Oracle | **Parity** | Same-port rule switch, invalid-config rollback and port migration in `compat/scripts/phase3.py` |
 | Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Malformed-YAML rollback, continued old-generation TCP routing and a following valid reload through the same signal loop in `compat/scripts/phase5a7a.py` |
 | Full SIGHUP reload across all Mihomo resources | Oracle | Partial | Local listener/config generations exist; providers, broader DNS state, TUN and remote adapters are not started |
-| `post-up` / `post-down` hooks | Oracle | Not started | Ordering, exit and failure behavior |
+| Phase 5A8a Unix `post-up` / `post-down` hooks | Oracle | **Parity** | CLI/environment/explicit-empty precedence, system-shell operators, startup readiness, Go-compatible post-down boundary and asymmetric failure exits in `compat/scripts/phase5a8a.py` |
+| Cross-platform and future-resource hook ordering | Oracle | Partial | Windows uses `cmd.exe /C` but needs native differential evidence; every future runtime resource must join the readiness/shutdown barrier |
 
 ## Configuration surface
 
@@ -295,7 +296,8 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A3a controller/secret overrides | Oracle | **Parity** | Native CLI/environment/empty-precedence, listener, auth and reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
-| Darwin arm64 beyond Phase 5A7b | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
+| Darwin arm64 beyond Phase 5A8a | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -321,7 +323,8 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A3a controller/secret overrides | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7a invalid SIGHUP recovery | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
-| Linux amd64 beyond Phase 5A7b | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
+| Linux amd64 beyond Phase 5A8a | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |

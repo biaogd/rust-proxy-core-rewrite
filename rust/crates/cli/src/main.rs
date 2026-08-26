@@ -6,7 +6,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::Parser;
 use rewrite_config::{Config, ConfigError, ConfigSpec};
-use tokio::sync::mpsc;
+use tokio::process::Command;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Parser)]
@@ -27,6 +28,14 @@ struct Arguments {
     /// Override external controller secret
     #[arg(long = "secret", value_name = "SECRET")]
     secret: Option<String>,
+
+    /// Run a shell command after startup
+    #[arg(long = "post-up", value_name = "COMMAND")]
+    post_up: Option<String>,
+
+    /// Run a shell command after shutdown
+    #[arg(long = "post-down", value_name = "COMMAND")]
+    post_down: Option<String>,
 
     /// Set configuration directory
     #[arg(short = 'd', value_name = "DIRECTORY")]
@@ -139,8 +148,48 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
 
     let overrides = RuntimeOverrides::from_arguments(&arguments);
     let config = overrides.apply(input.runtime_config(arguments.geodata_mode)?);
+    let post_up = arguments
+        .post_up
+        .as_deref()
+        .map(str::to_owned)
+        .or_else(|| std::env::var("CLASH_POST_UP").ok())
+        .unwrap_or_default();
+    let post_down = arguments
+        .post_down
+        .as_deref()
+        .map(str::to_owned)
+        .or_else(|| std::env::var("CLASH_POST_DOWN").ok())
+        .unwrap_or_default();
     let shutdown = CancellationToken::new();
     let (reload_sender, reload_receiver) = mpsc::channel(4);
+    let (ready_sender, ready_receiver) = oneshot::channel();
+    let (shutdown_hook_ready_sender, shutdown_hook_ready_receiver) = oneshot::channel();
+    let (continue_shutdown_sender, continue_shutdown_receiver) = oneshot::channel();
+    let runtime_shutdown = shutdown.clone();
+    let runtime = tokio::spawn(rewrite_runtime::run_with_reload_lifecycle(
+        config,
+        reload_receiver,
+        runtime_shutdown,
+        rewrite_runtime::LifecycleSignals::new(
+            ready_sender,
+            shutdown_hook_ready_sender,
+            continue_shutdown_receiver,
+        ),
+    ));
+    if ready_receiver.await.is_err() {
+        return match runtime.await? {
+            Ok(()) => Err(std::io::Error::other("runtime stopped before readiness").into()),
+            Err(error) => Err(error.into()),
+        };
+    }
+    if !post_up.is_empty()
+        && let Err(error) = execute_shell(&post_up).await
+    {
+        shutdown.cancel();
+        let _ = continue_shutdown_sender.send(());
+        runtime.await??;
+        return Err(std::io::Error::other(format!("post-up script error: {error}")).into());
+    }
     install_signals(
         shutdown.clone(),
         input,
@@ -148,8 +197,44 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
         overrides,
         reload_sender,
     );
-    rewrite_runtime::run_with_reload(config, reload_receiver, shutdown).await?;
+    if shutdown_hook_ready_receiver.await.is_err() {
+        return match runtime.await? {
+            Ok(()) => Err(std::io::Error::other(
+                "runtime stopped before the shutdown hook barrier",
+            )
+            .into()),
+            Err(error) => Err(error.into()),
+        };
+    }
+    if !post_down.is_empty()
+        && let Err(error) = execute_shell(&post_down).await
+    {
+        eprintln!("post-down script error: {error}");
+    }
+    let _ = continue_shutdown_sender.send(());
+    runtime.await??;
     Ok(())
+}
+
+async fn execute_shell(command: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let output = Command::new("cmd.exe")
+        .arg("/C")
+        .arg(command)
+        .output()
+        .await?;
+    #[cfg(not(windows))]
+    let output = Command::new("sh").arg("-c").arg(command).output().await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut details = output.stdout;
+    details.extend(output.stderr);
+    Err(std::io::Error::other(format!(
+        "{}, {}",
+        output.status,
+        String::from_utf8_lossy(&details)
+    )))
 }
 
 fn print_version() {
@@ -184,11 +269,14 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
         if argument == "--" {
             options = false;
             normalized.push(argument);
-        } else if matches!(argument.to_str(), Some("-config" | "-ext-ctl" | "-secret")) {
+        } else if matches!(
+            argument.to_str(),
+            Some("-config" | "-ext-ctl" | "-secret" | "-post-up" | "-post-down")
+        ) {
             normalized.push(OsString::from(format!("-{}", argument.to_string_lossy())));
             value_follows = true;
         } else if let Some((name, value)) = argument.to_str().and_then(|value| {
-            ["config", "ext-ctl", "secret"]
+            ["config", "ext-ctl", "secret", "post-up", "post-down"]
                 .into_iter()
                 .find_map(|name| {
                     value
@@ -200,7 +288,14 @@ fn normalized_arguments(arguments: impl IntoIterator<Item = OsString>) -> Vec<Os
         } else {
             value_follows = matches!(
                 argument.to_str(),
-                Some("-d" | "-f" | "--config" | "--ext-ctl" | "--secret")
+                Some(
+                    "-d" | "-f"
+                        | "--config"
+                        | "--ext-ctl"
+                        | "--secret"
+                        | "--post-up"
+                        | "--post-down"
+                )
             );
             normalized.push(argument);
         }
@@ -384,6 +479,9 @@ mod tests {
             OsString::from("-ext-ctl"),
             OsString::from("127.0.0.1:9090"),
             OsString::from("-secret=token"),
+            OsString::from("-post-up"),
+            OsString::from("echo up"),
+            OsString::from("-post-down=echo down"),
             OsString::from("-f"),
             OsString::from("config.yaml"),
         ]);
@@ -397,6 +495,9 @@ mod tests {
                 "--ext-ctl",
                 "127.0.0.1:9090",
                 "--secret=token",
+                "--post-up",
+                "echo up",
+                "--post-down=echo down",
                 "-f",
                 "config.yaml",
             ]
