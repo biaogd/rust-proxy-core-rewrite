@@ -5,6 +5,7 @@ members = [
   "crates/config",
   "crates/controller",
   "crates/dns",
+  "crates/generator",
   "crates/inbound",
   "crates/model",
   "crates/net",
@@ -63,6 +64,7 @@ rustls-native-certs = "0.8"
 rustc_version = "0.4"
 url = "2"
 uuid = { version = "1.25.0", features = ["v4"] }
+x25519-dalek = "2.0.1"
 zstd = "0.13.3"
 
 [workspace.lints.rust]

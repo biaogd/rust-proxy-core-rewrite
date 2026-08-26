@@ -2285,6 +2285,7 @@ dependencies = [
  "home",
  "rewrite-age",
  "rewrite-config",
+ "rewrite-generator",
  "rewrite-ruleset",
  "rewrite-runtime",
  "rustc_version",
@@ -2353,6 +2354,14 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+]
+
+[[package]]
+name = "rewrite-generator"
+version = "0.1.0"
+dependencies = [
+ "rand 0.10.2",
+ "x25519-dalek",
 ]
 
 [[package]]

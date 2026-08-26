@@ -184,8 +184,15 @@ fn run_generate_subcommand(
         )
         .into());
     };
-    if command.to_str() == Some("uuid") {
-        println!("{}", uuid::Uuid::new_v4());
+    match command.to_str() {
+        Some("uuid") => println!("{}", uuid::Uuid::new_v4()),
+        Some("reality-keypair") => {
+            let pair = rewrite_generator::x25519_keypair();
+            let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            println!("PrivateKey: {}", encoding.encode(pair.private));
+            println!("PublicKey: {}", encoding.encode(pair.public));
+        }
+        _ => {}
     }
     Ok(())
 }

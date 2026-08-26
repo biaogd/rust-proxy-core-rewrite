@@ -753,6 +753,17 @@ trailing arguments, configuration-startup short-circuit, the oracle's silent
 unknown-command result and missing-command exit class. Reality/WireGuard/ECH,
 VLESS and Sudoku key generators remain later 5A6 slices.
 
+### Phase 5A6b accepted scope
+
+Phase 5A6b accepts only `generate reality-keypair` from `CLI-09`. Random bytes
+are explicitly clamped at the same boundary as the oracle and the public key is
+derived by `x25519-dalek` 2.0.1 (BSD-3-Clause), a maintained pure-Rust library
+with broad platform support. The CLI emits the exact two labels using unpadded
+URL-safe Base64. The black-box gate independently performs the RFC 7748 ladder
+to prove each random public key belongs to the emitted private key, in addition
+to length, clamp, output and startup-lifecycle checks. WireGuard formatting and
+the ECH/VLESS/Sudoku generators remain later 5A6 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
