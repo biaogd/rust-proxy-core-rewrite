@@ -2759,6 +2759,14 @@ TProxy, TUN and future inbound families remain their own integration gates, so
 the full-product `DNS-18` inventory row stays partial outside the declared
 local surface.
 
+The interchange fixture binds both `HOME` and `XDG_CONFIG_HOME` to the same
+temporary tree. This prevents the Go oracle's conditional XDG fallback from
+using a runner-shared cache while Rust reads the temporary legacy path. It
+prefills multiple IPv4 mappings before Go-to-Rust handoff, so equal first
+addresses cannot mask a missing database transfer, and it never uses SIGHUP as
+a shutdown-readiness probe because the oracle persists the pool offset only
+during normal shutdown.
+
 Observed Phase 4F14 result on 2026-08-26:
 
 | Platform | Result | Environment |

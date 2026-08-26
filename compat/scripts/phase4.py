@@ -219,7 +219,15 @@ def launch(
     process = subprocess.Popen(
         [str(binary), "-f", str(config)],
         cwd=scratch,
-        env={**os.environ, "HOME": str(scratch)},
+        # Keep Go's conditional XDG fallback in the same isolated home used by
+        # the Rust candidate. Inheriting a runner-level XDG_CONFIG_HOME makes
+        # Go persist fake-IP state in a shared cache while Rust reads the
+        # fixture-local HOME, invalidating cross-process interchange evidence.
+        env={
+            **os.environ,
+            "HOME": str(scratch),
+            "XDG_CONFIG_HOME": str(scratch / ".config"),
+        },
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,

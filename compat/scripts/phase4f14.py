@@ -507,21 +507,14 @@ def interchange_generation(
         }
         # Listener readiness can precede Go's signal.Notify calls. On Linux,
         # wait for the caught-signal mask directly before SIGTERM persists the
-        # allocation offset. Other platforms retain a single observable reload
-        # as the barrier; never flood SIGHUP because overlapping reloads can
-        # replace the pool while bbolt persistence is being observed.
+        # allocation offset. Never use SIGHUP as this barrier: the oracle only
+        # stores the persistent offset during shutdown, so constructing a new
+        # pool before then correctly treats mappings-without-offset as stale
+        # and flushes the very interchange state this fixture must observe.
         if not wait_for_linux_signal_handlers(process):
-            marker = "reload-ready.interchange.phase4f14.test"
-            config.write_text(
-                config_text(
-                    dns_port=dns_port,
-                    mixed_port=mixed_port,
-                    upstream_port=authority_port,
-                    filters=[marker],
-                    store=True,
-                )
-            )
-            wait_for_real(dns_port, marker, reload_process=process)
+            time.sleep(0.05)
+            if process.poll() is not None:
+                raise AssertionError("candidate exited before interchange shutdown")
         return addresses, stop(process)
     finally:
         if process.poll() is None:
@@ -543,7 +536,15 @@ def run_interchange(
     six_two = "rust-to-go-v6.phase4f14.test"
     six_three = "next-v6.phase4f14.test"
     go_first, go_exit = interchange_generation(
-        binaries["go"], scratch, authority_port, [(one, 1), (six_one, 28)]
+        binaries["go"],
+        scratch,
+        authority_port,
+        [
+            ("prefill-one.phase4f14.test", 1),
+            ("prefill-two.phase4f14.test", 1),
+            (one, 1),
+            (six_one, 28),
+        ],
     )
     rust_middle, rust_exit = interchange_generation(
         binaries["rust"],
