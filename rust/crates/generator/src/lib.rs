@@ -29,6 +29,13 @@ pub struct VlessMlKem768Material {
     pub hash32: [u8; 32],
 }
 
+/// Sudoku split Edwards25519 private material and compressed public point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SudokuKeyPair {
+    pub private: [u8; 64],
+    pub public: [u8; 32],
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GeneratorError {
     #[error("ECH public name is longer than 255 bytes")]
@@ -129,6 +136,27 @@ pub fn vless_mlkem768(seed: Option<[u8; 64]>) -> VlessMlKem768Material {
     }
 }
 
+/// Generates a Sudoku split private key `r || k` where `x = r + k mod L`.
+#[must_use]
+pub fn sudoku_keypair() -> SudokuKeyPair {
+    use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+    use curve25519_dalek::scalar::Scalar;
+
+    let mut master_seed = [0_u8; 64];
+    rand::fill(&mut master_seed);
+    let master = Scalar::from_bytes_mod_order_wide(&master_seed);
+    let public = (ED25519_BASEPOINT_POINT * master).compress().to_bytes();
+
+    let mut split_seed = [0_u8; 64];
+    rand::fill(&mut split_seed);
+    let first = Scalar::from_bytes_mod_order_wide(&split_seed);
+    let second = master - first;
+    let mut private = [0_u8; 64];
+    private[..32].copy_from_slice(&first.to_bytes());
+    private[32..].copy_from_slice(&second.to_bytes());
+    SudokuKeyPair { private, public }
+}
+
 fn push_u16_record(output: &mut Vec<u8>, record: &[u8]) -> Result<(), GeneratorError> {
     output.extend(
         u16::try_from(record.len())
@@ -186,5 +214,21 @@ mod tests {
         assert_eq!(material.client.len(), 1184);
         assert_eq!(material.hash32, *blake3::hash(&material.client).as_bytes());
         assert_eq!(material, vless_mlkem768(Some([0x3c; 64])));
+    }
+
+    #[test]
+    fn sudoku_split_recovers_public_point() {
+        use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
+        use curve25519_dalek::scalar::Scalar;
+
+        let pair = sudoku_keypair();
+        let first = Scalar::from_canonical_bytes(pair.private[..32].try_into().unwrap()).unwrap();
+        let second = Scalar::from_canonical_bytes(pair.private[32..].try_into().unwrap()).unwrap();
+        assert_eq!(
+            ((first + second) * ED25519_BASEPOINT_POINT)
+                .compress()
+                .to_bytes(),
+            pair.public
+        );
     }
 }

@@ -238,6 +238,11 @@ fn run_generate_subcommand(
             println!("[Server] decryption: \"mlkem768x25519plus.native.600s.{seed}\"");
             println!("[Client] encryption: \"mlkem768x25519plus.native.0rtt.{client}\"");
         }
+        Some("sudoku-keypair") => {
+            let pair = rewrite_generator::sudoku_keypair();
+            println!("PrivateKey: {}", hex::encode(pair.private));
+            println!("PublicKey: {}", hex::encode(pair.public));
+        }
         _ => {}
     }
     Ok(())

@@ -2323,6 +2323,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
+ "hex",
  "home",
  "rewrite-age",
  "rewrite-config",
@@ -2402,6 +2403,7 @@ name = "rewrite-generator"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "curve25519-dalek",
  "ml-kem",
  "pem",
  "rand 0.10.2",

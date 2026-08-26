@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 blake3.workspace = true
+curve25519-dalek.workspace = true
 ml-kem.workspace = true
 pem.workspace = true
 rand.workspace = true

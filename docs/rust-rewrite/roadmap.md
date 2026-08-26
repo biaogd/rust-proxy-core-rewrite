@@ -810,6 +810,18 @@ are also covered. This is generation-format evidence, not VLESS or ML-KEM
 transport interoperability. Sudoku remains the final unimplemented `generate`
 subcommand family member.
 
+### Phase 5A6g accepted scope
+
+Phase 5A6g accepts `generate sudoku-keypair` and closes `CLI-09` for the pinned
+default baseline. Rust uses `curve25519-dalek` 4.1.3 (BSD-3-Clause) to reduce
+two independent 64-byte random values into canonical Edwards25519 scalars,
+split the master scalar as `r || (x-r) mod L`, and compress `x * G`; the CLI
+uses lowercase hex with the oracle's exact labels. The differential implements
+Edwards point arithmetic independently, reconstructs `(r+k) * G` for both Go
+and Rust outputs and compares it with each emitted public point. This is key
+generation-format evidence only; Sudoku transport belongs to its later adapter
+and protocol gates.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

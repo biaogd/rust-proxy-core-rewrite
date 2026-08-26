@@ -37,7 +37,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Remaining controller/UI/routing-mark process overrides | Oracle | Not started | Split by listener/resource boundary under 5A3b onward |
 | Controller/UI/secret CLI overrides | Oracle | Not started | Config plus override differential |
 | `convert-ruleset` | Oracle | Partial | Phases 5A5a–5A5d accept IP-CIDR and domain text/YAML ↔ MRS v1 with bidirectional Go/Rust frame interchange; classical behavior, invalid-rule warning logs and remaining parser/error classes are unclaimed |
-| `generate` | Oracle | Partial | Phases 5A6a–5A6f accept UUID v4, Reality/WireGuard, VLESS X25519/ML-KEM-768 and ECH key material; Sudoku remains unclaimed |
+| `generate` | Oracle | **Parity** | Phases 5A6a–5A6g cover UUID, Reality/WireGuard, ECH, VLESS X25519/ML-KEM-768 and Sudoku commands plus missing/unknown/trailing command lifecycle |
 | Phase 5A4a X25519 age-encrypted config | Oracle | **Parity** | File/base64 input, CLI/environment/explicit-empty precedence, wrong key, invalid-key warning on plaintext and live applied config in `compat/scripts/phase5a4a.py` |
 | Phase 5A4b `age convert` for X25519 | Oracle | **Parity** | Exact recipient output, ignored trailing argument and invalid/missing-key exit classes in `compat/scripts/phase5a4b.py` |
 | Phase 5A4c X25519 `age encrypt` / `decrypt` | Oracle | **Parity** | Binary file/stdin/stdout round trips, plaintext pass-through, error exits and bidirectional Go/Rust armor interoperability in `compat/scripts/phase5a4c.py` |
@@ -52,6 +52,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 5A6d `generate vless-x25519` | Oracle | **Parity** | Fixed-key byte-exact eight-line output, generated/clamped private and related public password, BLAKE3 Hash32/lazy-config interpolation, invalid-length exit and startup short-circuit in `compat/scripts/phase5a6d.py` |
 | Phase 5A6e `generate ech-keypair` | Oracle | **Parity** | Parsed ECHConfigList version/id/KEM/cipher suites/name/extensions, `ECH KEYS` PEM records, independently recomputed X25519 relation, trailing argument, missing-name exit and startup short-circuit in `compat/scripts/phase5a6e.py` |
 | Phase 5A6f `generate vless-mlkem768` | Oracle | **Parity** | Fixed 64-byte `d || z` seed produces byte-exact Go/Rust encapsulation key, BLAKE3 Hash32 and eight-line lazy config; generated shape, invalid-length exit and startup short-circuit in `compat/scripts/phase5a6f.py` |
+| Phase 5A6g `generate sudoku-keypair` | Oracle | **Parity** | Two canonical Edwards25519 split scalars, compressed public point, independent scalar-sum/basepoint recovery, exact lowercase hex labels, trailing argument and startup short-circuit in `compat/scripts/phase5a6g.py` |
 | Full age identities and encrypted config | Oracle | Partial | Multiple identities and hybrid/PQ, SSH, encrypted-identity and plugin forms remain unclaimed |
 | Phase 1 SIGTERM cleanup | Oracle | **Parity** | Exit 0, listener/idle stream closure and bounded task drain |
 | Phase 5A7b SIGINT/SIGTERM local-resource shutdown | Oracle | **Parity** | Zero exit, bounded idle-stream closure and immediate mixed/controller/DNS TCP plus DNS UDP port release in `compat/scripts/phase5a7b.py` |
@@ -322,6 +323,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A6d VLESS X25519 | Oracle | **Parity** | Native fixed-key byte-exact output and independent X25519 relation differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A6e ECH keypair | Oracle | **Parity** | Native parsed ECHConfigList/PEM and independent X25519 relation differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A6f VLESS ML-KEM-768 | Oracle | **Parity** | Native fixed-seed byte-exact ML-KEM output and command-lifecycle differential passed, 2026-08-26 |
+| Darwin arm64 — Phase 5A6g Sudoku keypair | Oracle | **Parity** | Native canonical split-scalar and independent Edwards25519 public recovery differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
@@ -363,6 +365,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A6d VLESS X25519 | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A6e ECH keypair | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A6f VLESS ML-KEM-768 | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
+| Linux amd64 — Phase 5A6g Sudoku keypair | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7a invalid SIGHUP recovery | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
