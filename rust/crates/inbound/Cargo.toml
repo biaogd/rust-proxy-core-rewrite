@@ -1,0 +1,16 @@
+[package]
+name = "rewrite-inbound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+rewrite-model = { path = "../model" }
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

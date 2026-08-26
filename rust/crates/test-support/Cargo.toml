@@ -1,0 +1,31 @@
+[package]
+name = "rewrite-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rewrite-phase2-oracle"
+path = "src/main.rs"
+
+[[bin]]
+name = "rewrite-h2-authority"
+path = "src/h2_authority.rs"
+
+[dependencies]
+rewrite-config = { path = "../config" }
+rewrite-model = { path = "../model" }
+rewrite-rules = { path = "../rules" }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+bytes.workspace = true
+h2.workspace = true
+http.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "rewrite-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rewrite-config = { path = "../config" }
+rewrite-dns = { path = "../dns" }
+rewrite-state = { path = "../state" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,48 @@
+[workspace]
+members = [
+  "crates/cli",
+  "crates/config",
+  "crates/controller",
+  "crates/dns",
+  "crates/inbound",
+  "crates/model",
+  "crates/net",
+  "crates/outbound",
+  "crates/rules",
+  "crates/runtime",
+  "crates/state",
+  "crates/test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4.5", features = ["derive"] }
+ipnet = "2"
+h2 = "0.4"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+url = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

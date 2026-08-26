@@ -1,0 +1,17 @@
+mixed-port: ${MIXED_PORT}
+external-controller: 127.0.0.1:${CONTROLLER_PORT}
+secret: phase4d4-secret
+mode: rule
+log-level: info
+ipv6: true
+dns:
+  enable: true
+  listen: 127.0.0.1:${DNS_PORT}
+  ipv6: true
+  use-hosts: false
+  use-system-hosts: false
+  enhanced-mode: redir-host
+  nameserver:
+    - udp://127.0.0.1:${UPSTREAM_PORT}
+rules:
+  - MATCH,DIRECT

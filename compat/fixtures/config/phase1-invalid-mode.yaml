@@ -1,0 +1,6 @@
+mixed-port: 7890
+mode: unsupported
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT

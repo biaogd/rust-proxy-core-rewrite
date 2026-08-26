@@ -1,0 +1,11 @@
+port: ${HTTP_PORT}
+socks-port: ${SOCKS_PORT}
+mixed-port: ${MIXED_PORT}
+mode: rule
+log-level: info
+ipv6: false
+authentication:
+  - alice:secret
+  - "socks4:"
+rules:
+  - MATCH,DIRECT

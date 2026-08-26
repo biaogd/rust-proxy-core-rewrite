@@ -26,3 +26,9 @@ test/config/cache*
 /output
 .vscode/
 .fleet/
+
+# Rust rewrite build and compatibility-test artifacts
+/rust/target/
+/compat/artifacts/
+/target/compat/
+__pycache__/

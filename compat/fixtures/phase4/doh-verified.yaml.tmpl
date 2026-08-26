@@ -1,0 +1,19 @@
+mixed-port: ${MIXED_PORT}
+mode: rule
+log-level: info
+ipv6: false
+tls:
+  custom-certifactes:
+    - |-
+${ROOT_PEM}
+dns:
+  enable: true
+  listen: 127.0.0.1:${DNS_PORT}
+  ipv6: false
+  use-hosts: false
+  use-system-hosts: false
+  enhanced-mode: redir-host
+  nameserver:
+    - https://127.0.0.1:${UPSTREAM_PORT}/dns-query#name-cert-verify=${SERVER_NAME}
+rules:
+  - MATCH,DIRECT

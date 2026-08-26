@@ -1,0 +1,6 @@
+mixed-port: 70000
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT

@@ -1,0 +1,23 @@
+[package]
+name = "rewrite-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rewrite-config = { path = "../config" }
+rewrite-controller = { path = "../controller" }
+rewrite-dns = { path = "../dns" }
+rewrite-inbound = { path = "../inbound" }
+rewrite-model = { path = "../model" }
+rewrite-net = { path = "../net" }
+rewrite-outbound = { path = "../outbound" }
+rewrite-rules = { path = "../rules" }
+rewrite-state = { path = "../state" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,186 @@
+name: Rust rewrite CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      full-regression:
+        description: Run every Phase 1-4E15 Go/Rust differential suite
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.95.0
+  GO_VERSION: 1.26.5
+
+jobs:
+  rust-and-current-differential:
+    name: Rust gates and Phase 4E15 differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+
+      - name: Run current differential gate
+        run: python3 compat/scripts/phase4e15.py
+
+      - name: Upload differential failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4e15-differential-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  go-baseline:
+    name: Go oracle baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CGO_ENABLED: 0
+      SKIP_INTEROP_TEST: 1
+      SKIP_CONCURRENT_TEST: 1
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Test Go oracle
+        run: go test ./...
+
+      - name: Test Go oracle with gVisor
+        run: go test ./... -tags with_gvisor -count=1
+
+      - name: Build static gVisor oracle
+        run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
+
+  full-differential:
+    name: Full Phase 1-4E15 differential regression
+    if: github.event_name == 'workflow_dispatch' && inputs.full-regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PHASE1_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE2_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE3_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-
+
+      - name: Run full differential regression
+        run: |
+          for phase_script in \
+            compat/scripts/phase4e15.py \
+            compat/scripts/phase4e14.py \
+            compat/scripts/phase4e13.py \
+            compat/scripts/phase4e12.py \
+            compat/scripts/phase4e11.py \
+            compat/scripts/phase4e10.py \
+            compat/scripts/phase4e9.py \
+            compat/scripts/phase4e8.py \
+            compat/scripts/phase4e7.py \
+            compat/scripts/phase4e6.py \
+            compat/scripts/phase4e5.py \
+            compat/scripts/phase4e4.py \
+            compat/scripts/phase4e3.py \
+            compat/scripts/phase4e2.py \
+            compat/scripts/phase4e1.py \
+            compat/scripts/phase4d4.py \
+            compat/scripts/phase4d3a.py \
+            compat/scripts/phase4d2.py \
+            compat/scripts/phase4d1.py \
+            compat/scripts/phase4c.py \
+            compat/scripts/phase4b.py \
+            compat/scripts/phase4.py \
+            compat/scripts/phase3.py \
+            compat/scripts/phase2.py \
+            compat/scripts/phase1.py
+          do
+            python3 "$phase_script"
+          done
+
+      - name: Upload differential failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-differential-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

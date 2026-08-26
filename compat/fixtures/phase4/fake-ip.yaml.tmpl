@@ -1,0 +1,24 @@
+mixed-port: ${MIXED_PORT}
+mode: rule
+log-level: info
+ipv6: true
+profile:
+  store-fake-ip: ${STORE_FAKE_IP}
+dns:
+  enable: true
+  listen: 127.0.0.1:${DNS_PORT}
+  ipv6: true
+  use-hosts: false
+  use-system-hosts: false
+  enhanced-mode: fake-ip
+  fake-ip-range: ${FAKE_IP_RANGE}
+  fake-ip-range6: ${FAKE_IP_RANGE6}
+  fake-ip-filter-mode: ${FILTER_MODE}
+  fake-ip-filter:
+    - ${FILTER_DOMAIN}
+  fake-ip-ttl: 7
+  nameserver:
+    - udp://127.0.0.1:${UPSTREAM_PORT}
+rules:
+  - DOMAIN,route.phase4.test,DIRECT
+  - MATCH,REJECT

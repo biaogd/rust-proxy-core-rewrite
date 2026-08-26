@@ -1,0 +1,20 @@
+[package]
+name = "rewrite-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rewrite-core"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rewrite-config = { path = "../config" }
+rewrite-runtime = { path = "../runtime" }
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

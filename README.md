@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> This public repository is an independent, unofficial Rust rewrite project.
+> It is not affiliated with or endorsed by MetaCubeX. The original Go tree is
+> retained at the pinned baseline solely as the behavioral oracle for
+> differential tests. Rust migration status is documented in
+> [`docs/rust-rewrite/status.md`](docs/rust-rewrite/status.md).
+
 <h1 align="center">
   <img src="Meta.png" alt="Meta Kennel" width="200">
   <br>Meta Kernel<br>

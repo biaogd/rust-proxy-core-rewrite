@@ -1,0 +1,548 @@
+# Rust rewrite architecture baseline
+
+## Scope and source of truth
+
+This document describes the Go implementation at
+`c0e43ebecf3be9b223f1015c1fc38689bb073467`. It is an implementation map for
+compatibility work, not a claim that the proposed Rust boundaries already
+exist. The Go process remains the oracle until a matrix row has explicit Rust
+parity evidence.
+
+`go-capability-inventory.md` is the product-surface census layered on this
+implementation map. Architecture explains where behavior originates; the
+inventory assigns stable IDs and acceptance gates to every observable family.
+
+The repository contains roughly 958 Go files and 162,529 lines of Go. The
+largest areas are:
+
+| Area | Approximate Go lines | Responsibility |
+| --- | ---: | --- |
+| `transport/` | 68,263 | Wire protocols, obfuscation, multiplexing and QUIC/KCP helpers |
+| `component/` | 20,410 | DNS/geodata/process/dialer/profile/sniffer/platform services |
+| `listener/` | 19,599 | Fixed-port and named inbound servers, including TUN/TProxy |
+| `adapter/` | 18,206 | Inbound/outbound adapters, groups and providers |
+| `common/` | 17,420 | Buffers, networking, collections, concurrency and utilities |
+| `dns/` | 3,881 | DNS clients, cache, policy, fake IP and server middleware |
+| `rules/` | 2,941 | Rule parsing, matching, logic and rule providers |
+| `hub/` | 2,898 | Configuration application and REST controller |
+| `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
+| `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
+
+## Phase 1–4E12 Rust boundary now implemented
+
+Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
+the pure configuration/rule boundary; Phase 3 added only the local proxy
+product, observability and generation boundaries; Phase 4A adds a narrow
+classic local DNS path; Phase 4B adds exact hosts and TTL-bounded redir-host
+state; Phase 4C adds the declared fake-IP pool and TCP reverse-resolution
+slice; Phases 4D1 through 4D4 add the declared resolver policy, fallback,
+direct-resolution and REST-control slices; Phases 4E1 and 4E2 add insecure and
+custom-root verified DoT main upstreams, including multiple inline roots in
+Phase 4E3 and bounded reuse in Phase 4E4. Phase 4E5 adds one verified HTTPS DoH
+GET main-upstream path, and Phase 4E6 adds its bounded HTTP/1.1 connection
+reuse. Phase 4E7 adds a constrained custom absolute path. It remains
+intentionally much narrower than the Go architecture described below; Phase
+4E8 additionally canonicalizes encoded unreserved path bytes:
+
+```text
+rewrite-cli -> rewrite-config -> rewrite-rules
+     |                              |
+     v                              v
+rewrite-runtime -> rewrite-inbound -> rewrite-model
+     |       |       |          |
+     |       |       +-> rewrite-dns
+     |       +-> rewrite-state  +-> rewrite-net
+     |                ^             ^
+     +-> rewrite-controller    +-> rewrite-outbound
+```
+
+Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
+resource is created. The spec layer overlays the declared Go defaults, validates
+the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
+spec into executable `Config` is a separate fallible step which accepts only
+the incrementally declared Phase 1–4D1 runtime slices. This prevents parser
+coverage from being mistaken for implemented protocol behavior.
+
+`rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
+sub-rule graph validation and rematch state transitions. The test-only
+`rewrite-test-support` binary and `compat/oracle/phase2` Go adapter expose the
+same JSON observation contract for deterministic differential and generated
+tests. Neither is linked into the product runtime.
+
+Phase 3 makes `rewrite-runtime` the owner of transactional local listener
+generations. Unchanged listener tasks receive the current `Arc<Config>` through
+a watch channel; new TCP/UDP/controller sockets are all bound before the config
+is published, and obsolete tasks are cancelled afterward. SIGHUP parsing stays
+in `rewrite-cli` and sends only validated owned configs to runtime.
+
+`rewrite-state` owns bounded log broadcasting, active connection snapshots and
+byte totals. `rewrite-controller` reads that state and current config; its only
+declared mutation path is the Phase 4D4 clear operation on the runtime-owned DNS
+service, not config or listener mutation. Local SOCKS UDP is an explicit
+listener boundary: it decodes one SOCKS datagram, applies the pure rule core,
+uses a local DIRECT UDP socket and restores the remote source in the SOCKS
+write-back header.
+
+Phase 4A makes `rewrite-dns` responsible for classic DNS message validation,
+bounded positive caching and direct UDP/TCP upstream exchange. The runtime
+still owns socket lifetimes: it binds both local DNS transports before a
+generation is published, while a same-address task reads the latest upstream
+configuration for each query. The DNS cache key includes upstream identity but
+not the client transaction ID, which is restored on cache hits. At the Phase 4A
+exit, DNS had no path into tunnel metadata, rules, hosts or fake-IP state.
+
+Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
+uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
+paths and can read the native Unix host file when enabled. DNS A/AAAA answers
+publish TTL-bounded reverse entries into `rewrite-state`; the runtime consults
+that state before rule evaluation so an IP-addressed inbound can recover the
+queried domain. This is shared runtime state, not a package global, and remains
+separate from the DNS response cache.
+
+Phase 4C keeps fake-IP allocation in `rewrite-state` so DNS generation and
+proxy listeners share one bidirectional mapping. Each address family owns an
+independent pool: allocation starts at network address + 4, never returns the
+final range address, wraps cyclically and uses a 1000-entry LRU limit when
+profile storage is disabled. The DNS layer applies the declared exact-domain
+blacklist/whitelist before allocation and emits configured-TTL A/AAAA answers.
+
+For the TCP vertical slice, runtime preprocessing distinguishes a fake mapping
+from a TTL redir-host mapping. It replaces the rule-visible host with the
+original domain, then DIRECT bypasses fake response generation and issues both
+AAAA and A questions to the configured classic upstream when IPv6 is enabled
+before dialing.
+Profile-enabled pools persist mapping and offset into Rust-specific JSON files
+under the candidate home. This proves restart behavior but intentionally does
+not claim compatibility with Go's bbolt `cache.db` file format.
+
+Phase 4D1 represents each declared `nameserver-policy` entry as an owned
+pattern plus one classic upstream. `rewrite-dns` ranks matching patterns before
+the cache lookup: static labels outrank a whole-label wildcard, and both
+outrank the `+.` suffix fallback. The selected transport and socket address are
+part of the existing cache key. This stays inside the DNS crate and does not
+introduce proxy routing or a callback into the tunnel.
+
+Phase 4D2 adds a single classic fallback and answer filters within the same DNS
+boundary. Phase 4D3A lets ordered IP rules request lazy main resolution and
+gives a selected DIRECT domain an independent direct resolver, optionally
+following Phase 4D1 policy. Proxy-server routing and `respect-rules` remain
+deferred because no remote proxy adapter is available to test them end to end.
+
+Phase 4D4 makes one `DnsService` owned by runtime and passes it to both the DNS
+listener and controller. `GET /dns/query` uses its classic upstream/cache path
+without hosts or fake-IP enhancement; `POST /cache/dns/flush` clears that
+shared positive cache. This preserves one-way dependencies and makes the cache
+side effect visible across both external entry points.
+
+Phase 4E1 adds one transport branch beneath that same resolver/cache boundary.
+A declared insecure/no-reuse DoT main upstream creates a fresh tokio-rustls
+client stream, verifies the TLS handshake signature with ring, then carries the
+existing DNS/TCP length-framed exchange. It does not alter policy selection,
+hosts/fake-IP processing, controller behavior or runtime ownership.
+
+Phase 4E2 adds a second no-reuse DoT branch at the same boundary. Configuration
+passes one inline `tls.custom-certifactes` PEM root and an explicit
+`name-cert-verify` value into an owned DNS TLS setting. Each exchange builds an
+isolated rustls root store, sends that DNS name as SNI, validates chain, time and
+SAN, and returns the Go-compatible DNS SERVFAIL packet to UDP/TCP clients when
+verification fails. The cache key includes the verification name and root so a
+reload cannot reuse data obtained under different trust settings.
+
+Phase 4E3 broadens only that owned root list. Each inline PEM entry is decoded
+into the same isolated rustls root store; list order does not affect chain
+selection, while the existing cache identity includes every root in configured
+order. No filesystem resolution is added because the Go oracle's custom trust
+field passes values directly to its certificate pool rather than reading paths.
+
+Phase 4E4 gives the shared `DnsService` one bounded verified-DoT pool. The pool
+holds at most eight streams in LIFO order and is keyed by upstream address,
+verification name and every configured root. A changed key drops old streams.
+An exchange failure on a reused stream drops it and permits exactly one fresh
+connect/exchange attempt; a failure on a fresh stream is returned immediately.
+Network I/O never runs while the pool mutex is held.
+
+Phase 4E5 adds a separate HTTPS DoH branch beneath the same resolver and
+positive cache. It copies the DNS request with ID zero, serializes it as an
+unpadded base64url `dns=` query parameter, sends an HTTP/1.1 GET with
+`Accept: application/dns-message`, reads the bounded response according to
+`Content-Length`, verifies the zero upstream response ID and restores the
+client ID. It reuses the Phase 4E2 isolated custom-root store and explicit
+name/SNI verification. The parser restricts this evidence to a loopback
+`/dns-query` main nameserver.
+
+Phase 4E6 reuses the verified TLS stream when the HTTP/1.1 response permits
+persistence. The existing eight-stream LIFO pool key now also includes the DoH
+path, so reloads cannot cross trust, upstream, transport or path identities.
+An exchange failure on a pooled stream drops it and permits one fresh
+connect/exchange attempt; fresh failures are returned without another retry.
+Responses carrying `Connection: close` are never pooled, and no network I/O is
+performed while the pool mutex is held.
+
+Phase 4E7 replaces the fixed `/dns-query` parser check with a deliberately
+narrow absolute-path grammar. The path must be non-root, contain no empty
+segments and use only ASCII alphanumeric or `-._~` bytes within each segment.
+The owned path is used verbatim as the GET target and remains part of both the
+resolver cache identity and TLS connection-pool identity. URL queries,
+userinfo and redirects remain rejected or unclaimed.
+
+Phase 4E8 permits a percent triplet only when it decodes to the same RFC 3986
+unreserved byte set. The parser decodes those triplets into the owned canonical
+path, matching the Go oracle's request target. Encoded separators, percent
+bytes, reserved bytes, controls, malformed triplets and non-ASCII path data are
+still rejected. Cache/pool keys and the HTTP target all use the canonical path.
+
+Phase 4E9 allows a verified main DoT endpoint to be a normalized DNS hostname
+and applies port 853 when either a domain or loopback IP omits its port. The
+owned TLS configuration carries the endpoint hostname and exactly one classic
+loopback bootstrap upstream. A fresh TLS connection resolves the endpoint with
+one A query, connects the returned IPv4 address at the preserved port and still
+verifies the separately configured certificate name. Resolver-cache and TLS-
+pool identities include the endpoint and bootstrap identity. Multiple/system
+bootstrap resolvers, AAAA selection and non-main encrypted resolver roles remain
+outside this boundary.
+
+Phase 4E10 makes verified DoT trust construction match the Go oracle's three
+sources on each connection: the native platform store, the repository's
+embedded CA bundle and globally configured inline `tls.custom-certifactes`
+roots. `DISABLE_SYSTEM_CA` and `DISABLE_EMBED_CA` use Go's accepted true forms.
+For IP-literal main DoT, omission of a fragment performs normal endpoint-name
+verification, `name-cert-verify` replaces that name and takes precedence when
+combined with `skip-cert-verify`, while `skip-cert-verify=true` alone installs
+the existing signature-only dangerous verifier. `disable-reuse=true` selects
+fresh connections; otherwise both verified and insecure DoT use the bounded
+pool keyed by their effective trust/verification identity.
+
+Phase 4E11 fixes the DoT pool lifecycle as an externally observed contract.
+Concurrent misses never hold the pool mutex during network I/O and may create
+independent connections; returning connections form a bounded eight-entry LIFO
+pool, closing the oldest excess entry. A failed reused exchange is discarded
+and receives exactly one fresh connect/exchange attempt, while a failure on
+that fresh connection is returned without a loop. TLS framing reads retain the
+five-second upstream deadline. Every successfully applied configuration
+generation clears the idle pool and invalidates pre-reload returns, so a later
+miss cannot inherit an obsolete encrypted connection.
+
+Phase 4E12 adds a separate plaintext HTTP/1.1 DoH pool whose entries are raw
+TCP streams and can never be confused with TLS streams. Loopback URLs use port
+80 when omitted; an empty path and `/` both canonicalize to the HTTP root,
+while an already accepted unreserved absolute path is preserved. The shared
+DoH exchange emits a zero-ID RFC 8484 GET, validates the response framing,
+restores the client ID and returns persistent streams to the transport-specific
+pool. Successful reload resets both plaintext and TLS pools.
+
+There is no dependency on the Go binary at runtime; Go is invoked only by the
+compatibility scripts as a development oracle. Proxy-server resolver routing,
+`respect-rules`, broader DoH URL and retry/concurrency behavior,
+concurrent DoH pool scheduling, HTTP/2/3, DoQ, TUN, remote adapters, providers
+and broader controller mutation still have no Rust implementation.
+
+## Process-level flow
+
+```text
+CLI / environment / config file / stdin / base64 config
+                        |
+                        v
+                    main.go
+        flags, subcommands, paths, signals
+                        |
+                        v
+                   hub.Parse
+              /                     \
+             v                       v
+     config.Parse             hub.applyRoute
+ defaults -> YAML ->        controller HTTP/TLS/
+ validate -> construct       Unix/named-pipe servers
+             |
+             v
+      executor.ApplyConfig
+             |
+             +--> global services, DNS, rules, proxies
+             +--> listeners and TUN
+             +--> providers/profile/updaters
+             |
+             v
+       tunnel enters Running
+```
+
+`main.go` also dispatches the `convert-ruleset`, `generate`, and `age`
+subcommands before normal startup. `-v` prints build/runtime information. `-t`
+parses and validates configuration without applying it. Normal startup installs
+SIGINT/SIGTERM shutdown and SIGHUP reload handling.
+
+Configuration input precedence is observable and must be preserved:
+
+1. `-config` / `CLASH_CONFIG_STRING` supplies base64-encoded bytes.
+2. `-f -` reads stdin.
+3. `-f` / `CLASH_CONFIG_FILE` selects a path.
+4. Otherwise the configured home directory and default config filename are
+   used; `config.Init` creates a minimal `mixed-port: 7890` file if absent.
+
+CLI overrides for controller/UI/secret are applied after parsing and before
+the configuration is dispatched.
+
+## Configuration construction
+
+The high-level path is:
+
+```text
+executor.Parse[WithPath|WithBytes]
+  -> config.Parse
+    -> config.UnmarshalRawConfig
+      -> age.DecryptBytes
+      -> DefaultRawConfig
+      -> YAML unmarshal over defaults
+    -> config.ParseRawConfig
+```
+
+`ParseRawConfig` constructs and validates objects in a significant order:
+
+1. general settings;
+2. a temporary general-setting update used by geodata/rule parsing;
+3. controller, experimental settings, iptables, NTP, profile and TLS;
+4. proxies, proxy groups and proxy providers;
+5. named listeners;
+6. rule providers, sub-rules and rules;
+7. hosts;
+8. global IPv6 state;
+9. DNS and TUN validation;
+10. TUIC server, users, static tunnels and sniffer.
+
+Important compatibility hazards:
+
+- YAML decoding overlays a large default object; absent, zero and explicit
+  values are therefore not interchangeable.
+- Parsing currently touches temporary global state because rule/geodata loading
+  depends on general settings.
+- Proxy groups are DAG-sorted and duplicate/reserved names are rejected.
+- Built-ins (`DIRECT`, `REJECT`, `REJECT-DROP`, `COMPATIBLE`, `PASS`,
+  `PASS-RULE`, and synthesized `GLOBAL`) are inserted during parsing.
+- Sub-rule cycles, missing proxy targets, dialer-proxy references, listeners,
+  providers, paths and TUN/DNS relationships are validated during parsing.
+- Configuration parsing may decrypt data and load/download external resources;
+  the Rust parser needs explicit I/O boundaries rather than hidden global I/O.
+
+## Configuration application and reload
+
+`executor.ApplyConfig` holds a process-wide mutex, suspends the tunnel, then
+applies configuration in this order:
+
+```text
+log level
+  -> tunnel suspend
+  -> CA reset/custom certificates
+  -> experimental flags
+  -> users
+  -> proxies/providers
+  -> rules/rule providers
+  -> sniffer
+  -> hosts
+  -> general settings
+  -> DNS
+  -> NTP (after DNS by design)
+  -> fixed and named listeners
+  -> TUN
+  -> iptables
+  -> static tunnels
+  -> inner listener
+  -> proxy providers
+  -> profile
+  -> rule providers
+  -> tunnel running
+  -> updater and resolver connection reset
+```
+
+Reload paths are not equivalent:
+
+| Trigger | Parse | Controller recreation | Runtime application |
+| --- | --- | --- | --- |
+| Initial startup | `hub.Parse` | Yes | Forced listener application |
+| SIGHUP | `hub.Parse` | Yes | Forced listener application |
+| `PUT /configs` | bytes or safe absolute path | No | `force` query controls fixed listeners |
+| `PATCH /configs` | JSON patch schema | No | Selective, in-place setters/recreation |
+| `POST /restart` | none | Process replacement | Full shutdown/re-exec |
+
+The Rust design must model a parsed immutable configuration separately from a
+running generation. Application should construct a new generation, validate
+its resources, and publish it atomically where possible. Exact Go partial
+update behavior remains a compatibility requirement for the controller API.
+
+## Inbound and metadata flow
+
+There are two inbound configuration families:
+
+- legacy fixed ports managed by `listener/listener.go`: HTTP, SOCKS, mixed,
+  redir, TProxy, Shadowsocks, VMess, TUIC, TUN and static tunnels;
+- named listeners parsed by `listener.ParseListener`: socks, http, tproxy,
+  redir, mixed, tunnel, tun, shadowsocks, snell, vmess, vless, trojan,
+  hysteria2, hysteria2-realm, tuic, shadowquic, anytls, mieru, sudoku and
+  trusttunnel.
+
+Each listener accepts a stream or packet, performs protocol/authentication
+decoding, creates `constant.Metadata`, then calls the `constant.Tunnel`
+interface. TCP uses a buffered `ConnContext`; UDP uses `UDPPacket` and
+`PacketAdapter` objects with source-aware `WriteBack` behavior.
+
+The first Rust slice only targets the mixed TCP listener. The mixed listener
+peeks the first byte and dispatches HTTP or SOCKS parsing. It must preserve
+buffered bytes when handing the connection to the tunnel.
+
+## Tunnel data plane
+
+The central singleton `tunnel.Tunnel` implements blocking TCP and nonblocking
+UDP entry points.
+
+TCP processing:
+
+1. reject traffic when the tunnel lifecycle state is not eligible;
+2. validate and normalize metadata;
+3. reverse-map fake/mapped IPs and hosts;
+4. optionally sniff buffered traffic and replace the destination;
+5. lazily resolve DNS/process metadata as demanded by rules;
+6. choose a proxy by special proxy, Direct, Global or ordered rule matching;
+7. unwrap groups, handle PASS/REMATCH and reject unsupported UDP choices;
+8. dial with retry and the configured timeout;
+9. account for early handshake bytes;
+10. wrap the connection in the statistics manager and relay both directions.
+
+UDP processing adds a NAT table keyed by source, packet send queues, optional
+UDP sniffing, destination mappings, remote packet connections, write-back
+address control, timeouts and asynchronous cleanup. UDP compatibility is not
+implied by TCP parity.
+
+Global mutable state includes lifecycle status, mode, proxies, providers,
+rules, listeners, sniffer, NAT state and process-mode settings. The Rust port
+should place these in an owned runtime state behind explicit read/update
+interfaces, not reproduce package globals.
+
+## Rules
+
+Rules are ordered. Each rule can request lazy IP resolution or process lookup
+through `RuleMatchHelper`. Supported rule kinds include domain exact/suffix/
+keyword/regex/wildcard, GEOSITE, GEOIP, ASN, IP CIDR/suffix, source/destination/
+inbound port, DSCP, process name/path variants, network, UID, inbound type/user/
+name, rematch name, rule set, sub-rule, AND/OR/NOT and MATCH.
+
+Matching can return PASS (continue scanning), REMATCH (mutate metadata and scan
+again with cycle protection), a proxy group or a concrete outbound. Rules also
+expose provider dependencies and hit/miss statistics. Parser acceptance, error
+messages, ordering and lazy side effects all belong in the compatibility
+contract.
+
+## DNS
+
+DNS is both a service and a dependency of routing:
+
+```text
+UDP/TCP DNS listener or TUN hijack
+  -> dns.Service
+  -> hosts middleware
+  -> fake-IP middleware (when enabled)
+  -> IP-to-host mapping middleware
+  -> resolver
+     -> policy-specific clients or main clients
+     -> fallback filters/lazy fallback
+     -> cache + singleflight + retry/background refresh
+```
+
+Upstream transports include system DNS, UDP/TCP DNS, DoH, DoT, DoQ, DHCP and
+Tailscale-aware resolution. Proxy and direct nameserver paths can themselves
+route through the tunnel. Fake-IP pools and mapping state interact with
+profiles, cache APIs, TUN hijacking and tunnel metadata preprocessing.
+
+DNS parity therefore needs message-level fixtures (including EDNS0, TTL,
+truncation and errors), not only hostname lookup tests.
+
+## Outbound adapters and transports
+
+`adapter.ParseProxy` converts untyped configuration maps into concrete outbound
+adapters. Current configured outbound types are:
+
+`ss`, `ssr`, `socks5`, `http`, `vmess`, `vless`, `snell`, `trojan`, `hysteria`,
+`hysteria2`, `wireguard`, `tuic`, `shadowquic`, `gost-relay`, `direct`, `dns`,
+`reject`, `rematch`, `ssh`, `mieru`, `anytls`, `sudoku`, `masque`,
+`trusttunnel`, `openvpn`, `tailscale`, and `zerotier`.
+
+Groups add selector, fallback, URL test, load balance and relay behavior.
+Providers add loading, health checks, persistence and live updates.
+
+Adapters implement a common stream/packet dial contract, but many compose
+several packages from `transport/` and third-party forks. A Rust crate being
+available for a protocol does not establish wire parity; each protocol needs
+cross-implementation vectors and live interop tests.
+
+## REST controller
+
+The controller can listen on plain TCP, TLS, Unix sockets and Windows named
+pipes. It supports bearer/token authentication, CORS, an external UI, optional
+debug routes, WebSockets and an optional DoH mount.
+
+Top-level resources are `/logs`, `/traffic`, `/memory`, `/version`, `/configs`,
+`/proxies`, `/group`, `/rules`, `/connections`, `/providers/proxies`,
+`/providers/rules`, `/cache`, `/dns`, `/storage`, `/restart`, `/upgrade`, and
+the configured UI/DoH paths. Compatibility includes routes, methods, status
+codes, JSON shapes, streaming/WebSocket framing, authentication and side
+effects—not only successful JSON responses.
+
+## Cargo workspace boundary
+
+Phase 1 introduced the smallest workspace needed by the first vertical slice;
+Phase 2 added the test-support helper; Phase 3 added state and controller;
+Phase 4A added the classic DNS crate; Phases 4B through 4E4 extended the
+existing config, DNS, state, controller and runtime boundaries without adding
+another crate.
+Crates marked “later phase” remain design boundaries and do not exist yet:
+
+```text
+rust/
+  Cargo.toml                 workspace policy and shared dependency versions
+  crates/
+    model/                   metadata, enums, addresses; no I/O
+    config/                  YAML/defaults/validation; produces owned specs
+    rules/                   parsing and pure matching over model
+    net/                     buffered streams, relay, deadlines, cancellation
+    inbound/                 HTTP/SOCKS/mixed and later other listeners
+    outbound/                DIRECT first, then protocol adapters
+    state/                   trackers, DNS mappings and fake-IP pools/profile state
+    dns/                     classic/DoT DNS, cache, hosts/fake-IP and policy service
+    controller/              REST surface over runtime interfaces
+    platform/                socket/TUN/process/routing OS boundaries
+    runtime/                 lifecycle, generations, routing orchestration
+    cli/                     binary entry point and signals
+    test-support/            local servers and fixture helpers; never runtime
+```
+
+Intended dependency direction:
+
+```text
+model <- config
+model <- rules
+model <- state
+model <- net <- inbound
+model <- net <- outbound
+config <- dns
+config + dns + state <- controller
+config + rules + inbound + outbound + state + controller + dns <- runtime
+runtime + config <- cli
+test-support ---------------------------------------> tests only
+```
+
+Crate/package and binary names are deliberately unresolved until the existing
+README naming condition is reviewed. Published crates should not accidentally
+claim the restricted project name.
+
+## Architectural risks to track
+
+1. Upstream drift: the Alpha branch changes frequently and uses many MetaCubeX
+   forks with future-dated protocol work.
+2. Hidden globals: parse and apply behavior currently depend on package state
+   and ordering.
+3. Async semantic drift: Go goroutines/channels and Rust tasks/queues differ in
+   cancellation, fairness, shutdown and panic behavior.
+4. Buffer ownership: sniffing, early data, zero-copy pools and UDP recycling are
+   sensitive to duplicated/dropped bytes and use-after-recycle errors.
+5. Platform breadth: socket marks, transparent proxying, process discovery,
+   TUN routing, named pipes and Android integration are distinct products.
+6. Crypto/wire behavior: protocol interoperability is byte-exact and cannot be
+   inferred from API similarity.
+7. Controller compatibility: dashboards depend on undocumented JSON and
+   streaming behavior as well as documented endpoints.

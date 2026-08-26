@@ -1,0 +1,461 @@
+# Compatibility matrix
+
+Baseline: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`).
+
+This is the authority for support claims. A Rust implementation is compatible
+only when the relevant row is marked **Parity** with named test evidence.
+`go-capability-inventory.md` is the exhaustive planning census: future slices
+must cite both its stable inventory IDs and the exact rows changed here. An
+aggregate row in this matrix does not erase a more-specific inventory gap.
+
+## Legend
+
+| State | Meaning |
+| --- | --- |
+| Oracle | Present in the pinned Go reference implementation |
+| Not started | No Rust behavior exists |
+| Partial | Some declared cases work; exclusions are listed |
+| Parity | Declared cases pass Go/Rust differential tests |
+| Deferred | Intentionally outside the current roadmap |
+
+Phase 1 through Phase 4D3A parity claims below are deliberately narrow. Existing
+Go unit tests are useful evidence but are not Go/Rust differential evidence.
+
+## CLI and process lifecycle
+
+| Capability | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| Default config/home resolution | Oracle | Not started | Path/env fixture matrix |
+| Phase 1 explicit `-f` configuration file | Oracle | **Parity** | `compat/scripts/phase1.py` on Darwin arm64 and Linux amd64 |
+| `-d`, `-config`, stdin config and input precedence | Oracle | Not started | Input precedence, paths, exit/stdout/stderr |
+| Phase 1 `-t` configuration corpus | Oracle | **Parity** | Valid minimal, malformed YAML, invalid mode/rule/port-type and out-of-range integer |
+| Full `-t` configuration surface | Oracle | Not started | Expanded valid/invalid golden corpus |
+| `-v` version/features output | Oracle | Not started | Normalized output contract |
+| Controller/UI/secret CLI overrides | Oracle | Not started | Config plus override differential |
+| `convert-ruleset` | Oracle | Not started | Fixture files and byte/record comparison |
+| `generate` | Oracle | Not started | Subcommand-specific golden fixtures |
+| `age` and encrypted config | Oracle | Not started | Valid/wrong-key/malformed fixtures |
+| Phase 1 SIGTERM cleanup | Oracle | **Parity** | Exit 0, listener/idle stream closure and bounded task drain |
+| SIGINT and full shutdown/profile semantics | Oracle | Not started | Exit, listener closure, profile flush |
+| Phase 3 local SIGHUP rule/listener reload | Oracle | **Parity** | Same-port rule switch, invalid-config rollback and port migration in `compat/scripts/phase3.py` |
+| Full SIGHUP reload across all Mihomo resources | Oracle | Partial | Local listener/config generations exist; providers, broader DNS state, TUN and remote adapters are not started |
+| `post-up` / `post-down` hooks | Oracle | Not started | Ordering, exit and failure behavior |
+
+## Configuration surface
+
+| Capability group | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| Phase 1 minimal YAML (`mixed-port`, Rule mode, log level, IPv6 flag, one rule) | Oracle | **Parity** | `compat/fixtures/config/phase1-*` differential corpus |
+| Phase 2 declared default overlay and malformed YAML | Oracle | **Parity** | 37 fixed plus 96 seeded generated Go/Rust observations in `compat/scripts/phase2.py` |
+| Phase 2 general ports, mode, logging, IPv6, interface and keepalive fields (spec only) | Oracle | **Parity** | Default/override/null/error observations; no listener/resource application claim |
+| Phase 3 local authentication records | Oracle | **Parity** | HTTP Basic, SOCKS4 USERID and SOCKS5 username/password accept/reject cases |
+| LAN allow/deny and skip-auth prefixes | Oracle | Not started | Parser plus remote-address connection decisions |
+| Phase 3 controller TCP address and secret | Oracle | **Parity** | Live loopback TCP controller and Bearer authorization observations |
+| Controller TLS/Unix/pipe and CORS | Oracle | Not started | Per-platform live controller fixtures |
+| UI paths/download settings and safe-path checks | Oracle | Not started | Path traversal and normalization cases |
+| Proxies and built-in proxy insertion | Oracle | Not started | Normalized inventory/error corpus |
+| Proxy groups and cycle/order validation | Oracle | Not started | DAG, duplicate and reserved-name cases |
+| Proxy providers and health checks | Oracle | Not started | Local provider server, refresh/state tests |
+| Rules, sub-rules and rule providers | Oracle | Partial | Phase 2 pure rule/sub-rule subset only; providers and runtime resources are not started |
+| Named listeners | Oracle | Not started | Type-specific accepted/rejected configs |
+| Hosts | Oracle | Partial | Phase 4B exact configured IP/CNAME plus native Darwin system-host subset; wildcard, `lan` and broad platform behavior are not started |
+| DNS and fake-IP configuration | Oracle | Partial | Phase 4A/4B classic/hosts, Phase 4C fake settings, Phase 4D1 policy, Phase 4D2 fallback and Phase 4D3A single local direct resolver; general fallback, proxy-server/respect-rules and encrypted DNS remain unclaimed |
+| TUN and route settings | Oracle | Not started | Per-OS parse/apply fixtures |
+| Static tunnels and proxy validation | Oracle | Not started | TCP/UDP target fixtures |
+| NTP | Oracle | Not started | Local NTP server and ordering tests |
+| iptables | Oracle | Not started | Linux namespace integration tests |
+| TLS/custom CA/client auth/ECH | Oracle | Not started | Certificate and handshake fixtures |
+| Profile persistence | Oracle | Partial | Phase 4C fake-IP mapping/allocation restart behavior only; Go `cache.db` format/interchange, corruption and other profile state are unclaimed |
+| Sniffer | Oracle | Not started | HTTP/TLS/QUIC payload fixtures |
+| Geodata URLs/loaders/matchers/updates | Oracle | Not started | Pinned local data files, no public latest |
+| Experimental and build-feature settings | Oracle | Not started | Feature-profile parser/runtime tests |
+| Deprecated/removed configuration behavior | Oracle | Not started | Accepted aliases, warnings and Go-compatible rejection corpus, including removed relay groups |
+
+## Inbound listeners
+
+| Listener | TCP | UDP | Go | Rust | Differential evidence |
+| --- | --- | --- | --- | --- | --- |
+| Phase 1 mixed HTTP/SOCKS5 TCP subset | Yes | No | Oracle | **Parity** | Fragmented HTTP absolute-form, CONNECT, SOCKS5 IPv4/domain, disabled-IPv6 close and auth-method reply |
+| Full mixed HTTP/SOCKS listener | Yes | SOCKS UDP | Oracle | Partial | Phase 3 declared HTTP/SOCKS4/4a/5 TCP and local SOCKS5 UDP subset; broader HTTP/UDP semantics remain |
+| Phase 3 fixed HTTP TCP subset | Yes | No | Oracle | **Parity** | Absolute-form/CONNECT, Basic 407/403/success, relay and half-close observations |
+| Phase 3 fixed/mixed SOCKS subset | Yes | Yes | Oracle | **Parity** | SOCKS4/4a/5 CONNECT, USERID/user-pass, UDP ASSOCIATE, IPv4 DIRECT write-back and FRAG drop |
+| Redir | Yes | Platform-dependent | Oracle | Not started | Linux/Darwin/FreeBSD socket tests |
+| TProxy | Yes | Linux-real semantics | Oracle | Not started | Linux network namespace tests |
+| Tunnel | Yes | Yes | Oracle | Not started | Fixed target and write-back tests |
+| TUN | Yes | Yes | Oracle | Not started | Per-stack/per-OS integration tests |
+| Shadowsocks | Yes | Yes | Oracle | Not started | Upstream interop matrix |
+| Snell | Yes | Yes | Oracle | Not started | Version and UDP interop matrix |
+| VMess | Yes | Transport-dependent | Oracle | Not started | v2ray interop and transport matrix |
+| VLESS | Yes | Transport-dependent | Oracle | Not started | Interop, Vision/Reality/transports |
+| Trojan | Yes | Yes | Oracle | Not started | TLS/auth/fallback/UDP interop |
+| Hysteria2 | Yes | Yes | Oracle | Not started | QUIC/congestion/obfs interop |
+| Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
+| TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
+| ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
+| AnyTLS | Yes | Protocol-dependent | Oracle | Not started | Padding/session/auth interop |
+| Mieru | Yes | Yes | Oracle | Not started | TCP/UDP/mux interop |
+| Sudoku | Yes | Yes | Oracle | Not started | Handshake/obfs/mux/replay interop |
+| TrustTunnel | Yes | Yes/ICMP | Oracle | Not started | HTTP/2/TCP/packet/ICMP interop |
+| Legacy fixed VMess/SS/TUIC ports | Yes | Varies | Oracle | Not started | Legacy config and rebind behavior |
+| Shared inbound transport/security variants | Varies | Varies | Oracle | Not started | Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya fixtures per consuming protocol |
+
+## Rules and routing
+
+| Rule family | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| Phase 1 Rule mode with exactly `MATCH,DIRECT` | Oracle | **Parity** | Valid/malformed rule corpus and live DIRECT routing |
+| Full MATCH behavior and routing modes | Oracle | Not started | Rule/Direct/Global modes and expanded targets |
+| Phase 2 domain exact/suffix/keyword subset | Oracle | **Parity** | Fixed and seeded parser/matcher observations, including sniff-host precedence; no IDNA normalization claim |
+| Domain regex/wildcard | Oracle | Not started | Engine syntax/error/match corpus |
+| Phase 2 IPv4/IPv6 CIDR source/destination subset | Oracle | **Parity** | `IP-CIDR`, `IP-CIDR6`, `SRC-IP-CIDR` and `src` parameter observations |
+| IP suffix, unmap, no-resolve and resolver interaction | Oracle | Not started | Address-family and lazy-resolution corpus |
+| Phase 2 source/destination/inbound ports and TCP/UDP network | Oracle | **Parity** | Fixed range/list/reversal/error cases plus seeded matcher observations |
+| DSCP and remaining metadata matchers | Oracle | Not started | Metadata matrix |
+| Process name/path variants and UID | Oracle | Not started | Per-OS process fixtures |
+| Phase 2 rematch-name pure metadata matcher | Oracle | **Parity** | Rematch mutation followed by `REMATCH-NAME` observation |
+| Inbound type/user/name matchers | Oracle | Not started | Metadata and inbound fixture matrix |
+| GEOIP/GEOSITE/ASN | Oracle | Not started | Pinned geodata corpus |
+| RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
+| Phase 2 pure SUB-RULE and AND/OR/NOT subset | Oracle | **Parity** | Nested pure matcher, missing reference, PASS-RULE and cycle observations; no lazy DNS/process helpers |
+| Phase 2 pure PASS/PASS-RULE/REMATCH scan | Oracle | **Parity** | Ordered scan, metadata mutation, sub-rule switch and rematch-cycle observations; no live adapter claim |
+| Proxy groups/select/fallback/url-test/load-balance | Oracle | Not started | Deterministic health/delay fixtures |
+| Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
+| Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |
+
+## Outbound adapters
+
+| Outbound type | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| Phase 1 DIRECT TCP | Oracle | **Parity** | HTTP/echo, domain/IP, dial failure, binary relay and half-close |
+| Full DIRECT TCP/UDP/platform options | Oracle | Partial | Phase 1/3 local TCP plus IPv4 SOCKS UDP subset; interface/mark/TFO/MPTCP/general NAT are not claimed |
+| REJECT / REJECT-DROP | Oracle | Partial | Phase 3 immediate TCP REJECT parity only; REJECT-DROP timing and full UDP behavior are not claimed |
+| DNS / PASS / PASS-RULE / REMATCH | Oracle | Not started | Routing semantics and metadata mutation |
+| HTTP | Oracle | Not started | HTTP/TLS/auth/CONNECT interop |
+| SOCKS5 | Oracle | Not started | TCP/UDP/auth/resolve interop |
+| Shadowsocks (`ss`) | Oracle | Not started | Cipher/plugin/UoT interop |
+| ShadowsocksR (`ssr`) | Oracle | Not started | Cipher/protocol/obfs interop |
+| VMess | Oracle | Not started | Security/early-data/transport interop |
+| VLESS | Oracle | Not started | Encryption/Vision/Reality/transports |
+| Snell | Oracle | Not started | Version/UDP/pool interop |
+| Trojan | Oracle | Not started | TLS/fallback/UDP interop |
+| Hysteria / Hysteria2 | Oracle | Not started | QUIC/fake-TCP/obfs/congestion interop |
+| TUIC | Oracle | Not started | v4/v5/0-RTT/congestion interop |
+| ShadowQUIC | Oracle | Not started | QUIC stream/datagram interop |
+| WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
+| SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
+| Mieru | Oracle | Not started | Client/mux interop |
+| AnyTLS | Oracle | Not started | Session/padding/TLS interop |
+| Sudoku | Oracle | Not started | Handshake/obfs/mux interop |
+| MASQUE | Oracle | Not started | CONNECT-IP/QUIC interop |
+| TrustTunnel | Oracle | Not started | HTTP/2/packet/ICMP interop |
+| OpenVPN | Oracle | Not started | Control/data/rekey/cipher interop |
+| Gost relay | Oracle | Not started | Chain and addressing tests |
+| Tailscale | Oracle (`with_gvisor`) | Not started | tsnet/DNS/tailnet integration |
+| ZeroTier | Oracle (unless disabled) | Not started | Network lifecycle/integration |
+| Dialer-proxy chains and sing-mux | Oracle | Not started | Nested dial path, TCP/UDP, statistics, cycle/error and close behavior |
+| Shared outbound transport/security variants | Oracle | Not started | WebSocket, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, plugins, Reality, ECH, JLS, ReSTLS, ShadowTLS and TLSMirror interop per consumer |
+
+## DNS
+
+| Capability | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| Phase 4A UDP/TCP DNS server subset | Oracle | **Parity** | UDP and TCP queries, framing, ID echo, AA/flags and A response semantics in `compat/scripts/phase4.py` |
+| Full UDP/TCP DNS server semantics | Oracle | Partial | Phase 4A one-question positive A path only; malformed/error replies, EDNS and truncation remain unclaimed |
+| Phase 4A IP-literal UDP/TCP upstream | Oracle | **Parity** | Both transports observed by the deterministic loopback authoritative server |
+| System and general classic upstream selection | Oracle | Not started | System resolver, domains, multiple upstreams, retries and selection order |
+| Phase 4E1 loopback insecure DoT main-upstream subset | Oracle | **Parity** | Local TLS server, DNS/TCP framing, cache behavior and config/process observations in `compat/scripts/phase4e1.py` |
+| Phase 4E2 custom-CA verified DoT main-upstream subset | Oracle | **Parity** | Inline root/leaf chain, explicit SNI/name verification, wrong-name SERVFAIL, DNS/TCP framing and cache observations in `compat/scripts/phase4e2.py` |
+| Phase 4E3 multiple inline custom roots for verified DoT | Oracle | **Parity** | Decoy + issuing root selection, issuing-root order, untrusted-chain SERVFAIL and cache observations in `compat/scripts/phase4e3.py` |
+| Phase 4E4 verified main-DoT connection reuse subset | Oracle | **Parity** | Cross-client reuse, positive-cache separation, stale pooled-connection one-shot reconnect and bounded pool observations in `compat/scripts/phase4e4.py` |
+| Phase 4E5 verified HTTPS DoH GET main-upstream subset | Oracle | **Parity** | HTTP/1.1 GET query encoding, zero upstream DNS ID, media headers, custom-root/name validation, response restoration and cache observations in `compat/scripts/phase4e5.py` |
+| Phase 4E6 verified HTTP/1.1 DoH connection-reuse subset | Oracle | **Parity** | Persistent cross-client reuse, positive-cache separation and stale pooled-connection recovery observations in `compat/scripts/phase4e6.py` |
+| Phase 4E7 custom absolute DoH path subset | Oracle | **Parity** | Config acceptance, exact HTTP request target, response/ID and positive-cache observations in `compat/scripts/phase4e7.py` |
+| Phase 4E8 percent-encoded unreserved DoH path subset | Oracle | **Parity** | Encoded-path config acceptance, Go-compatible decoded HTTP target, response/ID and cache observations in `compat/scripts/phase4e8.py` |
+| Phase 4E9 domain DoT/default-port/bootstrap subset | Oracle | **Parity** | `DNS-06`; domain endpoint config, implicit 853 normalization, one classic loopback `default-nameserver`, bootstrap A query, verified DoT wire/cache/process observations in `compat/scripts/phase4e9.py` |
+| Phase 4E10 DoT trust/verification matrix subset | Oracle | **Parity** | `DNS-06`; default system + embedded + global roots, `skip-cert-verify`, `name-cert-verify` precedence, reuse toggle and deterministic trusted/untrusted/name-mismatch observations in `compat/scripts/phase4e10.py` |
+| Phase 4E11 DoT concurrency/timeout/reset/retry subset | Oracle | **Parity** | `DNS-06`; 12 concurrent misses/8 idle cap, five-second response timeout, SIGHUP pool reset, stale one-shot reconnect and fresh-failure retry bound in `compat/scripts/phase4e11.py` |
+| Phase 4E12 plaintext HTTP DoH/default URL subset | Oracle | **Parity** | `DNS-07`; explicit/default port, empty/root/custom path normalization, RFC 8484 GET wire, ID restoration, cache and sequential reuse in `compat/scripts/phase4e12.py` |
+| Phase 4E13 HTTPS root/query/userinfo/redirect subset | Oracle | **Parity** | `DNS-07`; implicit/default port and root path, discarded configured query, ASCII Basic userinfo, persistent same-origin relative redirects and Go-compatible ten-request limit in `compat/scripts/phase4e13.py` |
+| Phase 4E14 domain-host HTTPS bootstrap/trust subset | Oracle | **Parity** | `DNS-07`; one loopback UDP bootstrap A lookup, URL-domain Host/SNI, default/name-override/skip verification precedence and trusted/untrusted outcomes in `compat/scripts/phase4e14.py` |
+| Phase 4E15 DoH HTTP/2 negotiation/GET subset | Oracle | **Parity** | `DNS-08`; TLS ALPN `h2`, RFC 8484 GET pseudo/header fields, zero DNS ID, response restoration, sequential stream reuse and HTTP/1.1 fallback in `compat/scripts/phase4e15.py` |
+| Full DoH/DoT/DoQ | Oracle | Partial | Multiple/system bootstrap and broader domain/IPv6 combinations, encoded userinfo, absolute/cross-origin and connection-closing redirects, cross-platform positive system-store fixtures, broader DoH/DoQ retry and pool behavior, HTTP/3, DoQ framing and encrypted policy/fallback/direct upstreams remain unclaimed; custom-certificate paths are not a Go feature |
+| DHCP upstream | Oracle | Not started | Isolated integration fixture |
+| Synthetic RCODE and Tailscale DNS upstreams | Oracle | Not started | Rcode response corpus and registered/missing Tailscale resolver lifecycle |
+| DNS upstream wrapper parameters | Oracle | Partial | TLS verification/reuse subset only; ECS/override, disabled address/qtypes, proxy-name and respect-rules combinations remain unclaimed |
+| Phase 4D1 simple nameserver policy | Oracle | **Parity** | Exact, `*` one-label and `+.` root/deep suffix selection across local UDP/TCP authorities, overlap priority and policy cache hit in `compat/scripts/phase4d1.py` |
+| Full policy and proxy/direct nameservers | Oracle | Partial | Phase 4D3A direct subset only; multi-upstream policies, ordered same-node overwrite, geosite/rule-set matchers, proxy-server routing and respect-rules are unclaimed |
+| Phase 4D2 single main/fallback answer-filter subset | Oracle | **Parity** | One local fallback, `+.` domain forcing, IPv4 CIDR answer filtering, eager/lazy call behavior, policy precedence and selected-response cache hit in `compat/scripts/phase4d2.py` |
+| Full main/fallback filters and lazy fallback | Oracle | Partial | Multiple upstreams, GeoIP/GeoSite, IPv6 filter answers, failure/timeout/retry ordering and general upstreams are unclaimed |
+| Phase 4D3A direct resolver and lazy IP-rule TCP subset | Oracle | **Parity** | Ordered domain/IP-CIDR rule queries, `no-resolve`, one local direct nameserver, policy-follow behavior and DIRECT TCP result in `compat/scripts/phase4d3a.py` |
+| Cache TTL, stale refresh, singleflight/retry | Oracle | Partial | Phase 4A bounded positive cache hit, client-ID restoration and Go-compatible remaining TTL; negative/stale/singleflight/retry are not claimed |
+| Phase 4B exact hosts and CNAME subset | Oracle | **Parity** | Configured A/AAAA, CNAME-only, CNAME-to-upstream and Darwin system-host observations in `compat/scripts/phase4b.py` |
+| Full hosts and CNAME behavior | Oracle | Partial | Exact names only; wildcard, `lan`, randomized multi-address routing, non-IP queries and broad platforms are not claimed |
+| Phase 4B redir-host TCP mapping subset | Oracle | **Parity** | Local DNS A answer -> IP SOCKS5 CONNECT -> recovered DOMAIN rule -> DIRECT echo chain |
+| Full redir-host mapping | Oracle | Partial | TCP SOCKS IPv4 evidence only; UDP, reload persistence, CNAME reverse-rule identity and other inbounds are not claimed |
+| Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py` |
+| Full fake-IP behavior and persistence format | Oracle | Partial | Rule/provider/wildcard filters, UDP reverse routing, reload/prefix migration, flush API, crash/corruption behavior and Go bbolt file interchange are unclaimed |
+| EDNS0 echo, UDP size and truncation | Oracle | Not started | Message byte/semantic comparison |
+| DNS hijack through TUN | Oracle | Not started | Platform TUN integration |
+| Phase 4D4 local DNS REST A/AAAA/CNAME query and positive-cache flush subset | Oracle | **Parity** | Authenticated query JSON plus REST/local-listener shared cache hit/flush/refetch behavior in `compat/scripts/phase4d4.py` |
+| Full DNS REST query and cache control | Oracle | Partial | Arbitrary RR types, negative/stale cache state, fake-IP flush and complete method/error behavior remain unclaimed |
+
+## REST controller
+
+| Surface | Go | Rust | Required parity evidence |
+| --- | --- | --- | --- |
+| TCP/TLS/Unix/Windows pipe listeners | Oracle | Partial | Phase 3 loopback TCP only; TLS/Unix/pipe are not started |
+| Secret auth, WebSocket token and CORS | Oracle | Partial | Phase 3 Bearer header auth parity; query token/WebSocket/CORS are not claimed |
+| `/`, `/version`, `/memory`, `/traffic` | Oracle | Partial | Phase 3 root/version and first traffic stream frame; memory and full stream cadence are not claimed |
+| `/logs` WebSocket/stream | Oracle | Partial | Phase 3 plain HTTP info event and invalid-level contract; WebSocket/structured/full filters are not claimed |
+| `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | Phase 3 declared GET field subset only; all mutation/geo surfaces are not started |
+| `/proxies`, `/group`, delay and selection | Oracle | Not started | JSON, mutation and local health server |
+| `/rules` and disable operation | Oracle | Not started | Ordering/statistics/mutation |
+| `/connections` stream/list/delete | Oracle | Partial | Phase 3 GET snapshot/tracker/totals subset; WebSocket and DELETE are not started |
+| Proxy and rule provider APIs | Oracle | Not started | Refresh, health and error behavior |
+| Cache, DNS and storage APIs | Oracle | Partial | Phase 4D4 local query/positive-cache flush subset only; fake-IP/storage and complete cache surfaces remain unclaimed |
+| Restart and upgrade APIs | Oracle | Not started | Subprocess/re-exec/download fixtures |
+| External UI and DoH mount | Oracle | Not started | Static paths, redirect and DNS messages |
+| Debug routes | Oracle when debug | Not started | Feature exposure and GC endpoint |
+| Exact route-wide error/stream/concurrency contracts | Oracle | Partial | Status, headers, JSON/body, WebSocket cadence, disconnect and concurrent mutation evidence per route |
+
+## Platforms, architectures and build profiles
+
+The release workflow is broader than the first Rust target. Each row needs a
+separate build and runtime claim.
+
+| Target/profile | Go | Rust | Notes/evidence needed |
+| --- | --- | --- | --- |
+| Darwin arm64 — Phase 1 slice | Oracle | **Parity** | Native `compat/scripts/phase1.py`, 2026-08-25 |
+| Linux amd64 — Phase 1 slice | Oracle | **Parity** | `rust:1.95-bookworm` amd64 container differential, 2026-08-25 |
+| Darwin arm64 — Phase 2 pure config/rules | Oracle | **Parity** | Native `compat/scripts/phase2.py`, 2026-08-25; no privileged/platform I/O |
+| Darwin arm64 — Phase 3 local product | Oracle | **Parity** | Native `compat/scripts/phase3.py`, 2026-08-25; loopback TCP/UDP and signals only |
+| Darwin arm64 — Phase 4A classic DNS | Oracle | **Parity** | Native `compat/scripts/phase4.py`, 2026-08-25; loopback UDP/TCP only |
+| Darwin arm64 — Phase 4B hosts/mapping | Oracle | **Parity** | Native `compat/scripts/phase4b.py`, 2026-08-25; local DNS, system hosts and interface-local TCP only |
+| Darwin arm64 — Phase 4C fake IP | Oracle | **Parity** | Native `compat/scripts/phase4c.py`, 2026-08-25; local DNS, interface-local TCP and temporary profile homes only |
+| Darwin arm64 — Phase 4D1 nameserver policy | Oracle | **Parity** | Native `compat/scripts/phase4d1.py`, 2026-08-25; four deterministic loopback UDP/TCP authorities |
+| Darwin arm64 — Phase 4D2 DNS fallback | Oracle | **Parity** | Native `compat/scripts/phase4d2.py`, 2026-08-25; deterministic local main/fallback/policy authorities |
+| Darwin arm64 — Phase 4D3A direct/lazy DNS | Oracle | **Parity** | Native `compat/scripts/phase4d3a.py`, 2026-08-25; mixed SOCKS TCP, three local DNS authorities and local echo |
+| Darwin arm64 — Phase 4E2 verified DoT | Oracle | **Parity** | Native `compat/scripts/phase4e2.py`, 2026-08-25; deterministic inline CA/leaf and loopback TLS authority |
+| Darwin arm64 — Phase 4E3 multiple DoT roots | Oracle | **Parity** | Native `compat/scripts/phase4e3.py`, 2026-08-25; deterministic decoy/issuing roots and loopback TLS authority |
+| Darwin arm64 — Phase 4E4 DoT reuse | Oracle | **Parity** | Native `compat/scripts/phase4e4.py`, 2026-08-25; persistent and server-closed loopback TLS connections |
+| Darwin arm64 — Phase 4E5 HTTPS DoH GET | Oracle | **Parity** | Native `compat/scripts/phase4e5.py`, 2026-08-25; deterministic custom CA and loopback HTTP/1.1 TLS authority |
+| Darwin arm64 — Phase 4E6 HTTP/1.1 DoH reuse | Oracle | **Parity** | Native `compat/scripts/phase4e6.py`, 2026-08-25; persistent and server-closed loopback HTTP/1.1 TLS connections |
+| Darwin arm64 — Phase 4E7 custom DoH path | Oracle | **Parity** | Native `compat/scripts/phase4e7.py`, 2026-08-25; deterministic custom-path loopback HTTP/1.1 TLS authority |
+| Darwin arm64 — Phase 4E8 encoded DoH path | Oracle | **Parity** | Native `compat/scripts/phase4e8.py`, 2026-08-25; deterministic percent-encoded-path loopback HTTP/1.1 TLS authority |
+| Darwin arm64 — Phase 4E9 domain DoT bootstrap | Oracle | **Parity** | Native `compat/scripts/phase4e9.py`, 2026-08-25; deterministic loopback bootstrap DNS plus verified DoT authority |
+| Darwin arm64 — Phase 4E10 DoT trust matrix | Oracle | **Parity** | Native `compat/scripts/phase4e10.py`, 2026-08-25; deterministic default/global-root, untrusted, name-override, skip-verification and reuse cases |
+| Darwin arm64 — Phase 4E11 DoT lifecycle | Oracle | **Parity** | Native `compat/scripts/phase4e11.py`, 2026-08-25; deterministic concurrent, delayed, reset and retry authority cases |
+| Darwin arm64 — Phase 4E12 HTTP DoH | Oracle | **Parity** | Native `compat/scripts/phase4e12.py`, 2026-08-25; deterministic plaintext HTTP/1.1 authority and default URL observations |
+| Darwin arm64 — Phase 4E13 HTTPS URL semantics | Oracle | **Parity** | Native `compat/scripts/phase4e13.py`, 2026-08-26; deterministic TLS HTTP/1.1 root/query/ASCII-userinfo/persistent-relative-redirect observations |
+| Darwin arm64 — Phase 4E14 domain HTTPS | Oracle | **Parity** | Native `compat/scripts/phase4e14.py`, 2026-08-26; deterministic bootstrap DNS and TLS HTTP/1.1 trust/SNI/Host observations |
+| Darwin arm64 — Phase 4E15 DoH HTTP/2 | Oracle | **Parity** | Native `compat/scripts/phase4e15.py`, 2026-08-26; deterministic local HTTP/2 TLS authority and HTTP/1.1 fallback |
+| Darwin arm64 beyond Phase 4E15 | Oracle | Not started | Capability-specific native evidence |
+| Linux amd64 beyond Phase 1 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux arm64 | Oracle | Not started | Cross-build then native integration |
+| Windows amd64/arm64/386 | Oracle | Not started | Named pipe, process/socket behavior |
+| FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
+| Android 386/amd64/arm/arm64 | Oracle | Not started | NDK/CMFA/TUN/package behavior |
+| Linux 386/armv5-7/mips/mips64 | Oracle | Not started | Toolchain/dependency feasibility gate |
+| Linux riscv64/loong64/s390x/ppc64le | Oracle | Not started | Toolchain/dependency feasibility gate |
+| Default build | Oracle | Not started | Feature inventory and tests |
+| `with_gvisor` | Oracle | Not started | gVisor TUN and Tailscale-enabled tests |
+| `with_low_memory` | Oracle | Not started | Buffer limits/memory benchmarks |
+| `no_fake_tcp` | Oracle | Not started | Hysteria feature exclusion |
+| `no_tailscale` | Oracle | Not started | Config rejection/stub behavior |
+| `no_zerotier` | Oracle | Not started | Config rejection/stub behavior |
+| `cmfa` | Oracle | Not started | Android-specific integration |
+| Packaging, executable metadata and reproducible archives | Oracle | Not started | Artifact names, archive/package contents, version/build metadata and reproducibility checks |
+
+## Phase 1 declared compatibility target
+
+Only these rows may move from Not started in the first implementation phase:
+
+- minimal YAML/default parsing required by the fixture;
+- `-t` for the declared minimal valid and invalid fixtures;
+- mixed TCP listener dispatching HTTP and SOCKS5;
+- Rule mode with `MATCH,DIRECT`;
+- DIRECT TCP dialing and bidirectional relay;
+- SIGINT/SIGTERM cleanup needed by the test harness.
+
+Everything else remains explicitly unsupported even if incidental code exists.
+
+Phase 1 evidence is the local-only `compat/scripts/phase1.py` run on native
+Darwin arm64 and an emulated Linux amd64 container. The minimal fixture keeps
+`ipv6: false`; the IPv6-address SOCKS case therefore asserts the oracle's close
+behavior. Enabled IPv6 proxying is not a Phase 1 compatibility claim.
+
+## Phase 2 declared compatibility target
+
+Phase 2 parity is limited to normalized specification behavior and pure rule
+evaluation exercised by `compat/scripts/phase2.py`:
+
+- declared Go defaults and overlays for general ports, LAN/bind, mode/logging,
+  IPv6/interface/routing mark, concurrency, keepalive and ETag fields;
+- MATCH, exact/suffix/keyword domain (with sniff-host precedence), IPv4/IPv6
+  destination/source CIDR, source/destination/inbound ports and TCP/UDP network;
+- AND, OR, NOT, SUB-RULE, PASS, PASS-RULE, rematch-name and REMATCH metadata
+  transitions, including invalid references and cycles.
+
+At the Phase 2 exit, executable conversion remained restricted to the Phase 1
+mixed listener and exact `MATCH,DIRECT` route. Later live additions are claimed
+only by their separate Phase 3 rows; Phase 2 evidence alone does not establish
+runtime compatibility.
+
+## Phase 3 declared compatibility target
+
+Phase 3 evidence in `compat/scripts/phase3.py` is limited to:
+
+- authentication records needed by legacy local listeners;
+- fixed HTTP and SOCKS TCP listeners plus the existing mixed TCP listener;
+- HTTP Basic authentication and SOCKS4 USERID/SOCKS5 username-password;
+- SOCKS4, SOCKS4a and SOCKS5 CONNECT over TCP;
+- pure rule selection ending in live DIRECT or immediate REJECT TCP behavior;
+- authenticated and rejected connection shutdown/lifecycle observations;
+- declared read-only controller TCP/Bearer and normalized snapshot/stream
+  fields for version, configs, connections, traffic and logs;
+- SIGHUP rule switching, invalid-config rollback and listener port migration;
+- SOCKS5 UDP ASSOCIATE and local IPv4 DIRECT request/write-back behavior.
+
+The Rust-only occupied-port rollback contract is deliberately stronger than the
+pinned Go listener recreation and is documented as a safety property, not Go
+parity. REST mutation/WebSockets, general-purpose UDP NAT, broader DNS, TUN, remote
+proxy protocols and broader platforms remain later phases. DNS support is
+claimed only by the separate Phase 4A rows below.
+
+## Phase 4A declared compatibility target
+
+Phase 4A evidence in `compat/scripts/phase4.py` is limited to:
+
+- an explicit loopback IPv4 DNS listener and exactly one loopback IP-literal
+  `udp://` or `tcp://` upstream;
+- one-question A requests over both UDP and length-prefixed TCP client paths;
+- positive upstream answers with matching transaction ID, local authoritative
+  flag behavior, question/answer counts, record type/class/address and TTL;
+- a bounded in-memory positive cache, client transaction-ID restoration and
+  the pinned Go remaining-TTL behavior on an immediate cache hit;
+- valid configuration and the enabled-with-empty-nameserver rejection case.
+
+The Phase 4A fixture explicitly disables configured and system hosts. It does
+not claim IPv6 DNS, multiple/system/domain upstreams, upstream failure/SERVFAIL,
+negative or stale caching, request coalescing/retry, EDNS, UDP truncation,
+hosts/CNAME, redir-host tunnel mapping, fake IP, resolver policy, DNS REST,
+DoH/DoT/DoQ or TUN hijack.
+
+## Phase 4B declared compatibility target
+
+Phase 4B evidence in `compat/scripts/phase4b.py` is limited to:
+
+- exact hosts keys with a single or list-valued IPv4/IPv6
+  address, plus rejection of configured domain-mapping cycles;
+- configured A and AAAA direct answers with TTL 10 and no upstream call;
+- a configured CNAME-only answer and a CNAME whose terminal is resolved by the
+  declared local UDP upstream, including cached terminal TTL behavior;
+- one non-`localhost` entry from the native Darwin `/etc/hosts` file when such
+  an entry is available to both binaries;
+- redir-host recovery for a locally authoritative IPv4 answer: a subsequent
+  SOCKS5 CONNECT addressed only by that IP recovers the queried domain before
+  rule evaluation and reaches an interface-local TCP echo server through
+  `DOMAIN,...,DIRECT`.
+
+The mapping table is TTL-bounded and capped at 4096 entries. Capacity eviction,
+mapping persistence across reload/restart, UDP rule mapping, configured-host
+use by DIRECT domain dialing, wildcard/`lan` hosts, randomized address choice,
+IDNA, non-IP DNS types and non-Darwin system-host discovery are not compatibility
+claims; they are not implied by Phase 4B evidence.
+
+## Phase 4C declared compatibility target
+
+Phase 4C evidence in `compat/scripts/phase4c.py` is limited to:
+
+- fake-IP configuration with explicit IPv4/IPv6 ranges, TTL, exact-domain
+  `blacklist` or `whitelist` filtering, and `profile.store-fake-ip`;
+- deterministic network-address-plus-four allocation, case-insensitive stable
+  reuse, independent A/AAAA pools, final-address reservation and cyclic
+  overwrite on a `/29` IPv4 fixture;
+- the pinned 1000-entry nonpersistent memory limit and observable eviction of
+  the least-recently-used mapping;
+- filtered queries falling through to the declared local classic upstream;
+- DNS A fake response -> IP-only SOCKS5 CONNECT -> recovered DOMAIN rule ->
+  configured real dual-stack lookup -> IPv4 DIRECT TCP echo relay;
+- graceful process stop/restart with one temporary home, preserving existing
+  mappings and continuing the allocation offset.
+
+The Rust candidate stores its restart state in candidate-local JSON sidecars;
+the Go oracle uses bbolt `cache.db`. Only the observable restart result is in
+parity. Cross-reading either implementation's files, atomic crash recovery,
+corruption handling, `rule`/provider/wildcard filters, UDP fake-IP routing,
+reload/prefix changes, REST flush/query control, TUN hijack and resolver policy
+are not compatibility claims.
+
+## Phase 4D1 declared compatibility target
+
+Phase 4D1 evidence in `compat/scripts/phase4d1.py` is limited to:
+
+- `dns.nameserver-policy` entries whose keys are ASCII exact domains,
+  whole-label `*` patterns or a leading `+.` suffix pattern;
+- exactly one loopback IP-literal `udp://` or `tcp://` upstream per policy;
+- main-upstream fallback for misses, `+.` matching both its root domain and
+  arbitrary subdomain depth, and `*` matching exactly one label;
+- Go-trie precedence where a static exact path wins over an overlapping
+  suffix policy;
+- selected upstream transport/address in the positive cache key, transaction
+  ID restoration and remaining-TTL behavior on a policy cache hit;
+- matching configuration acceptance plus malformed-pattern/non-string-value
+  rejection.
+
+Four local authorities return distinct addresses and record the received
+transport/name/type, so policy selection cannot pass merely by producing a
+syntactically valid DNS answer. Multiple upstreams per policy, patterns that
+write the same trie node and depend on YAML overwrite order, Unicode, geosite
+or rule-set matchers, system/domain upstreams, fallback, proxy/direct DNS,
+`respect-rules`, DNS REST control and encrypted DNS remain unclaimed.
+
+## Phase 4D2 declared compatibility target
+
+Phase 4D2 evidence in `compat/scripts/phase4d2.py` is limited to:
+
+- one loopback IP-literal main upstream over UDP and one fallback over TCP;
+- explicit `fallback-filter.geoip: false`, one `+.` ASCII domain filter and one
+  IPv4 CIDR answer filter;
+- domain-filter matches querying only fallback, a safe positive main answer,
+  and a filtered main answer selecting fallback;
+- eager mode sending both safe main and fallback queries while returning main,
+  versus lazy mode avoiding fallback when main is accepted;
+- a selected fallback response cache hit with restored transaction ID and a
+  positive aged TTL;
+- a matching nameserver policy bypassing the fallback path;
+- valid configuration plus malformed CIDR/domain-pattern rejection.
+
+The local authorities return distinct A records and log transport/name/type.
+Only the exact cached TTL decrement at wall-clock boundaries is normalized;
+whether it aged and remained positive is semantic. Multiple main or fallback
+servers, GeoIP/GeoSite, IPv6 answer filters, empty/error/timeout/retry behavior,
+general system/domain upstreams, proxy/direct DNS, `respect-rules`, DNS REST
+control and encrypted DNS remain unclaimed.
+
+## Phase 4D3A declared compatibility target
+
+Phase 4D3A evidence in `compat/scripts/phase4d3a.py` is limited to:
+
+- SOCKS5 domain TCP input with ordered DOMAIN, destination IP-CIDR and MATCH
+  rules targeting DIRECT or REJECT;
+- no DNS query when an earlier domain rule decides the route;
+- destination `IP-CIDR` requesting one main-resolver A lookup only when its
+  target IP is missing, while `no-resolve` falls through without DNS;
+- one loopback IP-literal `direct-nameserver` over TCP resolving the domain
+  again for the final DIRECT connection;
+- `direct-nameserver-follow-policy: false` selecting the direct authority even
+  after a main policy lookup, and `true` selecting the matching policy for both
+  lazy rule resolution and DIRECT resolution;
+- exact upstream transport/name/type observations, relay/close results,
+  process exit and valid/invalid configuration outcomes.
+
+The main authority deliberately returns a different loopback address from the
+direct authority: a test can pass only if the main result selects the IP rule
+and the direct result reaches the TCP echo server. The harness waits for both
+candidate listeners plus the documented Go resolver-publication stabilization
+window; no in-scenario DNS result is delayed or normalized.
+
+UDP lazy rules, IPv6 answers, resolver failure/retry/cache semantics, multiple
+direct servers, general policy matchers, proxy-server nameservers, remote
+proxy adapters, `respect-rules`, DNS REST and encrypted DNS remain unclaimed.
