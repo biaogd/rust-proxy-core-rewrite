@@ -16,6 +16,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed |
 | Inbound HTTP parser refactor | Complete in the existing Phase 1/3 scope | HTTP/1 syntax parsing uses `httparse`; Phase 1 and Phase 3 Go/Rust differentials re-pass with proxy behavior unchanged |
 | Phase 4A classic local DNS | Complete in declared scope | Native UDP/TCP client × UDP/TCP upstream differential suite passed |
+| Common DNS wire codec refactor | Complete in the existing 4A/4F1/4F15 scope | Query construction and question/name decoding use `hickory-proto`; all three focused Go/Rust differentials re-pass |
 | Phase 4B hosts and redir-host mapping | Complete in declared scope | Configured/system hosts, CNAME and DNS-to-SOCKS mapping differential suite passed |
 | Phase 4C fake IP | Complete in declared scope | IPv4/IPv6 allocation, filters, bounded pool, TCP reverse mapping and restart differential suite passed |
 | Phase 4D1 nameserver policy | Complete in declared scope | Exact/`*`/`+.` domain selection across deterministic local UDP/TCP authorities passed |
@@ -2875,6 +2876,19 @@ restores the client ID.
 `phase4e15.py` all re-pass locally on 2026-08-26. This infrastructure change
 does not expand supported DoH URL forms, transports, concurrency or retry
 behavior.
+
+## Common DNS wire codec refactor
+
+Ordinary DNS query construction and question/compressed-name decoding now use
+the existing `hickory-proto` 0.26.1 dependency. This removes local label-length,
+pointer-loop and query field codecs from those generic paths. Explicit raw-wire
+logic remains where it encodes observable Mihomo behavior: request flag echo,
+local authoritative answers, EDNS preservation, UDP truncation, cache identity
+and hosts/fake-IP responses.
+
+Phase 4A, Phase 4F1 and Phase 4F15 Go/Rust differential suites re-pass locally
+on 2026-08-26. No new RR type, malformed-message acceptance or resolver role is
+claimed by the codec migration.
 
 ## Differential fixture timing stability
 

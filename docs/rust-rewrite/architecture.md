@@ -97,6 +97,12 @@ configuration for each query. The DNS cache key includes upstream identity but
 not the client transaction ID, which is restored on cache hits. At the Phase 4A
 exit, DNS had no path into tunnel metadata, rules, hosts or fake-IP state.
 
+After Phase 4F15, common query construction plus question and compressed-name
+decoding use `hickory-proto`'s `Message`, `Query`, `Name` and binary decoder.
+The resolver retains explicit code for oracle-specific flags, raw question
+echo, EDNS handling, UDP truncation, hosts/fake-IP responses and cache keys;
+those are policy/compatibility behavior rather than generic DNS wire parsing.
+
 Phase 4F1 completes the local DNS message boundary before resolver dispatch.
 `rewrite-dns` classifies raw UDP/TCP frames as accepted, rejected or silently
 ignored using the oracle's header rules; TCP ignore keeps the stream alive.

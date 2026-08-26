@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
-use hickory_proto::rr::{RData, Record};
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinDecoder};
 use http::header::{ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, HOST, USER_AGENT};
 use http::{HeaderValue, Method, Request};
@@ -2079,12 +2080,14 @@ fn make_query(name: &str, record_type: u16) -> Result<Vec<u8>, DnsError> {
     if !valid {
         return Err(DnsError::InvalidMessage("invalid resolver domain"));
     }
-    let mut query = 0xc04c_u16.to_be_bytes().to_vec();
-    query.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
-    query.extend_from_slice(&encode_name(name));
-    query.extend_from_slice(&record_type.to_be_bytes());
-    query.extend_from_slice(&1_u16.to_be_bytes());
-    Ok(query)
+    let name =
+        Name::from_ascii(name).map_err(|_| DnsError::InvalidMessage("invalid resolver domain"))?;
+    let mut message = Message::new(0xc04c, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
+    message.add_query(Query::query(name, RecordType::from(record_type)));
+    message
+        .to_vec()
+        .map_err(|_| DnsError::InvalidMessage("invalid resolver query"))
 }
 
 fn rewrite_question(query: &[u8], question: &Question, target: &str) -> Result<Vec<u8>, DnsError> {
@@ -3447,37 +3450,21 @@ fn parse_question(query: &[u8]) -> Result<Question, DnsError> {
             "Phase 4A requires exactly one question",
         ));
     }
-    let mut offset = DNS_HEADER_LENGTH;
-    let mut labels = Vec::new();
-    loop {
-        let length = usize::from(
-            *query
-                .get(offset)
-                .ok_or(DnsError::InvalidMessage("name is truncated"))?,
-        );
-        offset += 1;
-        if length == 0 {
-            break;
-        }
-        if length > 63 || offset + length > query.len() {
-            return Err(DnsError::InvalidMessage("invalid question name"));
-        }
-        labels.push(
-            std::str::from_utf8(&query[offset..offset + length])
-                .map_err(|_| DnsError::InvalidMessage("question name is not ASCII"))?,
-        );
-        offset += length;
-    }
-    if offset + 4 > query.len() {
-        return Err(DnsError::InvalidMessage("question is truncated"));
-    }
-    let record_type = u16::from_be_bytes([query[offset], query[offset + 1]]);
-    let class = u16::from_be_bytes([query[offset + 2], query[offset + 3]]);
+    let decoder = BinDecoder::new(query);
+    let question_offset = u16::try_from(DNS_HEADER_LENGTH)
+        .map_err(|_| DnsError::InvalidMessage("DNS header offset exceeds message"))?;
+    let mut decoder = decoder.clone(question_offset);
+    let parsed =
+        Query::read(&mut decoder).map_err(|_| DnsError::InvalidMessage("invalid question"))?;
     Ok(Question {
-        name: labels.join(".").to_lowercase(),
-        record_type,
-        class,
-        end: offset + 4,
+        name: parsed
+            .name()
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_lowercase(),
+        record_type: parsed.query_type().into(),
+        class: parsed.query_class().into(),
+        end: decoder.index(),
     })
 }
 
@@ -3651,44 +3638,16 @@ fn format_rfc3597(data: &[u8]) -> String {
 }
 
 fn read_name(message: &[u8], start: usize) -> Result<(String, usize), DnsError> {
-    let mut labels = Vec::new();
-    let mut offset = start;
-    let mut next = None;
-    let mut hops = 0_usize;
-    loop {
-        if hops > message.len() {
-            return Err(DnsError::InvalidMessage("name pointer loop"));
-        }
-        hops += 1;
-        let length = *message
-            .get(offset)
-            .ok_or(DnsError::InvalidMessage("name is truncated"))?;
-        if length & 0xc0 == 0xc0 {
-            let low = *message
-                .get(offset + 1)
-                .ok_or(DnsError::InvalidMessage("name pointer is truncated"))?;
-            next.get_or_insert(offset + 2);
-            offset = usize::from(u16::from_be_bytes([length & 0x3f, low]));
-            continue;
-        }
-        if length & 0xc0 != 0 {
-            return Err(DnsError::InvalidMessage("invalid name label"));
-        }
-        offset += 1;
-        if length == 0 {
-            return Ok((labels.join("."), next.unwrap_or(offset)));
-        }
-        let end = offset
-            .checked_add(usize::from(length))
-            .filter(|end| *end <= message.len())
-            .ok_or(DnsError::InvalidMessage("name label is truncated"))?;
-        labels.push(
-            std::str::from_utf8(&message[offset..end])
-                .map_err(|_| DnsError::InvalidMessage("name label is not ASCII"))?
-                .to_owned(),
-        );
-        offset = end;
-    }
+    let start = u16::try_from(start)
+        .map_err(|_| DnsError::InvalidMessage("DNS name offset exceeds message"))?;
+    let decoder = BinDecoder::new(message);
+    let mut decoder = decoder.clone(start);
+    let name =
+        Name::read(&mut decoder).map_err(|_| DnsError::InvalidMessage("invalid DNS name"))?;
+    Ok((
+        name.to_ascii().trim_end_matches('.').to_owned(),
+        decoder.index(),
+    ))
 }
 
 fn fqdn(name: &str) -> String {

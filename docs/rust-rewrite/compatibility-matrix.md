@@ -160,6 +160,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Capability | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
 | Phase 4A UDP/TCP DNS server subset | Oracle | **Parity** | UDP and TCP queries, framing, ID echo, AA/flags and A response semantics in `compat/scripts/phase4.py` |
+| Common DNS wire codec infrastructure | Oracle | **Parity** in the declared 4A/4F1/4F15 scope | `hickory-proto` now builds ordinary queries and decodes questions/compressed names; Phase 4A, 4F1 and 4F15 re-pass while oracle-specific EDNS/flags/truncation remain explicit |
 | Phase 4F1 full local UDP/TCP DNS server semantics | Oracle | **Parity** | `DNS-01`; header accept/reject/ignore matrix, malformed wire, representative name-bearing/text/address/SOA/unknown RR relay, RCODE behavior, EDNS and UDP truncation in `compat/scripts/phase4f1.py` |
 | Phase 4A IP-literal UDP/TCP upstream | Oracle | **Parity** | Both transports observed by the deterministic loopback authoritative server |
 | Phase 4F2 general classic main-upstream selection | Oracle | **Parity** | `DNS-02`; non-loopback config, UDP/TCP domain bootstrap, concurrent fastest-valid selection, connection/RCODE failover, five-second timeout and UDP-TC retry in `compat/scripts/phase4f2.py` |
