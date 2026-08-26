@@ -464,6 +464,14 @@ rule-provider loading, GeoSite attributes, `respect-rules`, and consumption by
 a real remote proxy outbound remain later integration gates rather than
 implicit Phase 4F8 claims.
 
+Phase 4F9 accepts the deterministic fallback decision core. Domain and
+GeoSite matchers select fallback without contacting main; GeoIP.dat and
+IPv4/IPv6 CIDR matchers evaluate main answers. Multiple fallback clients retain
+fastest-valid selection. Eager and lazy modes preserve Go's main-first decision
+and single five-second query budget, including the observable case where a lazy
+main timeout leaves no budget to contact fallback. MMDB-mode GeoIP and broader
+transport/cache/retry integration remain explicit `DNS-13` gaps.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

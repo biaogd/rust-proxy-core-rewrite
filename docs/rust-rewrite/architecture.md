@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F8 Rust boundary now implemented
+## Phase 1–4F9 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -60,7 +60,7 @@ Phase 2 makes `rewrite-config` produce an owned `ConfigSpec` before any runtime
 resource is created. The spec layer overlays the declared Go defaults, validates
 the Phase 2 YAML/rule surface and can emit normalized observations. Converting a
 spec into executable `Config` is a separate fallible step which accepts only
-the incrementally declared Phase 1–4F8 runtime slices. This prevents parser
+the incrementally declared Phase 1–4F9 runtime slices. This prevents parser
 coverage from being mistaken for implemented protocol behavior.
 
 `rewrite-rules` now contains the declared pure metadata matchers, ordered scan,
@@ -149,6 +149,16 @@ same multi-client query path and cache identity as every other resolver set.
 File-backed configs load `GeoSite.dat` beside the config, while Phase 4F8 rule
 sets deliberately accept inline `domain` and domain-bearing `classical`
 providers only.
+
+Phase 4F9 extends the existing fallback branch rather than introducing a
+second resolver pipeline. Domain and GeoSite matchers can bypass main entirely;
+otherwise main and fallback resolver sets retain eager or lazy scheduling.
+Answer selection evaluates IPv4/IPv6 CIDR and file-backed GeoIP networks, with
+Go-compatible GeoIP inversion and LAN-address exceptions. Lazy scheduling owns
+one five-second main-plus-fallback budget, while eager scheduling starts both
+sets immediately but still waits for the main decision before returning an
+already available fallback result. GeoIP database decoding stays in config;
+the DNS crate receives owned networks and performs no asset I/O.
 
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
@@ -552,7 +562,8 @@ extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
 refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
 adds no protocol or platform dependency; Phase 4F6 extends those same crates
 with per-classic-upstream wrapper state, Phase 4F7 adds resolver-set
-composition, and Phase 4F8 adds ordered policy matchers plus development-only
+composition, Phase 4F8 adds ordered policy matchers, and Phase 4F9 adds owned
+fallback matcher data and scheduling evidence plus development-only
 differential helpers. `rewrite-platform`
 is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:

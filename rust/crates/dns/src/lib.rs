@@ -2963,10 +2963,22 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
             key.extend_from_slice(pattern.as_bytes());
             key.push(0);
         }
+        for matcher in &fallback.geosites {
+            key.extend_from_slice(format!("{matcher:?}").as_bytes());
+            key.push(0);
+        }
         key.push(0xfe);
         for network in &fallback.ipcidr {
             key.extend_from_slice(network.to_string().as_bytes());
             key.push(0);
+        }
+        if let Some(filter) = &fallback.geoip {
+            key.extend_from_slice(filter.code.as_bytes());
+            key.push(u8::from(filter.inverted));
+            for network in &filter.networks {
+                key.extend_from_slice(network.to_string().as_bytes());
+                key.push(0);
+            }
         }
     }
     key
@@ -3094,16 +3106,32 @@ async fn query_configured(
         .domains
         .iter()
         .any(|pattern| policy_match_rank(pattern, domain).is_some())
+        || fallback_config
+            .geosites
+            .iter()
+            .any(|matcher| policy_matcher_matches(matcher, domain))
     {
         return query_resolver_set(query, &fallback_config.resolvers, tls_pool, http_pool).await;
     }
 
     if fallback_config.lazy {
+        let started = Instant::now();
         return match query_main(query, config, tls_pool, http_pool).await {
             Ok(response) if response_passes_fallback_filter(&response, fallback_config)? => {
                 Ok(response)
             }
-            _ => query_resolver_set(query, &fallback_config.resolvers, tls_pool, http_pool).await,
+            Err(DnsError::UpstreamTimeout) => Err(DnsError::UpstreamTimeout),
+            _ => {
+                let remaining = UPSTREAM_TIMEOUT
+                    .checked_sub(started.elapsed())
+                    .ok_or(DnsError::UpstreamTimeout)?;
+                tokio::time::timeout(
+                    remaining,
+                    query_resolver_set(query, &fallback_config.resolvers, tls_pool, http_pool),
+                )
+                .await
+                .map_err(|_| DnsError::UpstreamTimeout)?
+            }
         };
     }
 
@@ -3486,7 +3514,49 @@ fn response_passes_fallback_filter(
                 .ipcidr
                 .iter()
                 .all(|network| !network.contains(address))
+                && !fallback
+                    .geoip
+                    .as_ref()
+                    .is_some_and(|filter| geoip_requires_fallback(*address, filter))
         }))
+}
+
+fn geoip_requires_fallback(address: IpAddr, filter: &rewrite_config::DnsGeoIpFilter) -> bool {
+    if is_lan_address(address) {
+        return false;
+    }
+    if filter.code == "lan" {
+        return true;
+    }
+    let contained = filter
+        .networks
+        .iter()
+        .any(|network| network.contains(&address));
+    let matches = if filter.inverted {
+        !contained
+    } else {
+        contained
+    };
+    !matches
+}
+
+fn is_lan_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_private()
+                || address.is_unspecified()
+                || address.is_loopback()
+                || address.is_multicast()
+                || address.is_link_local()
+        }
+        IpAddr::V6(address) => {
+            address.is_unique_local()
+                || address.is_unspecified()
+                || address.is_loopback()
+                || address.is_multicast()
+                || address.is_unicast_link_local()
+        }
+    }
 }
 
 fn policy_match_rank(pattern: &str, domain: &str) -> Option<Vec<u8>> {

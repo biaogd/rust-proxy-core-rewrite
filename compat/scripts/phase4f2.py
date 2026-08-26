@@ -63,9 +63,16 @@ class AuthorityState:
         if self.mode == "truncated" and transport == "udp":
             return query[:2] + b"\x83\x80\x00\x01\x00\x00\x00\x00\x00\x00" + query[12:end]
         address = "127.0.0.1" if self.mode == "bootstrap" else self.address
+        packed = socket.inet_pton(
+            socket.AF_INET6 if ":" in address else socket.AF_INET, address
+        )
+        record_type = 28 if len(packed) == 16 else 1
         answer = (
-            b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x1e\x00\x04"
-            + socket.inet_aton(address)
+            b"\xc0\x0c"
+            + record_type.to_bytes(2, "big")
+            + b"\x00\x01\x00\x00\x00\x1e"
+            + len(packed).to_bytes(2, "big")
+            + packed
         )
         return (
             query[:2]

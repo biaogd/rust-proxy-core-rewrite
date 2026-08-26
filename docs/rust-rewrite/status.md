@@ -48,11 +48,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F6 classic DNS wrappers | Complete in declared scope; DNS-10 partial | Per-upstream ECS/disable wrappers pass on UDP/TCP, including invalid/false values, multi-section filtering and wrapper identity; proxy/rule routing remains |
 | Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; complete bootstrap/proxy consumers remain |
 | Phase 4F8 resolver policies | Complete in declared core; DNS-12 partial | Ordered main/proxy multi-resolver domain/GeoSite/inline-rule-set policies pass; external providers, attributes and adapter consumers remain |
+| Phase 4F9 fallback decision core | Complete in declared core; DNS-13 partial | GeoIP.dat/GeoSite/domain/IPv4/IPv6 filters, multiple fallback clients and eager/lazy failure/timeout ordering pass; MMDB and broader integration remain |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F8 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F9 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F8 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F9 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2423,6 +2424,58 @@ The Phase 4F8 differential, format check and strict workspace Clippy gate passed
 locally. Complete Phase 1–4F8 regression, workspace tests and Go/with-gVisor
 baseline remain delegated to GitHub Actions; no result is pre-claimed.
 
+## Phase 4F9 deliverables and evidence
+
+Phase 4F9 extends the fallback decision boundary without entering Phase 4F10
+lookup ordering. File-backed `geodata-mode: true` configurations decode
+`GeoIP.dat` CIDR lists and `GeoSite.dat` domain lists beside the YAML. GeoIP
+selection preserves the Go fallback inversion rule and the private/loopback/
+link-local/multicast exception; `!CODE` inversion is also represented. Domain,
+GeoSite and IPv4/IPv6 CIDR filters compose with the resolver-set model from
+Phase 4F7.
+
+The scheduler continues to start eager fallback queries alongside main, but it
+waits for the main result before selecting fallback. Lazy fallback starts only
+after a rejected or failed main response and shares the Go oracle's single
+five-second budget. Consequently, a main query that consumes the entire budget
+returns an error without contacting fallback; eager mode can return an already
+completed fallback response at that boundary.
+
+`compat/scripts/phase4f9.py` generates deterministic GeoIP/GeoSite protobuf
+fixtures and compares product validation, selected addresses, authority
+contacts, prompt/five-second duration classes, and eager/lazy start ordering.
+It covers domain and GeoSite-only routing, IPv4 and IPv6 answer filters, GeoIP
+hit/miss/private/`lan`/inverted decisions, a blackholed plus healthy fallback set,
+delayed SERVFAIL, and main timeout behavior.
+
+This remains a **partial** `DNS-13` result. The Rust path intentionally requires
+`geodata-mode: true` for GeoIP fallback; Go's default MMDB database mode,
+broader encrypted/special transport runtime combinations, cache/retry
+interaction and non-loopback integration are not claimed.
+
+Observed Phase 4F9 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared core passed; DNS-13 partial | Native `compat/scripts/phase4f9.py`; generated GeoIP/GeoSite data and deterministic UDP authorities |
+| Linux amd64 | Pending | Default full differential includes Phase 4F9; no result is recorded before completion |
+
+### Phase 4F9 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f9.py
+```
+
+The Phase 4F9 differential, format check and strict workspace Clippy gate
+passed locally. Complete Phase 1–4F9 regression, workspace tests and
+Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
+pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2498,10 +2551,10 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the partial Phase 4F8 resolver-policy boundary.
+Rust behavior stops at the partial Phase 4F9 fallback-decision boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
-`DNS-10`–`DNS-12` retain the adapter/provider consumer gaps above. Phase 4D3B,
-4F9 or another implementation gate must not begin without a separate
+`DNS-10`–`DNS-13` retain the database/adapter/provider/integration gaps above.
+Phase 4D3B, 4F10 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use ipnet::IpNet;
@@ -248,8 +248,17 @@ pub enum DnsClassicEndpoint {
 pub struct DnsFallbackConfig {
     pub resolvers: Vec<DnsResolverClient>,
     pub domains: Vec<String>,
+    pub geosites: Vec<DnsPolicyMatcher>,
     pub ipcidr: Vec<IpNet>,
+    pub geoip: Option<DnsGeoIpFilter>,
     pub lazy: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsGeoIpFilter {
+    pub code: String,
+    pub networks: Vec<IpNet>,
+    pub inverted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,6 +359,7 @@ struct RawConfig {
     unified_delay: Option<bool>,
     log_level: Option<String>,
     ipv6: Option<bool>,
+    geodata_mode: Option<bool>,
     interface_name: Option<String>,
     routing_mark: Option<i64>,
     tcp_concurrent: Option<bool>,
@@ -420,6 +430,7 @@ struct RawDns {
 #[serde(rename_all = "kebab-case")]
 struct RawFallbackFilter {
     geoip: Option<bool>,
+    geoip_code: Option<String>,
     ipcidr: Option<Vec<String>>,
     domain: Option<Vec<String>>,
     geosite: Option<Vec<String>>,
@@ -513,6 +524,7 @@ impl ConfigSpec {
             &trust_certificates,
             &rule_providers,
             config_directory,
+            raw.geodata_mode.unwrap_or(false),
         )?;
         validate_rule_provider_usage(&rule_providers, dns.as_ref())?;
 
@@ -800,6 +812,7 @@ fn parse_dns(
     trust_certificates: &[String],
     rule_providers: &BTreeMap<String, ParsedRuleProvider>,
     config_directory: Option<&Path>,
+    geodata_mode: bool,
 ) -> Result<Option<DnsConfig>, ConfigError> {
     let Some(mut raw) = raw else {
         return Ok(None);
@@ -832,7 +845,8 @@ fn parse_dns(
         .take()
         .ok_or_else(|| ConfigError::InvalidDns("dns.listen is required".to_owned()))?;
     let listen = parse_loopback_dns_addr(&listen_text, "dns.listen")?;
-    let resolver_sets = parse_dns_resolver_sets(&mut raw, trust_certificates)?;
+    let resolver_sets =
+        parse_dns_resolver_sets(&mut raw, trust_certificates, config_directory, geodata_mode)?;
     let policies = parse_dns_policies(
         raw.nameserver_policy.take().unwrap_or_default(),
         "dns.nameserver-policy",
@@ -896,6 +910,8 @@ struct ParsedDnsResolverSets {
 fn parse_dns_resolver_sets(
     raw: &mut RawDns,
     trust_certificates: &[String],
+    config_directory: Option<&Path>,
+    geodata_mode: bool,
 ) -> Result<ParsedDnsResolverSets, ConfigError> {
     let nameservers = raw.nameserver.take().unwrap_or_default();
     if nameservers.is_empty() {
@@ -918,7 +934,13 @@ fn parse_dns_resolver_sets(
     let main = parse_main_nameservers(legacy_main, &defaults, prefer_h3, trust_certificates)?;
     let default_resolvers = parse_resolver_clients(&defaults, &[], prefer_h3, trust_certificates)?;
     validate_default_resolvers(&default_resolvers)?;
-    let fallback = parse_fallback(raw, &defaults, trust_certificates)?;
+    let fallback = parse_fallback(
+        raw,
+        &defaults,
+        trust_certificates,
+        config_directory,
+        geodata_mode,
+    )?;
     let direct_resolvers = parse_resolver_clients(
         &raw.direct_nameserver.take().unwrap_or_default(),
         &defaults,
@@ -1391,6 +1413,8 @@ fn parse_fallback(
     raw: &mut RawDns,
     default_nameservers: &[String],
     trust_certificates: &[String],
+    config_directory: Option<&Path>,
+    geodata_mode: bool,
 ) -> Result<Option<DnsFallbackConfig>, ConfigError> {
     let servers = raw.fallback.take().unwrap_or_default();
     if servers.is_empty() && raw.fallback_filter.is_none() {
@@ -1402,16 +1426,21 @@ fn parse_fallback(
             "unsupported field dns.fallback-filter.{key}"
         )));
     }
-    if filter.geoip.unwrap_or(true) {
-        return Err(ConfigError::InvalidDns(
-            "dns.fallback-filter.geoip must be false in Phase 4D2".to_owned(),
-        ));
-    }
-    if filter.geosite.is_some_and(|entries| !entries.is_empty()) {
-        return Err(ConfigError::InvalidDns(
-            "dns.fallback-filter.geosite is outside Phase 4D2".to_owned(),
-        ));
-    }
+    let geoip = filter
+        .geoip
+        .unwrap_or(true)
+        .then(|| {
+            if !geodata_mode {
+                return Err(ConfigError::InvalidDns(
+                    "Phase 4F9 GeoIP fallback requires geodata-mode: true".to_owned(),
+                ));
+            }
+            load_geoip_filter(
+                filter.geoip_code.as_deref().unwrap_or("CN"),
+                config_directory,
+            )
+        })
+        .transpose()?;
     let domains = filter
         .domain
         .unwrap_or_default()
@@ -1430,6 +1459,12 @@ fn parse_fallback(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let geosites = filter
+        .geosite
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| load_geosite_matcher(&name, config_directory))
+        .collect::<Result<Vec<_>, _>>()?;
     if servers.is_empty() {
         return Ok(None);
     }
@@ -1442,7 +1477,9 @@ fn parse_fallback(
     Ok(Some(DnsFallbackConfig {
         resolvers,
         domains,
+        geosites,
         ipcidr,
+        geoip,
         lazy: raw.fallback_lazy_query.unwrap_or(false),
     }))
 }
@@ -1659,6 +1696,28 @@ struct GeoSiteDomainWire {
     value: String,
 }
 
+#[derive(Clone, PartialEq, Message)]
+struct GeoIpListWire {
+    #[prost(message, repeated, tag = "1")]
+    entries: Vec<GeoIpWire>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeoIpWire {
+    #[prost(string, tag = "1")]
+    country_code: String,
+    #[prost(message, repeated, tag = "2")]
+    networks: Vec<GeoIpCidrWire>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeoIpCidrWire {
+    #[prost(bytes = "vec", tag = "1")]
+    address: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    prefix: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 enum GeoSiteDomainTypeWire {
@@ -1666,6 +1725,73 @@ enum GeoSiteDomainTypeWire {
     Regex = 1,
     Domain = 2,
     Full = 3,
+}
+
+fn load_geoip_filter(
+    code: &str,
+    config_directory: Option<&Path>,
+) -> Result<DnsGeoIpFilter, ConfigError> {
+    let (inverted, code) = code
+        .strip_prefix('!')
+        .map_or((false, code), |code| (true, code));
+    if code.is_empty() {
+        return Err(ConfigError::InvalidDns(
+            "dns.fallback-filter.geoip-code must be non-empty".to_owned(),
+        ));
+    }
+    if code.eq_ignore_ascii_case("lan") && !inverted {
+        return Ok(DnsGeoIpFilter {
+            code: "lan".to_owned(),
+            networks: Vec::new(),
+            inverted: false,
+        });
+    }
+    let directory = config_directory.ok_or_else(|| {
+        ConfigError::InvalidDns(
+            "GeoIP fallback filter requires file-backed configuration beside GeoIP.dat".to_owned(),
+        )
+    })?;
+    let data = std::fs::read(directory.join("GeoIP.dat"))
+        .map_err(|error| ConfigError::InvalidDns(format!("cannot read GeoIP.dat: {error}")))?;
+    let list = GeoIpListWire::decode(data.as_slice())
+        .map_err(|error| ConfigError::InvalidDns(format!("cannot decode GeoIP.dat: {error}")))?;
+    let entry = list
+        .entries
+        .into_iter()
+        .find(|entry| entry.country_code.eq_ignore_ascii_case(code))
+        .ok_or_else(|| ConfigError::InvalidDns(format!("GeoIP country {code} not found")))?;
+    let networks = entry
+        .networks
+        .into_iter()
+        .map(|network| {
+            let address = match network.address.as_slice() {
+                octets @ [_, _, _, _] => {
+                    IpAddr::V4(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]))
+                }
+                octets if octets.len() == 16 => {
+                    let octets: [u8; 16] = octets.try_into().map_err(|_| {
+                        ConfigError::InvalidDns("invalid IPv6 GeoIP network".to_owned())
+                    })?;
+                    IpAddr::V6(Ipv6Addr::from(octets))
+                }
+                _ => {
+                    return Err(ConfigError::InvalidDns(
+                        "GeoIP network address must contain 4 or 16 bytes".to_owned(),
+                    ));
+                }
+            };
+            let prefix = u8::try_from(network.prefix).map_err(|_| {
+                ConfigError::InvalidDns(format!("invalid GeoIP prefix {}", network.prefix))
+            })?;
+            IpNet::new(address, prefix)
+                .map_err(|error| ConfigError::InvalidDns(format!("invalid GeoIP network: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DnsGeoIpFilter {
+        code: code.to_ascii_lowercase(),
+        networks,
+        inverted,
+    })
 }
 
 fn load_geosite_matcher(
@@ -2846,7 +2972,9 @@ dns:
                     query_options: DnsQueryOptions::default(),
                 })],
                 domains: vec!["+.fallback.phase4.test".to_owned()],
+                geosites: Vec::new(),
                 ipcidr: vec!["198.51.100.0/24".parse().expect("CIDR")],
+                geoip: None,
                 lazy: true,
             })
         );
