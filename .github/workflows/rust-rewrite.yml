@@ -84,7 +84,7 @@ jobs:
         run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
 
   full-differential:
-    name: Full Phase 1-4E19 differential regression
+    name: Full Phase 1-4F1 differential regression
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -122,6 +122,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase4f1.py \
             compat/scripts/phase4e19.py \
             compat/scripts/phase4e18.py \
             compat/scripts/phase4e17.py \

@@ -487,6 +487,11 @@ impl Resolver {
         .await?;
         response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
         validate_response(&response, identifier)?;
+        if matches!(response[3] & 0x0f, 2 | 5) {
+            return Err(DnsError::InvalidMessage(
+                "upstream returned a retryable failure rcode",
+            ));
+        }
         // The pinned Go local DNS service marks responses authoritative even
         // when their records came from an upstream resolver.
         response[2] |= 0x04;
@@ -611,6 +616,16 @@ pub async fn serve(
                     Ok((length, peer)) => {
                         let query = datagram[..length].to_vec();
                         let socket = Arc::clone(&udp);
+                        match local_query_disposition(&query) {
+                            LocalQueryDisposition::Ignore => continue,
+                            LocalQueryDisposition::Reject(response) => {
+                                tasks.spawn(async move {
+                                    let _ = socket.send_to(&response, peer).await;
+                                });
+                                continue;
+                            }
+                            LocalQueryDisposition::Accept => {}
+                        }
                         let service = Arc::clone(&service);
                         let current = current_config(&config);
                         let state = Arc::clone(&state);
@@ -619,8 +634,11 @@ pub async fn serve(
                             let response = service
                                 .resolver
                                 .resolve(&query, &current, &state)
-                                .await
-                                .or_else(|_| server_failure_response(&query));
+                                .await;
+                            let response = match response {
+                                Ok(response) => local_response(&query, response, true),
+                                Err(_) => server_failure_response(&query),
+                            };
                             if let Ok(response) = response {
                                 let _ = socket.send_to(&response, peer).await;
                             }
@@ -691,24 +709,37 @@ async fn serve_tcp_connection(
         if stream.read_exact(&mut query).await.is_err() {
             return;
         }
+        match local_query_disposition(&query) {
+            LocalQueryDisposition::Ignore => continue,
+            LocalQueryDisposition::Reject(response) => {
+                if write_tcp_response(&mut stream, &response).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            LocalQueryDisposition::Accept => {}
+        }
         let Ok(current) = current_config(&config) else {
             return;
         };
-        let response = service
-            .resolver
-            .resolve(&query, &current, &state)
-            .await
-            .or_else(|_| server_failure_response(&query));
-        let Ok(response) = response else { return };
-        let Ok(length) = u16::try_from(response.len()) else {
-            return;
+        let response = service.resolver.resolve(&query, &current, &state).await;
+        let response = match response {
+            Ok(response) => local_response(&query, response, false),
+            Err(_) => server_failure_response(&query),
         };
-        if stream.write_all(&length.to_be_bytes()).await.is_err()
-            || stream.write_all(&response).await.is_err()
-        {
+        let Ok(response) = response else { return };
+        if write_tcp_response(&mut stream, &response).await.is_err() {
             return;
         }
     }
+}
+
+async fn write_tcp_response(stream: &mut TcpStream, response: &[u8]) -> Result<(), DnsError> {
+    let length = u16::try_from(response.len())
+        .map_err(|_| DnsError::InvalidMessage("response exceeds TCP DNS frame"))?;
+    stream.write_all(&length.to_be_bytes()).await?;
+    stream.write_all(response).await?;
+    Ok(())
 }
 
 fn current_config(config: &watch::Receiver<Arc<Config>>) -> Result<Arc<Config>, DnsError> {
@@ -723,6 +754,201 @@ fn server_failure_response(query: &[u8]) -> Result<Vec<u8>, DnsError> {
     response[2] = 0x80 | (query[2] & 0x79);
     response[3] = (query[3] & 0xf0) | 0x02;
     response[6..12].fill(0);
+    Ok(response)
+}
+
+enum LocalQueryDisposition {
+    Accept,
+    Ignore,
+    Reject(Vec<u8>),
+}
+
+fn local_query_disposition(query: &[u8]) -> LocalQueryDisposition {
+    if query.len() < DNS_HEADER_LENGTH {
+        return LocalQueryDisposition::Ignore;
+    }
+    let flags = u16::from_be_bytes([query[2], query[3]]);
+    if flags & 0x8000 != 0 {
+        return LocalQueryDisposition::Ignore;
+    }
+    let opcode = (flags >> 11) & 0x0f;
+    if !matches!(opcode, 0 | 4) {
+        return LocalQueryDisposition::Reject(local_rejection_response(query, 4, true));
+    }
+    let questions = u16::from_be_bytes([query[4], query[5]]);
+    let answers = u16::from_be_bytes([query[6], query[7]]);
+    let authorities = u16::from_be_bytes([query[8], query[9]]);
+    let additionals = u16::from_be_bytes([query[10], query[11]]);
+    if questions != 1 || answers > 1 || authorities > 1 || additionals > 2 {
+        return LocalQueryDisposition::Reject(local_rejection_response(query, 1, false));
+    }
+    if validate_dns_wire(query).is_err() {
+        return LocalQueryDisposition::Reject(local_rejection_response(query, 1, false));
+    }
+    LocalQueryDisposition::Accept
+}
+
+fn local_rejection_response(query: &[u8], rcode: u8, preserve_opcode: bool) -> Vec<u8> {
+    let request_flags = u16::from_be_bytes([query[2], query[3]]);
+    let mut flags = 0x8000 | (request_flags & 0x03b0) | u16::from(rcode);
+    if preserve_opcode {
+        flags |= request_flags & 0x7800;
+    }
+    let mut response = Vec::with_capacity(DNS_HEADER_LENGTH);
+    response.extend_from_slice(&query[..2]);
+    response.extend_from_slice(&flags.to_be_bytes());
+    response.extend_from_slice(&[0; 8]);
+    response
+}
+
+fn validate_dns_wire(message: &[u8]) -> Result<(), DnsError> {
+    let counts = [
+        usize::from(u16::from_be_bytes([message[4], message[5]])),
+        usize::from(u16::from_be_bytes([message[6], message[7]])),
+        usize::from(u16::from_be_bytes([message[8], message[9]])),
+        usize::from(u16::from_be_bytes([message[10], message[11]])),
+    ];
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..counts[0] {
+        offset = skip_name(message, offset)?;
+        offset = checked_record_end(message, offset, 4, "question is truncated")?;
+    }
+    for _ in 0..counts[1] + counts[2] + counts[3] {
+        offset = resource_record_end(message, offset)?.1;
+    }
+    if offset > message.len() {
+        return Err(DnsError::InvalidMessage("DNS message is truncated"));
+    }
+    Ok(())
+}
+
+fn local_response(query: &[u8], mut response: Vec<u8>, udp: bool) -> Result<Vec<u8>, DnsError> {
+    if let Some((_, request_do)) = message_edns(query)?
+        && message_edns(&response)?.is_none()
+    {
+        append_edns(&mut response, 1232, request_do)?;
+    }
+    if udp {
+        let limit = message_edns(query)?.map_or(512, |(size, _)| usize::from(size));
+        truncate_udp_response(&response, limit.max(512))
+    } else {
+        Ok(response)
+    }
+}
+
+fn message_edns(message: &[u8]) -> Result<Option<(u16, bool)>, DnsError> {
+    if message.len() < DNS_HEADER_LENGTH {
+        return Err(DnsError::InvalidMessage("header is truncated"));
+    }
+    let questions = usize::from(u16::from_be_bytes([message[4], message[5]]));
+    let answers = usize::from(u16::from_be_bytes([message[6], message[7]]));
+    let authorities = usize::from(u16::from_be_bytes([message[8], message[9]]));
+    let additionals = usize::from(u16::from_be_bytes([message[10], message[11]]));
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(message, offset)?;
+        offset = checked_record_end(message, offset, 4, "question is truncated")?;
+    }
+    for _ in 0..answers + authorities {
+        offset = resource_record_end(message, offset)?.1;
+    }
+    for _ in 0..additionals {
+        let name_end = skip_name(message, offset)?;
+        if name_end + 10 > message.len() {
+            return Err(DnsError::InvalidMessage("resource record is truncated"));
+        }
+        let record_type = u16::from_be_bytes([message[name_end], message[name_end + 1]]);
+        let class = u16::from_be_bytes([message[name_end + 2], message[name_end + 3]]);
+        let ttl = u32::from_be_bytes([
+            message[name_end + 4],
+            message[name_end + 5],
+            message[name_end + 6],
+            message[name_end + 7],
+        ]);
+        let end = resource_record_end(message, offset)?.1;
+        if record_type == 41 {
+            return Ok(Some((class, ttl & 0x8000 != 0)));
+        }
+        offset = end;
+    }
+    Ok(None)
+}
+
+fn append_edns(response: &mut Vec<u8>, udp_size: u16, dnssec_ok: bool) -> Result<(), DnsError> {
+    let additionals = u16::from_be_bytes([response[10], response[11]])
+        .checked_add(1)
+        .ok_or(DnsError::InvalidMessage("too many additional records"))?;
+    response[10..12].copy_from_slice(&additionals.to_be_bytes());
+    response.push(0);
+    response.extend_from_slice(&41_u16.to_be_bytes());
+    response.extend_from_slice(&udp_size.to_be_bytes());
+    response.extend_from_slice(&(if dnssec_ok { 0x8000_u32 } else { 0 }).to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    Ok(())
+}
+
+fn truncate_udp_response(message: &[u8], limit: usize) -> Result<Vec<u8>, DnsError> {
+    let questions = usize::from(u16::from_be_bytes([message[4], message[5]]));
+    let counts = [
+        usize::from(u16::from_be_bytes([message[6], message[7]])),
+        usize::from(u16::from_be_bytes([message[8], message[9]])),
+        usize::from(u16::from_be_bytes([message[10], message[11]])),
+    ];
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(message, offset)?;
+        offset = checked_record_end(message, offset, 4, "question is truncated")?;
+    }
+    let question_end = offset;
+    let mut sections = [Vec::new(), Vec::new(), Vec::new()];
+    for (section, count) in counts.into_iter().enumerate() {
+        for _ in 0..count {
+            let start = offset;
+            let (record_type, end) = resource_record_end(message, start)?;
+            sections[section].push((record_type, start, end));
+            offset = end;
+        }
+    }
+
+    if sections[2]
+        .last()
+        .is_some_and(|(record_type, _, _)| *record_type == 250)
+        || message.len() <= limit
+    {
+        return Ok(message.to_vec());
+    }
+
+    let edns = sections[2]
+        .iter()
+        .rposition(|(record_type, _, _)| *record_type == 41)
+        .map(|index| sections[2].remove(index));
+    let edns_length = edns.map_or(0, |(_, start, end)| end - start);
+    let budget = limit.saturating_sub(edns_length);
+    let mut response = message[..question_end].to_vec();
+    let mut retained = [0_u16; 3];
+    let mut exhausted = false;
+    let mut omitted = false;
+    for (section_index, section) in sections.iter().enumerate() {
+        for &(_, start, end) in section {
+            if !exhausted && response.len() + end - start <= budget {
+                response.extend_from_slice(&message[start..end]);
+                retained[section_index] += 1;
+            } else {
+                exhausted = true;
+                omitted = true;
+            }
+        }
+    }
+    if let Some((_, start, end)) = edns {
+        response.extend_from_slice(&message[start..end]);
+        retained[2] += 1;
+    }
+    response[6..8].copy_from_slice(&retained[0].to_be_bytes());
+    response[8..10].copy_from_slice(&retained[1].to_be_bytes());
+    response[10..12].copy_from_slice(&retained[2].to_be_bytes());
+    if omitted {
+        response[2] |= 0x02;
+    }
     Ok(response)
 }
 

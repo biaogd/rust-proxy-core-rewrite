@@ -418,6 +418,16 @@ DNS. Each subphase is an independent Go/Rust differential gate:
 15. **4F15:** arbitrary DNS REST queries, complete cache controls and external
     DoH GET/POST (`DNS-19`).
 
+Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
+checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
+ignore), malformed question handling, semantic forwarding of name-bearing,
+text, address, SOA and unknown RR data, non-success RCODE handling, EDNS OPT
+echo/preservation and DO bit behavior, and UDP truncation at implicit 512,
+advertised-below-512 and larger advertised sizes. TCP must retain the complete
+answer independent of the advertised UDP size. Classic upstream domain names,
+multiple-server selection, failure scheduling and UDP-TC retry remain Phase
+4F2; cache retry/negative/stale behavior remains Phase 4F11.
+
 No 4F gate may pull TUN or remote proxy protocols forward merely because DNS
 can consume them. Those end-to-end claims close only in Phase 8 or the relevant
 Phase 6/7 adapter gate.

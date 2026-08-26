@@ -91,6 +91,14 @@ configuration for each query. The DNS cache key includes upstream identity but
 not the client transaction ID, which is restored on cache hits. At the Phase 4A
 exit, DNS had no path into tunnel metadata, rules, hosts or fake-IP state.
 
+Phase 4F1 completes the local DNS message boundary before resolver dispatch.
+`rewrite-dns` classifies raw UDP/TCP frames as accepted, rejected or silently
+ignored using the oracle's header rules; TCP ignore keeps the stream alive.
+Successful replies converge through one EDNS echo/preservation step, then only
+UDP replies pass through RR-boundary truncation using the client's advertised
+size (with the RFC minimum of 512). Upstream selection and UDP-to-TCP retry stay
+behind the resolver boundary for Phase 4F2.
+
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
 paths and can read the native Unix host file when enabled. DNS A/AAAA answers

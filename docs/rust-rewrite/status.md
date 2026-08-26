@@ -40,11 +40,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
 | Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
 | Phase 4E19 encrypted DNS wrappers | Complete in declared scope | `DNS-10`; verified-DoQ ECS inject/preserve/override, disabled request types and one disabled response-RR filter differential suite passed |
+| Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E19 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F1 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E19 subset remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices through Phase 4F1 remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -1951,6 +1952,71 @@ suite passed locally. The complete Phase 1–4E19 differential regression,
 workspace tests and Go/with-gVisor baseline gates remain delegated to the
 default GitHub Actions workflow; their result is not pre-claimed here.
 
+## Phase 4F1 deliverables and evidence
+
+Phase 4F1 completes the declared `DNS-01` local-listener boundary. Before a
+request reaches the resolver, Rust now applies the Go DNS server's header
+acceptance rules: response packets and short headers are silently ignored,
+unsupported opcodes receive NOTIMP, invalid section counts and malformed wire
+receive FORMERR, and ignored TCP frames leave the connection open. Rejected
+messages never reach the configured upstream.
+
+Successful responses preserve generic RR boundaries and non-error RCODEs.
+Classic upstream SERVFAIL and REFUSED responses enter the same local SERVFAIL
+path as the oracle instead of being returned with an authoritative bit. At the
+service convergence point, a request OPT causes a missing response OPT to be
+generated with payload size 1232 and the request DO bit; an existing upstream
+OPT is preserved. UDP output is limited by the request OPT size, treating
+values below 512 as 512, dropping complete RRs in answer/authority/additional
+order and setting TC. TCP output is not truncated.
+
+`compat/scripts/phase4f1.py` runs both candidates against one deterministic
+TCP authority and proves:
+
+- FORMERR over UDP/TCP for zero/two questions, excessive answer/authority/
+  additional counts and a truncated question;
+- NOTIMP for an unsupported opcode and silent timeout for QR/short-header
+  inputs without closing the TCP connection;
+- semantic relay of CNAME, MX, TXT, private/unknown, SOA and A records across
+  all three response sections;
+- NXDOMAIN, empty NOERROR and NOTIMP preservation, plus local SERVFAIL for
+  upstream SERVFAIL/REFUSED;
+- 1232-byte OPT echo with DO preservation and an existing 4096-byte upstream
+  OPT left intact;
+- implicit 512, advertised 256-as-512 and advertised 900 UDP truncation, while
+  TCP retains all ten large TXT answers.
+
+Observed Phase 4F1 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4f1.py`; Go 1.26.5, Rust 1.95.0 and deterministic loopback TCP authority |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4F1; no result is recorded before that run completes |
+
+No new dependency was introduced. DNS request acceptance, EDNS handling and
+RR-boundary truncation remain inside `rewrite-dns`.
+
+Phase 4F1 does not claim upstream UDP truncation retry, domain upstream targets,
+multiple-upstream scheduling or timeout/failure ordering; those remain Phase
+4F2. Negative/stale caching and resolver retry behavior remain Phase 4F11, and
+TUN/intercepted DNS remains Phase 8.
+
+### Phase 4F1 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f1.py
+```
+
+The format check, complete workspace Clippy gate and Phase 4F1 differential
+suite passed locally. The complete Phase 1–4F1 differential regression,
+workspace tests and Go/with-gVisor baseline gates remain delegated to the
+default GitHub Actions workflow; their result is not pre-claimed here.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2026,11 +2092,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4E19 encrypted-upstream wrapper boundary.
-Phase 4D3B, 4F1 or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4F1 local DNS message boundary. Phase 4D3B,
+4F2 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
-DoH scheduling, broader DoQ endpoint/trust/token/error behavior, arbitrary
-RR/cache control, proxy-server nameservers, `respect-rules`, intercepted DNS,
-TUN, remote proxy protocols, providers and broader REST/platform compatibility
-are planned but not implied by this status.
+DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
+selection/cache control, proxy-server nameservers, `respect-rules`, intercepted
+DNS, TUN, remote proxy protocols, providers and broader REST/platform
+compatibility are planned but not implied by this status.

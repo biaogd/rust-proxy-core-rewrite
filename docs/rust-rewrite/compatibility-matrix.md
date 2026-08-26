@@ -160,7 +160,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Capability | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
 | Phase 4A UDP/TCP DNS server subset | Oracle | **Parity** | UDP and TCP queries, framing, ID echo, AA/flags and A response semantics in `compat/scripts/phase4.py` |
-| Full UDP/TCP DNS server semantics | Oracle | Partial | Phase 4A one-question positive A path only; malformed/error replies, EDNS and truncation remain unclaimed |
+| Phase 4F1 full local UDP/TCP DNS server semantics | Oracle | **Parity** | `DNS-01`; header accept/reject/ignore matrix, malformed wire, representative name-bearing/text/address/SOA/unknown RR relay, RCODE behavior, EDNS and UDP truncation in `compat/scripts/phase4f1.py` |
 | Phase 4A IP-literal UDP/TCP upstream | Oracle | **Parity** | Both transports observed by the deterministic loopback authoritative server |
 | System and general classic upstream selection | Oracle | Not started | System resolver, domains, multiple upstreams, retries and selection order |
 | Phase 4E1 loopback insecure DoT main-upstream subset | Oracle | **Parity** | Local TLS server, DNS/TCP framing, cache behavior and config/process observations in `compat/scripts/phase4e1.py` |
@@ -198,7 +198,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Full redir-host mapping | Oracle | Partial | TCP SOCKS IPv4 evidence only; UDP, reload persistence, CNAME reverse-rule identity and other inbounds are not claimed |
 | Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py`; the fixture enables the oracle's IPv6 test escape hatch on hosts without global-unicast IPv6 |
 | Full fake-IP behavior and persistence format | Oracle | Partial | Rule/provider/wildcard filters, UDP reverse routing, reload/prefix migration, flush API, crash/corruption behavior and Go bbolt file interchange are unclaimed |
-| EDNS0 echo, UDP size and truncation | Oracle | Not started | Message byte/semantic comparison |
+| EDNS0 echo, UDP size and truncation | Oracle | **Parity** | Phase 4F1; 1232 OPT echo with DO preservation, upstream OPT preservation, implicit 512, advertised 256-as-512 and advertised 900 truncation, plus untruncated TCP evidence |
 | DNS hijack through TUN | Oracle | Not started | Platform TUN integration |
 | Phase 4D4 local DNS REST A/AAAA/CNAME query and positive-cache flush subset | Oracle | **Parity** | Authenticated query JSON plus REST/local-listener shared cache hit/flush/refetch behavior in `compat/scripts/phase4d4.py` |
 | Full DNS REST query and cache control | Oracle | Partial | Arbitrary RR types, negative/stale cache state, fake-IP flush and complete method/error behavior remain unclaimed |
@@ -257,13 +257,15 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4E17 verified DoQ framing | Oracle | **Parity** | Native `compat/scripts/phase4e17.py`, 2026-08-26; deterministic local ALPN/framing/trust/failure observations |
 | Darwin arm64 — Phase 4E18 DoQ lifecycle | Oracle | **Parity** | Native `compat/scripts/phase4e18.py`, 2026-08-26; deterministic reuse/concurrency/retry/reset/full-handshake observations |
 | Darwin arm64 — Phase 4E19 encrypted wrappers | Oracle | **Parity** | Native `compat/scripts/phase4e19.py`, 2026-08-26; deterministic ECS and disabled request/response observations over DoQ |
-| Darwin arm64 beyond Phase 4E19 | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 4F1 local DNS semantics | Oracle | **Parity** | Native `compat/scripts/phase4f1.py`, 2026-08-26; deterministic validation, RR/RCODE, EDNS and UDP-size observations |
+| Darwin arm64 beyond Phase 4F1 | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E18 DoQ lifecycle | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E19 encrypted wrappers | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
-| Linux amd64 beyond Phase 4E19 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 4F1 local DNS semantics | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
+| Linux amd64 beyond Phase 4F1 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64/arm64/386 | Oracle | Not started | Named pipe, process/socket behavior |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
