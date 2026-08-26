@@ -15,6 +15,7 @@ import (
 
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/tls"
+	D "github.com/miekg/dns"
 )
 
 type mode string
@@ -34,14 +35,22 @@ type handshakeObservation struct {
 }
 
 type frameObservation struct {
-	ALPN           string `json:"alpn"`
-	ServerName     string `json:"server_name"`
-	DeclaredLength int    `json:"declared_length"`
-	PayloadLength  int    `json:"payload_length"`
-	TrailingBytes  int    `json:"trailing_bytes"`
-	DNSIDZero      bool   `json:"dns_id_zero"`
-	FINReceived    bool   `json:"fin_received"`
-	Valid          bool   `json:"valid"`
+	ALPN           string          `json:"alpn"`
+	ServerName     string          `json:"server_name"`
+	DeclaredLength int             `json:"declared_length"`
+	PayloadLength  int             `json:"payload_length"`
+	TrailingBytes  int             `json:"trailing_bytes"`
+	DNSIDZero      bool            `json:"dns_id_zero"`
+	FINReceived    bool            `json:"fin_received"`
+	QType          uint16          `json:"qtype"`
+	ECS            *ecsObservation `json:"ecs"`
+	Valid          bool            `json:"valid"`
+}
+
+type ecsObservation struct {
+	Family  uint16 `json:"family"`
+	Prefix  uint8  `json:"prefix"`
+	Address string `json:"address"`
 }
 
 type observation struct {
@@ -148,6 +157,8 @@ func serveStream(connection *quic.Conn, stream *quic.Stream, alpn, serverName st
 	payloadLength := 0
 	trailingBytes := 0
 	dnsIDZero := false
+	qType := uint16(0)
+	var ecs *ecsObservation
 	var query []byte
 	if len(request) >= 2 {
 		declaredLength = int(binary.BigEndian.Uint16(request[:2]))
@@ -159,13 +170,36 @@ func serveStream(connection *quic.Conn, stream *quic.Stream, alpn, serverName st
 		trailingBytes = available - payloadLength
 		query = request[2 : 2+payloadLength]
 		dnsIDZero = len(query) >= 2 && query[0] == 0 && query[1] == 0
+		message := new(D.Msg)
+		if message.Unpack(query) == nil {
+			if len(message.Question) == 1 {
+				qType = message.Question[0].Qtype
+			}
+			for _, record := range message.Extra {
+				option, ok := record.(*D.OPT)
+				if !ok {
+					continue
+				}
+				for _, value := range option.Option {
+					subnet, ok := value.(*D.EDNS0_SUBNET)
+					if ok {
+						ecs = &ecsObservation{
+							Family:  subnet.Family,
+							Prefix:  subnet.SourceNetmask,
+							Address: subnet.Address.String(),
+						}
+					}
+				}
+			}
+		}
 	}
 	valid := readErr == nil && declaredLength >= 12 && payloadLength == declaredLength && trailingBytes == 0 && dnsIDZero
 	shared.update(func(value *observation) {
 		value.Frames = append(value.Frames, frameObservation{
 			ALPN: alpn, ServerName: serverName, DeclaredLength: declaredLength,
 			PayloadLength: payloadLength, TrailingBytes: trailingBytes,
-			DNSIDZero: dnsIDZero, FINReceived: readErr == nil, Valid: valid,
+			DNSIDZero: dnsIDZero, FINReceived: readErr == nil, QType: qType,
+			ECS: ecs, Valid: valid,
 		})
 		if valid {
 			value.Queries++

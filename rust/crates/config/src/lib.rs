@@ -136,6 +136,20 @@ pub struct DnsConfig {
     pub fallback: Option<DnsFallbackConfig>,
     pub direct: Option<DnsDirectConfig>,
     pub tls: Option<DnsTlsConfig>,
+    pub query_options: DnsQueryOptions,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DnsQueryOptions {
+    pub ecs: Option<EcsConfig>,
+    pub disabled_types: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EcsConfig {
+    pub address: IpAddr,
+    pub prefix: u8,
+    pub override_existing: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -694,6 +708,7 @@ fn parse_dns(
         ));
     }
     let parsed = parse_dns_upstream(&nameservers[0], "dns.nameserver")?;
+    let query_options = parse_dns_query_options(&nameservers[0])?;
     let default_nameservers = raw.default_nameserver.take().unwrap_or_default();
     let (transport, upstream, tls) = parse_main_dns_tls(
         parsed,
@@ -724,7 +739,83 @@ fn parse_dns(
         fallback,
         direct,
         tls,
+        query_options,
     }))
+}
+
+fn is_dns_wrapper_parameter(name: &str) -> bool {
+    matches!(
+        name,
+        "ecs" | "ecs-override" | "disable-ipv4" | "disable-ipv6"
+    ) || name.starts_with("disable-qtype-")
+}
+
+fn parse_dns_query_options(value: &str) -> Result<DnsQueryOptions, ConfigError> {
+    if !value.starts_with("tls://")
+        && !value.starts_with("https://")
+        && !value.starts_with("quic://")
+    {
+        return Ok(DnsQueryOptions::default());
+    }
+    let parameters: BTreeMap<_, _> = value
+        .split_once('#')
+        .map_or("", |(_, fragment)| fragment)
+        .split('&')
+        .filter_map(|parameter| parameter.split_once('='))
+        .collect();
+    let ecs = parameters
+        .get("ecs")
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_ecs_config(value, parameters.get("ecs-override") == Some(&"true")))
+        .transpose()?;
+    let mut disabled_types = Vec::new();
+    if parameters.get("disable-ipv4") == Some(&"true") {
+        disabled_types.push(1);
+    }
+    if parameters.get("disable-ipv6") == Some(&"true") {
+        disabled_types.push(28);
+    }
+    for (name, value) in &parameters {
+        if *value != "true" {
+            continue;
+        }
+        if let Some(record_type) = name.strip_prefix("disable-qtype-")
+            && let Ok(record_type) = record_type.parse::<u16>()
+        {
+            disabled_types.push(record_type);
+        }
+    }
+    disabled_types.sort_unstable();
+    disabled_types.dedup();
+    Ok(DnsQueryOptions {
+        ecs,
+        disabled_types,
+    })
+}
+
+fn parse_ecs_config(value: &str, override_existing: bool) -> Result<EcsConfig, ConfigError> {
+    let (address, prefix) = value
+        .split_once('/')
+        .map_or((value, None), |(address, prefix)| (address, Some(prefix)));
+    let address = address.parse::<IpAddr>().map_err(|_| {
+        ConfigError::InvalidDns("Phase 4E19 requires a valid ECS address or prefix".to_owned())
+    })?;
+    let maximum = if address.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix
+        .map(str::parse::<u8>)
+        .transpose()
+        .map_err(|_| ConfigError::InvalidDns("Phase 4E19 ECS prefix is invalid".to_owned()))?
+        .unwrap_or(maximum);
+    if prefix > maximum {
+        return Err(ConfigError::InvalidDns(
+            "Phase 4E19 ECS prefix exceeds its address width".to_owned(),
+        ));
+    }
+    Ok(EcsConfig {
+        address,
+        prefix,
+        override_existing,
+    })
 }
 
 fn parse_main_dns_tls(
@@ -1012,6 +1103,9 @@ fn parse_quic_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream
                 "Phase 4E17 does not permit DoQ proxy-name fragments".to_owned(),
             ));
         };
+        if is_dns_wrapper_parameter(name) {
+            continue;
+        }
         if name != "name-cert-verify" || value.is_empty() || verification_name.is_some() {
             return Err(ConfigError::InvalidDns(format!(
                 "Phase 4E17 does not permit DoQ parameter {name}"
@@ -1058,7 +1152,8 @@ fn parse_tls_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream,
         if !matches!(
             name,
             "skip-cert-verify" | "name-cert-verify" | "disable-reuse"
-        ) {
+        ) && !is_dns_wrapper_parameter(name)
+        {
             return Err(ConfigError::InvalidDns(format!(
                 "Phase 4E10 does not yet permit DoT parameter {name}"
             )));
@@ -1242,7 +1337,9 @@ fn parse_https_dns_upstream(url: &Url) -> Result<ParsedDnsUpstream, ConfigError>
                 "Phase 4E14 does not yet permit DoH proxy-name fragments".to_owned(),
             ));
         };
-        if !matches!(name, "skip-cert-verify" | "name-cert-verify" | "h3") {
+        if !matches!(name, "skip-cert-verify" | "name-cert-verify" | "h3")
+            && !is_dns_wrapper_parameter(name)
+        {
             return Err(ConfigError::InvalidDns(format!(
                 "Phase 4E16 does not yet permit DoH parameter {name}"
             )));
@@ -1680,6 +1777,7 @@ dns:
                 fallback: None,
                 direct: None,
                 tls: None,
+                query_options: DnsQueryOptions::default(),
             })
         );
     }
@@ -2291,5 +2389,30 @@ dns:
             Config::from_yaml(&missing_name),
             Err(ConfigError::InvalidDns(message)) if message.contains("Phase 4E17")
         ));
+    }
+
+    #[test]
+    fn parses_phase_four_e_nineteen_encrypted_query_options() {
+        let source = r"
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  nameserver:
+    - quic://127.0.0.1:8853#name-cert-verify=dot.phase4.test&ecs=203.0.113.129/24&ecs-override=true&disable-ipv4=true&disable-ipv6=true&disable-qtype-65=true
+";
+        let options = Config::from_yaml(source)
+            .expect("Phase 4E19 config")
+            .dns
+            .expect("DNS")
+            .query_options;
+        assert_eq!(options.disabled_types, vec![1, 28, 65]);
+        assert_eq!(
+            options.ecs,
+            Some(EcsConfig {
+                address: "203.0.113.129".parse().expect("address"),
+                prefix: 24,
+                override_existing: true,
+            })
+        );
     }
 }

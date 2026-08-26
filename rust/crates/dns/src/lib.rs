@@ -10,7 +10,7 @@ use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
     Config, DnsConfig, DnsFallbackConfig, DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream,
-    DohProtocol, FakeIpConfig, FakeIpFilterMode, HostEntry,
+    DohProtocol, EcsConfig, FakeIpConfig, FakeIpFilterMode, HostEntry,
 };
 use rewrite_state::RuntimeState;
 use serde::Serialize;
@@ -459,6 +459,13 @@ impl Resolver {
         config: &DnsConfig,
     ) -> Result<Vec<u8>, DnsError> {
         let question = parse_question(query)?;
+        if config
+            .query_options
+            .disabled_types
+            .contains(&question.record_type)
+        {
+            return Ok(empty_upstream_answer(query, &question));
+        }
         let identifier = [query[0], query[1]];
         let key = resolution_cache_key(query, config, &question.name);
         let now = Instant::now();
@@ -466,14 +473,19 @@ impl Resolver {
             return Ok(response);
         }
 
+        let upstream_query = config
+            .query_options
+            .ecs
+            .map_or_else(|| Ok(query.to_vec()), |ecs| apply_ecs(query, ecs))?;
         let mut response = query_configured(
-            query,
+            &upstream_query,
             config,
             &question.name,
             Some(&self.tls_pool),
             Some(&self.http_pool),
         )
         .await?;
+        response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
         validate_response(&response, identifier)?;
         // The pinned Go local DNS service marks responses authoritative even
         // when their records came from an upstream resolver.
@@ -712,6 +724,182 @@ fn server_failure_response(query: &[u8]) -> Result<Vec<u8>, DnsError> {
     response[3] = (query[3] & 0xf0) | 0x02;
     response[6..12].fill(0);
     Ok(response)
+}
+
+fn empty_upstream_answer(query: &[u8], question: &Question) -> Vec<u8> {
+    let mut response = query[..question.end].to_vec();
+    response[2] = 0x84 | (query[2] & 0x79);
+    response[3] = (query[3] & 0xf0) | 0x80;
+    response[6..12].fill(0);
+    response
+}
+
+fn apply_ecs(query: &[u8], ecs: EcsConfig) -> Result<Vec<u8>, DnsError> {
+    let questions = usize::from(u16::from_be_bytes([query[4], query[5]]));
+    let answers = usize::from(u16::from_be_bytes([query[6], query[7]]));
+    let authorities = usize::from(u16::from_be_bytes([query[8], query[9]]));
+    let additionals = usize::from(u16::from_be_bytes([query[10], query[11]]));
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(query, offset)?;
+        offset = checked_record_end(query, offset, 4, "question is truncated")?;
+    }
+    for _ in 0..answers + authorities {
+        offset = resource_record_end(query, offset)?.1;
+    }
+
+    let option = ecs_option(ecs);
+    for _ in 0..additionals {
+        let start = offset;
+        let name_end = skip_name(query, start)?;
+        let (record_type, end) = resource_record_end(query, start)?;
+        if record_type == 41 {
+            let data_length_offset = name_end + 8;
+            let data_start = name_end + 10;
+            let mut option_offset = data_start;
+            while option_offset < end {
+                if option_offset + 4 > end {
+                    return Err(DnsError::InvalidMessage("EDNS option is truncated"));
+                }
+                let code = u16::from_be_bytes([query[option_offset], query[option_offset + 1]]);
+                let length = usize::from(u16::from_be_bytes([
+                    query[option_offset + 2],
+                    query[option_offset + 3],
+                ]));
+                let option_end = checked_record_end(
+                    query,
+                    option_offset + 4,
+                    length,
+                    "EDNS option data is truncated",
+                )?;
+                if code == 8 {
+                    if !ecs.override_existing {
+                        return Ok(query.to_vec());
+                    }
+                    let mut rewritten = Vec::with_capacity(query.len() + option.len());
+                    rewritten.extend_from_slice(&query[..option_offset]);
+                    rewritten.extend_from_slice(&option);
+                    rewritten.extend_from_slice(&query[option_end..]);
+                    let old_data_length = end - data_start;
+                    let new_data_length =
+                        old_data_length - (option_end - option_offset) + option.len();
+                    rewritten[data_length_offset..data_length_offset + 2].copy_from_slice(
+                        &u16::try_from(new_data_length)
+                            .map_err(|_| DnsError::InvalidMessage("EDNS option data is too large"))?
+                            .to_be_bytes(),
+                    );
+                    return Ok(rewritten);
+                }
+                option_offset = option_end;
+            }
+            let mut rewritten = Vec::with_capacity(query.len() + option.len());
+            rewritten.extend_from_slice(&query[..end]);
+            rewritten.extend_from_slice(&option);
+            rewritten.extend_from_slice(&query[end..]);
+            let new_data_length = end - data_start + option.len();
+            rewritten[data_length_offset..data_length_offset + 2].copy_from_slice(
+                &u16::try_from(new_data_length)
+                    .map_err(|_| DnsError::InvalidMessage("EDNS option data is too large"))?
+                    .to_be_bytes(),
+            );
+            return Ok(rewritten);
+        }
+        offset = end;
+    }
+
+    let mut rewritten = query.to_vec();
+    rewritten[10..12].copy_from_slice(
+        &u16::try_from(additionals + 1)
+            .map_err(|_| DnsError::InvalidMessage("too many additional records"))?
+            .to_be_bytes(),
+    );
+    rewritten.push(0);
+    rewritten.extend_from_slice(&41_u16.to_be_bytes());
+    rewritten.extend_from_slice(&0_u16.to_be_bytes());
+    rewritten.extend_from_slice(&0_u32.to_be_bytes());
+    rewritten.extend_from_slice(
+        &u16::try_from(option.len())
+            .map_err(|_| DnsError::InvalidMessage("ECS option is too large"))?
+            .to_be_bytes(),
+    );
+    rewritten.extend_from_slice(&option);
+    Ok(rewritten)
+}
+
+fn ecs_option(ecs: EcsConfig) -> Vec<u8> {
+    let (family, mut address) = match ecs.address {
+        IpAddr::V4(address) => (1_u16, address.octets().to_vec()),
+        IpAddr::V6(address) => (2_u16, address.octets().to_vec()),
+    };
+    let address_length = usize::from(ecs.prefix).div_ceil(8);
+    address.truncate(address_length);
+    if !ecs.prefix.is_multiple_of(8)
+        && let Some(last) = address.last_mut()
+    {
+        *last &= u8::MAX << (8 - ecs.prefix % 8);
+    }
+    let data_length = 4_u16 + u16::from(ecs.prefix.div_ceil(8));
+    let mut option = Vec::with_capacity(4 + usize::from(data_length));
+    option.extend_from_slice(&8_u16.to_be_bytes());
+    option.extend_from_slice(&data_length.to_be_bytes());
+    option.extend_from_slice(&family.to_be_bytes());
+    option.push(ecs.prefix);
+    option.push(0);
+    option.extend_from_slice(&address);
+    option
+}
+
+fn filter_disabled_records(message: &[u8], disabled_types: &[u16]) -> Result<Vec<u8>, DnsError> {
+    if disabled_types.is_empty() {
+        return Ok(message.to_vec());
+    }
+    let questions = usize::from(u16::from_be_bytes([message[4], message[5]]));
+    let section_counts = [
+        usize::from(u16::from_be_bytes([message[6], message[7]])),
+        usize::from(u16::from_be_bytes([message[8], message[9]])),
+        usize::from(u16::from_be_bytes([message[10], message[11]])),
+    ];
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(message, offset)?;
+        offset = checked_record_end(message, offset, 4, "question is truncated")?;
+    }
+    let mut filtered = message[..offset].to_vec();
+    let mut retained = [0_u16; 3];
+    for (section, count) in section_counts.into_iter().enumerate() {
+        for _ in 0..count {
+            let start = offset;
+            let (record_type, end) = resource_record_end(message, start)?;
+            if !disabled_types.contains(&record_type) {
+                filtered.extend_from_slice(&message[start..end]);
+                retained[section] += 1;
+            }
+            offset = end;
+        }
+    }
+    filtered[6..8].copy_from_slice(&retained[0].to_be_bytes());
+    filtered[8..10].copy_from_slice(&retained[1].to_be_bytes());
+    filtered[10..12].copy_from_slice(&retained[2].to_be_bytes());
+    Ok(filtered)
+}
+
+fn resource_record_end(message: &[u8], start: usize) -> Result<(u16, usize), DnsError> {
+    let name_end = skip_name(message, start)?;
+    if name_end + 10 > message.len() {
+        return Err(DnsError::InvalidMessage("resource record is truncated"));
+    }
+    let record_type = u16::from_be_bytes([message[name_end], message[name_end + 1]]);
+    let data_length = usize::from(u16::from_be_bytes([
+        message[name_end + 8],
+        message[name_end + 9],
+    ]));
+    let end = checked_record_end(
+        message,
+        name_end + 10,
+        data_length,
+        "resource data is truncated",
+    )?;
+    Ok((record_type, end))
 }
 
 fn lookup_host(
@@ -2342,6 +2530,18 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
         if let Some(credentials) = &tls.doh_basic_credentials {
             key.push(0xf9);
             key.extend_from_slice(credentials.as_bytes());
+        }
+    }
+    if let Some(ecs) = config.query_options.ecs {
+        key.push(0xf7);
+        key.extend_from_slice(ecs.address.to_string().as_bytes());
+        key.push(ecs.prefix);
+        key.push(u8::from(ecs.override_existing));
+    }
+    if !config.query_options.disabled_types.is_empty() {
+        key.push(0xf6);
+        for record_type in &config.query_options.disabled_types {
+            key.extend_from_slice(&record_type.to_be_bytes());
         }
     }
     key.push(0xff);

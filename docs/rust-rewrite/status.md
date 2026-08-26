@@ -39,11 +39,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
 | Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
 | Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
+| Phase 4E19 encrypted DNS wrappers | Complete in declared scope | `DNS-10`; verified-DoQ ECS inject/preserve/override, disabled request types and one disabled response-RR filter differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E18 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E19 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E18 subset remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E19 subset remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -1876,7 +1877,8 @@ classification are not claimed by the current evidence.
 
 Default-port/domain/bootstrap DoQ, broader trust options, fresh-connect failure
 matrices beyond Phase 4E17, timeout/cancellation stress, connection migration,
-proxy routing and encrypted-upstream wrapper parameters remain unclaimed.
+proxy routing and encrypted-upstream wrapper parameters remain unclaimed by
+Phase 4E18. Phase 4E19 claims only the wrapper subset described below.
 
 ### Phase 4E18 local exit gates
 
@@ -1891,6 +1893,61 @@ python3 compat/scripts/phase4e18.py
 
 The format check, complete workspace Clippy gate and Phase 4E18 differential
 suite passed locally. The complete Phase 1–4E18 differential regression,
+workspace tests and Go/with-gVisor baseline gates remain delegated to the
+default GitHub Actions workflow; their result is not pre-claimed here.
+
+## Phase 4E19 deliverables and evidence
+
+Phase 4E19 adds the declared encrypted-upstream query-wrapper subset on the
+verified DoQ path. Configuration parsing records one optional ECS prefix and a
+deduplicated set of disabled qtypes from `disable-ipv4`, `disable-ipv6` and
+`disable-qtype-N`. The resolver applies the Go wrapper order: disabled request
+types are answered locally before transport; otherwise ECS is injected or
+preserved/overridden before exchange, and disabled RR types are removed from
+the received Answer, Authority and Additional sections before validation and
+positive caching. Cache identities include the wrapper configuration.
+
+`compat/scripts/phase4e19.py` runs the pinned Go oracle and Rust candidate
+against the deterministic DoQ authority. Its scenarios compare exact stable
+observations and prove:
+
+- IPv4 and IPv6 ECS prefixes are injected with host bits masked;
+- an incoming ECS option is preserved by default and replaced when
+  `ecs-override=true`;
+- disabled A, AAAA and numeric qtype 65 requests receive the same local
+  authoritative empty response without contacting the authority;
+- an A answer returned for a CNAME question is filtered from the response;
+- valid wrapper fragments are accepted and a wrapper on an unsupported scheme
+  is rejected consistently.
+
+Observed Phase 4E19 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4e19.py`; Go 1.26.5, Rust 1.95.0 and deterministic loopback DoQ authority |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4E19; no result is recorded before that run completes |
+
+No new dependency was introduced. The Rust implementation reuses the existing
+DNS wire parser and verified DoQ transport.
+
+Classic-upstream wrappers, the broader invalid/false fragment matrix,
+arbitrary compressed and multi-record RR filtering, multiple-upstream
+scheduling, `proxy-name` and `respect-rules` remain unclaimed. Classic wrapper
+coverage remains Phase 4F6, while proxy/rule routing remains Phase 4D3B.
+
+### Phase 4E19 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4e19.py
+```
+
+The format check, complete workspace Clippy gate and Phase 4E19 differential
+suite passed locally. The complete Phase 1–4E19 differential regression,
 workspace tests and Go/with-gVisor baseline gates remain delegated to the
 default GitHub Actions workflow; their result is not pre-claimed here.
 
@@ -1969,8 +2026,8 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4E18 DoQ lifecycle boundary. Phase 4D3B, 4E19
-or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4E19 encrypted-upstream wrapper boundary.
+Phase 4D3B, 4F1 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, arbitrary

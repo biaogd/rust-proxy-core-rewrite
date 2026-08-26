@@ -368,8 +368,18 @@ must not be used to claim a later resolver or mapping behavior:
    ordinary reconnect and same-config connection reset, but token rejection,
    stateless reset, idle timeout and packet-level token use are not claimed
    without dedicated wire evidence. Default-port/domain DoQ, broader trust,
-   cancellation/timeout stress, proxy routing and wrapper parameters also
-   remain later gates.
+   cancellation/timeout stress and proxy routing also remain later gates.
+   Phase 4E19 accepts the encrypted-upstream query-wrapper subset on the
+   verified DoQ path: IPv4 and IPv6 ECS injection, preservation of a client ECS
+   option unless `ecs-override=true`, configured override with host-bit masking,
+   local authoritative empty responses for disabled A, AAAA and one numeric
+   qtype, and filtering one disabled A answer returned for a non-A question.
+   The gate compares configuration/process results, authority observations,
+   response bytes and whether the authority was contacted. It does not claim
+   the invalid/false parameter matrix, arbitrary compressed or multi-record RR
+   filtering, or wrappers on classic upstreams; those remain Phase 4F6.
+   `proxy-name` and `respect-rules` remain Phase 4D3B, and multiple-upstream
+   scheduling remains outside this slice.
 
 Phase 4A does not claim system resolvers, multiple-upstream selection,
 negative/stale/singleflight cache behavior, EDNS rewriting, hosts, fake IP,
