@@ -631,6 +631,16 @@ compiler would make diagnostics misleading. Release builds may inject
 low-memory and negative feature-tag banners remain separate build-profile
 gates and are not claimed by this slice.
 
+### Phase 5A2b accepted scope
+
+Phase 5A2b accepts `CLI-05`. The `-m` flag changes the process-level default
+used when `geodata-mode` is absent; an explicit YAML `true` or `false` remains
+authoritative, matching the oracle's initialize-then-unmarshal order. The
+black-box gate starts the complete Go and Rust products and reads the applied
+value from `/configs` for all four default/CLI/YAML combinations. It does not
+claim geodata loaders, matchers, updates or individual GEOIP/GEOSITE rules,
+which retain their existing Phase 4/5B/5E gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

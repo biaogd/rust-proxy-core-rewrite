@@ -480,6 +480,7 @@ fn config_snapshot(config: &Config) -> serde_json::Value {
         "mode": config.mode,
         "log-level": config.log_level,
         "ipv6": config.ipv6,
+        "geodata-mode": config.geodata_mode,
         "interface-name": "",
         "routing-mark": 0,
         "tcp-concurrent": false,

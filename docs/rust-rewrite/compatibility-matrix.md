@@ -32,6 +32,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Full `-t` configuration surface | Oracle | Not started | Expanded valid/invalid golden corpus |
 | Phase 5A2a `-v` default version output | Oracle | **Parity** | Product/version, Go-compatible OS/architecture names, implementation compiler version, build time, clean stderr, zero exit and config short-circuit in `compat/scripts/phase5a2a.py`; Rust truthfully reports `rustc` rather than `go` |
 | `-v` feature-tag build variants | Oracle | Not started | One native build/output gate per supported feature profile |
+| Phase 5A2b `-m` geodata-mode default | Oracle | **Parity** | Default false, CLI-enabled default and explicit YAML true/false precedence observed from the live `/configs` surface in `compat/scripts/phase5a2b.py` |
 | Controller/UI/secret CLI overrides | Oracle | Not started | Config plus override differential |
 | `convert-ruleset` | Oracle | Not started | Fixture files and byte/record comparison |
 | `generate` | Oracle | Not started | Subcommand-specific golden fixtures |
@@ -286,7 +287,8 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4F14 fake-IP lifecycle core | Oracle | **Parity** | Native product differential and bidirectional Go/Rust bbolt interchange passed, 2026-08-26; filters, reload/range, TCP/UDP reverse, flush/restart and malformed-cache evidence |
 | Darwin arm64 — Phase 5A1 configuration input | Oracle | **Parity** | Native 25-case Go/Rust path, environment, precedence, creation, empty-source fallthrough, error and frozen-source reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A2a default version output | Oracle | **Parity** | Native default-banner and configuration-short-circuit differential passed, 2026-08-26; tagged profiles remain unclaimed |
-| Darwin arm64 beyond Phase 5A2a | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 5A2b geodata-mode CLI default | Oracle | **Parity** | Native four-case live controller differential passed, 2026-08-26 |
+| Darwin arm64 beyond Phase 5A2b | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -308,7 +310,8 @@ separate build and runtime claim.
 | Linux amd64 — Phase 4F14 fake-IP lifecycle core | Oracle | Pending | Default focused differential and bbolt interchange gate are configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A1 configuration input | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A2a default version output | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
-| Linux amd64 beyond Phase 5A2a | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 5A2b geodata-mode CLI default | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
+| Linux amd64 beyond Phase 5A2b | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |

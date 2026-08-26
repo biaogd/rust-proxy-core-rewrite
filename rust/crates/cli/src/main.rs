@@ -16,6 +16,10 @@ struct Arguments {
     #[arg(short = 'v')]
     version: bool,
 
+    /// Use geodata mode as the configuration default
+    #[arg(short = 'm')]
+    geodata_mode: bool,
+
     /// Set configuration directory
     #[arg(short = 'd', value_name = "DIRECTORY")]
     home: Option<PathBuf>,
@@ -40,17 +44,19 @@ enum ConfigInput {
 }
 
 impl ConfigInput {
-    fn specification(&self) -> Result<ConfigSpec, ConfigError> {
+    fn specification(&self, geodata_mode: bool) -> Result<ConfigSpec, ConfigError> {
         match self {
-            Self::File(path) => ConfigSpec::from_path(path),
-            Self::FrozenYaml(source) => ConfigSpec::from_yaml(source),
+            Self::File(path) => ConfigSpec::from_path_with_geodata_mode(path, geodata_mode),
+            Self::FrozenYaml(source) => {
+                ConfigSpec::from_yaml_with_geodata_mode(source, geodata_mode)
+            }
         }
     }
 
-    fn runtime_config(&self) -> Result<Config, ConfigError> {
+    fn runtime_config(&self, geodata_mode: bool) -> Result<Config, ConfigError> {
         match self {
-            Self::File(path) => Config::from_path(path),
-            Self::FrozenYaml(source) => Config::from_yaml(source),
+            Self::File(path) => Config::from_path_with_geodata_mode(path, geodata_mode),
+            Self::FrozenYaml(source) => Config::from_yaml_with_geodata_mode(source, geodata_mode),
         }
     }
 
@@ -78,7 +84,9 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
     }
     let input = resolve_config_input(&arguments)?;
     if arguments.test {
-        input.specification()?.validate_declared_surface()?;
+        input
+            .specification(arguments.geodata_mode)?
+            .validate_declared_surface()?;
         println!(
             "configuration file {} test is successful",
             input.display_path().display()
@@ -86,10 +94,15 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
-    let config = input.runtime_config()?;
+    let config = input.runtime_config(arguments.geodata_mode)?;
     let shutdown = CancellationToken::new();
     let (reload_sender, reload_receiver) = mpsc::channel(4);
-    install_signals(shutdown.clone(), input, reload_sender);
+    install_signals(
+        shutdown.clone(),
+        input,
+        arguments.geodata_mode,
+        reload_sender,
+    );
     rewrite_runtime::run_with_reload(config, reload_receiver, shutdown).await?;
     Ok(())
 }
@@ -239,6 +252,7 @@ fn absolute_from(current_directory: &Path, path: PathBuf) -> std::io::Result<Pat
 fn install_signals(
     shutdown: CancellationToken,
     input: ConfigInput,
+    geodata_mode: bool,
     reload_sender: mpsc::Sender<Config>,
 ) {
     tokio::spawn(async move {
@@ -277,7 +291,7 @@ fn install_signals(
                         if received.is_none() {
                             break;
                         }
-                        match input.runtime_config() {
+                        match input.runtime_config(geodata_mode) {
                             Ok(config) => {
                                 if reload_sender.send(config).await.is_err() {
                                     break;

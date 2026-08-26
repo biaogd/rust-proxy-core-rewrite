@@ -47,6 +47,7 @@ pub struct ConfigSpec {
     pub unified_delay: bool,
     pub log_level: LogLevel,
     pub ipv6: bool,
+    pub geodata_mode: bool,
     pub interface_name: String,
     pub routing_mark: i64,
     pub tcp_concurrent: bool,
@@ -76,6 +77,7 @@ pub struct Config {
     pub mode: Mode,
     pub log_level: LogLevel,
     pub ipv6: bool,
+    pub geodata_mode: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
     pub external_doh_server: String,
@@ -607,10 +609,27 @@ impl ConfigSpec {
     /// Returns [`ConfigError`] for malformed YAML, invalid enums, unsupported
     /// proxy specifications or invalid pure rules.
     pub fn from_yaml(source: &str) -> Result<Self, ConfigError> {
-        Self::from_source(source, None)
+        Self::from_source(source, None, false)
     }
 
-    fn from_source(source: &str, config_directory: Option<&Path>) -> Result<Self, ConfigError> {
+    /// Parses YAML with the process-level geodata-mode default selected by
+    /// the CLI. An explicit YAML value still takes precedence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] under the same conditions as [`Self::from_yaml`].
+    pub fn from_yaml_with_geodata_mode(
+        source: &str,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        Self::from_source(source, None, geodata_mode)
+    }
+
+    fn from_source(
+        source: &str,
+        config_directory: Option<&Path>,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
         let raw = serde_yaml_ng::from_str::<Option<RawConfig>>(source)?.unwrap_or_default();
         let mode = parse_mode(raw.mode.as_deref().unwrap_or("rule"))?;
         let log_level = parse_log_level(raw.log_level.as_deref().unwrap_or("info"))?;
@@ -621,12 +640,13 @@ impl ConfigSpec {
         let store_fake_ip = parse_profile(raw.profile)?;
         let trust_certificates = parse_tls(raw.tls)?;
         let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
+        let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let dns = parse_dns(
             raw.dns,
             &trust_certificates,
             &rule_providers,
             config_directory,
-            raw.geodata_mode.unwrap_or(false),
+            geodata_mode,
         )?;
         validate_rule_provider_usage(&rule_providers, dns.as_ref())?;
 
@@ -642,6 +662,7 @@ impl ConfigSpec {
             unified_delay: raw.unified_delay.unwrap_or(false),
             log_level,
             ipv6: raw.ipv6.unwrap_or(true),
+            geodata_mode,
             interface_name: raw.interface_name.unwrap_or_default(),
             routing_mark: raw.routing_mark.unwrap_or(0),
             tcp_concurrent: raw.tcp_concurrent.unwrap_or(false),
@@ -670,7 +691,20 @@ impl ConfigSpec {
     ///
     /// Returns [`ConfigError`] for file I/O or specification errors.
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
-        Self::from_source(&std::fs::read_to_string(path)?, path.parent())
+        Self::from_source(&std::fs::read_to_string(path)?, path.parent(), false)
+    }
+
+    /// Reads YAML with the process-level geodata-mode default selected by the
+    /// CLI. An explicit YAML value still takes precedence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] under the same conditions as [`Self::from_path`].
+    pub fn from_path_with_geodata_mode(
+        path: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        Self::from_source(&std::fs::read_to_string(path)?, path.parent(), geodata_mode)
     }
 
     /// Ensures no top-level feature outside the declared Phase 2 parser surface
@@ -751,6 +785,7 @@ impl TryFrom<ConfigSpec> for Config {
             mode: spec.mode,
             log_level: spec.log_level,
             ipv6: spec.ipv6,
+            geodata_mode: spec.geodata_mode,
             authentication: spec.authentication,
             external_controller: spec.external_controller,
             external_doh_server: spec.external_doh_server,
@@ -775,6 +810,18 @@ impl Config {
         ConfigSpec::from_yaml(source)?.try_into()
     }
 
+    /// Parses runtime YAML using the CLI geodata-mode default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for specification or runtime-scope errors.
+    pub fn from_yaml_with_geodata_mode(
+        source: &str,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        ConfigSpec::from_yaml_with_geodata_mode(source, geodata_mode)?.try_into()
+    }
+
     /// Reads, parses and converts a configuration for the current runtime.
     ///
     /// # Errors
@@ -782,6 +829,18 @@ impl Config {
     /// Returns [`ConfigError`] for file, specification or runtime-scope errors.
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
         ConfigSpec::from_path(path)?.try_into()
+    }
+
+    /// Reads runtime YAML using the CLI geodata-mode default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for file, specification or runtime-scope errors.
+    pub fn from_path_with_geodata_mode(
+        path: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        ConfigSpec::from_path_with_geodata_mode(path, geodata_mode)?.try_into()
     }
 
     /// Converts the parsed integer into a bindable runtime port.
