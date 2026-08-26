@@ -16,6 +16,7 @@ home.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-age = { path = "../age" }
 rewrite-runtime = { path = "../runtime" }
+rewrite-ruleset = { path = "../ruleset" }
 tokio.workspace = true
 tokio-util.workspace = true
 time.workspace = true

@@ -147,6 +147,13 @@ impl ConfigInput {
 #[tokio::main]
 async fn main() {
     let raw_arguments: Vec<_> = std::env::args_os().collect();
+    if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("convert-ruleset") {
+        if let Err(error) = run_convert_ruleset_subcommand(&raw_arguments[2..]) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("age") {
         if let Err(error) = run_age_subcommand(&raw_arguments[2..]) {
             eprintln!("{error}");
@@ -159,6 +166,38 @@ async fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn run_convert_ruleset_subcommand(
+    arguments: &[OsString],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let usage = "Usage: convert-ruleset <behavior> <format> <source file> <target file>";
+    let behavior = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| std::io::Error::other(usage))?;
+    if behavior != "ipcidr" {
+        return Err(std::io::Error::other(format!("unsupported behavior type: {behavior}")).into());
+    }
+    let format = arguments
+        .get(1)
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| std::io::Error::other(usage))?;
+    if format != "mrs" {
+        return Err(
+            std::io::Error::other(format!("unsupported conversion format: {format}")).into(),
+        );
+    }
+    let source = arguments
+        .get(2)
+        .ok_or_else(|| std::io::Error::other(usage))?;
+    let target = arguments
+        .get(3)
+        .ok_or_else(|| std::io::Error::other(usage))?;
+    let source = std::fs::read(source)?;
+    let mut target = std::fs::File::create(target)?;
+    target.write_all(&rewrite_ruleset::ipcidr_mrs_to_text(&source)?)?;
+    Ok(())
 }
 
 async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

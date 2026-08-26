@@ -66,12 +66,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A4b X25519 age convert | Complete in declared scope; CLI-10 remains partial | Exact public recipient, trailing argument and invalid/missing identity exit behavior pass |
 | Phase 5A4c X25519 age encrypt/decrypt | Complete in declared scope; CLI-10 remains partial | Binary file/stream round trips, plaintext pass-through, errors and bidirectional Go/Rust armor interchange pass |
 | Phase 5A4d X25519 age keygen | Complete in declared scope; CLI-10 remains partial | Structured timestamp/public/secret output, startup short-circuit and cross-implementation conversion pass |
+| Phase 5A5a IP-CIDR MRS to text | Complete in declared scope; CLI-08 remains partial | Go-produced zstd MRS v1, merged IPv4/IPv6 minimal CIDRs and basic command/error lifecycle differential pass |
 | Phase 5A7a invalid SIGHUP recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the same signal loop applies a following valid generation |
 | Phase 5A7b local-resource shutdown | Complete in declared scope; CLI-11 remains partial | SIGINT/SIGTERM close an idle tunnel and release current mixed/controller/DNS TCP and DNS UDP resources before zero exit |
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, startup readiness, Go-compatible live-resource shutdown-hook boundary and failure asymmetry pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A8a CLI/lifecycle suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A8a CLI/lifecycle suites, including 5A5a ruleset conversion, run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |

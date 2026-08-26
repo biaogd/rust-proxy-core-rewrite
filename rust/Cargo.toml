@@ -11,6 +11,7 @@ members = [
   "crates/outbound",
   "crates/platform",
   "crates/rules",
+  "crates/ruleset",
   "crates/runtime",
   "crates/state",
   "crates/test-support",
@@ -61,6 +62,7 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 rustc_version = "0.4"
 url = "2"
+zstd = "0.13.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -692,6 +692,18 @@ keys must convert to the same recipient in the opposite implementation.
 `keygen-pq` and hybrid/PQ configuration identities remain outside the X25519
 claim.
 
+### Phase 5A5a accepted scope
+
+Phase 5A5a accepts only the IP-CIDR MRS v1 to canonical text direction of
+`CLI-08`. It decodes the oracle's zstd frame and binary header/range records,
+then emits the same minimal ordered IPv4 and IPv6 prefixes. The command
+short-circuits configuration startup, ignores trailing arguments and preserves
+the basic missing/unknown-argument exit class. Rust delegates compression to
+the maintained cross-platform `zstd` 0.13.3 binding (MIT; native zstd is BSD),
+while the MRS record parser remains focused, safe Rust. Text/YAML to MRS,
+domain/classical rules, every malformed-record diagnostic and native Windows
+evidence remain later 5A5 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
