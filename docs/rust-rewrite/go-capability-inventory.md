@@ -115,7 +115,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | RULE-05 | IP-SUFFIX/SRC-IP-SUFFIX, address unmapping and family behavior | Partial (destination/source IPv4 literal 5B2a/5B2b) | 5B2 |
 | RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial | 5B2 completion |
 | RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | Not started | 5B3 plus platform gates |
-| RULE-08 | IN-TYPE, IN-USER and IN-NAME | Not started | 5B3 |
+| RULE-08 | IN-TYPE, IN-USER and IN-NAME | Partial (`IN-TYPE` local mixed TCP 5B3a) | 5B3 |
 | RULE-09 | GEOIP, GEOSITE, IP-ASN and source variants | Not started | 5B4 |
 | RULE-10 | RULE-SET classical/domain/IP strategies, MRS, providers and refresh | Not started | 5B5, 5C4 |
 | RULE-11 | SUB-RULE, AND/OR/NOT with lazy DNS/process helpers and cycle/error behavior | Partial | 5B3 |

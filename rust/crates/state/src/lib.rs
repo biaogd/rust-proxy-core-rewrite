@@ -716,7 +716,8 @@ impl Drop for ConnectionGuard {
 impl From<&Metadata> for MetadataSnapshot {
     fn from(metadata: &Metadata) -> Self {
         let inbound_type = match metadata.inbound {
-            InboundProtocol::Http => "HTTPS",
+            InboundProtocol::Http => "HTTP",
+            InboundProtocol::Https => "HTTPS",
             InboundProtocol::Socks4 => "Socks4",
             InboundProtocol::Socks5 => "Socks5",
         };

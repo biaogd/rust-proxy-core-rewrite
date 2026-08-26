@@ -920,6 +920,16 @@ REJECT, and both matches must report the source rule kind. IPv6, partial-byte
 suffixes, mapped addresses and resolver-call instrumentation remain later
 RULE-05 gates.
 
+### Phase 5B3a accepted scope
+
+Phase 5B3a accepts `IN-TYPE` for the current mixed TCP input set. HTTP
+absolute-form must be distinguishable from HTTPS CONNECT, SOCKS4 from SOCKS5,
+slash-separated payloads must preserve ordering-independent membership, and
+`SOCKS` must expand to both SOCKS versions. Each wire input receives an
+observable DIRECT echo or REJECT close after an explicit provider-readiness
+barrier. `IN-USER`, `IN-NAME`, UDP and protocol kinds without a Rust inbound
+remain later RULE-08 gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

@@ -137,7 +137,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | DSCP and remaining metadata matchers | Oracle | Not started | Metadata matrix |
 | Process name/path variants and UID | Oracle | Not started | Per-OS process fixtures |
 | Phase 2 rematch-name pure metadata matcher | Oracle | **Parity** | Rematch mutation followed by `REMATCH-NAME` observation |
-| Inbound type/user/name matchers | Oracle | Not started | Metadata and inbound fixture matrix |
+| Inbound type/user/name matchers | Oracle | **Partial** | Phase 5B3a proves mixed TCP `IN-TYPE` for HTTP absolute-form, HTTPS CONNECT, SOCKS4, SOCKS5, slash lists and `SOCKS` alias; user/name and future inbound kinds remain pending |
 | GEOIP/GEOSITE/ASN | Oracle | Not started | Pinned geodata corpus |
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | Phase 2 pure SUB-RULE and AND/OR/NOT subset | Oracle | **Parity** | Nested pure matcher, missing reference, PASS-RULE and cycle observations; no lazy DNS/process helpers |

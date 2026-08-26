@@ -35,6 +35,7 @@ impl Destination {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InboundProtocol {
     Http,
+    Https,
     Socks4,
     Socks5,
 }

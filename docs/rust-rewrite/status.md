@@ -86,9 +86,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B1b domain wildcard routing | Complete in declared byte-wildcard/local-TCP scope; RULE-03 remains partial | Exact Go byte-level `*`/`?` matching, empty/non-ASCII unit boundaries, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
+| Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B2b rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3a rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3037,6 +3038,34 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 IPv6, partial-byte suffixes, mapped-address family behavior and observable
 resolver invocation remain pending before RULE-05 can be called complete.
+
+## Phase 5B3a deliverables and evidence
+
+Phase 5B3a begins `RULE-08` with `IN-TYPE` on the currently implemented local
+TCP inbounds. It also corrects the metadata boundary exposed by the oracle:
+HTTP absolute-form requests are type `HTTP`, while HTTP CONNECT tunnels are
+type `HTTPS`. SOCKS4 and SOCKS5 remain distinct, and the Go `SOCKS` payload
+alias expands to both. Slash-separated type lists are parsed once into the rule
+matcher; unsupported future inbound kinds remain rejected in this partial gate.
+
+`compat/scripts/phase5b3a.py` sends all four wire inputs through one mixed
+listener. One configuration routes HTTP/SOCKS4 to DIRECT and HTTPS/SOCKS5 to
+REJECT; a second proves that `SOCKS` selects both SOCKS versions but neither
+HTTP form. The fixture waits for a DIRECT echo before collecting outcomes,
+closing the oracle's listener-open/provider-publication startup window.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B3A_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3a.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-model -p rewrite-inbound -p rewrite-rules -p rewrite-state --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+The focused differential passed twice consecutively after the readiness
+barrier. `IN-USER`, `IN-NAME`, UDP metadata and future inbound protocol kinds
+remain separate phases.
 
 ## Controller HTTP infrastructure refactor
 

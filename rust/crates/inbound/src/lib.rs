@@ -375,7 +375,7 @@ async fn accept_http(
             .write_all(format!("{} 200 Connection established\r\n\r\n", request.version).as_bytes())
             .await?;
         return Ok(AcceptedTcp {
-            metadata: socket_metadata(&client, destination, InboundProtocol::Http),
+            metadata: socket_metadata(&client, destination, InboundProtocol::Https),
             client,
             preface: bytes[request.body_offset..].to_vec(),
             command: InboundCommand::Connect,

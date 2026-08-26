@@ -92,6 +92,7 @@ enum Matcher {
         field: PortField,
     },
     Network(Network),
+    InType(Vec<rewrite_model::InboundProtocol>),
     RematchName(Vec<String>),
     And(Vec<Matcher>),
     Or(Vec<Matcher>),
@@ -446,6 +447,7 @@ impl Matcher {
                 )
             }
             Self::Network(network) => MatchResult::from_bool(metadata.network == *network),
+            Self::InType(types) => MatchResult::from_bool(types.contains(&metadata.inbound)),
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
@@ -501,6 +503,7 @@ impl Matcher {
                 ..
             } => "InPort",
             Self::Network(_) => "Network",
+            Self::InType(_) => "InType",
             Self::RematchName(_) => "RematchName",
             Self::And(_) => "AND",
             Self::Or(_) => "OR",
@@ -660,6 +663,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
             "UDP" => Ok(Matcher::Network(Network::Udp)),
             _ => Err(RuleError::Unsupported("NETWORK".to_owned())),
         },
+        "IN-TYPE" => parse_in_type(payload),
         "REMATCH-NAME" => {
             let names: Vec<_> = payload
                 .split('/')
@@ -762,6 +766,27 @@ fn parse_ip_suffix(payload: &str, source: bool, no_resolve: bool) -> Result<Matc
         source,
         no_resolve: no_resolve || source,
     })
+}
+
+fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
+    let mut types = Vec::new();
+    for value in payload.split('/').map(str::trim) {
+        match value.to_ascii_uppercase().as_str() {
+            "HTTP" => types.push(rewrite_model::InboundProtocol::Http),
+            "HTTPS" => types.push(rewrite_model::InboundProtocol::Https),
+            "SOCKS4" => types.push(rewrite_model::InboundProtocol::Socks4),
+            "SOCKS5" => types.push(rewrite_model::InboundProtocol::Socks5),
+            "SOCKS" => types.extend([
+                rewrite_model::InboundProtocol::Socks4,
+                rewrite_model::InboundProtocol::Socks5,
+            ]),
+            _ => return Err(RuleError::InvalidPayload),
+        }
+    }
+    if types.is_empty() {
+        return Err(RuleError::InvalidPayload);
+    }
+    Ok(Matcher::InType(types))
 }
 
 fn ip_suffix_matches(pattern: std::net::IpAddr, bits: u8, candidate: std::net::IpAddr) -> bool {
@@ -1036,6 +1061,28 @@ mod tests {
             assert_eq!(decision.target, "REJECT");
             assert_eq!(decision.matched_kind.as_deref(), Some("SrcIPSuffix"));
         }
+    }
+
+    #[test]
+    fn matches_current_local_inbound_types_and_socks_alias() {
+        let rules = vec![
+            "IN-TYPE,HTTP/SOCKS4,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let mut input = metadata("inbound.test", 80);
+        input.inbound = InboundProtocol::Http;
+        assert_eq!(program.evaluate(&input).target, "REJECT");
+        input.inbound = InboundProtocol::Https;
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
+        input.inbound = InboundProtocol::Socks4;
+        assert_eq!(program.evaluate(&input).target, "REJECT");
+        input.inbound = InboundProtocol::Socks5;
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
+
+        let alias = vec!["IN-TYPE,SOCKS,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+        let program = RuleSet::parse(&alias, &BTreeMap::new(), &[]).expect("valid rules");
+        assert_eq!(program.evaluate(&input).target, "REJECT");
     }
 
     #[test]
