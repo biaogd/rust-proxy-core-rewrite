@@ -338,8 +338,18 @@ must not be used to claim a later resolver or mapping behavior:
    RFC 8484 GET pseudo/header semantics, zero upstream DNS IDs, response-ID
    restoration, two sequential misses as streams on one HTTP/2 connection and
    deterministic HTTP/1.1 fallback. Concurrent streams, redirects after HTTP/2
-   selection, GOAWAY/retry and flow-control stress, proxy routing and HTTP/3
-   remain later gates.
+   selection, GOAWAY/retry and flow-control stress remain later gates. Phase
+   4E16 accepts `#h3=true` forced HTTP/3 and `dns.prefer-h3: true` raced
+   selection. The race is accepted against a deterministic H3-faster dual
+   authority and an H2-only fallback authority. The selected HTTP/3 path must
+   preserve the RFC 8484 GET contract, reuse a live QUIC connection for
+   sequential misses and recover after the authority closes the first
+   connection. The pinned Go oracle constructs its TLS config without a client
+   session cache, so reconnect requests are 0-RTT-capable in method
+   classification but the authority observes `Used0RTT=false`; Rust must match
+   that observable result and must not claim accepted 0-RTT. QUIC token and
+   rejection matrices, accepted resumption, concurrent streams,
+   flow-control/GOAWAY behavior, proxy routing and DoQ remain later gates.
 
 Phase 4A does not claim system resolvers, multiple-upstream selection,
 negative/stale/singleflight cache behavior, EDNS rewriting, hosts, fake IP,

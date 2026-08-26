@@ -36,11 +36,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E13 HTTPS URL semantics | Complete in declared scope | `DNS-07`; root/default-port, discarded configured query, ASCII Basic userinfo and persistent same-origin relative redirect differential suite passed |
 | Phase 4E14 domain HTTPS bootstrap/trust | Complete in declared scope | `DNS-07`; one loopback UDP bootstrap, URL-domain Host/SNI and default/name-override/skip verification-precedence differential suite passed |
 | Phase 4E15 DoH HTTP/2 | Complete in declared scope | `DNS-08`; ALPN `h2`, RFC 8484 GET, sequential stream reuse and HTTP/1.1 fallback differential suite passed |
+| Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E15 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E16 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E15 subset remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E16 subset remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -1659,8 +1660,10 @@ still compiling. No Go source was modified.
 
 Concurrent HTTP/2 streams, redirects after HTTP/2 selection, non-200 response
 handling parity, GOAWAY and retry matrices, connection flow-control stress,
-ping/idle lifecycle, HTTP/3 and 0-RTT, DoQ, proxy routing and encrypted-upstream
-wrapper parameters remain unclaimed.
+ping/idle lifecycle, DoQ, proxy routing and encrypted-upstream wrapper
+parameters remain unclaimed by Phase 4E15. Phase 4E16 claims only its declared
+HTTP/3 selection/reconnect subset; broader QUIC lifecycle and accepted 0-RTT
+remain unclaimed.
 
 ### Phase 4E15 exit-gate commands
 
@@ -1701,6 +1704,74 @@ SKIP_INTEROP_TEST=1 SKIP_CONCURRENT_TEST=1 go test ./...
 SKIP_INTEROP_TEST=1 SKIP_CONCURRENT_TEST=1 go test ./... -tags with_gvisor -count=1
 CGO_ENABLED=0 go build -tags with_gvisor -trimpath -o /tmp/mihomo-go-oracle .
 ```
+
+## Phase 4E16 deliverables and evidence
+
+Phase 4E16 adds the declared HTTPS DoH HTTP/3 selection and reconnect slice.
+The Rust configuration accepts `#h3=true` as forced H3 and
+`dns.prefer-h3: true` as a raced preference for H3. Ordinary HTTPS DoH retains
+the previously accepted HTTP/2/HTTP/1.1 path. The preference race probes QUIC
+and TLS/TCP, selects the first usable transport and retains that choice for the
+transport identity; an H2-only authority therefore remains a deterministic
+fallback instead of a startup failure.
+
+The selected H3 path sends the same bodyless RFC 8484 GET contract: HTTPS URI,
+configured authority and path, exactly one `dns` query parameter,
+`accept: application/dns-message`, zero upstream DNS ID and restored client ID.
+One pooled QUIC/H3 sender carries sequential cache misses. If the authority
+closes the pooled connection, the client discards it and reconnects within the
+bounded retry path.
+
+`compat/scripts/phase4e16.py` runs the pinned Go oracle and Rust candidate
+against `compat/helpers/h3-authority`, a deterministic local Go HTTP/3 fixture.
+The suite covers configuration acceptance, forced H3, H3 winning over a delayed
+H2 endpoint, H2-only fallback, connection reuse and a server-closed first QUIC
+connection. It compares exit status, DNS result and exact authority
+observations including protocol, method, target, headers, request body, DNS ID,
+connection count and `Used0RTT`.
+
+The pinned Go path marks DNS GET requests as eligible for 0-RTT, but its TLS
+configuration has no client session cache. The exact authority observation is
+therefore `Used0RTT=false` on reconnect. Rust session resumption is deliberately
+disabled in this slice to preserve that behavior; this is not a claim of
+accepted 0-RTT compatibility.
+
+Observed Phase 4E16 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4e16.py`; Go 1.26.5, Rust 1.95.0 and deterministic loopback H3/H2 authorities |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4E16; no result is recorded before that run completes |
+
+Dependency review for this gate:
+
+| Dependency | Resolved version | Purpose and coverage | Declared license | Evidence boundary |
+| --- | --- | --- | --- | --- |
+| `h3` | 0.0.8 | HTTP/3 request/response state machine | MIT | Sequential RFC 8484 GET and bounded reconnect only |
+| `h3-quinn` | 0.0.10 | Adapter between the H3 client and Quinn QUIC streams | MIT | Client-side H3 transport integration only |
+| `quinn` | 0.11.11 | QUIC endpoint, connection establishment and stream transport | MIT OR Apache-2.0 | Local forced/preferred/reconnect fixtures; no broader token, migration or congestion claim |
+
+The versions and checksums are locked in `rust/Cargo.lock`. Their licenses are
+recorded as compatible candidates for this GPL-3.0-only workspace; final
+distribution/legal review remains a Phase 9 gate.
+
+QUIC token and rejection matrices, accepted session resumption/0-RTT,
+concurrent H3 streams, flow-control and GOAWAY stress, non-200/retry matrices,
+DoQ, proxy routing and encrypted-upstream wrapper parameters remain unclaimed.
+
+### Phase 4E16 local exit gate
+
+Per the Phase 4E16 execution instruction, only the new phase suite was run
+locally:
+
+```sh
+python3 compat/scripts/phase4e16.py
+```
+
+It passed on Darwin arm64. The complete Phase 1–4E16 differential regression,
+workspace `fmt`/`clippy`/`test`, and Go/with-gVisor baseline gates are configured
+in `.github/workflows/rust-rewrite.yml`; their result is intentionally left to
+GitHub Actions and is not pre-claimed here.
 
 ## Reproducible baseline
 
@@ -1777,10 +1848,10 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4E15 DoH HTTP/2 boundary. Phase 4D3B, 4E16 or
+Rust behavior stops at the Phase 4E16 DoH HTTP/3 boundary. Phase 4D3B, 4E17 or
 another implementation gate must not begin without a separate instruction and
-the exact inventory IDs/matrix rows. HTTP/3 and 0-RTT, broader HTTP/2 lifecycle,
-general encrypted-DNS pool/retry behavior, concurrent DoH scheduling, DoQ,
-arbitrary RR/cache control, proxy-server nameservers, `respect-rules`,
-intercepted DNS, TUN, remote proxy protocols, providers and broader
-REST/platform compatibility are planned but not implied by this status.
+the exact inventory IDs/matrix rows. Accepted 0-RTT and broader HTTP/3/HTTP/2
+lifecycle, general encrypted-DNS pool/retry behavior, concurrent DoH
+scheduling, DoQ, arbitrary RR/cache control, proxy-server nameservers,
+`respect-rules`, intercepted DNS, TUN, remote proxy protocols, providers and
+broader REST/platform compatibility are planned but not implied by this status.

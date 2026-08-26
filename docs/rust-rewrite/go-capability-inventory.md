@@ -183,9 +183,9 @@ runtime behavior is under [`dns`](../../dns).
 | DNS-05 | RCODE synthetic upstream and Tailscale DNS upstream | Not started | 4F5/7K |
 | DNS-06 | DoT URL/default-port/bootstrap, TLS trust/name options, reuse/retry/reset/concurrency | Partial | 4E9–4E11 |
 | DNS-07 | DoH HTTP and HTTPS URL semantics, GET wire behavior, redirects/auth, bootstrap and HTTP/1.1 pooling | Partial | 4E12–4E14 |
-| DNS-08 | DoH HTTP/2 and HTTP/3 forced/preferred/race/fallback/0-RTT behavior | Partial | 4E15–4E16 |
+| DNS-08 | DoH HTTP/2 and HTTP/3 forced/preferred/race/fallback/0-RTT behavior | Partial: 4E15 HTTP/2 and 4E16 declared H3 subset accepted; broader lifecycle remains | 4E15–4E16 plus later lifecycle gates |
 | DNS-09 | DoQ TLS/QUIC, framing, reuse, streams, retry/token/reset/concurrency | Not started | 4E17–4E18 |
-| DNS-10 | Upstream params: proxy name/respect-rules, skip/name verification, H3, reuse, ECS/override, disable IPv4/IPv6/qtype | Partial TLS options only | 4D3B, 4E19, 4F6 |
+| DNS-10 | Upstream params: proxy name/respect-rules, skip/name verification, H3, reuse, ECS/override, disable IPv4/IPv6/qtype | Partial TLS/H3 options only | 4D3B, 4E19, 4F6 |
 | DNS-11 | Default/main/fallback/direct/proxy-server resolver sets, all transports, shared transport identity and direct-follow-policy | Partial | 4D3B, 4F7 |
 | DNS-12 | Nameserver and proxy-server policy: multiple upstreams, exact/wildcard ordering, same-node overwrite, geosite and rule-set | Partial | 4F8 |
 | DNS-13 | Fallback: multiple servers, GeoIP/GeoSite/domain/IPv4/IPv6 filters, lazy/eager, failure and ordering | Partial | 4F9 |

@@ -5,7 +5,7 @@
 > differential tests. Rust migration status is documented in
 > [`docs/rust-rewrite/status.md`](docs/rust-rewrite/status.md).
 > Every push and pull request runs the Rust quality gates, Go baseline gates
-> and the complete Phase 1–4E15 Go/Rust differential regression in GitHub
+> and the complete Phase 1–4E16 Go/Rust differential regression in GitHub
 > Actions.
 
 [![Rust rewrite CI](https://github.com/biaogd/rust-proxy-core-rewrite/actions/workflows/rust-rewrite.yml/badge.svg)](https://github.com/biaogd/rust-proxy-core-rewrite/actions/workflows/rust-rewrite.yml)

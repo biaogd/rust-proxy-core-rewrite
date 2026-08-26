@@ -94,6 +94,13 @@ pub enum DnsTransport {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DohProtocol {
+    Http,
+    PreferHttp3,
+    Http3Only,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsMode {
     RedirHost,
     FakeIp,
@@ -140,6 +147,7 @@ pub struct DnsTlsConfig {
     pub doh_basic_credentials: Option<String>,
     pub endpoint_host: Option<String>,
     pub bootstrap: Option<DnsUpstream>,
+    pub doh_protocol: DohProtocol,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +266,7 @@ struct RawDns {
     enable: Option<bool>,
     listen: Option<String>,
     ipv6: Option<bool>,
+    prefer_h3: Option<bool>,
     use_hosts: Option<bool>,
     use_system_hosts: Option<bool>,
     enhanced_mode: Option<String>,
@@ -685,8 +694,12 @@ fn parse_dns(
     }
     let parsed = parse_dns_upstream(&nameservers[0], "dns.nameserver")?;
     let default_nameservers = raw.default_nameserver.take().unwrap_or_default();
-    let (transport, upstream, tls) =
-        parse_main_dns_tls(parsed, &default_nameservers, trust_certificates)?;
+    let (transport, upstream, tls) = parse_main_dns_tls(
+        parsed,
+        raw.prefer_h3.unwrap_or(false),
+        &default_nameservers,
+        trust_certificates,
+    )?;
     let policies = parse_dns_policies(raw.nameserver_policy.take().unwrap_or_default())?;
     let fallback = parse_fallback(&mut raw)?;
     let direct_servers = raw.direct_nameserver.take().unwrap_or_default();
@@ -715,6 +728,7 @@ fn parse_dns(
 
 fn parse_main_dns_tls(
     parsed: ParsedDnsUpstream,
+    prefer_h3: bool,
     default_nameservers: &[String],
     trust_certificates: &[String],
 ) -> Result<(DnsTransport, SocketAddr, Option<DnsTlsConfig>), ConfigError> {
@@ -747,6 +761,13 @@ fn parse_main_dns_tls(
             "Phase 4E9 dns.default-nameserver must use classic UDP or TCP".to_owned(),
         ));
     }
+    let doh_protocol = if parsed.doh_h3_only {
+        DohProtocol::Http3Only
+    } else if prefer_h3 && parsed.doh_path.is_some() {
+        DohProtocol::PreferHttp3
+    } else {
+        DohProtocol::Http
+    };
     let tls = parsed
         .server_name
         .map(|server_name| {
@@ -761,6 +782,7 @@ fn parse_main_dns_tls(
                 doh_basic_credentials: parsed.doh_basic_credentials,
                 endpoint_host: parsed.endpoint_host,
                 bootstrap,
+                doh_protocol,
             })
         })
         .transpose()?;
@@ -925,6 +947,7 @@ struct ParsedDnsUpstream {
     doh_path: Option<String>,
     doh_basic_credentials: Option<String>,
     endpoint_host: Option<String>,
+    doh_h3_only: bool,
 }
 
 fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, ConfigError> {
@@ -938,6 +961,7 @@ fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, Con
             doh_path: None,
             doh_basic_credentials: None,
             endpoint_host: None,
+            doh_h3_only: false,
         });
     }
     if let Some(address) = value.strip_prefix("tcp://") {
@@ -950,6 +974,7 @@ fn parse_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream, Con
             doh_path: None,
             doh_basic_credentials: None,
             endpoint_host: None,
+            doh_h3_only: false,
         });
     }
     if let Some(value) = value.strip_prefix("tls://") {
@@ -1040,6 +1065,7 @@ fn parse_tls_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream,
         doh_path: None,
         doh_basic_credentials: None,
         endpoint_host,
+        doh_h3_only: false,
     })
 }
 
@@ -1112,6 +1138,7 @@ fn parse_http_dns_upstream(
             doh_path,
             doh_basic_credentials: None,
             endpoint_host: None,
+            doh_h3_only: false,
         });
     }
     parse_https_dns_upstream(&url)
@@ -1168,9 +1195,9 @@ fn parse_https_dns_upstream(url: &Url) -> Result<ParsedDnsUpstream, ConfigError>
                 "Phase 4E14 does not yet permit DoH proxy-name fragments".to_owned(),
             ));
         };
-        if !matches!(name, "skip-cert-verify" | "name-cert-verify") {
+        if !matches!(name, "skip-cert-verify" | "name-cert-verify" | "h3") {
             return Err(ConfigError::InvalidDns(format!(
-                "Phase 4E14 does not yet permit DoH parameter {name}"
+                "Phase 4E16 does not yet permit DoH parameter {name}"
             )));
         }
         parameters.insert(name, value);
@@ -1186,6 +1213,7 @@ fn parse_https_dns_upstream(url: &Url) -> Result<ParsedDnsUpstream, ConfigError>
     let server_name = name_override.unwrap_or_else(|| tls_server_name.clone());
     let doh_basic_credentials = (!url.username().is_empty() || url.password().is_some())
         .then(|| format!("{}:{}", url.username(), url.password().unwrap_or_default()));
+    let doh_h3_only = parameters.get("h3") == Some(&"true");
     Ok(ParsedDnsUpstream {
         transport: DnsTransport::HttpsVerifiedReuse,
         address,
@@ -1195,6 +1223,7 @@ fn parse_https_dns_upstream(url: &Url) -> Result<ParsedDnsUpstream, ConfigError>
         doh_path,
         doh_basic_credentials,
         endpoint_host,
+        doh_h3_only,
     })
 }
 

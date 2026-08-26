@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
     Config, DnsConfig, DnsFallbackConfig, DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream,
-    FakeIpConfig, FakeIpFilterMode, HostEntry,
+    DohProtocol, FakeIpConfig, FakeIpFilterMode, HostEntry,
 };
 use rewrite_state::RuntimeState;
 use serde::Serialize;
@@ -219,6 +219,12 @@ struct TlsConnectionPool {
     connections: Vec<TlsStream<TcpStream>>,
     h2_key: Vec<u8>,
     h2_sender: Option<h2::client::SendRequest<Bytes>>,
+    h3_key: Vec<u8>,
+    h3_endpoint: Option<quinn::Endpoint>,
+    h3_connection: Option<quinn::Connection>,
+    h3_sender: Option<h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>>,
+    doh_choice_key: Vec<u8>,
+    doh_choice: Option<DohProtocol>,
 }
 
 #[derive(Default)]
@@ -281,6 +287,14 @@ impl DnsService {
         pool.connections.clear();
         pool.h2_key.clear();
         pool.h2_sender = None;
+        pool.h3_key.clear();
+        if let Some(connection) = pool.h3_connection.take() {
+            connection.close(0_u32.into(), b"DNS reset");
+        }
+        pool.h3_sender = None;
+        pool.h3_endpoint = None;
+        pool.doh_choice_key.clear();
+        pool.doh_choice = None;
         drop(pool);
         let mut pool = self.resolver.http_pool.lock().await;
         pool.key.clear();
@@ -1076,6 +1090,25 @@ async fn connect_tls_verified_with_alpn(
     tls: &DnsTlsConfig,
     https: bool,
 ) -> Result<TlsStream<TcpStream>, DnsError> {
+    let mut client_config = verified_client_config(tls)?;
+    if https {
+        client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    }
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let server_name = ServerName::try_from(tls.tls_server_name.clone())
+        .map_err(|_| DnsError::InvalidMessage("invalid TLS server name"))?;
+    let upstream = resolve_tls_endpoint(upstream, tls).await?;
+    let stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)??;
+    tokio::time::timeout(UPSTREAM_TIMEOUT, connector.connect(server_name, stream))
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)
+        .map_err(DnsError::Io)
+}
+
+fn verified_client_config(tls: &DnsTlsConfig) -> Result<ClientConfig, DnsError> {
     let mut roots = RootCertStore::empty();
     if !go_style_env_flag("DISABLE_SYSTEM_CA") {
         let native = rustls_native_certs::load_native_certs();
@@ -1104,7 +1137,7 @@ async fn connect_tls_verified_with_alpn(
             roots.add(certificate).map_err(std::io::Error::other)?;
         }
     }
-    let mut client_config = if tls.skip_certificate_verification {
+    let client_config = if tls.skip_certificate_verification {
         ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
@@ -1123,21 +1156,7 @@ async fn connect_tls_verified_with_alpn(
             }))
             .with_no_client_auth()
     };
-    if https {
-        client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    }
-    let connector = TlsConnector::from(Arc::new(client_config));
-    let server_name = ServerName::try_from(tls.tls_server_name.clone())
-        .map_err(|_| DnsError::InvalidMessage("invalid TLS server name"))?;
-    let upstream = resolve_tls_endpoint(upstream, tls).await?;
-    let stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
-        .await
-        .map_err(|_| DnsError::UpstreamTimeout)??;
-    tokio::time::timeout(UPSTREAM_TIMEOUT, connector.connect(server_name, stream))
-        .await
-        .map_err(|_| DnsError::UpstreamTimeout)?
-        .map_err(std::io::Error::other)
-        .map_err(DnsError::Io)
+    Ok(client_config)
 }
 
 fn go_style_env_flag(name: &str) -> bool {
@@ -1202,6 +1221,7 @@ fn tls_pool_key(upstream: SocketAddr, tls: &DnsTlsConfig) -> Vec<u8> {
     key.push(0xff);
     key.extend_from_slice(tls.tls_server_name.as_bytes());
     key.push(u8::from(tls.skip_certificate_verification));
+    key.push(tls.doh_protocol as u8);
     if let Some(endpoint_host) = &tls.endpoint_host {
         key.push(0xfe);
         key.extend_from_slice(endpoint_host.as_bytes());
@@ -1516,6 +1536,264 @@ async fn query_http_reuse(
 }
 
 async fn query_https_verified_reuse(
+    query: &[u8],
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+    pool: Option<&Mutex<TlsConnectionPool>>,
+) -> Result<Vec<u8>, DnsError> {
+    let protocol = match tls.doh_protocol {
+        DohProtocol::Http => DohProtocol::Http,
+        DohProtocol::Http3Only => DohProtocol::Http3Only,
+        DohProtocol::PreferHttp3 => select_doh_protocol(upstream, tls, pool).await?,
+    };
+    match protocol {
+        DohProtocol::Http => query_https_http_reuse(query, upstream, tls, pool).await,
+        DohProtocol::Http3Only => query_https_h3_reuse(query, upstream, tls, pool).await,
+        DohProtocol::PreferHttp3 => unreachable!("preference probe returns a concrete protocol"),
+    }
+}
+
+async fn select_doh_protocol(
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+    pool: Option<&Mutex<TlsConnectionPool>>,
+) -> Result<DohProtocol, DnsError> {
+    let key = tls_pool_key(upstream, tls);
+    if let Some(pool) = pool {
+        let pool = pool.lock().await;
+        if pool.doh_choice_key == key
+            && let Some(choice) = pool.doh_choice
+        {
+            return Ok(choice);
+        }
+    }
+
+    let h3_probe = probe_h3(upstream, tls);
+    let http_probe = async {
+        // The pinned Go implementation starts QUIC and TLS probes together,
+        // but the local QUIC handshake wins before its TCP goroutine reaches
+        // the socket when both transports are immediately available.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        connect_https_verified(upstream, tls).await
+    };
+    tokio::pin!(h3_probe);
+    tokio::pin!(http_probe);
+    let choice = tokio::select! {
+        h3 = &mut h3_probe => match h3 {
+            Ok(()) => DohProtocol::Http3Only,
+            Err(_) => {
+                drop(http_probe.await?);
+                DohProtocol::Http
+            }
+        },
+        http = &mut http_probe => match http {
+            Ok(stream) => {
+                drop(stream);
+                DohProtocol::Http
+            }
+            Err(_) => {
+                h3_probe.await?;
+                DohProtocol::Http3Only
+            }
+        },
+    };
+    if let Some(pool) = pool {
+        let mut pool = pool.lock().await;
+        pool.doh_choice_key = key;
+        pool.doh_choice = Some(choice);
+    }
+    Ok(choice)
+}
+
+async fn probe_h3(upstream: SocketAddr, tls: &DnsTlsConfig) -> Result<(), DnsError> {
+    let endpoint = h3_endpoint(tls)?;
+    let address = resolve_tls_endpoint(upstream, tls).await?;
+    let connecting = endpoint
+        .connect(address, &tls.tls_server_name)
+        .map_err(std::io::Error::other)?;
+    let connection = tokio::time::timeout(UPSTREAM_TIMEOUT, connecting)
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)?;
+    connection.close(0_u32.into(), b"HTTP/3 probe complete");
+    Ok(())
+}
+
+fn h3_endpoint(tls: &DnsTlsConfig) -> Result<quinn::Endpoint, DnsError> {
+    let mut crypto = verified_client_config(tls)?;
+    crypto.alpn_protocols = vec![b"h3".to_vec()];
+    // The pinned Go DoH client leaves ClientSessionCache unset. It labels H3
+    // GETs as 0-RTT-capable, but reconnects cannot actually resume TLS and the
+    // authority observes a full handshake. Disable rustls resumption to keep
+    // that externally visible behavior until the oracle changes.
+    crypto.enable_early_data = false;
+    crypto.resumption = tokio_rustls::rustls::client::Resumption::disabled();
+    let crypto =
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(std::io::Error::other)?;
+    let config = quinn::ClientConfig::new(Arc::new(crypto));
+    let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    endpoint.set_default_client_config(config);
+    Ok(endpoint)
+}
+
+async fn connect_h3(
+    endpoint: &quinn::Endpoint,
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+) -> Result<quinn::Connection, DnsError> {
+    let connecting = endpoint
+        .connect(upstream, &tls.tls_server_name)
+        .map_err(std::io::Error::other)?;
+    match connecting.into_0rtt() {
+        Ok((connection, accepted)) => {
+            tokio::spawn(async move {
+                let _ = accepted.await;
+            });
+            Ok(connection)
+        }
+        Err(connecting) => tokio::time::timeout(UPSTREAM_TIMEOUT, connecting)
+            .await
+            .map_err(|_| DnsError::UpstreamTimeout)?
+            .map_err(std::io::Error::other)
+            .map_err(DnsError::Io),
+    }
+}
+
+async fn h3_sender(
+    connection: quinn::Connection,
+) -> Result<h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>, DnsError> {
+    let (mut driver, sender) = h3::client::new(h3_quinn::Connection::new(connection))
+        .await
+        .map_err(std::io::Error::other)?;
+    tokio::spawn(async move {
+        let _ = std::future::poll_fn(|context| driver.poll_close(context)).await;
+    });
+    Ok(sender)
+}
+
+async fn query_https_h3_reuse(
+    query: &[u8],
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+    pool: Option<&Mutex<TlsConnectionPool>>,
+) -> Result<Vec<u8>, DnsError> {
+    let address = resolve_tls_endpoint(upstream, tls).await?;
+    let key = tls_pool_key(upstream, tls);
+    let Some(pool) = pool else {
+        let endpoint = h3_endpoint(tls)?;
+        let connection = connect_h3(&endpoint, address, tls).await?;
+        let mut sender = h3_sender(connection.clone()).await?;
+        let response = exchange_doh_h3(query, upstream, tls, &mut sender).await;
+        connection.close(0_u32.into(), b"one-shot HTTP/3 complete");
+        return response;
+    };
+
+    let mut pool = pool.lock().await;
+    if pool.h3_key != key {
+        if let Some(connection) = pool.h3_connection.take() {
+            connection.close(0_u32.into(), b"HTTP/3 configuration changed");
+        }
+        pool.h3_sender = None;
+        pool.h3_endpoint = None;
+        pool.h3_key.clone_from(&key);
+    }
+    if pool.h3_endpoint.is_none() {
+        pool.h3_endpoint = Some(h3_endpoint(tls)?);
+    }
+
+    for _ in 0..3 {
+        if let Some(mut sender) = pool.h3_sender.take() {
+            match exchange_doh_h3(query, upstream, tls, &mut sender).await {
+                Ok(response) => {
+                    pool.h3_sender = Some(sender);
+                    return Ok(response);
+                }
+                Err(_) => {
+                    if let Some(connection) = pool.h3_connection.take() {
+                        connection.close(0_u32.into(), b"stale HTTP/3 connection");
+                    }
+                }
+            }
+        }
+        let endpoint = pool.h3_endpoint.as_ref().expect("HTTP/3 endpoint");
+        let connection = connect_h3(endpoint, address, tls).await?;
+        let mut sender = h3_sender(connection.clone()).await?;
+        match exchange_doh_h3(query, upstream, tls, &mut sender).await {
+            Ok(response) => {
+                pool.h3_connection = Some(connection);
+                pool.h3_sender = Some(sender);
+                return Ok(response);
+            }
+            Err(_) => connection.close(0_u32.into(), b"failed HTTP/3 request"),
+        }
+    }
+    Err(DnsError::InvalidMessage("HTTP/3 retry limit exceeded"))
+}
+
+async fn exchange_doh_h3(
+    query: &[u8],
+    upstream: SocketAddr,
+    tls: &DnsTlsConfig,
+    sender: &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+) -> Result<Vec<u8>, DnsError> {
+    let path = tls
+        .doh_path
+        .as_deref()
+        .ok_or(DnsError::InvalidMessage("DoH path is missing"))?;
+    let mut upstream_query = query.to_vec();
+    upstream_query[..2].fill(0);
+    let encoded = URL_SAFE_NO_PAD.encode(&upstream_query);
+    let authority = tls.endpoint_host.as_ref().map_or_else(
+        || upstream.to_string(),
+        |host| format!("{host}:{}", upstream.port()),
+    );
+    let uri = format!("https://{authority}{path}?dns={encoded}")
+        .parse::<http::Uri>()
+        .map_err(std::io::Error::other)?;
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("accept", "application/dns-message")
+        .header("user-agent", "");
+    if let Some(credentials) = &tls.doh_basic_credentials {
+        builder = builder.header(
+            "authorization",
+            format!("Basic {}", STANDARD.encode(credentials.as_bytes())),
+        );
+    }
+    let request = builder.body(()).map_err(std::io::Error::other)?;
+    let mut stream = tokio::time::timeout(UPSTREAM_TIMEOUT, sender.send_request(request))
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)?;
+    stream.finish().await.map_err(std::io::Error::other)?;
+    let response = tokio::time::timeout(UPSTREAM_TIMEOUT, stream.recv_response())
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)?;
+    if response.status() != http::StatusCode::OK {
+        return Err(DnsError::InvalidMessage("DoH response status is not 200"));
+    }
+    let mut dns_response = Vec::new();
+    while let Some(mut chunk) = tokio::time::timeout(UPSTREAM_TIMEOUT, stream.recv_data())
+        .await
+        .map_err(|_| DnsError::UpstreamTimeout)?
+        .map_err(std::io::Error::other)?
+    {
+        if dns_response.len().saturating_add(chunk.remaining()) > MAX_DNS_MESSAGE {
+            return Err(DnsError::InvalidMessage("DoH response is too large"));
+        }
+        let remaining = chunk.remaining();
+        dns_response.extend_from_slice(&chunk.copy_to_bytes(remaining));
+    }
+    if dns_response.len() < DNS_HEADER_LENGTH || dns_response[..2] != [0, 0] {
+        return Err(DnsError::InvalidMessage("DoH response DNS ID is not zero"));
+    }
+    dns_response[..2].copy_from_slice(&query[..2]);
+    Ok(dns_response)
+}
+
+async fn query_https_http_reuse(
     query: &[u8],
     upstream: SocketAddr,
     tls: &DnsTlsConfig,
@@ -1899,6 +2177,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
         key.push(0xf8);
         key.extend_from_slice(tls.tls_server_name.as_bytes());
         key.push(u8::from(tls.skip_certificate_verification));
+        key.push(tls.doh_protocol as u8);
         if let Some(endpoint_host) = &tls.endpoint_host {
             key.push(0xfb);
             key.extend_from_slice(endpoint_host.as_bytes());

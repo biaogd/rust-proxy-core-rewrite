@@ -9,7 +9,10 @@ publish.workspace = true
 base64.workspace = true
 bytes.workspace = true
 h2.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 http.workspace = true
+quinn.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-state = { path = "../state" }
 serde.workspace = true
