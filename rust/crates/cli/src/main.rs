@@ -312,6 +312,16 @@ fn run_age_subcommand(
     arguments: &[OsString],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match arguments.first().and_then(|value| value.to_str()) {
+        Some("keygen") => {
+            let (secret_key, public_key) = rewrite_age::generate_x25519_key_pair();
+            let created = time::OffsetDateTime::now_utc()
+                .replace_nanosecond(0)?
+                .format(&time::format_description::well_known::Rfc3339)?;
+            println!("# created: {created}");
+            println!("# public key: {public_key}");
+            println!("{secret_key}");
+            Ok(())
+        }
         Some("convert") => {
             let secret_key = arguments
                 .get(1)

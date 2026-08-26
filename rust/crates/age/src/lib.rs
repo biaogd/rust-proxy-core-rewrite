@@ -1,5 +1,6 @@
 //! Narrow age compatibility helpers for encrypted Mihomo configuration.
 
+use age::secrecy::ExposeSecret;
 use age::x25519;
 use thiserror::Error;
 
@@ -33,6 +34,16 @@ pub fn validate_x25519_identity(secret_key: &str) -> Result<(), AgeError> {
 /// Returns [`AgeError::InvalidIdentity`] for malformed or unsupported keys.
 pub fn recipient_for_x25519_identity(secret_key: &str) -> Result<String, AgeError> {
     Ok(parse_identity(secret_key)?.to_public().to_string())
+}
+
+/// Generates one native X25519 identity and its public recipient.
+#[must_use]
+pub fn generate_x25519_key_pair() -> (String, String) {
+    let identity = x25519::Identity::generate();
+    (
+        identity.to_string().expose_secret().to_owned(),
+        identity.to_public().to_string(),
+    )
 }
 
 /// Encrypts bytes to one native X25519 recipient using ASCII armor.
@@ -99,5 +110,11 @@ mod tests {
             decrypt_config(encrypted.as_bytes(), identity.to_string().expose_secret()).unwrap(),
             b"phase 5a4c"
         );
+    }
+
+    #[test]
+    fn generated_key_pair_converts_to_the_same_recipient() {
+        let (secret, public) = generate_x25519_key_pair();
+        assert_eq!(recipient_for_x25519_identity(&secret).unwrap(), public);
     }
 }

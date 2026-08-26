@@ -683,6 +683,15 @@ failure exit class. Bidirectional Go→Rust and Rust→Go ciphertext interchange
 required. Key generation, hybrid/PQ and other identity/recipient types remain
 outside this slice.
 
+### Phase 5A4d accepted scope
+
+Phase 5A4d accepts native X25519 `age keygen` from `CLI-10`. It preserves the
+oracle's three-line created/public/secret output structure, accepts ignored
+trailing arguments and short-circuits all normal configuration setup. Generated
+keys must convert to the same recipient in the opposite implementation.
+`keygen-pq` and hybrid/PQ configuration identities remain outside the X25519
+claim.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A

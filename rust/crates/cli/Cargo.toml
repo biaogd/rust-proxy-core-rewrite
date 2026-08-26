@@ -18,6 +18,7 @@ rewrite-age = { path = "../age" }
 rewrite-runtime = { path = "../runtime" }
 tokio.workspace = true
 tokio-util.workspace = true
+time.workspace = true
 
 [build-dependencies]
 rustc_version.workspace = true
