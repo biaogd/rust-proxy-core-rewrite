@@ -212,6 +212,17 @@ fn run_generate_subcommand(
             println!("[Server] decryption: \"mlkem768x25519plus.native.600s.{private}\"");
             println!("[Client] encryption: \"mlkem768x25519plus.native.0rtt.{password}\"");
         }
+        Some("ech-keypair") => {
+            let public_name = arguments
+                .get(1)
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    std::io::Error::other("Using: generate ech-keypair <plain_server_name>")
+                })?;
+            let pair = rewrite_generator::ech_keypair(public_name)?;
+            println!("Config: {}", STANDARD.encode(pair.config_list));
+            println!("Key: {}", pair.key_pem);
+        }
         _ => {}
     }
     Ok(())

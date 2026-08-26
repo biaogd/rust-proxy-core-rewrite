@@ -786,6 +786,18 @@ relationship and an invalid-length case preserves the exit class. This does
 not claim VLESS transport/encryption runtime behavior; ML-KEM, ECH and Sudoku
 generation remain later slices.
 
+### Phase 5A6e accepted scope
+
+Phase 5A6e accepts `generate ech-keypair <plain_server_name>` from `CLI-09`.
+The generator writes the oracle's ECHConfigList v0xfe0d record with X25519
+HKDF-SHA256 KEM, the ordered AES-128-GCM/AES-256-GCM/ChaCha20-Poly1305 suite
+list, public name and empty extensions, then packages the raw private key and
+matching config through `pem` 4.0.0 (MIT). The black-box gate parses both the
+Base64 config and `ECH KEYS` PEM rather than snapshotting randomness, verifies
+every declared field and independently derives the public key. This establishes
+generation-format compatibility only, not TLS ECH handshake behavior. ML-KEM
+and Sudoku generation remain later 5A6 slices.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
