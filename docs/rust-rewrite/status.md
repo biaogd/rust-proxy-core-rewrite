@@ -49,11 +49,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; complete bootstrap/proxy consumers remain |
 | Phase 4F8 resolver policies | Complete in declared core; DNS-12 partial | Ordered main/proxy multi-resolver domain/GeoSite/inline-rule-set policies pass; external providers, attributes and adapter consumers remain |
 | Phase 4F9 fallback decision core | Complete in declared core; DNS-13 partial | GeoIP.dat/GeoSite/domain/IPv4/IPv6 filters, multiple fallback clients and eager/lazy failure/timeout ordering pass; MMDB and broader integration remain |
+| Phase 4F10 dual-stack/ECH/lazy tunnel | Complete in declared scope; DNS-14 parity | Concurrent A/AAAA with A-first ordering and configurable wait, primary IPv4, IP literals, HTTPS ECH extraction and tunnel lazy rule resolution pass |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F9 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F10 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F9 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F10 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2476,6 +2477,56 @@ passed locally. Complete Phase 1–4F9 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+## Phase 4F10 deliverables and evidence
+
+Phase 4F10 replaces the earlier sequential development lookup path with the Go
+resolver's dual-stack contract. A and AAAA queries start concurrently. The
+lookup waits for A first, then waits only the configured `dns.ipv6-timeout`
+for AAAA; returned address lists keep IPv4 entries before IPv6. A zero timeout
+uses the Go-compatible 100 ms fallback. The primary-IPv4 operation returns a
+successful A result without waiting for AAAA, but waits for AAAA when A fails.
+IPv4 and IPv6 literals are resolved locally without contacting an upstream.
+
+The DNS wire parser now recognizes HTTPS (type 65) answer records and returns
+the first ECH service parameter (key 5), preserving its bytes exactly. A valid
+HTTPS answer without ECH produces the same observable failure class at the
+helper boundary. This does not add outbound TLS ECH negotiation; adapter-level
+ECH consumption remains with the relevant remote protocol gate.
+
+The tunnel portion re-proves lazy rule resolution through the product boundary.
+A domain rule preceding an IP rule reaches DIRECT without contacting the main
+resolver, while an IP-CIDR rule causes concurrent main A/AAAA resolution before
+selection. Both paths then use the configured direct resolver and complete a
+mixed SOCKS5 TCP echo relay.
+
+`compat/scripts/phase4f10.py` compares config exits, ordered address lists,
+upstream query families and concurrent start times, configurable wait-window
+inclusion/exclusion, primary-A early return, A-failure AAAA fallback, literal
+short-circuiting, ECH bytes/errors, tunnel resolver contacts and relay results.
+
+Observed Phase 4F10 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Declared scope passed; DNS-14 parity | Native `compat/scripts/phase4f10.py`; deterministic UDP authorities and mixed SOCKS tunnel |
+| Linux amd64 | Pending | Default full differential includes Phase 4F10; no result is recorded before completion |
+
+### Phase 4F10 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f10.py
+```
+
+The Phase 4F10 differential, format check and strict workspace Clippy gate
+passed locally. Complete Phase 1–4F10 regression, workspace tests and
+Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
+pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2551,10 +2602,10 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the partial Phase 4F9 fallback-decision boundary.
+Rust behavior stops at the Phase 4F10 dual-stack/ECH/lazy-tunnel boundary.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` retain the database/adapter/provider/integration gaps above.
-Phase 4D3B, 4F10 or another implementation gate must not begin without a separate
+Phase 4D3B, 4F11 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

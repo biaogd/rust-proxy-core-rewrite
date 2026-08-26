@@ -17,6 +17,10 @@ path = "src/h2_authority.rs"
 name = "rewrite-resolver-set"
 path = "src/resolver_set.rs"
 
+[[bin]]
+name = "rewrite-dns-lookup"
+path = "src/dns_lookup.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }

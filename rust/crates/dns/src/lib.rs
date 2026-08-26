@@ -238,6 +238,8 @@ pub enum DnsError {
     Inactive,
     #[error("DNS upstream returned no permitted address")]
     NoAddress,
+    #[error("no ECH config found in DNS records")]
+    NoEchConfig,
 }
 
 #[derive(Clone)]
@@ -618,7 +620,61 @@ pub async fn resolve_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    resolve_domain_with(config, host, allow_ipv6, false).await
+    preferred_address(lookup_domain_with(config, host, allow_ipv6, false).await?)
+}
+
+/// Returns the Go-compatible ordered A/AAAA lookup result. A and AAAA start
+/// concurrently; after A completes, AAAA receives only `dns.ipv6-timeout` of
+/// additional wait time.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] when neither address family produces an address before
+/// the declared lookup boundary.
+pub async fn lookup_domain(
+    config: &DnsConfig,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<Vec<IpAddr>, DnsError> {
+    lookup_domain_with(config, host, allow_ipv6, false).await
+}
+
+/// Starts A and AAAA concurrently, returning A immediately when available and
+/// waiting for AAAA only when A fails.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] if both address-family lookups fail.
+pub async fn lookup_domain_primary_ipv4(
+    config: &DnsConfig,
+    host: &str,
+) -> Result<Vec<IpAddr>, DnsError> {
+    let ipv6_config = config.clone();
+    let ipv6_host = host.to_owned();
+    let ipv6 = tokio::spawn(async move {
+        query_configured_addresses(&ipv6_config, &ipv6_host, 28, false).await
+    });
+    match query_configured_addresses(config, host, 1, false).await {
+        Ok(addresses) => Ok(addresses),
+        Err(_) => match ipv6.await {
+            Ok(Ok(addresses)) => Ok(addresses),
+            Ok(Err(_)) | Err(_) => Err(DnsError::NoAddress),
+        },
+    }
+}
+
+/// Resolves the first ECH configuration value from an HTTPS DNS answer.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] for transport/message failures or when no HTTPS answer
+/// contains the ECH service parameter.
+pub async fn resolve_ech(config: &DnsConfig, host: &str) -> Result<Vec<u8>, DnsError> {
+    let query = make_query(host, 65)?;
+    let identifier = [query[0], query[1]];
+    let response = query_configured(&query, config, host, None, None).await?;
+    validate_response(&response, identifier)?;
+    answer_https_ech(&response)?.ok_or(DnsError::NoEchConfig)
 }
 
 /// Resolves a DIRECT outbound domain through the configured direct resolver.
@@ -634,7 +690,7 @@ pub async fn resolve_direct_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    resolve_domain_with(config, host, allow_ipv6, true).await
+    preferred_address(lookup_domain_with(config, host, allow_ipv6, true).await?)
 }
 
 /// Resolves a proxy endpoint through `dns.proxy-server-nameserver`.
@@ -647,12 +703,15 @@ pub async fn resolve_proxy_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    resolve_domain_from_set(
-        selected_policy(&config.proxy_policies, host).unwrap_or(&config.proxy_resolvers),
-        host,
-        allow_ipv6,
+    preferred_address(
+        lookup_domain_from_set(
+            selected_policy(&config.proxy_policies, host).unwrap_or(&config.proxy_resolvers),
+            host,
+            allow_ipv6,
+            config.ipv6_timeout,
+        )
+        .await?,
     )
-    .await
 }
 
 /// Resolves a bootstrap name through `dns.default-nameserver`.
@@ -665,76 +724,144 @@ pub async fn resolve_default_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    resolve_domain_from_set(&config.default_resolvers, host, allow_ipv6).await
+    preferred_address(
+        lookup_domain_from_set(
+            &config.default_resolvers,
+            host,
+            allow_ipv6,
+            config.ipv6_timeout,
+        )
+        .await?,
+    )
 }
 
-async fn resolve_domain_from_set(
+fn preferred_address(addresses: Vec<IpAddr>) -> Result<IpAddr, DnsError> {
+    addresses
+        .iter()
+        .copied()
+        .find(IpAddr::is_ipv4)
+        .or_else(|| addresses.into_iter().next())
+        .ok_or(DnsError::NoAddress)
+}
+
+async fn lookup_domain_from_set(
     resolvers: &[DnsResolverClient],
     host: &str,
     allow_ipv6: bool,
-) -> Result<IpAddr, DnsError> {
-    let mut ipv4 = None;
-    let mut ipv6 = None;
-    for record_type in [28_u16, 1_u16] {
-        if record_type == 28 && !allow_ipv6 {
-            continue;
-        }
-        let query = make_query(host, record_type)?;
-        let identifier = [query[0], query[1]];
-        let response = query_resolver_set(&query, resolvers, None, None).await?;
-        validate_response(&response, identifier)?;
-        if let Some((address, _)) = answer_addresses(&response)?
-            .into_iter()
-            .find(|(address, _)| allow_ipv6 || address.is_ipv4())
-        {
-            if address.is_ipv4() {
-                ipv4 = Some(address);
-            } else {
-                ipv6 = Some(address);
-            }
-        }
+    ipv6_timeout: Duration,
+) -> Result<Vec<IpAddr>, DnsError> {
+    if !allow_ipv6 {
+        return query_set_addresses(resolvers, host, 1).await;
     }
-    ipv4.or(ipv6).ok_or(DnsError::NoAddress)
+    let ipv6_resolvers = resolvers.to_vec();
+    let ipv6_host = host.to_owned();
+    let ipv6 =
+        tokio::spawn(async move { query_set_addresses(&ipv6_resolvers, &ipv6_host, 28).await });
+    let ipv4 = query_set_addresses(resolvers, host, 1).await;
+    finish_dual_stack(ipv4, ipv6, ipv6_timeout).await
 }
 
-async fn resolve_domain_with(
+async fn lookup_domain_with(
     config: &DnsConfig,
     host: &str,
     allow_ipv6: bool,
     direct: bool,
-) -> Result<IpAddr, DnsError> {
-    let mut ipv4 = None;
-    let mut ipv6 = None;
-    for record_type in [28_u16, 1_u16] {
-        if record_type == 28 && !allow_ipv6 {
-            continue;
-        }
-        let query = make_query(host, record_type)?;
-        let identifier = [query[0], query[1]];
-        let response = if direct && let Some(direct_config) = &config.direct {
-            if direct_config.follow_policy
-                && let Some(resolvers) = selected_policy(&config.policies, host)
-            {
-                query_resolver_set(&query, resolvers, None, None).await?
-            } else {
-                query_resolver_set(&query, &direct_config.resolvers, None, None).await?
-            }
-        } else {
-            query_configured(&query, config, host, None, None).await?
-        };
-        validate_response(&response, identifier)?;
-        if let Some((address, _)) = answer_addresses(&response)?
-            .into_iter()
-            .find(|(address, _)| allow_ipv6 || address.is_ipv4())
-        {
-            if address.is_ipv4() {
-                ipv4 = Some(address);
-            } else {
-                ipv6 = Some(address);
-            }
-        }
+) -> Result<Vec<IpAddr>, DnsError> {
+    if !allow_ipv6 {
+        return query_configured_addresses(config, host, 1, direct).await;
     }
-    ipv4.or(ipv6).ok_or(DnsError::NoAddress)
+    let ipv6_config = config.clone();
+    let ipv6_host = host.to_owned();
+    let ipv6 = tokio::spawn(async move {
+        query_configured_addresses(&ipv6_config, &ipv6_host, 28, direct).await
+    });
+    let ipv4 = query_configured_addresses(config, host, 1, direct).await;
+    finish_dual_stack(ipv4, ipv6, config.ipv6_timeout).await
+}
+
+async fn finish_dual_stack(
+    ipv4: Result<Vec<IpAddr>, DnsError>,
+    ipv6: tokio::task::JoinHandle<Result<Vec<IpAddr>, DnsError>>,
+    ipv6_timeout: Duration,
+) -> Result<Vec<IpAddr>, DnsError> {
+    let ipv6 = tokio::time::timeout(ipv6_timeout, ipv6).await;
+    let mut addresses = ipv4.unwrap_or_default();
+    match ipv6 {
+        Ok(Ok(Ok(mut ipv6))) => addresses.append(&mut ipv6),
+        Ok(Ok(Err(_)) | Err(_)) if addresses.is_empty() => {
+            return Err(DnsError::NoAddress);
+        }
+        Ok(Ok(Err(_)) | Err(_)) | Err(_) => {}
+    }
+    Ok(addresses)
+}
+
+async fn query_set_addresses(
+    resolvers: &[DnsResolverClient],
+    host: &str,
+    record_type: u16,
+) -> Result<Vec<IpAddr>, DnsError> {
+    if let Some(addresses) = literal_addresses(host, record_type)? {
+        return Ok(addresses);
+    }
+    let query = make_query(host, record_type)?;
+    let identifier = [query[0], query[1]];
+    let response = query_resolver_set(&query, resolvers, None, None).await?;
+    validate_response(&response, identifier)?;
+    response_addresses(&response)
+}
+
+async fn query_configured_addresses(
+    config: &DnsConfig,
+    host: &str,
+    record_type: u16,
+    direct: bool,
+) -> Result<Vec<IpAddr>, DnsError> {
+    if let Some(addresses) = literal_addresses(host, record_type)? {
+        return Ok(addresses);
+    }
+    let query = make_query(host, record_type)?;
+    let identifier = [query[0], query[1]];
+    let response = if direct && let Some(direct_config) = &config.direct {
+        if direct_config.follow_policy
+            && let Some(resolvers) = selected_policy(&config.policies, host)
+        {
+            query_resolver_set(&query, resolvers, None, None).await?
+        } else {
+            query_resolver_set(&query, &direct_config.resolvers, None, None).await?
+        }
+    } else {
+        query_configured(&query, config, host, None, None).await?
+    };
+    validate_response(&response, identifier)?;
+    response_addresses(&response)
+}
+
+fn literal_addresses(host: &str, record_type: u16) -> Result<Option<Vec<IpAddr>>, DnsError> {
+    let Ok(address) = host.parse::<IpAddr>() else {
+        return Ok(None);
+    };
+    let address = address.to_canonical();
+    if matches!(
+        (record_type, address),
+        (1, IpAddr::V4(_)) | (28, IpAddr::V6(_))
+    ) {
+        Ok(Some(vec![address]))
+    } else {
+        Err(DnsError::NoAddress)
+    }
+}
+
+fn response_addresses(response: &[u8]) -> Result<Vec<IpAddr>, DnsError> {
+    let addresses = answer_addresses(response)?
+        .into_iter()
+        .map(|(address, _)| address)
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        Err(DnsError::NoAddress)
+    } else {
+        Ok(addresses)
+    }
 }
 
 enum HostLookup {
@@ -1515,7 +1642,7 @@ fn answer_addresses(message: &[u8]) -> Result<Vec<(IpAddr, u32)>, DnsError> {
             message[offset + 9],
         ]));
         let data_start = offset + 10;
-        let end = checked_record_end(
+        let record_end = checked_record_end(
             message,
             data_start,
             data_length,
@@ -1529,7 +1656,7 @@ fn answer_addresses(message: &[u8]) -> Result<Vec<(IpAddr, u32)>, DnsError> {
                 message[data_start + 3],
             ))),
             (28, 16) => {
-                let octets: [u8; 16] = message[data_start..end]
+                let octets: [u8; 16] = message[data_start..record_end]
                     .try_into()
                     .map_err(|_| DnsError::InvalidMessage("invalid AAAA record"))?;
                 Some(IpAddr::V6(Ipv6Addr::from(octets)))
@@ -1539,9 +1666,76 @@ fn answer_addresses(message: &[u8]) -> Result<Vec<(IpAddr, u32)>, DnsError> {
         if let Some(address) = address {
             addresses.push((address.to_canonical(), ttl));
         }
-        offset = end;
+        offset = record_end;
     }
     Ok(addresses)
+}
+
+fn answer_https_ech(message: &[u8]) -> Result<Option<Vec<u8>>, DnsError> {
+    if message.len() < DNS_HEADER_LENGTH {
+        return Err(DnsError::InvalidMessage("header is truncated"));
+    }
+    let questions = usize::from(u16::from_be_bytes([message[4], message[5]]));
+    let answers = usize::from(u16::from_be_bytes([message[6], message[7]]));
+    let mut offset = DNS_HEADER_LENGTH;
+    for _ in 0..questions {
+        offset = skip_name(message, offset)?;
+        offset = checked_record_end(message, offset, 4, "question is truncated")?;
+    }
+    for _ in 0..answers {
+        offset = skip_name(message, offset)?;
+        if offset + 10 > message.len() {
+            return Err(DnsError::InvalidMessage("resource record is truncated"));
+        }
+        let record_type = u16::from_be_bytes([message[offset], message[offset + 1]]);
+        let data_length = usize::from(u16::from_be_bytes([
+            message[offset + 8],
+            message[offset + 9],
+        ]));
+        let data_start = offset + 10;
+        let record_end = checked_record_end(
+            message,
+            data_start,
+            data_length,
+            "resource data is truncated",
+        )?;
+        if record_type == 65 {
+            if data_length < 3 {
+                return Err(DnsError::InvalidMessage("HTTPS record is truncated"));
+            }
+            let mut parameter = skip_name(message, data_start + 2)?;
+            if parameter > record_end {
+                return Err(DnsError::InvalidMessage("HTTPS target exceeds record"));
+            }
+            while parameter < record_end {
+                if parameter + 4 > record_end {
+                    return Err(DnsError::InvalidMessage(
+                        "HTTPS service parameter is truncated",
+                    ));
+                }
+                let key = u16::from_be_bytes([message[parameter], message[parameter + 1]]);
+                let length = usize::from(u16::from_be_bytes([
+                    message[parameter + 2],
+                    message[parameter + 3],
+                ]));
+                let value_start = parameter + 4;
+                let value_end = value_start
+                    .checked_add(length)
+                    .filter(|end| *end <= record_end);
+                let Some(value_end) = value_end else {
+                    return Err(DnsError::InvalidMessage(
+                        "HTTPS service parameter value is truncated",
+                    ));
+                };
+                if key == 5 {
+                    return Ok(Some(message[value_start..value_end].to_vec()));
+                }
+                parameter = value_end;
+            }
+        }
+        offset = record_end;
+    }
+    Ok(None)
 }
 
 fn checked_record_end(

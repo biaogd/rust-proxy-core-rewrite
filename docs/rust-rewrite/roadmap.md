@@ -472,6 +472,15 @@ and single five-second query budget, including the observable case where a lazy
 main timeout leaves no budget to contact fallback. MMDB-mode GeoIP and broader
 transport/cache/retry integration remain explicit `DNS-13` gaps.
 
+Phase 4F10 accepts the configured-resolver `DNS-14` core. A and AAAA start
+concurrently, A remains primary, and AAAA is included only within the default
+or configured post-A wait window. Primary-IPv4 returns immediately on A success
+and uses AAAA only after A failure. The gate also covers IP-literal
+short-circuiting, HTTPS ECH parameter extraction and missing-ECH behavior, plus
+the mixed-tunnel distinction between a domain rule that avoids main DNS and an
+IP rule that requests lazy resolution. Outbound TLS ECH consumption and remote
+adapter/platform integration remain with their owning gates.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

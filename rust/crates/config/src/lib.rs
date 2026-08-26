@@ -135,6 +135,7 @@ pub struct DnsConfig {
     pub default_resolvers: Vec<DnsResolverClient>,
     pub proxy_resolvers: Vec<DnsResolverClient>,
     pub ipv6: bool,
+    pub ipv6_timeout: std::time::Duration,
     pub use_hosts: bool,
     pub use_system_hosts: bool,
     pub mode: DnsMode,
@@ -403,6 +404,7 @@ struct RawDns {
     enable: Option<bool>,
     listen: Option<String>,
     ipv6: Option<bool>,
+    ipv6_timeout: Option<i64>,
     prefer_h3: Option<bool>,
     use_hosts: Option<bool>,
     use_system_hosts: Option<bool>,
@@ -826,6 +828,17 @@ fn parse_dns(
         )));
     }
     let ipv6 = raw.ipv6.unwrap_or(false);
+    let ipv6_timeout = match raw.ipv6_timeout.unwrap_or(100) {
+        value if value < 0 => {
+            return Err(ConfigError::InvalidDns(
+                "dns.ipv6-timeout must be non-negative".to_owned(),
+            ));
+        }
+        0 => std::time::Duration::from_millis(100),
+        value => std::time::Duration::from_millis(
+            u64::try_from(value).expect("positive IPv6 timeout fits u64"),
+        ),
+    };
     let use_hosts = raw.use_hosts.unwrap_or(true);
     let use_system_hosts = raw.use_system_hosts.unwrap_or(true);
     let mode = match raw.enhanced_mode.as_deref().unwrap_or("redir-host") {
@@ -884,6 +897,7 @@ fn parse_dns(
         default_resolvers: resolver_sets.default_resolvers,
         proxy_resolvers: resolver_sets.proxy_resolvers,
         ipv6,
+        ipv6_timeout,
         use_hosts,
         use_system_hosts,
         mode,
@@ -2647,6 +2661,7 @@ dns:
                 default_resolvers: Vec::new(),
                 proxy_resolvers: Vec::new(),
                 ipv6: false,
+                ipv6_timeout: std::time::Duration::from_millis(100),
                 use_hosts: false,
                 use_system_hosts: false,
                 mode: DnsMode::RedirHost,

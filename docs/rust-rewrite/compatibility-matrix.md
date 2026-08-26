@@ -191,6 +191,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4F7 resolver-set composition core | Oracle | **Partial** | All accepted transport forms compose in default/main/fallback/direct/proxy-server sets; deterministic multi-client selection, fallback filtering, direct-follow-policy and explicit default/proxy lookups pass in `compat/scripts/phase4f7.py`; complete bootstrap consumers and real proxy-outbound use remain pending |
 | Phase 4F8 ordered resolver policies | Oracle | **Partial** | Main/proxy multi-upstream policies, YAML matcher barriers, same-node overwrite, comma expansion, all four GeoSite domain types and inline domain/classical rule-set matchers pass in `compat/scripts/phase4f8.py`; external provider vehicles, GeoSite attributes, `respect-rules` and a real proxy consumer remain pending |
 | Phase 4F9 fallback decision core | Oracle | **Partial** | File-backed geodata-mode GeoIP including inversion/private-address behavior, GeoSite/domain and IPv4/IPv6 CIDR filters, multiple fallback clients, eager/lazy SERVFAIL and shared five-second timeout ordering pass in `compat/scripts/phase4f9.py`; MMDB-mode GeoIP and broader transport/retry integration remain pending |
+| Phase 4F10 dual-stack/ECH/lazy tunnel core | Oracle | **Parity** | Concurrent A/AAAA start, A-first ordering, default/configured IPv6 wait windows, primary-IPv4 early return and AAAA fallback, IP literals, HTTPS ECH extraction/missing-ECH error and mixed SOCKS rule-stage lazy resolution pass in `compat/scripts/phase4f10.py` |
 | Phase 4D1 simple nameserver policy | Oracle | **Parity** | Exact, `*` one-label and `+.` root/deep suffix selection across local UDP/TCP authorities, overlap priority and policy cache hit in `compat/scripts/phase4d1.py` |
 | Full policy and proxy/direct nameservers | Oracle | Partial | Phase 4F8 proves the ordered main/proxy policy core and Phase 4D3A proves direct-follow-policy; external rule-provider vehicles, GeoSite attributes, proxy data-plane consumption and `respect-rules` remain unclaimed |
 | Phase 4D2 single main/fallback answer-filter subset | Oracle | **Parity** | One local fallback, `+.` domain forcing, IPv4 CIDR answer filtering, eager/lazy call behavior, policy precedence and selected-response cache hit in `compat/scripts/phase4d2.py` |
@@ -271,7 +272,8 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4F7 resolver-set core | Oracle | **Partial** | Native deterministic default/main/fallback/direct/proxy set differential passed, 2026-08-26; remaining consumers are not claimed |
 | Darwin arm64 — Phase 4F8 resolver policies | Oracle | **Partial** | Native ordered domain/GeoSite/rule-set and main/proxy multi-client differential passed, 2026-08-26; provider/adapter integration gaps remain |
 | Darwin arm64 — Phase 4F9 fallback core | Oracle | **Partial** | Native deterministic GeoIP.dat/GeoSite/domain/IPv4/IPv6 and eager/lazy failure/timeout differential passed, 2026-08-26; MMDB and broader integration remain |
-| Darwin arm64 beyond Phase 4F9 | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 4F10 dual-stack/ECH/lazy tunnel | Oracle | **Parity** | Native helper and mixed SOCKS tunnel differential passed, 2026-08-26 |
+| Darwin arm64 beyond Phase 4F10 | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -286,7 +288,8 @@ separate build and runtime claim.
 | Linux amd64 — Phase 4F7 resolver-set core | Oracle | Pending | Default resolver-set differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 4F8 resolver policies | Oracle | Pending | Default ordered policy differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 4F9 fallback core | Oracle | Pending | Default fallback differential is configured; no result is claimed before completion |
-| Linux amd64 beyond Phase 4F9 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 4F10 dual-stack/ECH/lazy tunnel | Oracle | Pending | Default focused differential is configured; no result is claimed before completion |
+| Linux amd64 beyond Phase 4F10 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |
 | Windows amd64 — Phase 4F4 DHCP resolver | Oracle | Cross-build passed; native pending | Interface enumeration, packet and socket code compile for Rust 1.95 GNU; privileged native client/server parity remains pending |
