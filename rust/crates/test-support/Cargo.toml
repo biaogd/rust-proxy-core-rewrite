@@ -13,10 +13,15 @@ path = "src/main.rs"
 name = "rewrite-h2-authority"
 path = "src/h2_authority.rs"
 
+[[bin]]
+name = "rewrite-resolver-set"
+path = "src/resolver_set.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-rules = { path = "../rules" }
+rewrite-dns = { path = "../dns" }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true

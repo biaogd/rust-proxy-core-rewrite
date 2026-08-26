@@ -941,6 +941,7 @@ dependencies = [
  "h2",
  "http",
  "rewrite-config",
+ "rewrite-dns",
  "rewrite-model",
  "rewrite-rules",
  "rustls-pemfile",

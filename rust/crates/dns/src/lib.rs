@@ -13,8 +13,8 @@ use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
     Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMainKind,
-    DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
-    FakeIpFilterMode, HostEntry, SyntheticRcode,
+    DnsMode, DnsResolverClient, DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig,
+    FakeIpConfig, FakeIpFilterMode, HostEntry, SyntheticRcode,
 };
 use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
@@ -546,8 +546,8 @@ impl Resolver {
         config: &DnsConfig,
     ) -> Result<Vec<u8>, DnsError> {
         let question = parse_question(query)?;
-        let classic_wrappers = !config.classic_upstreams.is_empty();
-        if !classic_wrappers
+        let per_client_wrappers = !config.main_resolvers.is_empty();
+        if !per_client_wrappers
             && config
                 .query_options
                 .disabled_types
@@ -562,7 +562,7 @@ impl Resolver {
             return Ok(response);
         }
 
-        let upstream_query = if classic_wrappers {
+        let upstream_query = if per_client_wrappers {
             query.to_vec()
         } else {
             config
@@ -578,13 +578,16 @@ impl Resolver {
             Some(&self.http_pool),
         )
         .await?;
-        if !classic_wrappers {
+        if !per_client_wrappers {
             response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
         }
         validate_response(&response, identifier)?;
-        if !matches!(&config.main_kind, DnsMainKind::Rcode(_))
-            && matches!(response[3] & 0x0f, 2 | 5)
-        {
+        let synthetic_rcode = matches!(&config.main_kind, DnsMainKind::Rcode(_))
+            || config
+                .main_resolvers
+                .iter()
+                .any(|resolver| matches!(resolver, DnsResolverClient::Rcode(_)));
+        if !synthetic_rcode && matches!(response[3] & 0x0f, 2 | 5) {
             return Err(DnsError::InvalidMessage(
                 "upstream returned a retryable failure rcode",
             ));
@@ -633,6 +636,61 @@ pub async fn resolve_direct_domain(
     resolve_domain_with(config, host, allow_ipv6, true).await
 }
 
+/// Resolves a proxy endpoint through `dns.proxy-server-nameserver`.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] when the set is empty or produces no permitted address.
+pub async fn resolve_proxy_domain(
+    config: &DnsConfig,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<IpAddr, DnsError> {
+    resolve_domain_from_set(&config.proxy_resolvers, host, allow_ipv6).await
+}
+
+/// Resolves a bootstrap name through `dns.default-nameserver`.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] when the set is empty or produces no permitted address.
+pub async fn resolve_default_domain(
+    config: &DnsConfig,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<IpAddr, DnsError> {
+    resolve_domain_from_set(&config.default_resolvers, host, allow_ipv6).await
+}
+
+async fn resolve_domain_from_set(
+    resolvers: &[DnsResolverClient],
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<IpAddr, DnsError> {
+    let mut ipv4 = None;
+    let mut ipv6 = None;
+    for record_type in [28_u16, 1_u16] {
+        if record_type == 28 && !allow_ipv6 {
+            continue;
+        }
+        let query = make_query(host, record_type)?;
+        let identifier = [query[0], query[1]];
+        let response = query_resolver_set(&query, resolvers, None, None).await?;
+        validate_response(&response, identifier)?;
+        if let Some((address, _)) = answer_addresses(&response)?
+            .into_iter()
+            .find(|(address, _)| allow_ipv6 || address.is_ipv4())
+        {
+            if address.is_ipv4() {
+                ipv4 = Some(address);
+            } else {
+                ipv6 = Some(address);
+            }
+        }
+    }
+    ipv4.or(ipv6).ok_or(DnsError::NoAddress)
+}
+
 async fn resolve_domain_with(
     config: &DnsConfig,
     host: &str,
@@ -647,20 +705,16 @@ async fn resolve_domain_with(
         }
         let query = make_query(host, record_type)?;
         let identifier = [query[0], query[1]];
-        let direct_upstream = if direct {
-            config.direct.map(|direct| {
-                if direct.follow_policy {
-                    selected_policy(config, host).unwrap_or(direct.upstream)
-                } else {
-                    direct.upstream
-                }
-            })
+        let response = if direct && let Some(direct_config) = &config.direct {
+            if direct_config.follow_policy
+                && let Some(upstream) = selected_policy(config, host)
+            {
+                query_one(&query, upstream, None, None, None).await?
+            } else {
+                query_resolver_set(&query, &direct_config.resolvers, None, None).await?
+            }
         } else {
-            None
-        };
-        let response = match direct_upstream {
-            Some(upstream) => query_one(&query, upstream, None, None, None).await?,
-            None => query_configured(&query, config, host, None, None).await?,
+            query_configured(&query, config, host, None, None).await?
         };
         validate_response(&response, identifier)?;
         if let Some((address, _)) = answer_addresses(&response)?
@@ -2891,20 +2945,10 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
         }
     }
     append_query_options_cache_identity(&mut key, &config.query_options);
+    append_resolver_clients_cache_identity(&mut key, &config.main_resolvers);
     key.push(0xff);
     if let Some(fallback) = &config.fallback {
-        key.push(match fallback.upstream.transport {
-            DnsTransport::Udp => 0,
-            DnsTransport::Tcp => 1,
-            DnsTransport::TlsInsecureNoReuse => 2,
-            DnsTransport::TlsInsecureReuse => 3,
-            DnsTransport::TlsVerifiedNoReuse => 4,
-            DnsTransport::TlsVerifiedReuse => 5,
-            DnsTransport::HttpReuse => 6,
-            DnsTransport::HttpsVerifiedReuse => 7,
-            DnsTransport::QuicVerifiedReuse => 8,
-        });
-        key.extend_from_slice(fallback.upstream.address.to_string().as_bytes());
+        append_resolver_clients_cache_identity(&mut key, &fallback.resolvers);
         key.push(u8::from(fallback.lazy));
         for pattern in &fallback.domains {
             key.extend_from_slice(pattern.as_bytes());
@@ -2917,6 +2961,14 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
         }
     }
     key
+}
+
+fn append_resolver_clients_cache_identity(key: &mut Vec<u8>, clients: &[DnsResolverClient]) {
+    key.push(0xee);
+    for client in clients {
+        key.extend_from_slice(format!("{client:?}").as_bytes());
+        key.push(0);
+    }
 }
 
 fn append_query_options_cache_identity(
@@ -2984,14 +3036,12 @@ async fn query_configured(
     let Some(fallback_config) = &config.fallback else {
         return query_main(query, config, tls_pool, http_pool).await;
     };
-    let fallback = fallback_config.upstream;
-
     if fallback_config
         .domains
         .iter()
         .any(|pattern| policy_match_rank(pattern, domain).is_some())
     {
-        return query_one(query, fallback, None, None, None).await;
+        return query_resolver_set(query, &fallback_config.resolvers, tls_pool, http_pool).await;
     }
 
     if fallback_config.lazy {
@@ -2999,13 +3049,15 @@ async fn query_configured(
             Ok(response) if response_passes_fallback_filter(&response, fallback_config)? => {
                 Ok(response)
             }
-            _ => query_one(query, fallback, None, None, None).await,
+            _ => query_resolver_set(query, &fallback_config.resolvers, tls_pool, http_pool).await,
         };
     }
 
     let fallback_query = query.to_vec();
-    let fallback_task =
-        tokio::spawn(async move { query_one(&fallback_query, fallback, None, None, None).await });
+    let fallback_resolvers = fallback_config.resolvers.clone();
+    let fallback_task = tokio::spawn(async move {
+        query_resolver_set(&fallback_query, &fallback_resolvers, None, None).await
+    });
     match query_main(query, config, tls_pool, http_pool).await {
         Ok(response) if response_passes_fallback_filter(&response, fallback_config)? => {
             Ok(response)
@@ -3022,6 +3074,9 @@ async fn query_main(
     tls_pool: Option<&Mutex<TlsConnectionPool>>,
     http_pool: Option<&Mutex<HttpConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
+    if !config.main_resolvers.is_empty() {
+        return query_resolver_set(query, &config.main_resolvers, tls_pool, http_pool).await;
+    }
     match &config.main_kind {
         DnsMainKind::System => return query_system(query).await,
         DnsMainKind::Dhcp(interface) => return query_dhcp(query, interface).await,
@@ -3043,6 +3098,78 @@ async fn query_main(
         http_pool,
     )
     .await
+}
+
+async fn query_resolver_set(
+    query: &[u8],
+    resolvers: &[DnsResolverClient],
+    tls_pool: Option<&Mutex<TlsConnectionPool>>,
+    http_pool: Option<&Mutex<HttpConnectionPool>>,
+) -> Result<Vec<u8>, DnsError> {
+    if let [resolver] = resolvers {
+        return query_resolver_client(query, resolver, tls_pool, http_pool).await;
+    }
+    if let Some(resolver @ DnsResolverClient::Rcode(_)) = resolvers
+        .iter()
+        .find(|resolver| matches!(resolver, DnsResolverClient::Rcode(_)))
+    {
+        return query_resolver_client(query, resolver, tls_pool, http_pool).await;
+    }
+    let identifier = [query[0], query[1]];
+    let mut tasks = JoinSet::new();
+    for resolver in resolvers {
+        let query = query.to_vec();
+        let resolver = resolver.clone();
+        tasks.spawn(async move { query_resolver_client(&query, &resolver, None, None).await });
+    }
+    let selected = tokio::time::timeout(UPSTREAM_TIMEOUT, async {
+        while let Some(result) = tasks.join_next().await {
+            let Ok(Ok(response)) = result else { continue };
+            if validate_response(&response, identifier).is_ok()
+                && !matches!(response[3] & 0x0f, 2 | 5)
+            {
+                return Ok(response);
+            }
+        }
+        Err(DnsError::InvalidMessage("all DNS resolver clients failed"))
+    })
+    .await
+    .map_err(|_| DnsError::UpstreamTimeout)?;
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    selected
+}
+
+async fn query_resolver_client(
+    query: &[u8],
+    resolver: &DnsResolverClient,
+    tls_pool: Option<&Mutex<TlsConnectionPool>>,
+    http_pool: Option<&Mutex<HttpConnectionPool>>,
+) -> Result<Vec<u8>, DnsError> {
+    let default_options = rewrite_config::DnsQueryOptions::default();
+    let options = match resolver {
+        DnsResolverClient::Classic(upstream) => &upstream.query_options,
+        DnsResolverClient::Network { query_options, .. } => query_options,
+        _ => &default_options,
+    };
+    let question = parse_question(query)?;
+    if options.disabled_types.contains(&question.record_type) {
+        return Ok(empty_upstream_answer(query, &question));
+    }
+    let query = options
+        .ecs
+        .map_or_else(|| Ok(query.to_vec()), |ecs| apply_ecs(query, ecs))?;
+    let response = match resolver {
+        DnsResolverClient::Classic(upstream) => query_classic(&query, upstream).await?,
+        DnsResolverClient::Network { upstream, tls, .. } => {
+            query_one(&query, *upstream, tls.as_ref(), tls_pool, http_pool).await?
+        }
+        DnsResolverClient::System => query_system(&query).await?,
+        DnsResolverClient::Dhcp(interface) => query_dhcp(&query, interface).await?,
+        DnsResolverClient::Rcode(rcode) => query_rcode(&query, *rcode),
+        DnsResolverClient::Tailscale(name) => query_tailscale(&query, name).await?,
+    };
+    filter_disabled_records(&response, &options.disabled_types)
 }
 
 fn query_rcode(query: &[u8], rcode: SyntheticRcode) -> Vec<u8> {

@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F6 Rust boundary now implemented
+## Phase 1–4F7 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -128,6 +128,16 @@ types from Answer, Authority and Additional sections. Wrapper identity is also
 part of the DNS cache key, so different visible behavior cannot share a cached
 answer. Resolver-set composition and proxy/rule routing remain outside this
 boundary.
+
+Phase 4F7 introduces one `DnsResolverClient` representation shared by
+default, main, fallback, direct and proxy-server resolver sets. A client is an
+existing classic, encrypted or special transport plus its own query wrappers;
+sets remove exact duplicates and race remaining clients under the existing
+five-second selection window. Main and fallback use the runtime-owned pools
+when a single client is selected, while multi-client execution preserves the
+already proven transport wire paths. Direct-follow-policy is evaluated before
+the direct set. Default and proxy sets expose the same lookup boundary used by
+their future product consumers, without introducing a remote proxy adapter.
 
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
@@ -531,8 +541,9 @@ introduced `rewrite-platform` for system resolver discovery and Phase 4F4
 extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
 refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
 adds no protocol or platform dependency; Phase 4F6 extends those same crates
-with per-classic-upstream wrapper state. `rewrite-platform` is still not a
-general TUN/routing implementation.
+with per-classic-upstream wrapper state, and Phase 4F7 adds resolver-set
+composition plus a development-only differential helper. `rewrite-platform`
+is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
 ```text

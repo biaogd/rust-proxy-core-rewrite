@@ -129,6 +129,9 @@ pub struct DnsConfig {
     pub transport: DnsTransport,
     pub main_kind: DnsMainKind,
     pub classic_upstreams: Vec<DnsClassicUpstream>,
+    pub main_resolvers: Vec<DnsResolverClient>,
+    pub default_resolvers: Vec<DnsResolverClient>,
+    pub proxy_resolvers: Vec<DnsResolverClient>,
     pub ipv6: bool,
     pub use_hosts: bool,
     pub use_system_hosts: bool,
@@ -215,6 +218,20 @@ pub struct DnsClassicUpstream {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsResolverClient {
+    Classic(DnsClassicUpstream),
+    Network {
+        upstream: DnsUpstream,
+        tls: Option<DnsTlsConfig>,
+        query_options: DnsQueryOptions,
+    },
+    System,
+    Dhcp(String),
+    Rcode(SyntheticRcode),
+    Tailscale(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DnsClassicEndpoint {
     Socket(SocketAddr),
     Domain {
@@ -226,15 +243,15 @@ pub enum DnsClassicEndpoint {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsFallbackConfig {
-    pub upstream: DnsUpstream,
+    pub resolvers: Vec<DnsResolverClient>,
     pub domains: Vec<String>,
     pub ipcidr: Vec<IpNet>,
     pub lazy: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsDirectConfig {
-    pub upstream: DnsUpstream,
+    pub resolvers: Vec<DnsResolverClient>,
     pub follow_policy: bool,
 }
 
@@ -351,6 +368,7 @@ struct RawDns {
     fallback_lazy_query: Option<bool>,
     direct_nameserver: Option<Vec<String>>,
     direct_nameserver_follow_policy: Option<bool>,
+    proxy_server_nameserver: Option<Vec<String>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -754,46 +772,110 @@ fn parse_dns(
         .take()
         .ok_or_else(|| ConfigError::InvalidDns("dns.listen is required".to_owned()))?;
     let listen = parse_loopback_dns_addr(&listen_text, "dns.listen")?;
-    let nameservers = raw.nameserver.take().unwrap_or_default();
-    if nameservers.is_empty() {
-        return Err(ConfigError::InvalidDns(
-            "at least one dns.nameserver is required".to_owned(),
-        ));
-    }
-    let default_nameservers = raw.default_nameserver.take().unwrap_or_default();
-    let main = parse_main_nameservers(
-        &nameservers,
-        &default_nameservers,
-        raw.prefer_h3.unwrap_or(false),
-        trust_certificates,
-    )?;
+    let resolver_sets = parse_dns_resolver_sets(&mut raw, trust_certificates)?;
     let policies = parse_dns_policies(raw.nameserver_policy.take().unwrap_or_default())?;
-    let fallback = parse_fallback(&mut raw)?;
-    let direct_servers = raw.direct_nameserver.take().unwrap_or_default();
-    let direct =
-        parse_optional_dns_upstream(&direct_servers, "dns.direct-nameserver", "Phase 4D3A")?.map(
-            |upstream| DnsDirectConfig {
-                upstream,
-                follow_policy: raw.direct_nameserver_follow_policy.unwrap_or(false),
-            },
-        );
+    let main = resolver_sets.main;
     Ok(Some(DnsConfig {
         listen,
         upstream: main.upstream,
         transport: main.transport,
         main_kind: main.main_kind,
         classic_upstreams: main.classic_upstreams,
+        main_resolvers: resolver_sets.main_resolvers,
+        default_resolvers: resolver_sets.default_resolvers,
+        proxy_resolvers: resolver_sets.proxy_resolvers,
         ipv6,
         use_hosts,
         use_system_hosts,
         mode,
         fake_ip,
         policies,
-        fallback,
-        direct,
+        fallback: resolver_sets.fallback,
+        direct: resolver_sets.direct,
         tls: main.tls,
         query_options: main.query_options,
     }))
+}
+
+struct ParsedDnsResolverSets {
+    main: ParsedMainNameservers,
+    main_resolvers: Vec<DnsResolverClient>,
+    default_resolvers: Vec<DnsResolverClient>,
+    proxy_resolvers: Vec<DnsResolverClient>,
+    fallback: Option<DnsFallbackConfig>,
+    direct: Option<DnsDirectConfig>,
+}
+
+fn parse_dns_resolver_sets(
+    raw: &mut RawDns,
+    trust_certificates: &[String],
+) -> Result<ParsedDnsResolverSets, ConfigError> {
+    let nameservers = raw.nameserver.take().unwrap_or_default();
+    if nameservers.is_empty() {
+        return Err(ConfigError::InvalidDns(
+            "at least one dns.nameserver is required".to_owned(),
+        ));
+    }
+    let defaults = raw.default_nameserver.take().unwrap_or_default();
+    let prefer_h3 = raw.prefer_h3.unwrap_or(false);
+    let main_resolvers =
+        parse_resolver_clients(&nameservers, &defaults, prefer_h3, trust_certificates)?;
+    let all_classic = nameservers
+        .iter()
+        .all(|server| server.starts_with("udp://") || server.starts_with("tcp://"));
+    let legacy_main = if nameservers.len() == 1 || all_classic {
+        &nameservers[..]
+    } else {
+        &nameservers[..1]
+    };
+    let main = parse_main_nameservers(legacy_main, &defaults, prefer_h3, trust_certificates)?;
+    let default_resolvers = parse_resolver_clients(&defaults, &[], prefer_h3, trust_certificates)?;
+    validate_default_resolvers(&default_resolvers)?;
+    let fallback = parse_fallback(raw, &defaults, trust_certificates)?;
+    let direct_resolvers = parse_resolver_clients(
+        &raw.direct_nameserver.take().unwrap_or_default(),
+        &defaults,
+        prefer_h3,
+        trust_certificates,
+    )?;
+    let direct = (!direct_resolvers.is_empty()).then_some(DnsDirectConfig {
+        resolvers: direct_resolvers,
+        follow_policy: raw.direct_nameserver_follow_policy.unwrap_or(false),
+    });
+    let proxy_resolvers = parse_resolver_clients(
+        &raw.proxy_server_nameserver.take().unwrap_or_default(),
+        &defaults,
+        prefer_h3,
+        trust_certificates,
+    )?;
+    Ok(ParsedDnsResolverSets {
+        main,
+        main_resolvers,
+        default_resolvers,
+        proxy_resolvers,
+        fallback,
+        direct,
+    })
+}
+
+fn validate_default_resolvers(resolvers: &[DnsResolverClient]) -> Result<(), ConfigError> {
+    let invalid = resolvers.iter().any(|resolver| {
+        !matches!(
+            resolver,
+            DnsResolverClient::System
+                | DnsResolverClient::Classic(DnsClassicUpstream {
+                    endpoint: DnsClassicEndpoint::Socket(_),
+                    ..
+                })
+                | DnsResolverClient::Network { .. }
+        )
+    });
+    if invalid {
+        return Err(ConfigError::InvalidDns(
+            "dns.default-nameserver must use pure-IP network endpoints or system".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct ParsedMainNameservers {
@@ -803,6 +885,51 @@ struct ParsedMainNameservers {
     classic_upstreams: Vec<DnsClassicUpstream>,
     tls: Option<DnsTlsConfig>,
     query_options: DnsQueryOptions,
+}
+
+fn parse_resolver_clients(
+    servers: &[String],
+    default_nameservers: &[String],
+    prefer_h3: bool,
+    trust_certificates: &[String],
+) -> Result<Vec<DnsResolverClient>, ConfigError> {
+    let mut clients = Vec::new();
+    for server in servers {
+        let parsed = parse_main_nameservers(
+            std::slice::from_ref(server),
+            default_nameservers,
+            prefer_h3,
+            trust_certificates,
+        )?;
+        let mut parsed_clients = if parsed.classic_upstreams.is_empty() {
+            vec![match parsed.main_kind {
+                DnsMainKind::Configured => DnsResolverClient::Network {
+                    upstream: DnsUpstream {
+                        address: parsed.upstream,
+                        transport: parsed.transport,
+                    },
+                    tls: parsed.tls,
+                    query_options: parsed.query_options,
+                },
+                DnsMainKind::System => DnsResolverClient::System,
+                DnsMainKind::Dhcp(interface) => DnsResolverClient::Dhcp(interface),
+                DnsMainKind::Rcode(rcode) => DnsResolverClient::Rcode(rcode),
+                DnsMainKind::Tailscale(name) => DnsResolverClient::Tailscale(name),
+            }]
+        } else {
+            parsed
+                .classic_upstreams
+                .into_iter()
+                .map(DnsResolverClient::Classic)
+                .collect::<Vec<_>>()
+        };
+        for client in parsed_clients.drain(..) {
+            if !clients.contains(&client) {
+                clients.push(client);
+            }
+        }
+    }
+    Ok(clients)
 }
 
 fn parse_main_nameservers(
@@ -819,7 +946,7 @@ fn parse_main_nameservers(
         .all(|server| server.starts_with("udp://") || server.starts_with("tcp://"));
     if all_classic {
         let bootstrap = parse_optional_dns_upstream(
-            default_nameservers,
+            default_nameservers.get(..1).unwrap_or_default(),
             "dns.default-nameserver",
             "Phase 4F2 domain classic upstream",
         )?;
@@ -1097,21 +1224,11 @@ fn parse_main_dns_tls(
     trust_certificates: &[String],
 ) -> Result<(DnsTransport, SocketAddr, Option<DnsTlsConfig>), ConfigError> {
     let domain_endpoint = parsed.endpoint_host.is_some();
-    if !default_nameservers.is_empty()
-        && !matches!(
-            parsed.transport,
-            DnsTransport::TlsVerifiedNoReuse
-                | DnsTransport::TlsVerifiedReuse
-                | DnsTransport::HttpsVerifiedReuse
-        )
-    {
-        return Err(ConfigError::InvalidDns(
-            "Phase 4E14 permits explicit dns.default-nameserver only with verified DoT or HTTPS DoH"
-                .to_owned(),
-        ));
-    }
-    let bootstrap =
-        parse_optional_dns_upstream(default_nameservers, "dns.default-nameserver", "Phase 4E9")?;
+    let bootstrap = parse_optional_dns_upstream(
+        default_nameservers.get(..1).unwrap_or_default(),
+        "dns.default-nameserver",
+        "Phase 4E9",
+    )?;
     if domain_endpoint && bootstrap.is_none() {
         return Err(ConfigError::InvalidDns(
             "Phase 4E9 domain DoT requires exactly one classic loopback dns.default-nameserver"
@@ -1182,7 +1299,11 @@ fn parse_optional_dns_upstream(
     }))
 }
 
-fn parse_fallback(raw: &mut RawDns) -> Result<Option<DnsFallbackConfig>, ConfigError> {
+fn parse_fallback(
+    raw: &mut RawDns,
+    default_nameservers: &[String],
+    trust_certificates: &[String],
+) -> Result<Option<DnsFallbackConfig>, ConfigError> {
     let servers = raw.fallback.take().unwrap_or_default();
     if servers.is_empty() && raw.fallback_filter.is_none() {
         return Ok(None);
@@ -1224,21 +1345,14 @@ fn parse_fallback(raw: &mut RawDns) -> Result<Option<DnsFallbackConfig>, ConfigE
     if servers.is_empty() {
         return Ok(None);
     }
-    if servers.len() != 1 {
-        return Err(ConfigError::InvalidDns(
-            "Phase 4D2 requires exactly one dns.fallback upstream".to_owned(),
-        ));
-    }
-    let parsed = parse_dns_upstream(&servers[0], "dns.fallback")?;
-    debug_assert!(parsed.server_name.is_none());
-    debug_assert!(parsed.doh_path.is_none());
-    debug_assert!(parsed.doh_basic_credentials.is_none());
-    debug_assert!(parsed.endpoint_host.is_none());
+    let resolvers = parse_resolver_clients(
+        &servers,
+        default_nameservers,
+        raw.prefer_h3.unwrap_or(false),
+        trust_certificates,
+    )?;
     Ok(Some(DnsFallbackConfig {
-        upstream: DnsUpstream {
-            address: parsed.address,
-            transport: parsed.transport,
-        },
+        resolvers,
         domains,
         ipcidr,
         lazy: raw.fallback_lazy_query.unwrap_or(false),
@@ -2058,6 +2172,15 @@ dns:
                     transport: DnsTransport::Tcp,
                     query_options: DnsQueryOptions::default(),
                 }],
+                main_resolvers: vec![DnsResolverClient::Classic(DnsClassicUpstream {
+                    endpoint: DnsClassicEndpoint::Socket(
+                        "127.0.0.1:15353".parse().expect("literal"),
+                    ),
+                    transport: DnsTransport::Tcp,
+                    query_options: DnsQueryOptions::default(),
+                })],
+                default_resolvers: Vec::new(),
+                proxy_resolvers: Vec::new(),
                 ipv6: false,
                 use_hosts: false,
                 use_system_hosts: false,
@@ -2201,6 +2324,43 @@ dns:
     }
 
     #[test]
+    fn parses_phase_four_f_seven_resolver_sets() {
+        let source = r"
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  default-nameserver:
+    - udp://127.0.0.1:1053
+    - tcp://127.0.0.1:1054
+  nameserver:
+    - udp://127.0.0.1:2053
+    - tcp://127.0.0.1:2054
+  fallback:
+    - udp://127.0.0.1:3053
+    - tcp://127.0.0.1:3054
+  fallback-filter:
+    geoip: false
+  direct-nameserver:
+    - udp://127.0.0.1:4053
+    - tcp://127.0.0.1:4054
+  direct-nameserver-follow-policy: true
+  proxy-server-nameserver:
+    - udp://127.0.0.1:5053
+    - tcp://127.0.0.1:5054
+";
+        let dns = Config::from_yaml(source)
+            .expect("Phase 4F7 resolver sets")
+            .dns
+            .expect("enabled DNS");
+        assert_eq!(dns.default_resolvers.len(), 2);
+        assert_eq!(dns.main_resolvers.len(), 2);
+        assert_eq!(dns.fallback.as_ref().expect("fallback").resolvers.len(), 2);
+        assert_eq!(dns.direct.as_ref().expect("direct").resolvers.len(), 2);
+        assert!(dns.direct.as_ref().expect("direct").follow_policy);
+        assert_eq!(dns.proxy_resolvers.len(), 2);
+    }
+
+    #[test]
     fn accepts_phase_four_b_hosts_switch() {
         let source = r"
 dns:
@@ -2324,10 +2484,13 @@ dns:
         assert_eq!(
             dns.fallback,
             Some(DnsFallbackConfig {
-                upstream: DnsUpstream {
-                    address: "127.0.0.1:25353".parse().expect("literal"),
+                resolvers: vec![DnsResolverClient::Classic(DnsClassicUpstream {
+                    endpoint: DnsClassicEndpoint::Socket(
+                        "127.0.0.1:25353".parse().expect("literal"),
+                    ),
                     transport: DnsTransport::Tcp,
-                },
+                    query_options: DnsQueryOptions::default(),
+                })],
                 domains: vec!["+.fallback.phase4.test".to_owned()],
                 ipcidr: vec!["198.51.100.0/24".parse().expect("CIDR")],
                 lazy: true,
@@ -2354,10 +2517,13 @@ dns:
         assert_eq!(
             dns.direct,
             Some(DnsDirectConfig {
-                upstream: DnsUpstream {
-                    address: "127.0.0.1:25353".parse().expect("literal"),
+                resolvers: vec![DnsResolverClient::Classic(DnsClassicUpstream {
+                    endpoint: DnsClassicEndpoint::Socket(
+                        "127.0.0.1:25353".parse().expect("literal"),
+                    ),
                     transport: DnsTransport::Tcp,
-                },
+                    query_options: DnsQueryOptions::default(),
+                })],
                 follow_policy: true,
             })
         );

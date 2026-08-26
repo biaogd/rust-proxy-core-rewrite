@@ -444,6 +444,16 @@ wrapper identity. Proxy names and `respect-rules` remain Phase 4D3B; combining
 these wrappers across main/default/fallback/direct/policy resolver sets remains
 Phase 4F7–4F9.
 
+Phase 4F7 accepts the common resolver-set core: exact deduplication and
+fastest-valid selection for default/main/fallback/direct/proxy-server sets,
+multiple fallback and direct clients, direct-follow-policy, and configuration
+composition with every transport already accepted by earlier gates. Runtime
+selection is re-proved with deterministic UDP/TCP clients; protocol-specific
+handshakes retain their Phase 4E evidence. `DNS-11` remains **partial** until a
+multi-client default set is wired through every domain-bootstrap consumer and a
+real remote outbound consumes the proxy-server resolver; those consumers must
+not be inferred from the development lookup contract.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,
