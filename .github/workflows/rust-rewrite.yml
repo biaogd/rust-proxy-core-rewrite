@@ -84,7 +84,7 @@ jobs:
         run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
 
   full-differential:
-    name: Full Phase 1-4F15 differential regression
+    name: Full Phase 1-5A1 differential regression
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -92,6 +92,7 @@ jobs:
       PHASE2_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE3_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5A1_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -122,6 +123,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5a1.py \
             compat/scripts/phase4f15.py \
             compat/scripts/phase4f14.py \
             compat/scripts/phase4f13.py \

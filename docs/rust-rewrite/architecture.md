@@ -416,6 +416,12 @@ Configuration input precedence is observable and must be preserved:
 4. Otherwise the configured home directory and default config filename are
    used; `config.Init` creates a minimal `mixed-port: 7890` file if absent.
 
+Phase 5A1 implements this same source selection in the Rust CLI. File-backed
+inputs retain their resolved path for SIGHUP reloads, while base64 and stdin
+inputs retain their original bytes instead of reopening stdin or an unrelated
+file. Versioning, override flags, encrypted configuration and subcommands stay
+outside this input-selection boundary.
+
 CLI overrides for controller/UI/secret are applied after parsing and before
 the configuration is dispatched.
 

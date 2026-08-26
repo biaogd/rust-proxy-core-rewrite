@@ -37,6 +37,7 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 hickory-proto = { version = "0.26.1", default-features = false, features = ["dnssec-ring", "std"] }
+home = "0.5"
 http = "1"
 httparse = "1.10.1"
 http-body-util = "0.1.5"

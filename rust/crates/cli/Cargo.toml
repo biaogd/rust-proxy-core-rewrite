@@ -10,7 +10,9 @@ name = "rewrite-core"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
+home.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-runtime = { path = "../runtime" }
 tokio.workspace = true

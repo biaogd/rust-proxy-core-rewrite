@@ -600,6 +600,26 @@ parentheses are mandatory scope declarations:
 Each subphase must be split further when its external input cannot reach one
 observable result in a single deterministic fixture.
 
+### Phase 5A1 accepted scope
+
+Phase 5A1 accepts `CLI-01` and `CLI-02` only. The Rust CLI now applies the Go
+oracle's CLI-over-environment rules for `-d`, `-f` and `-config`, resolves
+relative home and file overrides from the process working directory, preserves
+the existing `$HOME/.config/mihomo` versus `XDG_CONFIG_HOME` fallback, and
+selects base64, stdin, explicit file or default file in that order. File mode
+also creates the home directory and the oracle's minimal initial configuration
+when the selected file is absent, without creating an unrelated missing parent
+for an explicit path.
+
+The deterministic gate covers successful selection, normalized success paths,
+creation side effects, invalid base64/YAML and missing-parent error classes.
+Inline and stdin runtime cases additionally prove that a processed SIGHUP
+reapplies the frozen bytes, resets DNS cache state and does not switch to a
+lower-priority shadow file.
+It does not expand the configuration schema, full `-t` corpus, version/build
+output, CLI overrides, age encryption, subcommands, hooks or lifecycle/resource
+application; those remain 5A2 onward.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
