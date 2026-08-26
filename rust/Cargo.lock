@@ -2402,6 +2402,7 @@ name = "rewrite-generator"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ml-kem",
  "pem",
  "rand 0.10.2",
  "thiserror 2.0.20",

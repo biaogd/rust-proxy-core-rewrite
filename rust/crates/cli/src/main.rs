@@ -223,6 +223,21 @@ fn run_generate_subcommand(
             println!("Config: {}", STANDARD.encode(pair.config_list));
             println!("Key: {}", pair.key_pem);
         }
+        Some("vless-mlkem768") => {
+            let seed = arguments.get(1).map(decode_mlkem_seed).transpose()?;
+            let material = rewrite_generator::vless_mlkem768(seed);
+            let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let seed = encoding.encode(material.seed);
+            let client = encoding.encode(material.client);
+            println!("Seed: {seed}");
+            println!("Client: {client}");
+            println!("Hash32: {}", encoding.encode(material.hash32));
+            println!("-----------------------");
+            println!("      Lazy-Config      ");
+            println!("-----------------------");
+            println!("[Server] decryption: \"mlkem768x25519plus.native.600s.{seed}\"");
+            println!("[Client] encryption: \"mlkem768x25519plus.native.0rtt.{client}\"");
+        }
         _ => {}
     }
     Ok(())
@@ -239,6 +254,20 @@ fn decode_vless_private(
         .unwrap_or_default();
     decoded.try_into().map_err(|_| {
         std::io::Error::other(format!("invalid length of X25519 private key: {value}")).into()
+    })
+}
+
+fn decode_mlkem_seed(
+    value: &OsString,
+) -> Result<[u8; 64], Box<dyn std::error::Error + Send + Sync>> {
+    let value = value
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("invalid ML-KEM-768 seed"))?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .unwrap_or_default();
+    decoded.try_into().map_err(|_| {
+        std::io::Error::other(format!("invalid length of ML-KEM-768 seed: {value}")).into()
     })
 }
 

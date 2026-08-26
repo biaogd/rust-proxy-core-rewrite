@@ -46,7 +46,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-06 | Controller/UI/secret/routing-mark override flags and environment variables | Partial: controller address and secret parity | Accepted 5A3a; UI/TLS/Unix/pipe/routing-mark remain |
 | CLI-07 | `-age-secret-key` and encrypted configuration loading | Partial: single X25519 identity parity | Accepted 5A4a; multiple, hybrid, SSH and plugin identities remain |
 | CLI-08 | `convert-ruleset` subcommand and MRS/classical/domain/IP output | Partial: IP-CIDR and domain text/YAML ↔ MRS v1 | Accepted 5A5a–5A5d; classical and broader parser/error slices remain |
-| CLI-09 | `generate` subcommand family | Partial: UUID v4, Reality/WireGuard keypairs, VLESS X25519 and ECH key material | Accepted 5A6a–5A6e; ML-KEM/Sudoku generators remain |
+| CLI-09 | `generate` subcommand family | Partial: UUID v4, Reality/WireGuard, VLESS X25519/ML-KEM-768 and ECH key material | Accepted 5A6a–5A6f; Sudoku generator remains |
 | CLI-10 | `age` subcommand family | Partial: X25519 `keygen`/`convert`/`encrypt`/`decrypt` parity | Accepted 5A4b–5A4d; hybrid/PQ remains |
 | CLI-11 | Startup, readiness, SIGINT/SIGTERM, SIGHUP, invalid-reload rollback and complete resource shutdown | Partial | 5A7, then repeated per resource family |
 | CLI-12 | `post-up` and `post-down` hook ordering, shell behavior and failure handling | Partial: Unix local-resource parity | Accepted 5A8a; native Windows evidence and future-resource ordering remain |

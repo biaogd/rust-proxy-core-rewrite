@@ -21,6 +21,14 @@ pub struct EchKeyPair {
     pub key_pem: String,
 }
 
+/// VLESS ML-KEM-768 material derived from one 64-byte `d || z` seed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessMlKem768Material {
+    pub seed: [u8; 64],
+    pub client: Vec<u8>,
+    pub hash32: [u8; 32],
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GeneratorError {
     #[error("ECH public name is longer than 255 bytes")]
@@ -99,6 +107,28 @@ pub fn ech_keypair(public_name: &str) -> Result<EchKeyPair, GeneratorError> {
     })
 }
 
+/// Generates or derives VLESS ML-KEM-768 material from a `d || z` seed.
+#[must_use]
+pub fn vless_mlkem768(seed: Option<[u8; 64]>) -> VlessMlKem768Material {
+    use ml_kem::{B32, EncodedSizeUser as _, KemCore as _, MlKem768};
+
+    let seed = seed.unwrap_or_else(|| {
+        let mut generated = [0_u8; 64];
+        rand::fill(&mut generated);
+        generated
+    });
+    let d: B32 = ml_kem::array::Array::from_fn(|index| seed[index]);
+    let z: B32 = ml_kem::array::Array::from_fn(|index| seed[index + 32]);
+    let (_, encapsulation) = MlKem768::generate_deterministic(&d, &z);
+    let client = encapsulation.as_bytes().to_vec();
+    let hash32 = *blake3::hash(&client).as_bytes();
+    VlessMlKem768Material {
+        seed,
+        client,
+        hash32,
+    }
+}
+
 fn push_u16_record(output: &mut Vec<u8>, record: &[u8]) -> Result<(), GeneratorError> {
     output.extend(
         u16::try_from(record.len())
@@ -148,5 +178,13 @@ mod tests {
         let key = pem::parse(pair.key_pem).unwrap();
         assert_eq!(key.tag(), "ECH KEYS");
         assert_eq!(key.contents().len(), pair.config_list.len() + 34);
+    }
+
+    #[test]
+    fn derives_repeatable_mlkem768_material() {
+        let material = vless_mlkem768(Some([0x3c; 64]));
+        assert_eq!(material.client.len(), 1184);
+        assert_eq!(material.hash32, *blake3::hash(&material.client).as_bytes());
+        assert_eq!(material, vless_mlkem768(Some([0x3c; 64])));
     }
 }

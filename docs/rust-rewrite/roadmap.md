@@ -798,6 +798,18 @@ every declared field and independently derives the public key. This establishes
 generation-format compatibility only, not TLS ECH handshake behavior. ML-KEM
 and Sudoku generation remain later 5A6 slices.
 
+### Phase 5A6f accepted scope
+
+Phase 5A6f accepts `generate vless-mlkem768` from `CLI-09`, with generated or
+supplied 64-byte `d || z` seed material. Rust uses the maintained pure-Rust
+`ml-kem` 0.2.3 implementation (Apache-2.0 OR MIT) in deterministic FIPS 203
+mode and the already selected BLAKE3 crate. The fixed-seed differential compares
+the complete 1184-byte encapsulation key, hash and all eight output lines byte
+for byte against Go, while generated-output lengths and invalid-seed lifecycle
+are also covered. This is generation-format evidence, not VLESS or ML-KEM
+transport interoperability. Sudoku remains the final unimplemented `generate`
+subcommand family member.
+
 ### Phase 5A7a accepted scope
 
 Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
