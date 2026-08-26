@@ -964,6 +964,14 @@ and every operator must produce observable DIRECT and REJECT outcomes against
 the oracle. Live `SUB-RULE`, lazy destination resolution, process helpers and
 the broader nested/error corpus remain independent RULE-11 gates.
 
+### Phase 5B3e accepted scope
+
+Phase 5B3e accepts live `PASS` scan continuation on the local mixed TCP path.
+A matched PASS must produce no adapter selection and must allow a following
+rule to choose either DIRECT or REJECT, with both outcomes compared to the Go
+oracle. `PASS-RULE`, live sub-rule escape and REMATCH mutation/rescan remain
+separate RULE-12 gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

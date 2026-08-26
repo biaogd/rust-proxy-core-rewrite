@@ -119,7 +119,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | RULE-09 | GEOIP, GEOSITE, IP-ASN and source variants | Not started | 5B4 |
 | RULE-10 | RULE-SET classical/domain/IP strategies, MRS, providers and refresh | Not started | 5B5, 5C4 |
 | RULE-11 | SUB-RULE, AND/OR/NOT with lazy DNS/process helpers and cycle/error behavior | Partial (pure core plus live basic logic 5B3d) | 5B3 |
-| RULE-12 | PASS, PASS-RULE, REMATCH/REMATCH-NAME and rescan mutation semantics | Partial pure core only | 5B3 live routing |
+| RULE-12 | PASS, PASS-RULE, REMATCH/REMATCH-NAME and rescan mutation semantics | Partial (pure core plus live PASS 5B3e) | 5B3 live routing |
 | RULE-13 | Rule hit/miss counters, disabled state and concurrent mutation API | Not started | 5D5 |
 | RULE-14 | TCP and UDP routing lifecycle, adapter unwrap, retries, NAT/write-back and close behavior | Partial | Cross-cutting protocol gates |
 

@@ -91,9 +91,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
 | Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
 | Phase 5B3d live logical routing | Complete in declared basic-local-TCP scope; RULE-11 remains partial | AND/OR/NOT combine domain and inbound-type metadata and drive distinct DIRECT/REJECT network outcomes |
+| Phase 5B3e live PASS routing | Complete in declared local-TCP scope; RULE-12 remains partial | A matched PASS continues ordered scanning into later DIRECT and REJECT results instead of becoming an outbound |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3d rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3e rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3172,6 +3173,28 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 Live `SUB-RULE`, lazy DNS/process-helper behavior and the larger nested/error
 corpus remain pending, so aggregate RULE-11 remains partial.
+
+## Phase 5B3e deliverables and evidence
+
+Phase 5B3e promotes `PASS` from a pure evaluator observation to a live mixed
+TCP routing contract. A matched PASS is a scan-control action: it must skip
+adapter selection and continue with the following rule.
+
+`compat/scripts/phase5b3e.py` proves both continuations. One configuration
+passes a `localhost` match into a later `DOMAIN,...,DIRECT` while a literal IP
+falls through to REJECT; another passes the same host into `MATCH,REJECT`.
+The resulting echo and connection-close observations match the pinned Go
+oracle.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B3E_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3e.py
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Live `PASS-RULE`, sub-rule escape and rematch mutation/rescan remain pending,
+so aggregate RULE-12 remains partial.
 
 ## Controller HTTP infrastructure refactor
 

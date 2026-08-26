@@ -141,7 +141,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | GEOIP/GEOSITE/ASN | Oracle | Not started | Pinned geodata corpus |
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references, PASS-RULE and cycles; Phase 5B3d proves basic AND/OR/NOT mixed-TCP DIRECT/REJECT routing; live SUB-RULE and lazy DNS/process helpers remain pending |
-| Phase 2 pure PASS/PASS-RULE/REMATCH scan | Oracle | **Parity** | Ordered scan, metadata mutation, sub-rule switch and rematch-cycle observations; no live adapter claim |
+| PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan, metadata mutation, sub-rule switch and rematch cycles; Phase 5B3e proves live PASS continuation to DIRECT and REJECT; live PASS-RULE/REMATCH remain pending |
 | Proxy groups/select/fallback/url-test/load-balance | Oracle | Not started | Deterministic health/delay fixtures |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
 | Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |
