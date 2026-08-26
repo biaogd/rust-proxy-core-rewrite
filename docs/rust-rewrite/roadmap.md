@@ -662,6 +662,16 @@ this gate adds the consecutive invalid-then-valid process lifecycle contract.
 Providers, TUN, remote adapters and resources not yet implemented in Rust remain
 outside the claim.
 
+### Phase 5A7b accepted scope
+
+Phase 5A7b accepts the currently implemented local-resource shutdown subset of
+`CLI-11`. Both SIGINT and SIGTERM must exit zero within the bounded shutdown
+window, close an idle DIRECT TCP tunnel and release the mixed, controller and
+DNS TCP listeners plus the DNS UDP socket before process exit. Phase 4F14 owns
+the existing fake-IP persistence evidence. Providers, remote adapters, TUN and
+other future resources must add their own shutdown gate before the aggregate
+shutdown row can become complete.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
