@@ -37,7 +37,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E14 domain HTTPS bootstrap/trust | Complete in declared scope | `DNS-07`; one loopback UDP bootstrap, URL-domain Host/SNI and default/name-override/skip verification-precedence differential suite passed |
 | Phase 4E15 DoH HTTP/2 | Complete in declared scope | `DNS-08`; ALPN `h2`, RFC 8484 GET, sequential stream reuse and HTTP/1.1 fallback differential suite passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E15 DNS suites |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E15 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E15 subset remains unimplemented |
@@ -390,7 +390,10 @@ interchangeable.
 owners, TTL and data; case-stable reuse; blacklist and whitelist upstream
 bypass; a `/29` wrap; eviction after 1000 in-memory mappings; invalid range and
 filter-mode configuration exit codes; configured upstream query multiset; process
-exit codes; and restart behavior.
+exit codes; and restart behavior. The harness sets the pinned Go oracle's
+`SKIP_SYSTEM_IPV6_CHECK=1` test escape hatch for both processes so the explicit
+dual-stack fixture is deterministic on IPv4-only CI runners; this does not
+normalize either implementation's DNS response.
 
 Observed Phase 4C result on 2026-08-25:
 

@@ -192,7 +192,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Full hosts and CNAME behavior | Oracle | Partial | Exact names only; wildcard, `lan`, randomized multi-address routing, non-IP queries and broad platforms are not claimed |
 | Phase 4B redir-host TCP mapping subset | Oracle | **Parity** | Local DNS A answer -> IP SOCKS5 CONNECT -> recovered DOMAIN rule -> DIRECT echo chain |
 | Full redir-host mapping | Oracle | Partial | TCP SOCKS IPv4 evidence only; UDP, reload persistence, CNAME reverse-rule identity and other inbounds are not claimed |
-| Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py` |
+| Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py`; the fixture enables the oracle's IPv6 test escape hatch on hosts without global-unicast IPv6 |
 | Full fake-IP behavior and persistence format | Oracle | Partial | Rule/provider/wildcard filters, UDP reverse routing, reload/prefix migration, flush API, crash/corruption behavior and Go bbolt file interchange are unclaimed |
 | EDNS0 echo, UDP size and truncation | Oracle | Not started | Message byte/semantic comparison |
 | DNS hijack through TUN | Oracle | Not started | Platform TUN integration |
@@ -369,6 +369,8 @@ Phase 4C evidence in `compat/scripts/phase4c.py` is limited to:
 
 - fake-IP configuration with explicit IPv4/IPv6 ranges, TTL, exact-domain
   `blacklist` or `whitelist` filtering, and `profile.store-fake-ip`;
+- deterministic dual-stack execution using the oracle-supported
+  `SKIP_SYSTEM_IPV6_CHECK=1` environment input on IPv4-only hosts;
 - deterministic network-address-plus-four allocation, case-insensitive stable
   reuse, independent A/AAAA pools, final-address reservation and cyclic
   overwrite on a `/29` IPv4 fixture;

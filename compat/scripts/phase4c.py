@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import socket
 import socketserver
@@ -400,6 +401,11 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 
 
 def main() -> None:
+    # The pinned Go parser removes the configured IPv6 fake-IP range when the
+    # host has no global-unicast IPv6 interface. Use its documented test escape
+    # hatch so this explicit dual-stack fixture has identical semantics on
+    # developer machines and IPv4-only CI runners.
+    os.environ["SKIP_SYSTEM_IPV6_CHECK"] = "1"
     FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mihomo-phase4c-") as temporary:
         root = pathlib.Path(temporary)
