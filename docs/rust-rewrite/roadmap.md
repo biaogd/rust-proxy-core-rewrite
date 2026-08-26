@@ -436,6 +436,14 @@ replacement ordering and unregister guards. `DNS-05` remains **partial** until
 the Phase 7K Tailscale outbound supplies and proves the real tsnet `QueryDNS`
 lifecycle; Phase 4F5 does not introduce TUN, tsnet startup or tailnet traffic.
 
+Phase 4F6 closes the classic UDP/TCP portion of `DNS-10`. Its gate covers IPv4
+and IPv6 ECS injection, preserve/override behavior, disabled A/AAAA/numeric
+qtypes, all three response sections, compressed multi-record responses, false
+and invalid parameter values, exact duplicate removal and raw-transport versus
+wrapper identity. Proxy names and `respect-rules` remain Phase 4D3B; combining
+these wrappers across main/default/fallback/direct/policy resolver sets remains
+Phase 4F7–4F9.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

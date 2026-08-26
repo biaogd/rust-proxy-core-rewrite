@@ -45,11 +45,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4F3 system resolver | Partial, native gates pending | `DNS-03`; config/runtime path and POSIX/Windows/Android-CMFA contracts implemented, but deterministic native port-53 wire parity is not claimed |
 | Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; config/runtime, exact DHCPv4 wire and interface/invalidation contracts implemented; native UDP 67/68 parity remains pending |
 | Phase 4F5 RCODE/Tailscale DNS boundary | Complete in declared scope; DNS-05 partial | Six synthetic RCODE wire paths and the named Tailscale resolver registration lifecycle pass; actual tsnet transport remains Phase 7K |
+| Phase 4F6 classic DNS wrappers | Complete in declared scope; DNS-10 partial | Per-upstream ECS/disable wrappers pass on UDP/TCP, including invalid/false values, multi-section filtering and wrapper identity; proxy/rule routing remains |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F5 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F6 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F5 boundaries remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F6 boundaries remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2257,6 +2258,53 @@ locally. The complete Phase 1–4F5 regression, workspace tests and
 Go/with-gVisor baseline remain delegated to GitHub Actions; no result is
 pre-claimed.
 
+## Phase 4F6 deliverables and evidence
+
+Phase 4F6 attaches `DnsQueryOptions` to each classic `DnsClassicUpstream`.
+Exact endpoint/transport/options duplicates are removed, but different wrappers
+on the same endpoint remain independently runnable, matching Go's separation of
+wrapped-client identity from reusable raw-transport identity. Cache identity
+includes each upstream's wrapper configuration.
+
+The resolver preserves Go's wrapper order: a disabled question returns a local
+authoritative empty response without network I/O; otherwise ECS is injected,
+preserved or overridden before UDP/TCP exchange, and configured RR types are
+removed from Answer, Authority and Additional before response selection and
+caching. Invalid ECS prefixes, false disable switches and unsupported numeric
+qtypes are accepted but ignored like the oracle. Proxy-name fragments are still
+rejected because Phase 4D3B routing is not implemented.
+
+`compat/scripts/phase4f6.py` runs the real Go and Rust products against one
+deterministic dual UDP/TCP authority. For both upstream transports it covers
+IPv4/IPv6 ECS, existing ECS preserve/override, disabled A and TYPE65 requests,
+compressed multi-record filtering across all three RR sections, ignored
+false/invalid values, exact deduplication and two distinct wrappers sharing one
+raw endpoint. A focused Go contract verifies `Equal` versus `transportEqual`;
+matching Rust config tests verify the represented identities. The added Go file
+is test-only and no oracle implementation file changes.
+
+Observed Phase 4F6 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `compat/scripts/phase4f6.py`; deterministic UDP/TCP authority plus Go/Rust identity contracts |
+| Linux amd64 | Pending | Default full differential includes Phase 4F6; no result is recorded before completion |
+
+### Phase 4F6 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4f6.py
+```
+
+The focused Phase 4F6 differential and identity contracts passed locally. The
+complete Phase 1–4F6 regression, workspace tests and Go/with-gVisor baseline
+remain delegated to GitHub Actions; no result is pre-claimed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2332,9 +2380,10 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F5 synthetic/registered-client boundary;
-`DNS-03`–`DNS-05` retain the platform/integration gaps documented above. Phase 4D3B,
-4F6 or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4F6 classic-wrapper boundary. `DNS-03`–`DNS-05`
+retain the platform/integration gaps documented above, while `DNS-10` still
+excludes proxy/rule routing and broader resolver-set combinations. Phase 4D3B,
+4F7 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

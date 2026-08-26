@@ -211,6 +211,7 @@ pub struct DnsUpstream {
 pub struct DnsClassicUpstream {
     pub endpoint: DnsClassicEndpoint,
     pub transport: DnsTransport,
+    pub query_options: DnsQueryOptions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -846,7 +847,7 @@ fn parse_main_nameservers(
         ));
     }
     let parsed = parse_dns_upstream(&nameservers[0], "dns.nameserver")?;
-    let query_options = parse_dns_query_options(&nameservers[0])?;
+    let query_options = parse_dns_query_options(&nameservers[0]);
     let (transport, upstream, tls) =
         parse_main_dns_tls(parsed, prefer_h3, default_nameservers, trust_certificates)?;
     Ok(ParsedMainNameservers {
@@ -921,13 +922,14 @@ fn parse_classic_main_upstreams(
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
-            || url.fragment().is_some()
             || !matches!(url.path(), "" | "/")
         {
             return Err(ConfigError::InvalidDns(
-                "Phase 4F2 classic upstream must contain only host and optional port".to_owned(),
+                "Phase 4F6 classic upstream must contain only host, port and wrapper fragment"
+                    .to_owned(),
             ));
         }
+        validate_classic_wrapper_fragment(url.fragment())?;
         let host = url.host_str().ok_or_else(|| {
             ConfigError::InvalidDns("Phase 4F2 classic upstream host is required".to_owned())
         })?;
@@ -964,12 +966,35 @@ fn parse_classic_main_upstreams(
         let upstream = DnsClassicUpstream {
             endpoint,
             transport,
+            query_options: parse_dns_query_options(server),
         };
         if !upstreams.contains(&upstream) {
             upstreams.push(upstream);
         }
     }
     Ok(upstreams)
+}
+
+fn validate_classic_wrapper_fragment(fragment: Option<&str>) -> Result<(), ConfigError> {
+    let Some(fragment) = fragment else {
+        return Ok(());
+    };
+    for parameter in fragment
+        .split('&')
+        .filter(|parameter| !parameter.is_empty())
+    {
+        let Some((name, _)) = parameter.split_once('=') else {
+            return Err(ConfigError::InvalidDns(
+                "Phase 4F6 does not accept classic DNS proxy routing fragments".to_owned(),
+            ));
+        };
+        if !is_dns_wrapper_parameter(name) {
+            return Err(ConfigError::InvalidDns(format!(
+                "unsupported classic DNS wrapper parameter: {name}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_dns_wrapper_parameter(name: &str) -> bool {
@@ -979,12 +1004,14 @@ fn is_dns_wrapper_parameter(name: &str) -> bool {
     ) || name.starts_with("disable-qtype-")
 }
 
-fn parse_dns_query_options(value: &str) -> Result<DnsQueryOptions, ConfigError> {
-    if !value.starts_with("tls://")
+fn parse_dns_query_options(value: &str) -> DnsQueryOptions {
+    if !value.starts_with("udp://")
+        && !value.starts_with("tcp://")
+        && !value.starts_with("tls://")
         && !value.starts_with("https://")
         && !value.starts_with("quic://")
     {
-        return Ok(DnsQueryOptions::default());
+        return DnsQueryOptions::default();
     }
     let parameters: BTreeMap<_, _> = value
         .split_once('#')
@@ -995,8 +1022,7 @@ fn parse_dns_query_options(value: &str) -> Result<DnsQueryOptions, ConfigError> 
     let ecs = parameters
         .get("ecs")
         .filter(|value| !value.is_empty())
-        .map(|value| parse_ecs_config(value, parameters.get("ecs-override") == Some(&"true")))
-        .transpose()?;
+        .and_then(|value| parse_ecs_config(value, parameters.get("ecs-override") == Some(&"true")));
     let mut disabled_types = Vec::new();
     if parameters.get("disable-ipv4") == Some(&"true") {
         disabled_types.push(1);
@@ -1010,41 +1036,58 @@ fn parse_dns_query_options(value: &str) -> Result<DnsQueryOptions, ConfigError> 
         }
         if let Some(record_type) = name.strip_prefix("disable-qtype-")
             && let Ok(record_type) = record_type.parse::<u16>()
+            && is_supported_disabled_qtype(record_type)
         {
             disabled_types.push(record_type);
         }
     }
     disabled_types.sort_unstable();
     disabled_types.dedup();
-    Ok(DnsQueryOptions {
+    DnsQueryOptions {
         ecs,
         disabled_types,
-    })
+    }
 }
 
-fn parse_ecs_config(value: &str, override_existing: bool) -> Result<EcsConfig, ConfigError> {
+fn parse_ecs_config(value: &str, override_existing: bool) -> Option<EcsConfig> {
     let (address, prefix) = value
         .split_once('/')
         .map_or((value, None), |(address, prefix)| (address, Some(prefix)));
-    let address = address.parse::<IpAddr>().map_err(|_| {
-        ConfigError::InvalidDns("Phase 4E19 requires a valid ECS address or prefix".to_owned())
-    })?;
+    let address = address.parse::<IpAddr>().ok()?;
     let maximum = if address.is_ipv4() { 32 } else { 128 };
     let prefix = prefix
         .map(str::parse::<u8>)
         .transpose()
-        .map_err(|_| ConfigError::InvalidDns("Phase 4E19 ECS prefix is invalid".to_owned()))?
+        .ok()?
         .unwrap_or(maximum);
     if prefix > maximum {
-        return Err(ConfigError::InvalidDns(
-            "Phase 4E19 ECS prefix exceeds its address width".to_owned(),
-        ));
+        return None;
     }
-    Ok(EcsConfig {
+    Some(EcsConfig {
         address,
         prefix,
         override_existing,
     })
+}
+
+fn is_supported_disabled_qtype(record_type: u16) -> bool {
+    matches!(
+        record_type,
+        1..=10
+            | 12..=21
+            | 23..=33
+            | 35..=37
+            | 39
+            | 41..=53
+            | 55..=65
+            | 99..=102
+            | 104..=109
+            | 128
+            | 249..=250
+            | 255..=258
+            | 260..=261
+            | 32768..=32769
+    )
 }
 
 fn parse_main_dns_tls(
@@ -2013,6 +2056,7 @@ dns:
                         "127.0.0.1:15353".parse().expect("literal"),
                     ),
                     transport: DnsTransport::Tcp,
+                    query_options: DnsQueryOptions::default(),
                 }],
                 ipv6: false,
                 use_hosts: false,
@@ -2099,6 +2143,61 @@ dns:
             );
             assert!(Config::from_yaml(&source).is_err(), "accepted {nameserver}");
         }
+    }
+
+    #[test]
+    fn parses_phase_four_f_six_classic_wrapper_identity() {
+        let source = r"
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  nameserver:
+    - udp://127.0.0.1:15353#ecs=203.0.113.129/24
+    - udp://127.0.0.1:15353#ecs=203.0.113.129/24
+    - udp://127.0.0.1:15353#disable-ipv4=true&disable-qtype-65=true
+";
+        let upstreams = Config::from_yaml(source)
+            .expect("Phase 4F6 classic wrapper config")
+            .dns
+            .expect("enabled DNS")
+            .classic_upstreams;
+        assert_eq!(upstreams.len(), 2, "exact wrapper duplicate must collapse");
+        assert_eq!(upstreams[0].endpoint, upstreams[1].endpoint);
+        assert_eq!(upstreams[0].transport, upstreams[1].transport);
+        assert_eq!(
+            upstreams[0].query_options.ecs,
+            Some(EcsConfig {
+                address: "203.0.113.129".parse().expect("address"),
+                prefix: 24,
+                override_existing: false,
+            })
+        );
+        assert_eq!(upstreams[1].query_options.disabled_types, vec![1, 65]);
+    }
+
+    #[test]
+    fn ignores_phase_four_f_six_false_and_invalid_wrapper_values() {
+        let source = r"
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  nameserver:
+    - tcp://127.0.0.1:15353#ecs=203.0.113.1/33&ecs-override=true&disable-ipv4=false&disable-qtype-invalid=true&disable-qtype-65535=true
+";
+        let options = Config::from_yaml(source)
+            .expect("Go ignores false and invalid wrapper values")
+            .dns
+            .expect("enabled DNS")
+            .classic_upstreams
+            .remove(0)
+            .query_options;
+        assert_eq!(options, DnsQueryOptions::default());
+
+        let proxy_fragment = source.replace(
+            "#ecs=203.0.113.1/33&ecs-override=true&disable-ipv4=false&disable-qtype-invalid=true&disable-qtype-65535=true",
+            "#proxy-outbound",
+        );
+        assert!(Config::from_yaml(&proxy_fragment).is_err());
     }
 
     #[test]

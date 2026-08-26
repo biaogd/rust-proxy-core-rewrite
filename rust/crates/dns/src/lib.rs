@@ -546,10 +546,12 @@ impl Resolver {
         config: &DnsConfig,
     ) -> Result<Vec<u8>, DnsError> {
         let question = parse_question(query)?;
-        if config
-            .query_options
-            .disabled_types
-            .contains(&question.record_type)
+        let classic_wrappers = !config.classic_upstreams.is_empty();
+        if !classic_wrappers
+            && config
+                .query_options
+                .disabled_types
+                .contains(&question.record_type)
         {
             return Ok(empty_upstream_answer(query, &question));
         }
@@ -560,10 +562,14 @@ impl Resolver {
             return Ok(response);
         }
 
-        let upstream_query = config
-            .query_options
-            .ecs
-            .map_or_else(|| Ok(query.to_vec()), |ecs| apply_ecs(query, ecs))?;
+        let upstream_query = if classic_wrappers {
+            query.to_vec()
+        } else {
+            config
+                .query_options
+                .ecs
+                .map_or_else(|| Ok(query.to_vec()), |ecs| apply_ecs(query, ecs))?
+        };
         let mut response = query_configured(
             &upstream_query,
             config,
@@ -572,7 +578,9 @@ impl Resolver {
             Some(&self.http_pool),
         )
         .await?;
-        response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
+        if !classic_wrappers {
+            response = filter_disabled_records(&response, &config.query_options.disabled_types)?;
+        }
         validate_response(&response, identifier)?;
         if !matches!(&config.main_kind, DnsMainKind::Rcode(_))
             && matches!(response[3] & 0x0f, 2 | 5)
@@ -2848,6 +2856,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
                     key.push(bootstrap.transport as u8);
                 }
             }
+            append_query_options_cache_identity(&mut key, &upstream.query_options);
             key.push(0);
         }
     }
@@ -2881,18 +2890,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
             key.extend_from_slice(credentials.as_bytes());
         }
     }
-    if let Some(ecs) = config.query_options.ecs {
-        key.push(0xf7);
-        key.extend_from_slice(ecs.address.to_string().as_bytes());
-        key.push(ecs.prefix);
-        key.push(u8::from(ecs.override_existing));
-    }
-    if !config.query_options.disabled_types.is_empty() {
-        key.push(0xf6);
-        for record_type in &config.query_options.disabled_types {
-            key.extend_from_slice(&record_type.to_be_bytes());
-        }
-    }
+    append_query_options_cache_identity(&mut key, &config.query_options);
     key.push(0xff);
     if let Some(fallback) = &config.fallback {
         key.push(match fallback.upstream.transport {
@@ -2919,6 +2917,24 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
         }
     }
     key
+}
+
+fn append_query_options_cache_identity(
+    key: &mut Vec<u8>,
+    options: &rewrite_config::DnsQueryOptions,
+) {
+    if let Some(ecs) = options.ecs {
+        key.push(0xf7);
+        key.extend_from_slice(ecs.address.to_string().as_bytes());
+        key.push(ecs.prefix);
+        key.push(u8::from(ecs.override_existing));
+    }
+    if !options.disabled_types.is_empty() {
+        key.push(0xf6);
+        for record_type in &options.disabled_types {
+            key.extend_from_slice(&record_type.to_be_bytes());
+        }
+    }
 }
 
 fn append_main_kind_cache_identity(key: &mut Vec<u8>, main_kind: &DnsMainKind) {
@@ -3058,6 +3074,7 @@ async fn query_dhcp(query: &[u8], interface: &str) -> Result<Vec<u8>, DnsError> 
         .map(|address| DnsClassicUpstream {
             endpoint: DnsClassicEndpoint::Socket(address),
             transport: DnsTransport::Udp,
+            query_options: rewrite_config::DnsQueryOptions::default(),
         })
         .collect::<Vec<_>>();
     if upstreams.is_empty() {
@@ -3116,6 +3133,7 @@ async fn query_system(query: &[u8]) -> Result<Vec<u8>, DnsError> {
         .map(|address| DnsClassicUpstream {
             endpoint: DnsClassicEndpoint::Socket(address),
             transport: DnsTransport::Udp,
+            query_options: rewrite_config::DnsQueryOptions::default(),
         })
         .collect::<Vec<_>>();
     if upstreams.is_empty() {
@@ -3161,7 +3179,7 @@ async fn query_classic_group(
     for upstream in upstreams {
         let query = query.to_vec();
         let upstream = upstream.clone();
-        tasks.spawn(async move { query_classic(&query, &upstream).await });
+        tasks.spawn(async move { query_classic_wrapped(&query, &upstream).await });
     }
     let selected = tokio::time::timeout(UPSTREAM_TIMEOUT, async {
         while let Some(result) = tasks.join_next().await {
@@ -3179,6 +3197,26 @@ async fn query_classic_group(
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     selected
+}
+
+async fn query_classic_wrapped(
+    query: &[u8],
+    upstream: &DnsClassicUpstream,
+) -> Result<Vec<u8>, DnsError> {
+    let question = parse_question(query)?;
+    if upstream
+        .query_options
+        .disabled_types
+        .contains(&question.record_type)
+    {
+        return Ok(empty_upstream_answer(query, &question));
+    }
+    let query = upstream
+        .query_options
+        .ecs
+        .map_or_else(|| Ok(query.to_vec()), |ecs| apply_ecs(query, ecs))?;
+    let response = query_classic(&query, upstream).await?;
+    filter_disabled_records(&response, &upstream.query_options.disabled_types)
 }
 
 async fn query_classic(query: &[u8], upstream: &DnsClassicUpstream) -> Result<Vec<u8>, DnsError> {

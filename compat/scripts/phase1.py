@@ -35,6 +35,7 @@ MIGRATION_PATHS = {
     "AGENTS.md",
     "README.md",
     "dns/phase4f5_contract_test.go",
+    "dns/phase4f6_contract_test.go",
 }
 
 

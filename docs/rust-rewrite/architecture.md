@@ -28,7 +28,7 @@ largest areas are:
 | `config/` | 2,300 | YAML defaults, decoding, validation and object construction |
 | `tunnel/` | 1,644 | Central TCP/UDP routing data plane and statistics |
 
-## Phase 1–4F5 Rust boundary now implemented
+## Phase 1–4F6 Rust boundary now implemented
 
 Phase 1 introduced an isolated Cargo workspace under `rust/`; Phase 2 expanded
 the pure configuration/rule boundary; Phase 3 added only the local proxy
@@ -118,6 +118,16 @@ by proxy name in a generation-safe registry: the newest registration wins and
 dropping an older guard cannot remove its replacement. The registry accepts no
 tsnet or outbound dependency; a future Tailscale adapter supplies the actual
 resolver only at the Phase 7K boundary.
+
+Phase 4F6 moves query wrappers onto each classic upstream rather than treating
+them as one resolver-wide option. Exact endpoint/transport/wrapper duplicates
+collapse, while the same raw UDP/TCP transport with different wrapper options
+remains as distinct clients. Each client short-circuits disabled questions,
+then applies ECS, exchanges on its classic transport and filters disabled RR
+types from Answer, Authority and Additional sections. Wrapper identity is also
+part of the DNS cache key, so different visible behavior cannot share a cached
+answer. Resolver-set composition and proxy/rule routing remain outside this
+boundary.
 
 Phase 4B adds an owned exact-name host table to `rewrite-config`. `rewrite-dns`
 uses it before classic upstream resolution, supports the declared A/AAAA/CNAME
@@ -520,7 +530,8 @@ existing config, DNS, state, controller and runtime boundaries. Phase 4F3
 introduced `rewrite-platform` for system resolver discovery and Phase 4F4
 extended that boundary with DHCP interface snapshots, DHCPv4 wire handling and
 refresh decisions. Phase 4F5 stays inside the existing config/DNS crates and
-adds no protocol or platform dependency; `rewrite-platform` is still not a
+adds no protocol or platform dependency; Phase 4F6 extends those same crates
+with per-classic-upstream wrapper state. `rewrite-platform` is still not a
 general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
