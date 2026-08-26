@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -9,10 +9,11 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::{Buf, Bytes};
 use http::{Method, Request};
 use rewrite_config::{
-    Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMode,
-    DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
+    Config, DnsClassicEndpoint, DnsClassicUpstream, DnsConfig, DnsFallbackConfig, DnsMainKind,
+    DnsMode, DnsTlsConfig, DnsTransport, DnsUpstream, DohProtocol, EcsConfig, FakeIpConfig,
     FakeIpFilterMode, HostEntry,
 };
+use rewrite_platform::SystemDnsTracker;
 use rewrite_state::RuntimeState;
 use serde::Serialize;
 use thiserror::Error;
@@ -40,6 +41,18 @@ const MAX_DOH_REDIRECT_REQUESTS: usize = 10;
 const CACHE_CAPACITY: usize = 256;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_POOLED_TLS_CONNECTIONS: usize = 8;
+const SYSTEM_DNS_REFRESH_INTERVAL: Duration = Duration::from_mins(5);
+
+#[derive(Default)]
+struct SystemDnsCache {
+    tracker: SystemDnsTracker,
+    last_refresh: Option<Instant>,
+}
+
+fn system_dns_cache() -> &'static StdMutex<SystemDnsCache> {
+    static CACHE: OnceLock<StdMutex<SystemDnsCache>> = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(SystemDnsCache::default()))
+}
 
 #[derive(Debug)]
 struct NoCertificateVerification {
@@ -2738,6 +2751,9 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
     }
 
     let mut key = cache_key(query, config.transport, config.upstream);
+    if config.main_kind == DnsMainKind::System {
+        key.push(0xf4);
+    }
     if !config.classic_upstreams.is_empty() {
         key.push(0xf5);
         for upstream in &config.classic_upstreams {
@@ -2896,6 +2912,9 @@ async fn query_main(
     tls_pool: Option<&Mutex<TlsConnectionPool>>,
     http_pool: Option<&Mutex<HttpConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
+    if config.main_kind == DnsMainKind::System {
+        return query_system(query).await;
+    }
     if !config.classic_upstreams.is_empty() {
         return query_classic_group(query, &config.classic_upstreams).await;
     }
@@ -2910,6 +2929,49 @@ async fn query_main(
         http_pool,
     )
     .await
+}
+
+async fn query_system(query: &[u8]) -> Result<Vec<u8>, DnsError> {
+    let servers = active_system_dns()?;
+    let upstreams = servers
+        .into_iter()
+        .map(|address| DnsClassicUpstream {
+            endpoint: DnsClassicEndpoint::Socket(address),
+            transport: DnsTransport::Udp,
+        })
+        .collect::<Vec<_>>();
+    if upstreams.is_empty() {
+        return Err(DnsError::InvalidMessage(
+            "system DNS discovery returned no active servers",
+        ));
+    }
+    query_classic_group(query, &upstreams).await
+}
+
+fn active_system_dns() -> Result<Vec<SocketAddr>, DnsError> {
+    let now = Instant::now();
+    let mut cache = system_dns_cache()
+        .lock()
+        .map_err(|_| DnsError::InvalidMessage("system DNS cache lock poisoned"))?;
+    let refresh_due = cache
+        .last_refresh
+        .is_none_or(|last| now.duration_since(last) > SYSTEM_DNS_REFRESH_INTERVAL);
+    if refresh_due {
+        match rewrite_platform::discover_system_dns() {
+            Ok(discovered) => {
+                let active = cache.tracker.refresh(&discovered);
+                if !active.is_empty() {
+                    cache.last_refresh = Some(now);
+                }
+                return Ok(active);
+            }
+            Err(_) if cache.tracker.active().is_empty() => {
+                return Err(DnsError::InvalidMessage("system DNS discovery failed"));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(cache.tracker.active())
 }
 
 async fn query_classic_group(

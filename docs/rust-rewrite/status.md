@@ -42,11 +42,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E19 encrypted DNS wrappers | Complete in declared scope | `DNS-10`; verified-DoQ ECS inject/preserve/override, disabled request types and one disabled response-RR filter differential suite passed |
 | Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
 | Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
-| Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F2 DNS suites run by default in GitHub Actions |
+| Phase 4F3 system resolver | Partial, native gates pending | `DNS-03`; config/runtime path and POSIX/Windows/Android-CMFA contracts implemented, but deterministic native port-53 wire parity is not claimed |
+| Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4F3 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices through Phase 4F2 remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3 boundary remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -2084,6 +2085,64 @@ suite passed locally. The complete Phase 1–4F2 differential regression,
 workspace tests and Go/with-gVisor baseline gates remain delegated to the
 default GitHub Actions workflow; their result is not pre-claimed here.
 
+## Phase 4F3 deliverables and evidence
+
+Phase 4F3 introduces the isolated `rewrite-platform` crate and connects a
+single `system` or `system://` main nameserver to `rewrite-dns`. POSIX reads
+`/etc/resolv.conf` with the oracle's nameserver token rules. Windows uses the
+safe `ipconfig` adapter API and accepts only adapters that are up and have a
+gateway, filters the oracle's legacy `fec0` resolver prefix and preserves the
+first occurrence of each server. The `android-cmfa` feature exposes a replace
+or clear injection boundary without introducing Android code into DNS policy.
+
+The runtime refreshes discovery after five minutes, disables missing servers,
+restores a reappearing server and deletes an entry only after the same
+`disableTimes > 12` check used by Go. Active servers use the Phase 4F2
+concurrent UDP client and UDP-TC retry path. `compat/scripts/phase4f3.py`
+compares both accepted system nameserver spellings through the real Go and Rust
+configuration-test processes. `rewrite-platform` tests the POSIX parser,
+Windows adapter filter, Android replace/clear behavior, refresh lifecycle and
+native host discovery.
+
+This remains a **partial** `DNS-03` result. The Darwin sandbox cannot bind a
+deterministic UDP/TCP authority to port 53, so the local test does not compare
+system-resolver wire traffic. Windows native contract execution is delegated
+to Actions, and Android-CMFA has no native runner yet. Windows scoped-IPv6 zone
+preservation, Android reset callbacks and the system-DNS blacklist API also
+remain unverified. None is normalized away or described as parity.
+
+Observed Phase 4F3 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Partial contracts passed | Native `compat/scripts/phase4f3.py` plus `cargo test -p rewrite-platform`; deterministic port-53 wire fixture unavailable |
+| Linux amd64 | Pending | Default full differential and native platform-contract jobs are configured; no result is recorded before completion |
+| Windows amd64 | Cross-check passed; native pending | `cargo +1.95.0 check -p rewrite-platform --target x86_64-pc-windows-gnu --all-features`; native contract job is configured but no runtime result is pre-claimed |
+| Android-CMFA | Contract only | Host-side injection contract passed; native execution remains pending |
+
+Phase 4F3 adds target-specific `ipconfig` 0.3.4 for the Windows safe adapter
+boundary. Its upstream manifest declares MIT/Apache-2.0; final dependency and
+distribution review remains part of the release gate.
+
+### Phase 4F3 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p rewrite-platform --all-features
+
+cd ..
+python3 compat/scripts/phase4f3.py
+```
+
+The complete Phase 1–4F3 regression, workspace tests, Go/with-gVisor baseline
+and Windows native contracts remain delegated to the default GitHub Actions
+workflow; their result is not pre-claimed here.
+
+The local format check, complete workspace Clippy gate, Phase 4F3 config
+differential, five `rewrite-platform` tests and Windows GNU target check passed.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
@@ -2159,8 +2218,8 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4F2 classic DNS upstream boundary. Phase 4D3B,
-4F3 or another implementation gate must not begin without a separate
+Rust behavior stops at the partial Phase 4F3 system-resolver boundary. Phase 4D3B,
+4F4 or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
 DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream

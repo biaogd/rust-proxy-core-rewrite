@@ -127,6 +127,7 @@ pub struct DnsConfig {
     pub listen: SocketAddr,
     pub upstream: SocketAddr,
     pub transport: DnsTransport,
+    pub main_kind: DnsMainKind,
     pub classic_upstreams: Vec<DnsClassicUpstream>,
     pub ipv6: bool,
     pub use_hosts: bool,
@@ -138,6 +139,12 @@ pub struct DnsConfig {
     pub direct: Option<DnsDirectConfig>,
     pub tls: Option<DnsTlsConfig>,
     pub query_options: DnsQueryOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsMainKind {
+    Configured,
+    System,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -745,6 +752,7 @@ fn parse_dns(
         listen,
         upstream: main.upstream,
         transport: main.transport,
+        main_kind: main.main_kind,
         classic_upstreams: main.classic_upstreams,
         ipv6,
         use_hosts,
@@ -762,6 +770,7 @@ fn parse_dns(
 struct ParsedMainNameservers {
     transport: DnsTransport,
     upstream: SocketAddr,
+    main_kind: DnsMainKind,
     classic_upstreams: Vec<DnsClassicUpstream>,
     tls: Option<DnsTlsConfig>,
     query_options: DnsQueryOptions,
@@ -773,6 +782,16 @@ fn parse_main_nameservers(
     prefer_h3: bool,
     trust_certificates: &[String],
 ) -> Result<ParsedMainNameservers, ConfigError> {
+    if nameservers.len() == 1 && matches!(nameservers[0].as_str(), "system" | "system://") {
+        return Ok(ParsedMainNameservers {
+            transport: DnsTransport::Udp,
+            upstream: "0.0.0.0:53".parse().expect("system DNS sentinel"),
+            main_kind: DnsMainKind::System,
+            classic_upstreams: Vec::new(),
+            tls: None,
+            query_options: DnsQueryOptions::default(),
+        });
+    }
     let all_classic = nameservers
         .iter()
         .all(|server| server.starts_with("udp://") || server.starts_with("tcp://"));
@@ -793,6 +812,7 @@ fn parse_main_nameservers(
         return Ok(ParsedMainNameservers {
             transport: first.transport,
             upstream,
+            main_kind: DnsMainKind::Configured,
             classic_upstreams,
             tls: None,
             query_options: DnsQueryOptions::default(),
@@ -811,6 +831,7 @@ fn parse_main_nameservers(
     Ok(ParsedMainNameservers {
         transport,
         upstream,
+        main_kind: DnsMainKind::Configured,
         classic_upstreams: Vec::new(),
         tls,
         query_options,
@@ -1925,6 +1946,7 @@ dns:
                 listen: "127.0.0.1:5353".parse().expect("literal"),
                 upstream: "127.0.0.1:15353".parse().expect("literal"),
                 transport: DnsTransport::Tcp,
+                main_kind: DnsMainKind::Configured,
                 classic_upstreams: vec![DnsClassicUpstream {
                     endpoint: DnsClassicEndpoint::Socket(
                         "127.0.0.1:15353".parse().expect("literal"),
@@ -1943,6 +1965,21 @@ dns:
                 query_options: DnsQueryOptions::default(),
             })
         );
+    }
+
+    #[test]
+    fn parses_phase_four_f_three_system_resolver_spellings() {
+        for nameserver in ["system", "system://"] {
+            let source = format!(
+                "dns:\n  enable: true\n  listen: 127.0.0.1:5353\n  nameserver:\n    - {nameserver}\n"
+            );
+            let dns = Config::from_yaml(&source)
+                .expect("Phase 4F3 system resolver config")
+                .dns
+                .expect("enabled DNS");
+            assert_eq!(dns.main_kind, DnsMainKind::System);
+            assert!(dns.classic_upstreams.is_empty());
+        }
     }
 
     #[test]

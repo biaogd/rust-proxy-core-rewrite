@@ -8,6 +8,7 @@ members = [
   "crates/model",
   "crates/net",
   "crates/outbound",
+  "crates/platform",
   "crates/rules",
   "crates/runtime",
   "crates/state",

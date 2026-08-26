@@ -1,0 +1,16 @@
+[package]
+name = "rewrite-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+android-cmfa = []
+
+[target.'cfg(windows)'.dependencies]
+ipconfig = "0.3.4"
+
+[lints]
+workspace = true

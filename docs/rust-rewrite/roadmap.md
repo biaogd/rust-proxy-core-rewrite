@@ -418,6 +418,12 @@ DNS. Each subphase is an independent Go/Rust differential gate:
 15. **4F15:** arbitrary DNS REST queries, complete cache controls and external
     DoH GET/POST (`DNS-19`).
 
+Phase 4F3 implements the isolated system-resolver runtime path and platform
+contracts, but remains a **partial** matrix row until native deterministic
+Go/Rust port-53 wire fixtures pass on the advertised POSIX/Windows/Android
+targets. Configuration acceptance and pure platform contracts alone do not
+close `DNS-03`.
+
 Phase 4F1 accepts the local-listener boundary on both UDP and TCP. The gate
 checks the Go server's header acceptance matrix (FORMERR, NOTIMP and silent
 ignore), malformed question handling, semantic forwarding of name-bearing,

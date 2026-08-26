@@ -504,9 +504,10 @@ effects—not only successful JSON responses.
 
 Phase 1 introduced the smallest workspace needed by the first vertical slice;
 Phase 2 added the test-support helper; Phase 3 added state and controller;
-Phase 4A added the classic DNS crate; Phases 4B through 4E4 extended the
-existing config, DNS, state, controller and runtime boundaries without adding
-another crate.
+Phase 4A added the classic DNS crate; Phases 4B through 4F2 extended the
+existing config, DNS, state, controller and runtime boundaries. Phase 4F3
+introduced `rewrite-platform` for system resolver discovery and pure platform
+contracts; it is not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
 ```text
@@ -537,6 +538,7 @@ model <- state
 model <- net <- inbound
 model <- net <- outbound
 config <- dns
+platform <- dns
 config + dns + state <- controller
 config + rules + inbound + outbound + state + controller + dns <- runtime
 runtime + config <- cli
