@@ -304,7 +304,8 @@ separate build and runtime claim.
 | Linux amd64 — Phase 4F13 redir-host local-inbound core | Oracle | Pending | Default focused differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 4F14 fake-IP lifecycle core | Oracle | Pending | Default focused differential and bbolt interchange gate are configured; no result is claimed before completion |
 | Linux amd64 beyond Phase 4F14 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
-| Linux arm64 | Oracle | Not started | Cross-build then native integration |
+| Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
+| Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |
 | Windows amd64 — Phase 4F4 DHCP resolver | Oracle | Cross-build passed; native pending | Interface enumeration, packet and socket code compile for Rust 1.95 GNU; privileged native client/server parity remains pending |
 | Windows arm64/386 and other behavior | Oracle | Not started | Named pipe, process/socket behavior |

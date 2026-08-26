@@ -138,10 +138,19 @@ def run_filter_case(
         stderr.close()
 
 
-def wait_for_real(port: int, name: str) -> str:
+def wait_for_real(
+    port: int, name: str, *, reload_process: Any | None = None
+) -> str:
     deadline = time.monotonic() + IO_DEADLINE
     identifier = 0x7200
+    next_reload = 0.0
     while time.monotonic() < deadline:
+        now = time.monotonic()
+        if reload_process is not None and now >= next_reload:
+            if reload_process.poll() is not None:
+                raise AssertionError("candidate exited before fake-IP reload became observable")
+            os.kill(reload_process.pid, signal.SIGHUP)
+            next_reload = now + 0.1
         try:
             data = query_data(port, name, identifier)
             if data == REAL_ADDRESS:
@@ -210,9 +219,12 @@ def run_reload_case(
                 store=persistent,
             )
         )
-        os.kill(process.pid, signal.SIGHUP)
         try:
-            ready = wait_for_real(dns_port, "reload-ready.phase4f14.test")
+            ready = wait_for_real(
+                dns_port,
+                "reload-ready.phase4f14.test",
+                reload_process=process,
+            )
         except AssertionError as error:
             stdout.flush()
             stderr.flush()
@@ -475,12 +487,12 @@ def interchange_generation(
     authority_port: int,
     queries: list[tuple[str, int]],
 ) -> tuple[dict[str, str], int]:
-    dns_port = reserve_port()
+    dns_port, mixed_port = reserve_port(), reserve_port()
     config = scratch / "interchange.yaml"
     config.write_text(
         config_text(
             dns_port=dns_port,
-            mixed_port=reserve_port(),
+            mixed_port=mixed_port,
             upstream_port=authority_port,
             store=True,
         )
@@ -494,6 +506,21 @@ def interchange_generation(
             )
             for index, (name, record_type) in enumerate(queries)
         }
+        # Listener readiness can precede Go's signal.Notify calls. Prove that
+        # SIGHUP is installed and processed before SIGTERM is used to persist
+        # the allocation offset; otherwise a fast Linux runner can terminate
+        # the oracle without StoreState and produce a non-interchangeable DB.
+        marker = "reload-ready.interchange.phase4f14.test"
+        config.write_text(
+            config_text(
+                dns_port=dns_port,
+                mixed_port=mixed_port,
+                upstream_port=authority_port,
+                filters=[marker],
+                store=True,
+            )
+        )
+        wait_for_real(dns_port, marker, reload_process=process)
         return addresses, stop(process)
     finally:
         if process.poll() is None:
@@ -529,19 +556,26 @@ def run_interchange(
         authority_port,
         [(two, 1), (six_two, 28), (three, 1), (six_three, 28)],
     )
+    result = {
+        "go-first": go_first,
+        "rust-middle": rust_middle,
+        "go-last": go_last,
+        "exit-codes": [go_exit, rust_exit, last_exit],
+    }
     if (
         go_first[f"{one}/1"] != rust_middle[f"{one}/1"]
         or go_first[f"{six_one}/28"] != rust_middle[f"{six_one}/28"]
         or rust_middle[f"{two}/1"] != go_last[f"{two}/1"]
         or rust_middle[f"{six_two}/28"] != go_last[f"{six_two}/28"]
     ):
-        raise AssertionError("Go/Rust bbolt fake-IP mappings were not interchangeable")
-    return {
-        "go-first": go_first,
-        "rust-middle": rust_middle,
-        "go-last": go_last,
-        "exit-codes": [go_exit, rust_exit, last_exit],
-    }
+        FAILURE_ARTIFACT.write_text(
+            json.dumps({"interchange": result}, indent=2, sort_keys=True)
+        )
+        raise AssertionError(
+            f"Go/Rust bbolt fake-IP mappings were not interchangeable; "
+            f"see {FAILURE_ARTIFACT}"
+        )
+    return result
 
 
 def main() -> None:

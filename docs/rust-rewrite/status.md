@@ -2868,6 +2868,27 @@ The four focused Go/Rust differential suites and affected-crate tests pass.
 Format and strict workspace Clippy are required before handoff; the full
 Phase 1–4F15 regression remains delegated to GitHub Actions.
 
+## CI portability and Phase 4F14 signal barrier
+
+GitHub Actions run `32954739951` exposed two independent CI-only failures.
+The Windows native `rewrite-platform` job linked that crate in isolation, so
+`dhcproto`'s no-default-features `hickory-proto` edge did not inherit the
+`std` feature enabled elsewhere by `rewrite-dns`. `rewrite-platform` now
+declares `hickory-proto/std` directly; the standalone dependency graph and all
+nine platform tests pass locally. The Windows-native rerun remains the
+acceptance authority.
+
+Phase 4F14 also no longer assumes that a listening Go DNS socket means
+`signal.Notify` is installed. Its reload polling re-sends SIGHUP at a bounded
+interval until the changed fake-IP filter is observable, and each bbolt
+interchange generation crosses the same observable reload barrier before
+SIGTERM asks the product to persist its allocation offset. This preserves the
+exact v4/v6 mapping assertions while removing the startup race that could
+terminate the Go oracle before `StoreState`. A native Linux arm64 Docker run
+proved Go→Rust→Go v4/v6 mapping interchange and three zero exit codes. On a
+future mismatch the script now writes the three mapping snapshots to the
+existing Phase 4F14 failure artifact instead of losing the evidence.
+
 ## DoH HTTP/1 client infrastructure refactor
 
 The plaintext and TLS HTTP/1 DoH paths now use Hyper 1.11's client-connection

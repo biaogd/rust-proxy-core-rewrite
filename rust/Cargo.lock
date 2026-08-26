@@ -1645,6 +1645,7 @@ name = "rewrite-platform"
 version = "0.1.0"
 dependencies = [
  "dhcproto",
+ "hickory-proto",
  "ipconfig",
  "network-interface",
  "socket2",

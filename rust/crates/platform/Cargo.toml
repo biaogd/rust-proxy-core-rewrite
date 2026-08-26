@@ -11,6 +11,9 @@ android-cmfa = []
 
 [dependencies]
 dhcproto.workspace = true
+# dhcproto disables hickory-proto's default features. Enable its standard-library
+# implementation explicitly so rewrite-platform also links when tested alone.
+hickory-proto = { version = "0.26.1", default-features = false, features = ["std"] }
 network-interface.workspace = true
 socket2.workspace = true
 
