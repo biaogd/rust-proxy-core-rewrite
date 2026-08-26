@@ -225,6 +225,9 @@ struct TlsConnectionPool {
     h3_sender: Option<h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>>,
     doh_choice_key: Vec<u8>,
     doh_choice: Option<DohProtocol>,
+    doq_key: Vec<u8>,
+    doq_endpoint: Option<quinn::Endpoint>,
+    doq_connection: Option<quinn::Connection>,
 }
 
 #[derive(Default)]
@@ -295,6 +298,9 @@ impl DnsService {
         pool.h3_endpoint = None;
         pool.doh_choice_key.clear();
         pool.doh_choice = None;
+        if let Some(connection) = pool.doq_connection.take() {
+            connection.close(0_u32.into(), b"DNS reset");
+        }
         drop(pool);
         let mut pool = self.resolver.http_pool.lock().await;
         pool.key.clear();
@@ -1642,21 +1648,96 @@ fn verified_quic_endpoint(
     Ok(endpoint)
 }
 
-async fn query_quic_verified(
+async fn query_quic_verified_reuse(
     query: &[u8],
     upstream: SocketAddr,
     tls: &DnsTlsConfig,
+    pool: Option<&Mutex<TlsConnectionPool>>,
 ) -> Result<Vec<u8>, DnsError> {
-    let endpoint = verified_quic_endpoint(tls, b"doq", false)?;
     let address = resolve_tls_endpoint(upstream, tls).await?;
-    let connecting = endpoint
-        .connect(address, &tls.tls_server_name)
-        .map_err(std::io::Error::other)?;
-    let connection = tokio::time::timeout(UPSTREAM_TIMEOUT, connecting)
-        .await
-        .map_err(|_| DnsError::UpstreamTimeout)?
-        .map_err(std::io::Error::other)?;
-    let result = tokio::time::timeout(UPSTREAM_TIMEOUT, async {
+    let Some(pool) = pool else {
+        let endpoint = verified_quic_endpoint(tls, b"doq", true)?;
+        let connection = connect_quic(&endpoint, address, tls).await?;
+        let result = exchange_doq(query, &connection).await;
+        connection.close(0_u32.into(), b"one-shot DoQ complete");
+        return result;
+    };
+    let key = tls_pool_key(upstream, tls);
+    let (mut connection, had_connection) = acquire_doq_connection(pool, &key, address, tls).await?;
+    let attempts = if had_connection { 3 } else { 1 };
+    for attempt in 0..attempts {
+        match exchange_doq(query, &connection).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                discard_doq_connection(pool, &key, connection.stable_id(), true).await;
+                if attempt + 1 == attempts {
+                    return Err(error);
+                }
+                connection = acquire_doq_connection(pool, &key, address, tls).await?.0;
+            }
+        }
+    }
+    unreachable!("DoQ always performs at least one attempt")
+}
+
+async fn acquire_doq_connection(
+    pool: &Mutex<TlsConnectionPool>,
+    key: &[u8],
+    address: SocketAddr,
+    tls: &DnsTlsConfig,
+) -> Result<(quinn::Connection, bool), DnsError> {
+    let mut pool = pool.lock().await;
+    if pool.doq_key != key {
+        if let Some(connection) = pool.doq_connection.take() {
+            connection.close(0_u32.into(), b"DoQ configuration changed");
+        }
+        pool.doq_endpoint = None;
+        pool.doq_key.clear();
+        pool.doq_key.extend_from_slice(key);
+    }
+    let had_connection = pool.doq_connection.is_some();
+    if let Some(connection) = &pool.doq_connection
+        && connection.close_reason().is_none()
+    {
+        return Ok((connection.clone(), had_connection));
+    }
+    pool.doq_connection = None;
+    if pool.doq_endpoint.is_none() {
+        // Go keeps QUIC address-validation tokens but has no TLS session cache,
+        // so reconnects remain full TLS handshakes rather than 0-RTT.
+        pool.doq_endpoint = Some(verified_quic_endpoint(tls, b"doq", true)?);
+    }
+    let connection = connect_quic(
+        pool.doq_endpoint.as_ref().expect("DoQ endpoint"),
+        address,
+        tls,
+    )
+    .await?;
+    pool.doq_connection = Some(connection.clone());
+    Ok((connection, had_connection))
+}
+
+async fn discard_doq_connection(
+    pool: &Mutex<TlsConnectionPool>,
+    key: &[u8],
+    stable_id: usize,
+    internal_error: bool,
+) {
+    let mut pool = pool.lock().await;
+    if pool.doq_key == key
+        && pool
+            .doq_connection
+            .as_ref()
+            .is_some_and(|connection| connection.stable_id() == stable_id)
+        && let Some(connection) = pool.doq_connection.take()
+    {
+        let code = u32::from(internal_error);
+        connection.close(code.into(), b"DoQ exchange failed");
+    }
+}
+
+async fn exchange_doq(query: &[u8], connection: &quinn::Connection) -> Result<Vec<u8>, DnsError> {
+    tokio::time::timeout(UPSTREAM_TIMEOUT, async {
         let (mut sender, mut receiver) =
             connection.open_bi().await.map_err(std::io::Error::other)?;
         let mut upstream_query = query.to_vec();
@@ -1694,12 +1775,10 @@ async fn query_quic_verified(
         Ok(response)
     })
     .await
-    .map_err(|_| DnsError::UpstreamTimeout)?;
-    connection.close(0_u32.into(), b"Phase 4E17 one-shot DoQ complete");
-    result
+    .map_err(|_| DnsError::UpstreamTimeout)?
 }
 
-async fn connect_h3(
+async fn connect_quic(
     endpoint: &quinn::Endpoint,
     upstream: SocketAddr,
     tls: &DnsTlsConfig,
@@ -1744,7 +1823,7 @@ async fn query_https_h3_reuse(
     let key = tls_pool_key(upstream, tls);
     let Some(pool) = pool else {
         let endpoint = h3_endpoint(tls)?;
-        let connection = connect_h3(&endpoint, address, tls).await?;
+        let connection = connect_quic(&endpoint, address, tls).await?;
         let mut sender = h3_sender(connection.clone()).await?;
         let response = exchange_doh_h3(query, upstream, tls, &mut sender).await;
         connection.close(0_u32.into(), b"one-shot HTTP/3 complete");
@@ -1779,7 +1858,7 @@ async fn query_https_h3_reuse(
             }
         }
         let endpoint = pool.h3_endpoint.as_ref().expect("HTTP/3 endpoint");
-        let connection = connect_h3(endpoint, address, tls).await?;
+        let connection = connect_quic(endpoint, address, tls).await?;
         let mut sender = h3_sender(connection.clone()).await?;
         match exchange_doh_h3(query, upstream, tls, &mut sender).await {
             Ok(response) => {
@@ -2220,7 +2299,7 @@ fn cache_key(query: &[u8], transport: DnsTransport, upstream: SocketAddr) -> Vec
         DnsTransport::TlsVerifiedReuse => 5,
         DnsTransport::HttpReuse => 6,
         DnsTransport::HttpsVerifiedReuse => 7,
-        DnsTransport::QuicVerifiedNoReuse => 8,
+        DnsTransport::QuicVerifiedReuse => 8,
     });
     key.extend_from_slice(upstream.to_string().as_bytes());
     key.push(0);
@@ -2276,7 +2355,7 @@ fn resolution_cache_key(query: &[u8], config: &DnsConfig, domain: &str) -> Vec<u
             DnsTransport::TlsVerifiedReuse => 5,
             DnsTransport::HttpReuse => 6,
             DnsTransport::HttpsVerifiedReuse => 7,
-            DnsTransport::QuicVerifiedNoReuse => 8,
+            DnsTransport::QuicVerifiedReuse => 8,
         });
         key.extend_from_slice(fallback.upstream.address.to_string().as_bytes());
         key.push(u8::from(fallback.lazy));
@@ -2393,11 +2472,11 @@ async fn query_one(
             ))?;
             query_https_verified_reuse(query, upstream.address, tls, tls_pool).await
         }
-        DnsTransport::QuicVerifiedNoReuse => {
+        DnsTransport::QuicVerifiedReuse => {
             let tls = tls.ok_or(DnsError::InvalidMessage(
                 "verified DoQ upstream lacks verification configuration",
             ))?;
-            query_quic_verified(query, upstream.address, tls).await
+            query_quic_verified_reuse(query, upstream.address, tls, tls_pool).await
         }
     }
 }

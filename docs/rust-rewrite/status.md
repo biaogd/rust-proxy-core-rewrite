@@ -38,11 +38,12 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E15 DoH HTTP/2 | Complete in declared scope | `DNS-08`; ALPN `h2`, RFC 8484 GET, sequential stream reuse and HTTP/1.1 fallback differential suite passed |
 | Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
 | Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
+| Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
 | Cargo workspace | Implemented | Twelve focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E17 DNS suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product and Phase 4A–4E18 DNS suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
-| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E17 subset remains unimplemented |
+| Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior beyond the declared Phase 4E18 subset remains unimplemented |
 
 ## Phase 0 deliverables
 
@@ -1811,7 +1812,8 @@ authority reuses the oracle module's already-pinned `metacubex/quic-go` and
 Default-port and domain/bootstrap DoQ, IP-name/default/system/skip trust
 matrices, connection reuse, multiple/concurrent streams, stale-connection
 retry, token and 0-RTT behavior, reload reset, cancellation stress, proxy
-routing and encrypted-upstream wrapper parameters remain unclaimed.
+routing and encrypted-upstream wrapper parameters remain unclaimed by Phase
+4E17. Phase 4E18 claims only the lifecycle subset described below.
 
 ### Phase 4E17 local exit gates
 
@@ -1826,6 +1828,69 @@ python3 compat/scripts/phase4e17.py
 
 The format check, complete workspace Clippy gate and Phase 4E17 differential
 suite passed locally. The complete Phase 1–4E17 differential regression,
+workspace tests and Go/with-gVisor baseline gates remain delegated to the
+default GitHub Actions workflow; their result is not pre-claimed here.
+
+## Phase 4E18 deliverables and evidence
+
+Phase 4E18 adds the declared DoQ reuse, stream concurrency, bounded reconnect
+and reload-reset slice. The Rust TLS pool now retains a Quinn endpoint and one
+verified DoQ connection per transport identity. Connection establishment is
+serialized, but the pool lock is released before exchange so cloned connection
+handles can open independent bidirectional streams concurrently.
+
+The retry state machine records whether a connection existed before the
+exchange. A fresh first exchange receives one attempt. An exchange that began
+with a cached connection receives the initial attempt plus at most two
+reconnect attempts, matching the pinned Go loop. An exchange failure closes
+only the still-current failed connection with application code 1; a concurrent
+replacement is not discarded. Same-config SIGHUP closes the active connection
+while retaining the endpoint, and a changed transport identity closes both the
+connection and endpoint before rebuilding them.
+
+`compat/scripts/phase4e18.py` runs the pinned Go oracle and Rust candidate
+against the extended deterministic DoQ authority. Its scenarios prove:
+
+- two sequential and eight overlapping cache misses use ten streams on one
+  connection, with an observed concurrent-stream overlap;
+- after one successful priming query, two server `NO_ERROR` connection closes
+  cause exactly two reconnect attempts before the repeated query succeeds;
+- same-config SIGHUP closes the first active connection and the next query
+  establishes a second one;
+- all authority-observed handshakes negotiate `doq` with
+  `DidResume=false` and `Used0RTT=false`.
+
+Observed Phase 4E18 result on 2026-08-26:
+
+| Platform | Result | Environment |
+| --- | --- | --- |
+| Darwin arm64 | Passed | Native `python3 compat/scripts/phase4e18.py`; Go 1.26.5, Rust 1.95.0 and deterministic reuse/concurrency/retry/reset DoQ authority |
+| Linux amd64 | Pending | The default GitHub Actions full regression includes Phase 4E18; no result is recorded before that run completes |
+
+No new dependency was introduced. Rust reuses locked `quinn` 0.11.11 and the
+existing rustls trust path. Its endpoint retains Quinn's address-validation
+token store across ordinary reconnect and same-config connection reset, while
+TLS resumption is disabled to match the oracle's missing client session cache.
+Packet-level token reuse, token rejection, stateless reset and idle-timeout
+classification are not claimed by the current evidence.
+
+Default-port/domain/bootstrap DoQ, broader trust options, fresh-connect failure
+matrices beyond Phase 4E17, timeout/cancellation stress, connection migration,
+proxy routing and encrypted-upstream wrapper parameters remain unclaimed.
+
+### Phase 4E18 local exit gates
+
+```sh
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+cd ..
+python3 compat/scripts/phase4e18.py
+```
+
+The format check, complete workspace Clippy gate and Phase 4E18 differential
+suite passed locally. The complete Phase 1–4E18 differential regression,
 workspace tests and Go/with-gVisor baseline gates remain delegated to the
 default GitHub Actions workflow; their result is not pre-claimed here.
 
@@ -1904,11 +1969,11 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 4E17 verified DoQ framing boundary. Phase
-4D3B, 4E18 or another implementation gate must not begin without a separate
+Rust behavior stops at the Phase 4E18 DoQ lifecycle boundary. Phase 4D3B, 4E19
+or another implementation gate must not begin without a separate
 instruction and the exact inventory IDs/matrix rows. Accepted 0-RTT and broader
 HTTP/3/HTTP/2 lifecycle, general encrypted-DNS pool/retry behavior, concurrent
-DoH and DoQ scheduling, broader DoQ lifecycle, arbitrary RR/cache control,
-proxy-server nameservers, `respect-rules`, intercepted DNS, TUN, remote proxy
-protocols, providers and broader REST/platform compatibility are planned but
-not implied by this status.
+DoH scheduling, broader DoQ endpoint/trust/token/error behavior, arbitrary
+RR/cache control, proxy-server nameservers, `respect-rules`, intercepted DNS,
+TUN, remote proxy protocols, providers and broader REST/platform compatibility
+are planned but not implied by this status.

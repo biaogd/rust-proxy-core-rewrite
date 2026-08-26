@@ -80,8 +80,14 @@ def read_authority(path: pathlib.Path, frame_count: int) -> dict[str, Any]:
         except (FileNotFoundError, json.JSONDecodeError):
             time.sleep(0.02)
             continue
-        if len(observation["frames"]) >= frame_count:
-            return observation
+        if (
+            len(observation["frames"]) >= frame_count
+            and observation.get("active_streams", 0) == 0
+        ):
+            return {
+                key: observation[key]
+                for key in ("connections", "streams", "queries", "frames")
+            }
         time.sleep(0.02)
     raise TimeoutError("DoQ authority observation did not become ready")
 

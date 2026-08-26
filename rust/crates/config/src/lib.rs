@@ -91,7 +91,7 @@ pub enum DnsTransport {
     TlsVerifiedReuse,
     HttpReuse,
     HttpsVerifiedReuse,
-    QuicVerifiedNoReuse,
+    QuicVerifiedReuse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1026,7 +1026,7 @@ fn parse_quic_dns_upstream(value: &str, field: &str) -> Result<ParsedDnsUpstream
     })?;
     let address = parse_loopback_dns_addr(endpoint, field)?;
     Ok(ParsedDnsUpstream {
-        transport: DnsTransport::QuicVerifiedNoReuse,
+        transport: DnsTransport::QuicVerifiedReuse,
         address,
         server_name: Some(server_name),
         tls_server_name: Some(address.ip().to_string()),
@@ -2279,7 +2279,7 @@ dns:
             .expect("Phase 4E17 config")
             .dns
             .expect("DNS");
-        assert_eq!(dns.transport, DnsTransport::QuicVerifiedNoReuse);
+        assert_eq!(dns.transport, DnsTransport::QuicVerifiedReuse);
         assert_eq!(dns.upstream, "127.0.0.1:8853".parse().expect("address"));
         let tls = dns.tls.expect("verification settings");
         assert_eq!(tls.server_name, "dot.phase4.test");

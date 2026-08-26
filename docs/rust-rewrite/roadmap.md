@@ -357,7 +357,19 @@ must not be used to claim a later resolver or mapping behavior:
    wrong-name rejection and zero-length-response failure. The test sends only
    one successful request per runtime, so it does not claim connection reuse,
    multiple streams, retry, token/0-RTT, reset or concurrency; those remain
-   Phase 4E18.
+   Phase 4E18. Phase 4E18 accepts two sequential misses and eight overlapping
+   misses as distinct streams on one verified DoQ connection, followed by a
+   cached-connection case in which two server `NO_ERROR` closes consume the
+   Go-compatible two reconnect attempts before success. A same-config SIGHUP
+   must close the active connection and the next query must establish a new
+   one. Every observed reconnect remains a full handshake with
+   `DidResume=false` and `Used0RTT=false`, matching the pinned Go TLS config.
+   The Rust endpoint retains its QUIC address-validation token store across
+   ordinary reconnect and same-config connection reset, but token rejection,
+   stateless reset, idle timeout and packet-level token use are not claimed
+   without dedicated wire evidence. Default-port/domain DoQ, broader trust,
+   cancellation/timeout stress, proxy routing and wrapper parameters also
+   remain later gates.
 
 Phase 4A does not claim system resolvers, multiple-upstream selection,
 negative/stale/singleflight cache behavior, EDNS rewriting, hosts, fake IP,

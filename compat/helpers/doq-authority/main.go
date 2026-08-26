@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/metacubex/quic-go"
 	"github.com/metacubex/tls"
@@ -20,7 +22,16 @@ type mode string
 const (
 	modeAnswer mode = "answer"
 	modeEmpty  mode = "empty"
+	modeDelay  mode = "delay"
+	modeRetry  mode = "retry-twice"
 )
+
+type handshakeObservation struct {
+	ALPN       string `json:"alpn"`
+	ServerName string `json:"server_name"`
+	Used0RTT   bool   `json:"used_0rtt"`
+	DidResume  bool   `json:"did_resume"`
+}
 
 type frameObservation struct {
 	ALPN           string `json:"alpn"`
@@ -34,17 +45,22 @@ type frameObservation struct {
 }
 
 type observation struct {
-	Connections int                `json:"connections"`
-	Streams     int                `json:"streams"`
-	Queries     int                `json:"queries"`
-	Frames      []frameObservation `json:"frames"`
+	Connections       int                    `json:"connections"`
+	ActiveConnections int                    `json:"active_connections"`
+	Streams           int                    `json:"streams"`
+	ActiveStreams     int                    `json:"active_streams"`
+	MaxInFlight       int                    `json:"max_in_flight"`
+	Queries           int                    `json:"queries"`
+	Handshakes        []handshakeObservation `json:"handshakes"`
+	Frames            []frameObservation     `json:"frames"`
 }
 
 type state struct {
-	mu     sync.Mutex
-	output string
-	mode   mode
-	value  observation
+	mu       sync.Mutex
+	output   string
+	mode     mode
+	value    observation
+	sequence atomic.Int64
 }
 
 func (s *state) update(fn func(*observation)) {
@@ -65,7 +81,7 @@ func main() {
 		fatal(errors.New("usage: doq-authority CERT KEY OUTPUT MODE"))
 	}
 	selected := mode(os.Args[4])
-	if selected != modeAnswer && selected != modeEmpty {
+	if selected != modeAnswer && selected != modeEmpty && selected != modeDelay && selected != modeRetry {
 		fatal(errors.New("invalid authority mode"))
 	}
 	certificate, err := tls.LoadX509KeyPair(os.Args[1], os.Args[2])
@@ -86,7 +102,10 @@ func main() {
 	shared := &state{
 		output: os.Args[3],
 		mode:   selected,
-		value:  observation{Frames: []frameObservation{}},
+		value: observation{
+			Frames:     []frameObservation{},
+			Handshakes: []handshakeObservation{},
+		},
 	}
 	shared.update(func(*observation) {})
 	fmt.Println(packet.LocalAddr().(*net.UDPAddr).Port)
@@ -95,12 +114,23 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
-		shared.update(func(value *observation) { value.Connections++ })
+		connectionState := connection.ConnectionState()
+		shared.update(func(value *observation) {
+			value.Connections++
+			value.ActiveConnections++
+			value.Handshakes = append(value.Handshakes, handshakeObservation{
+				ALPN:       connectionState.TLS.NegotiatedProtocol,
+				ServerName: connectionState.TLS.ServerName,
+				Used0RTT:   connectionState.Used0RTT,
+				DidResume:  connectionState.TLS.DidResume,
+			})
+		})
 		go serveConnection(connection, shared)
 	}
 }
 
 func serveConnection(connection *quic.Conn, shared *state) {
+	defer shared.update(func(value *observation) { value.ActiveConnections-- })
 	connectionState := connection.ConnectionState()
 	for {
 		stream, err := connection.AcceptStream(context.Background())
@@ -108,11 +138,11 @@ func serveConnection(connection *quic.Conn, shared *state) {
 			return
 		}
 		shared.update(func(value *observation) { value.Streams++ })
-		go serveStream(stream, connectionState.TLS.NegotiatedProtocol, connectionState.TLS.ServerName, shared)
+		go serveStream(connection, stream, connectionState.TLS.NegotiatedProtocol, connectionState.TLS.ServerName, shared)
 	}
 }
 
-func serveStream(stream *quic.Stream, alpn, serverName string, shared *state) {
+func serveStream(connection *quic.Conn, stream *quic.Stream, alpn, serverName string, shared *state) {
 	request, readErr := io.ReadAll(stream)
 	declaredLength := 0
 	payloadLength := 0
@@ -139,11 +169,24 @@ func serveStream(stream *quic.Stream, alpn, serverName string, shared *state) {
 		})
 		if valid {
 			value.Queries++
+			value.ActiveStreams++
+			if value.ActiveStreams > value.MaxInFlight {
+				value.MaxInFlight = value.ActiveStreams
+			}
 		}
 	})
 	if !valid {
 		stream.CancelWrite(1)
 		return
+	}
+	defer shared.update(func(value *observation) { value.ActiveStreams-- })
+	sequence := shared.sequence.Add(1)
+	if shared.mode == modeRetry && (sequence == 2 || sequence == 3) {
+		_ = connection.CloseWithError(0, "Phase 4E18 retry")
+		return
+	}
+	if shared.mode == modeDelay {
+		time.Sleep(250 * time.Millisecond)
 	}
 	if shared.mode == modeEmpty {
 		_, _ = stream.Write([]byte{0, 0})

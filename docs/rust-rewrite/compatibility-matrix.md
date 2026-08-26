@@ -180,7 +180,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4E15 DoH HTTP/2 negotiation/GET subset | Oracle | **Parity** | `DNS-08`; TLS ALPN `h2`, RFC 8484 GET pseudo/header fields, zero DNS ID, response restoration, sequential stream reuse and HTTP/1.1 fallback in `compat/scripts/phase4e15.py` |
 | Phase 4E16 DoH HTTP/3 selection/reconnect subset | Oracle | **Parity** | `DNS-08`; `#h3=true`, `dns.prefer-h3`, H3-faster race, H2-only fallback, RFC 8484 GET, sequential QUIC reuse, closed-connection recovery and oracle-compatible `Used0RTT=false` in `compat/scripts/phase4e16.py` |
 | Phase 4E17 verified DoQ framing subset | Oracle | **Parity** | `DNS-09`; loopback explicit-port `quic://`, custom root/name verification, ALPN `doq`, one bidirectional stream, exact two-octet framing, zero upstream ID, FIN, response-ID restoration, wrong-name and empty-response SERVFAIL in `compat/scripts/phase4e17.py` |
-| Full DoH/DoT/DoQ | Oracle | Partial | Multiple/system bootstrap and broader domain/IPv6 combinations, encoded userinfo, absolute/cross-origin and connection-closing redirects, cross-platform positive system-store fixtures, broader DoH/DoQ retry and pool behavior, HTTP/3 token/rejection/concurrency/flow-control/GOAWAY and accepted-resumption behavior, DoQ reuse/concurrency/retry/token/reset lifecycle and encrypted policy/fallback/direct upstreams remain unclaimed; custom-certificate paths are not a Go feature |
+| Phase 4E18 DoQ reuse/concurrency/retry/reset subset | Oracle | **Parity** | `DNS-09`; sequential and eight overlapping streams on one connection, two bounded `NO_ERROR` reconnect attempts, same-config SIGHUP reset and full-handshake `DidResume=false`/`Used0RTT=false` observations in `compat/scripts/phase4e18.py` |
+| Full DoH/DoT/DoQ | Oracle | Partial | Multiple/system bootstrap and broader domain/IPv6 combinations, encoded userinfo, absolute/cross-origin and connection-closing redirects, cross-platform positive system-store fixtures, broader DoH/DoQ retry and pool behavior, HTTP/3 token/rejection/concurrency/flow-control/GOAWAY and accepted-resumption behavior, DoQ default/domain endpoints, broader trust, timeout/cancellation, token rejection/stateless reset/idle timeout and encrypted policy/fallback/direct upstreams remain unclaimed; custom-certificate paths are not a Go feature |
 | DHCP upstream | Oracle | Not started | Isolated integration fixture |
 | Synthetic RCODE and Tailscale DNS upstreams | Oracle | Not started | Rcode response corpus and registered/missing Tailscale resolver lifecycle |
 | DNS upstream wrapper parameters | Oracle | Partial | TLS verification/reuse, H3 selection and verified-DoQ name parameters only; ECS/override, disabled address/qtypes, proxy-name and respect-rules combinations remain unclaimed |
@@ -253,11 +254,13 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 4E15 DoH HTTP/2 | Oracle | **Parity** | Native `compat/scripts/phase4e15.py`, 2026-08-26; deterministic local HTTP/2 TLS authority and HTTP/1.1 fallback |
 | Darwin arm64 — Phase 4E16 DoH HTTP/3 | Oracle | **Parity** | Native `compat/scripts/phase4e16.py`, 2026-08-26; deterministic forced/preferred/fallback/reconnect HTTP/3 observations |
 | Darwin arm64 — Phase 4E17 verified DoQ framing | Oracle | **Parity** | Native `compat/scripts/phase4e17.py`, 2026-08-26; deterministic local ALPN/framing/trust/failure observations |
-| Darwin arm64 beyond Phase 4E17 | Oracle | Not started | Capability-specific native evidence |
+| Darwin arm64 — Phase 4E18 DoQ lifecycle | Oracle | **Parity** | Native `compat/scripts/phase4e18.py`, 2026-08-26; deterministic reuse/concurrency/retry/reset/full-handshake observations |
+| Darwin arm64 beyond Phase 4E18 | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
 | Linux amd64 — Phase 4E17 verified DoQ framing | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
-| Linux amd64 beyond Phase 4E17 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
+| Linux amd64 — Phase 4E18 DoQ lifecycle | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
+| Linux amd64 beyond Phase 4E18 | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 | Oracle | Not started | Cross-build then native integration |
 | Windows amd64/arm64/386 | Oracle | Not started | Named pipe, process/socket behavior |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
