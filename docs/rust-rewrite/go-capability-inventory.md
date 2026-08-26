@@ -110,7 +110,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | --- | --- | --- | --- |
 | RULE-01 | MATCH plus Rule/Direct/Global modes and target resolution | Partial | 5B1 |
 | RULE-02 | DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD | Partial | 5B1 completion |
-| RULE-03 | DOMAIN-REGEX and DOMAIN-WILDCARD | Partial (`DOMAIN-REGEX` 5B1a) | 5B1 |
+| RULE-03 | DOMAIN-REGEX and DOMAIN-WILDCARD | Partial (declared 5B1a/5B1b corpus) | 5B1 exhaustive exit gate |
 | RULE-04 | IP-CIDR/IP-CIDR6/SRC-IP-CIDR and lazy/no-resolve semantics | Partial | 5B2 |
 | RULE-05 | IP-SUFFIX/SRC-IP-SUFFIX, address unmapping and family behavior | Not started | 5B2 |
 | RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial | 5B2 completion |

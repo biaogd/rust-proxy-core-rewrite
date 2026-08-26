@@ -75,6 +75,7 @@ enum Matcher {
     DomainSuffix(String),
     DomainKeyword(String),
     DomainRegex(DomainRegex),
+    DomainWildcard(String),
     IpCidr {
         network: IpNet,
         source: bool,
@@ -400,6 +401,9 @@ impl Matcher {
                     .is_match(metadata.rule_host())
                     .unwrap_or(false),
             ),
+            Self::DomainWildcard(pattern) => {
+                MatchResult::from_bool(domain_wildcard_matches(pattern, metadata.rule_host()))
+            }
             Self::IpCidr {
                 network,
                 source,
@@ -468,6 +472,7 @@ impl Matcher {
             Self::DomainSuffix(_) => "DomainSuffix",
             Self::DomainKeyword(_) => "DomainKeyword",
             Self::DomainRegex(_) => "DomainRegex",
+            Self::DomainWildcard(_) => "DomainWildcard",
             Self::IpCidr { source: true, .. } => "SrcIPCIDR",
             Self::IpCidr { source: false, .. } => "IPCIDR",
             Self::Port {
@@ -600,6 +605,9 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
             Matcher::DomainKeyword(value.to_lowercase())
         }),
         "DOMAIN-REGEX" => parse_domain_regex(payload),
+        "DOMAIN-WILDCARD" => require_payload(payload, |value| {
+            Matcher::DomainWildcard(value.to_lowercase())
+        }),
         "IP-CIDR" | "IP-CIDR6" => parse_ip_cidr(
             payload,
             params.iter().any(|param| param == "src"),
@@ -654,6 +662,32 @@ fn parse_domain_regex(payload: &str) -> Result<Matcher, RuleError> {
         pattern: payload.to_owned(),
         expression,
     }))
+}
+
+fn domain_wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut star, mut star_value) = (None, 0);
+    while value_index < value.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == value[value_index])
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star = Some(pattern_index);
+            pattern_index += 1;
+            star_value = value_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index + 1;
+            star_value += 1;
+            value_index = star_value;
+        } else {
+            return false;
+        }
+    }
+    pattern[pattern_index..].iter().all(|byte| *byte == b'*')
 }
 
 fn require_payload(
@@ -867,6 +901,22 @@ mod tests {
             RuleSet::parse(&rules, &BTreeMap::new(), &[]),
             Err(RuleError::InvalidPayload)
         ));
+    }
+
+    #[test]
+    fn matches_domain_wildcards_with_go_byte_semantics() {
+        let rules = vec![
+            "DOMAIN-WILDCARD,local?o*,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let decision = program.evaluate(&metadata("localhost", 80));
+        assert_eq!(decision.target, "REJECT");
+        assert_eq!(decision.matched_kind.as_deref(), Some("DomainWildcard"));
+        assert_eq!(program.evaluate(&metadata("localost", 80)).target, "DIRECT");
+        assert!(domain_wildcard_matches("?", "a"));
+        assert!(!domain_wildcard_matches("?", "é"));
+        assert!(domain_wildcard_matches("**", ""));
     }
 
     #[test]

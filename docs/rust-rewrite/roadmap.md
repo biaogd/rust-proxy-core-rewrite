@@ -891,6 +891,16 @@ local echo and one REJECT fallback through HTTP CONNECT. This gate does not
 claim exhaustive .NET regular-expression syntax, pathological timeout parity,
 Unicode-category parity or `DOMAIN-WILDCARD`; each remains a later gate.
 
+### Phase 5B1b accepted scope
+
+Phase 5B1b accepts `DOMAIN-WILDCARD` in the same local mixed TCP boundary. Its
+`*` and `?` operators match bytes exactly like the oracle's project-local
+wildcard package, including empty and multi-byte input boundaries; it is not a
+filesystem glob or Unicode-scalar matcher. Acceptance requires unit vectors,
+matched-kind observation, one DIRECT local echo and one REJECT fallback.
+Broader Unicode/normalization, sub-rule and recovered/intercepted-host coverage
+remains part of the aggregate RULE-03 exit gate.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

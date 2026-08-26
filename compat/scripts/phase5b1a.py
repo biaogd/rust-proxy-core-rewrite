@@ -31,7 +31,11 @@ from phase3 import launch, status, stop
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5b1a-diff.json"
 
 
-def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
+def build_binaries(
+    output: pathlib.Path,
+    cargo_target_variable: str = "PHASE5B1A_CARGO_TARGET",
+    default_target_name: str = "phase5b1a",
+) -> dict[str, pathlib.Path]:
     assert_go_oracle_baseline()
     go_binary = output / "go-oracle"
     subprocess.run(
@@ -40,7 +44,9 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
         check=True,
     )
     target = pathlib.Path(
-        os.environ.get("PHASE5B1A_CARGO_TARGET", ROOT / "target" / "compat" / "phase5b1a")
+        os.environ.get(
+            cargo_target_variable, ROOT / "target" / "compat" / default_target_name
+        )
     )
     subprocess.run(
         ["cargo", "build", "--workspace", "--target-dir", str(target)],
@@ -68,8 +74,8 @@ def connect_domain(proxy_port: int, host: str, destination_port: int) -> socket.
 def route(proxy_port: int, host: str, destination_port: int) -> str:
     with connect_domain(proxy_port, host, destination_port) as stream:
         try:
-            stream.sendall(b"regex-route")
-            return "direct" if recv_exact(stream, 11) == b"regex-route" else "unexpected"
+            stream.sendall(b"rule-route")
+            return "direct" if recv_exact(stream, 10) == b"rule-route" else "unexpected"
         except (EOFError, ConnectionResetError, BrokenPipeError):
             return "reject"
 
