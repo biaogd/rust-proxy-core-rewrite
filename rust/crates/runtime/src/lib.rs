@@ -603,6 +603,12 @@ async fn serve_connection(
     }
 
     let mut metadata = accepted.metadata.clone();
+    match kind {
+        ListenerKind::Http => "DEFAULT-HTTP",
+        ListenerKind::Socks => "DEFAULT-SOCKS",
+        ListenerKind::Mixed => "DEFAULT-MIXED",
+    }
+    .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
     let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
     let route = decision.route();

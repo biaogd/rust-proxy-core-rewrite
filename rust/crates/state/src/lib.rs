@@ -747,7 +747,7 @@ impl From<&Metadata> for MetadataSnapshot {
             destination_port: metadata.destination.port.to_string(),
             inbound_ip: "127.0.0.1".to_owned(),
             inbound_port: metadata.inbound_port.to_string(),
-            inbound_name: String::new(),
+            inbound_name: metadata.inbound_name.clone(),
             inbound_user: metadata.inbound_user.clone(),
             rematch_name: metadata.rematch_name.clone(),
             host: metadata.host.clone(),

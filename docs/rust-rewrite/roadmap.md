@@ -939,6 +939,14 @@ DIRECT/REJECT outcomes for `alice`, `Alice` and `socks4`. Authentication error
 behavior remains owned by Phase 3. Invalid UTF-8 usernames, UDP associations,
 remote inbound families and `IN-NAME` remain later gates.
 
+### Phase 5B3c accepted scope
+
+Phase 5B3c accepts `IN-NAME` for the fixed HTTP, SOCKS and mixed TCP listeners.
+Their exact names are `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED`;
+slash lists are case-sensitive and must create observable DIRECT/REJECT
+differences while all listeners coexist. UDP associations, general YAML named
+listeners and future inbound names remain attached to their own inbound gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

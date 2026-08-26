@@ -88,9 +88,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
 | Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
 | Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
+| Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3b rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3c rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3095,6 +3096,33 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 Invalid UTF-8 protocol usernames, UDP-association user propagation, remote
 inbound protocols and `IN-NAME` remain outside this phase.
+
+## Phase 5B3c deliverables and evidence
+
+Phase 5B3c completes the current fixed local TCP subset of `RULE-08` by adding
+`IN-NAME`. Runtime listener identity is attached after protocol decoding:
+`port` is `DEFAULT-HTTP`, `socks-port` is `DEFAULT-SOCKS`, and `mixed-port` is
+`DEFAULT-MIXED`, exactly matching the pinned listener additions. Connection
+snapshots now carry the same metadata value.
+
+The matcher is case-sensitive and accepts slash-separated names.
+`compat/scripts/phase5b3c.py` starts all three fixed listeners together, sends
+HTTP through the HTTP and mixed ports and SOCKS5 through the SOCKS port, and
+compares DIRECT echo for the HTTP/mixed name list with REJECT for the SOCKS
+name. DIRECT probes form the provider-readiness barrier before the rejection
+observation.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B3C_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b3c.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-model -p rewrite-rules -p rewrite-runtime -p rewrite-state --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+SOCKS UDP listener-name propagation, YAML named listeners and future inbound
+protocol names remain pending, so aggregate RULE-08 remains partial.
 
 ## Controller HTTP infrastructure refactor
 

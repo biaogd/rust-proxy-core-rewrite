@@ -94,6 +94,7 @@ enum Matcher {
     Network(Network),
     InType(Vec<rewrite_model::InboundProtocol>),
     InUser(Vec<String>),
+    InName(Vec<String>),
     RematchName(Vec<String>),
     And(Vec<Matcher>),
     Or(Vec<Matcher>),
@@ -450,6 +451,7 @@ impl Matcher {
             Self::Network(network) => MatchResult::from_bool(metadata.network == *network),
             Self::InType(types) => MatchResult::from_bool(types.contains(&metadata.inbound)),
             Self::InUser(users) => MatchResult::from_bool(users.contains(&metadata.inbound_user)),
+            Self::InName(names) => MatchResult::from_bool(names.contains(&metadata.inbound_name)),
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
@@ -507,6 +509,7 @@ impl Matcher {
             Self::Network(_) => "Network",
             Self::InType(_) => "InType",
             Self::InUser(_) => "InUser",
+            Self::InName(_) => "InName",
             Self::RematchName(_) => "RematchName",
             Self::And(_) => "AND",
             Self::Or(_) => "OR",
@@ -668,6 +671,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
         },
         "IN-TYPE" => parse_in_type(payload),
         "IN-USER" => parse_in_user(payload),
+        "IN-NAME" => parse_in_name(payload),
         "REMATCH-NAME" => {
             let names: Vec<_> = payload
                 .split('/')
@@ -803,6 +807,18 @@ fn parse_in_user(payload: &str) -> Result<Matcher, RuleError> {
         return Err(RuleError::InvalidPayload);
     }
     Ok(Matcher::InUser(users))
+}
+
+fn parse_in_name(payload: &str) -> Result<Matcher, RuleError> {
+    let names = payload
+        .split('/')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if names.is_empty() || names.iter().any(String::is_empty) {
+        return Err(RuleError::InvalidPayload);
+    }
+    Ok(Matcher::InName(names))
 }
 
 fn ip_suffix_matches(pattern: std::net::IpAddr, bits: u8, candidate: std::net::IpAddr) -> bool {
@@ -1112,6 +1128,20 @@ mod tests {
         input.inbound_user = "alice".to_owned();
         assert_eq!(program.evaluate(&input).target, "REJECT");
         input.inbound_user = "Alice".to_owned();
+        assert_eq!(program.evaluate(&input).target, "DIRECT");
+    }
+
+    #[test]
+    fn matches_inbound_names_exactly() {
+        let rules = vec![
+            "IN-NAME,DEFAULT-HTTP/DEFAULT-MIXED,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let mut input = metadata("name.test", 80);
+        input.inbound_name = "DEFAULT-MIXED".to_owned();
+        assert_eq!(program.evaluate(&input).target, "REJECT");
+        input.inbound_name = "default-mixed".to_owned();
         assert_eq!(program.evaluate(&input).target, "DIRECT");
     }
 
