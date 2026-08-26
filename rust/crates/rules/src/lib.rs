@@ -74,6 +74,7 @@ enum Matcher {
     Domain(String),
     DomainSuffix(String),
     DomainKeyword(String),
+    DomainRegex(DomainRegex),
     IpCidr {
         network: IpNet,
         source: bool,
@@ -93,6 +94,20 @@ enum Matcher {
         name: String,
     },
 }
+
+#[derive(Clone, Debug)]
+struct DomainRegex {
+    pattern: String,
+    expression: fancy_regex::Regex,
+}
+
+impl PartialEq for DomainRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+impl Eq for DomainRegex {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PortField {
@@ -379,6 +394,12 @@ impl Matcher {
             Self::DomainKeyword(keyword) => {
                 MatchResult::from_bool(metadata.rule_host().contains(keyword))
             }
+            Self::DomainRegex(regex) => MatchResult::from_bool(
+                regex
+                    .expression
+                    .is_match(metadata.rule_host())
+                    .unwrap_or(false),
+            ),
             Self::IpCidr {
                 network,
                 source,
@@ -446,6 +467,7 @@ impl Matcher {
             Self::Domain(_) => "Domain",
             Self::DomainSuffix(_) => "DomainSuffix",
             Self::DomainKeyword(_) => "DomainKeyword",
+            Self::DomainRegex(_) => "DomainRegex",
             Self::IpCidr { source: true, .. } => "SrcIPCIDR",
             Self::IpCidr { source: false, .. } => "IPCIDR",
             Self::Port {
@@ -540,7 +562,7 @@ fn parse_rule_payload(raw: &str, need_target: bool) -> RuleFields {
     if items.len() > 1 {
         match kind.as_str() {
             "MATCH" => items[1].clone_into(&mut target),
-            "NOT" | "OR" | "AND" | "SUB-RULE" => {
+            "NOT" | "OR" | "AND" | "SUB-RULE" | "DOMAIN-REGEX" => {
                 if need_target {
                     items.pop().unwrap_or_default().clone_into(&mut target);
                 }
@@ -577,6 +599,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
         "DOMAIN-KEYWORD" => require_payload(payload, |value| {
             Matcher::DomainKeyword(value.to_lowercase())
         }),
+        "DOMAIN-REGEX" => parse_domain_regex(payload),
         "IP-CIDR" | "IP-CIDR6" => parse_ip_cidr(
             payload,
             params.iter().any(|param| param == "src"),
@@ -619,6 +642,18 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
         "" => Err(RuleError::FormatInvalid),
         other => Err(RuleError::Unsupported(other.to_owned())),
     }
+}
+
+fn parse_domain_regex(payload: &str) -> Result<Matcher, RuleError> {
+    if payload.is_empty() {
+        return Err(RuleError::InvalidPayload);
+    }
+    let expression = fancy_regex::Regex::new(&format!("(?i:{payload})"))
+        .map_err(|_| RuleError::InvalidPayload)?;
+    Ok(Matcher::DomainRegex(DomainRegex {
+        pattern: payload.to_owned(),
+        expression,
+    }))
 }
 
 fn require_payload(
@@ -807,6 +842,31 @@ mod tests {
             program.evaluate(&metadata("www.example.com", 80)).target,
             "DIRECT"
         );
+    }
+
+    #[test]
+    fn matches_case_insensitive_domain_regex_with_advanced_syntax() {
+        let rules = vec![
+            "DOMAIN-REGEX,^(?=LOCAL)local{1,2}host$,REJECT".to_owned(),
+            "MATCH,DIRECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let decision = program.evaluate(&metadata("localhost", 80));
+        assert_eq!(decision.target, "REJECT");
+        assert_eq!(decision.matched_kind.as_deref(), Some("DomainRegex"));
+        assert_eq!(
+            program.evaluate(&metadata("localghost", 80)).target,
+            "DIRECT"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_domain_regex() {
+        let rules = vec!["DOMAIN-REGEX,(,DIRECT".to_owned()];
+        assert!(matches!(
+            RuleSet::parse(&rules, &BTreeMap::new(), &[]),
+            Err(RuleError::InvalidPayload)
+        ));
     }
 
     #[test]

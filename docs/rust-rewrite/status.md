@@ -82,9 +82,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A7a invalid SIGHUP recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the same signal loop applies a following valid generation |
 | Phase 5A7b local-resource shutdown | Complete in declared scope; CLI-11 remains partial | SIGINT/SIGTERM close an idle tunnel and release current mixed/controller/DNS TCP and DNS UDP resources before zero exit |
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, startup readiness, Go-compatible live-resource shutdown-hook boundary and failure asymmetry pass |
+| Phase 5B1a domain regex routing | Complete in declared syntax/local-TCP scope; RULE-03 remains partial | Ignore-case lookahead and comma-bearing quantifier parsing, invalid syntax, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A8a CLI/lifecycle suites, including 5A5a–5A5f ruleset conversion and complete 5A6a–5A6g generation, run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -2923,6 +2924,35 @@ The focused differential and CLI crate tests pass locally. The full regression
 and workspace test suite remain delegated to GitHub Actions. Phase 5A1 makes no
 claim about `CLI-03` onward, expanded configuration validation, overrides,
 subcommands, hooks or transactional application.
+
+## Phase 5B1a deliverables and evidence
+
+Phase 5B1a advances inventory row `RULE-03` with `DOMAIN-REGEX`. The rule
+parser preserves comma-bearing payloads by taking the final field as the
+target, compiles expressions once with case-insensitive matching, and delegates
+advanced matching to `fancy-regex` 0.19.0 rather than maintaining a regex
+engine. Invalid expressions remain configuration errors and match-time engine
+errors are non-matches, matching the pinned oracle's observable rule boundary.
+
+`compat/scripts/phase5b1a.py` starts both products with the same mixed listener,
+routes lowercase and uppercase `localhost` through an expression containing a
+lookahead and `{1,2}` quantifier to a local TCP echo server, and proves an IP
+authority falls through to REJECT. Unit tests also pin the matched rule kind and
+invalid-expression class. This is not exhaustive `regexp2` syntax parity;
+timeouts, Unicode categories and less common .NET constructs remain unclaimed.
+`DOMAIN-WILDCARD` remains the next independent RULE-03 slice.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B1A_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b1a.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-rules --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+The focused tests pass locally. Full regression and Linux evidence remain
+delegated to GitHub Actions and are not pre-claimed.
 
 ## Controller HTTP infrastructure refactor
 

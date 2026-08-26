@@ -880,6 +880,17 @@ changing a successful process exit. Windows command execution is implemented
 with `cmd.exe /C`, but native Windows ordering and failure parity remain
 unclaimed.
 
+### Phase 5B1a accepted scope
+
+Phase 5B1a accepts the first half of `RULE-03`: `DOMAIN-REGEX` parsing and
+mixed TCP routing. The target is the final comma-separated field so regular
+expressions may contain commas; matching is case-insensitive like the pinned
+Go `regexp2` rule. The acceptance corpus requires valid/invalid expressions,
+lookahead and a comma-bearing quantifier, rule-kind observation, one DIRECT
+local echo and one REJECT fallback through HTTP CONNECT. This gate does not
+claim exhaustive .NET regular-expression syntax, pathological timeout parity,
+Unicode-category parity or `DOMAIN-WILDCARD`; each remains a later gate.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
