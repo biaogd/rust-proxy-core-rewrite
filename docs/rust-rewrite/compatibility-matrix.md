@@ -132,7 +132,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 2 domain exact/suffix/keyword subset | Oracle | **Parity** | Fixed and seeded parser/matcher observations, including sniff-host precedence; no IDNA normalization claim |
 | Domain regex/wildcard | Oracle | **Partial** | Phases 5B1a–5B1b prove `DOMAIN-REGEX` ignore-case/lookahead/comma-bearing parsing and `DOMAIN-WILDCARD` byte-level `*`/`?`, errors and mixed TCP DIRECT/REJECT routing; exhaustive regexp2/Unicode corpus remains pending |
 | Phase 2 IPv4/IPv6 CIDR source/destination subset | Oracle | **Parity** | `IP-CIDR`, `IP-CIDR6`, `SRC-IP-CIDR` and `src` parameter observations |
-| IP suffix, unmap, no-resolve and resolver interaction | Oracle | **Partial** | Phase 5B2a proves destination IPv4 `IP-SUFFIX` host-bit-preserving byte suffixes, adaptive `/8`–`/32`, invalid width and mixed TCP hit/fallback; IPv6, mapped addresses, source aliases and resolver-call semantics remain pending |
+| IP suffix, unmap, no-resolve and resolver interaction | Oracle | **Partial** | Phases 5B2a–5B2b prove destination/source IPv4 `IP-SUFFIX`, `SRC-IP-SUFFIX`, `src`, host-bit-preserving byte suffixes, invalid width and mixed TCP hit/fallback; IPv6, mapped addresses, partial bits and resolver-call semantics remain pending |
 | Phase 2 source/destination/inbound ports and TCP/UDP network | Oracle | **Parity** | Fixed range/list/reversal/error cases plus seeded matcher observations |
 | DSCP and remaining metadata matchers | Oracle | Not started | Metadata matrix |
 | Process name/path variants and UID | Oracle | Not started | Per-OS process fixtures |

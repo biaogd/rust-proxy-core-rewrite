@@ -85,9 +85,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B1a domain regex routing | Complete in declared syntax/local-TCP scope; RULE-03 remains partial | Ignore-case lookahead and comma-bearing quantifier parsing, invalid syntax, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B1b domain wildcard routing | Complete in declared byte-wildcard/local-TCP scope; RULE-03 remains partial | Exact Go byte-level `*`/`?` matching, empty/non-ASCII unit boundaries, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
+| Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B2a rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B2b rule-routing suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3010,6 +3011,32 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 Destination IPv6, non-byte widths, IPv4-mapped IPv6, `src` and
 `SRC-IP-SUFFIX`, and observable lazy/no-resolve resolver calls remain pending;
 this phase does not claim them.
+
+## Phase 5B2b deliverables and evidence
+
+Phase 5B2b adds the source forms of the IPv4 suffix matcher. Both
+`SRC-IP-SUFFIX,prefix,target` and `IP-SUFFIX,prefix,target,src` compile to the
+same source matcher, never request destination resolution and expose the
+oracle's `SrcIPSuffix` matched kind. The implementation reuses the suffix-bit
+core from Phase 5B2a rather than duplicating source-specific matching code.
+
+`compat/scripts/phase5b2b.py` uses the mixed listener's deterministic
+`127.0.0.1` client source. Each source spelling routes a connection to a local
+echo through DIRECT, while a suffix ending in `.2` falls through to REJECT.
+Destination address and echo behavior are held constant, so only the source
+rule can account for the different outcome.
+
+Local evidence on 2026-08-26:
+
+```sh
+PHASE5B2B_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b2b.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-rules --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+IPv6, partial-byte suffixes, mapped-address family behavior and observable
+resolver invocation remain pending before RULE-05 can be called complete.
 
 ## Controller HTTP infrastructure refactor
 

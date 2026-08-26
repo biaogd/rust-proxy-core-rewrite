@@ -651,6 +651,7 @@ fn parse_matcher(kind: &str, payload: &str, params: &[String]) -> Result<Matcher
             params.iter().any(|param| param == "src"),
             params.iter().any(|param| param == "no-resolve"),
         ),
+        "SRC-IP-SUFFIX" => parse_ip_suffix(payload, true, true),
         "SRC-PORT" => parse_port(payload, PortField::Source),
         "DST-PORT" => parse_port(payload, PortField::Destination),
         "IN-PORT" => parse_port(payload, PortField::Inbound),
@@ -1019,6 +1020,22 @@ mod tests {
             RuleSet::parse(&rules, &BTreeMap::new(), &[]),
             Err(RuleError::InvalidPayload)
         ));
+    }
+
+    #[test]
+    fn matches_source_ip_suffix_aliases() {
+        for rule in [
+            "SRC-IP-SUFFIX,0.0.0.1/8,REJECT",
+            "IP-SUFFIX,0.0.0.1/8,REJECT,src",
+        ] {
+            let rules = vec![rule.to_owned(), "MATCH,DIRECT".to_owned()];
+            let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+            let mut input = metadata("source.test", 80);
+            input.source_ip = Some("127.0.0.1".parse().expect("IPv4"));
+            let decision = program.evaluate(&input);
+            assert_eq!(decision.target, "REJECT");
+            assert_eq!(decision.matched_kind.as_deref(), Some("SrcIPSuffix"));
+        }
     }
 
     #[test]

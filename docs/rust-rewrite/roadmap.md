@@ -911,6 +911,15 @@ DIRECT hit, REJECT fallback and invalid `/33` configuration. IPv6, partial-byte
 widths, mapped addresses, source forms and observable lazy/no-resolve resolver
 calls remain independent gates.
 
+### Phase 5B2b accepted scope
+
+Phase 5B2b accepts the IPv4 source forms `SRC-IP-SUFFIX` and
+`IP-SUFFIX,...,src` on the local mixed TCP path. The loopback client source must
+produce DIRECT for both spellings, a different last byte must fall through to
+REJECT, and both matches must report the source rule kind. IPv6, partial-byte
+suffixes, mapped addresses and resolver-call instrumentation remain later
+RULE-05 gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
