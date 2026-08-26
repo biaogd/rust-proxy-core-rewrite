@@ -652,6 +652,16 @@ selected listener, absence of superseded listeners, Bearer authentication and
 reload persistence through live REST requests. Controller TLS/Unix/Windows
 pipe, UI fields, routing mark and their platform behavior remain 5A3b onward.
 
+### Phase 5A7a accepted scope
+
+Phase 5A7a accepts the invalid-configuration recovery subset of `CLI-11`. A
+malformed YAML SIGHUP leaves the active listener and routing generation intact,
+does not terminate the process, and does not poison the signal loop: a later
+valid SIGHUP is still applied. Phase 3C already proves listener bind rollback;
+this gate adds the consecutive invalid-then-valid process lifecycle contract.
+Providers, TUN, remote adapters and resources not yet implemented in Rust remain
+outside the claim.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

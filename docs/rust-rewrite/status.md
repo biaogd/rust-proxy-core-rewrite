@@ -62,9 +62,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A2a default version output | Complete in declared scope; tagged profiles remain | `CLI-04`; default `-v` banner and configuration short-circuit differential pass while Rust truthfully identifies rustc |
 | Phase 5A2b geodata-mode CLI default | Complete in declared scope | `CLI-05`; default, `-m` and explicit YAML precedence pass through live `/configs` observations |
 | Phase 5A3a controller/secret overrides | Complete in declared scope; CLI-06 remains partial | CLI/environment/explicit-empty precedence, listener selection, Bearer auth and SIGHUP reapplication pass |
+| Phase 5A7a invalid SIGHUP recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the same signal loop applies a following valid generation |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Thirteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A3a CLI suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A7a CLI/lifecycle suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
