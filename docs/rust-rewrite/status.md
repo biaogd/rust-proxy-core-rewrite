@@ -70,6 +70,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A5b IP-CIDR text/YAML to MRS | Complete in declared scope; CLI-08 remains partial | Valid text/YAML, merged IPv4/IPv6 records, empty input and bidirectional Go/Rust MRS frame interoperability pass |
 | Phase 5A5c domain MRS to text | Complete in declared scope; CLI-08 remains partial | Go-produced succinct domain set, exact/`*`/`+.` normalization, sorted output and malformed-frame differential pass |
 | Phase 5A5d domain text/YAML to MRS | Complete in declared scope; CLI-08 remains partial | Valid text/YAML, exact/`*`/`+.`/dot-wildcard normalization, empty input and bidirectional Go/Rust MRS frame interoperability pass |
+| Phase 5A5e classical rejection | Complete in declared pinned-baseline scope; CLI-08 remains partial | Classical text/YAML/empty-format/MRS exit and empty-target side effects match the oracle's unsupported behavior |
 | Phase 5A6a UUID generation | Complete in declared scope; CLI-09 remains partial | Canonical lowercase UUID v4 structure, startup short-circuit, trailing/unknown/missing command lifecycle differential pass |
 | Phase 5A6b Reality keypair generation | Complete in declared scope; CLI-09 remains partial | Raw URL-safe Base64 key shape, X25519 private clamp/public relation, trailing argument and startup short-circuit differential pass |
 | Phase 5A6c WireGuard keypair generation | Complete in declared scope; CLI-09 remains partial | Padded standard-Base64 key shape, X25519 private clamp/public relation, trailing argument and startup short-circuit differential pass |
@@ -82,7 +83,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, startup readiness, Go-compatible live-resource shutdown-hook boundary and failure asymmetry pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A8a CLI/lifecycle suites, including 5A5a–5A5d ruleset conversion and complete 5A6a–5A6g generation, run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS and Phase 5A1–5A8a CLI/lifecycle suites, including 5A5a–5A5e ruleset conversion and complete 5A6a–5A6g generation, run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |

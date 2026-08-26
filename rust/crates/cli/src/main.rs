@@ -284,14 +284,14 @@ fn run_convert_ruleset_subcommand(
         .first()
         .and_then(|value| value.to_str())
         .ok_or_else(|| std::io::Error::other(usage))?;
-    if !matches!(behavior, "ipcidr" | "domain") {
+    if !matches!(behavior, "ipcidr" | "domain" | "classical") {
         return Err(std::io::Error::other(format!("unsupported behavior type: {behavior}")).into());
     }
     let format = arguments
         .get(1)
         .and_then(|value| value.to_str())
         .ok_or_else(|| std::io::Error::other(usage))?;
-    if !matches!(format, "mrs" | "text" | "yaml") {
+    if !matches!(format, "mrs" | "text" | "yaml" | "") {
         return Err(
             std::io::Error::other(format!("unsupported conversion format: {format}")).into(),
         );
@@ -309,16 +309,17 @@ fn run_convert_ruleset_subcommand(
         ("ipcidr", "text") => {
             rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?
         }
-        ("ipcidr", "yaml") => {
+        ("ipcidr", "yaml" | "") => {
             rewrite_ruleset::ipcidr_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?
         }
         ("domain", "mrs") => rewrite_ruleset::domain_mrs_to_text(&source)?,
         ("domain", "text") => {
             rewrite_ruleset::domain_to_mrs(&source, rewrite_ruleset::SourceFormat::Text)?
         }
-        ("domain", "yaml") => {
+        ("domain", "yaml" | "") => {
             rewrite_ruleset::domain_to_mrs(&source, rewrite_ruleset::SourceFormat::Yaml)?
         }
+        ("classical", _) => return Err(std::io::Error::other("invalid format").into()),
         _ => unreachable!("format was validated"),
     };
     target.write_all(&output)?;

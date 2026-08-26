@@ -742,6 +742,18 @@ failure path. Invalid-entry warning log parity, permissive streaming-YAML
 recovery, classical records and runtime provider consumption remain later
 slices.
 
+### Phase 5A5e accepted scope
+
+Phase 5A5e records and reproduces the pinned oracle's actual classical
+`convert-ruleset` behavior: classical is a recognized behavior name but is not
+an MRS-capable strategy, so text, YAML (including the empty-string YAML alias)
+and MRS requests terminate with exit 2 after reading the source and creating a
+zero-length target. Rust now preserves those observable side effects instead
+of rejecting the behavior before file I/O. This is explicit unsupported-feature
+parity, not a claim that classical MRS exists. Invalid-rule warning text,
+permissive streaming-YAML recovery and exhaustive malformed-record diagnostics
+remain later CLI-08/CLI-13 slices.
+
 ### Phase 5A6a accepted scope
 
 Phase 5A6a accepts only `generate uuid` from `CLI-09`. Rust delegates random
