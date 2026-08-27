@@ -87,6 +87,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B2a destination IPv4 suffix routing | Complete in declared literal/local-TCP scope; RULE-05 remains partial | Host-bit-preserving suffix parsing/matching, adaptive byte widths, invalid width, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
 | Phase 5B2c default DSCP routing | Complete in declared local-mixed-TCP/default-metadata scope; RULE-06 remains partial | DSCP zero/nonzero, slash and reversed ranges, wildcard, invalid 64, and DIRECT/REJECT outcomes pass |
+| Phase 5B2d live TCP port/network routing | Complete in declared mixed-TCP scope; RULE-06 remains partial | Real destination/inbound port and TCP network metadata produce matching DIRECT and nonmatching REJECT outcomes |
 | Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
 | Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
 | Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
@@ -3070,6 +3071,28 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 The focused differential and checks pass locally. Capturing nonzero DSCP from
 transparent proxy, TUN or UDP paths remains pending, so RULE-06 remains partial.
+
+## Phase 5B2d deliverables and evidence
+
+Phase 5B2d promotes destination port, inbound port and network matching from
+the pure policy oracle to a live mixed TCP path. Each rule is rendered only
+after the fixture has reserved the listener and echo ports, avoiding fixed-port
+collisions and making the compared metadata the real socket values.
+
+`compat/scripts/phase5b2d.py` proves destination-port and inbound-port exact
+hits plus adjacent-port misses. It also proves the same connection reports
+`NETWORK,TCP` and does not report `NETWORK,UDP`. Every pair yields an observable
+DIRECT echo or REJECT close in both products.
+
+Local evidence on 2026-08-27:
+
+```sh
+PHASE5B2D_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b2d.py
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Live `SRC-PORT`, UDP ingress metadata and nonzero DSCP capture remain pending,
+so aggregate RULE-06 remains partial.
 
 ## Phase 5B3a deliverables and evidence
 

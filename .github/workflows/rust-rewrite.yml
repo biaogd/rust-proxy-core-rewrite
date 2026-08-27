@@ -121,6 +121,7 @@ jobs:
       PHASE5B2A_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B2B_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B2C_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5B2D_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B3A_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B3B_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B3C_CARGO_TARGET: ${{ github.workspace }}/rust/target
@@ -165,6 +166,7 @@ jobs:
             compat/scripts/phase5b3c.py \
             compat/scripts/phase5b3b.py \
             compat/scripts/phase5b3a.py \
+            compat/scripts/phase5b2d.py \
             compat/scripts/phase5b2c.py \
             compat/scripts/phase5b2b.py \
             compat/scripts/phase5b2a.py \

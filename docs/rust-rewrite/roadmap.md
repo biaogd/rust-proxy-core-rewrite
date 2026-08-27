@@ -929,6 +929,14 @@ value above 63, and distinct DIRECT/REJECT network outcomes in both products.
 Nonzero socket metadata from transparent proxy, TUN and UDP paths remains a
 later RULE-06 gate and must not be simulated by this slice.
 
+### Phase 5B2d accepted scope
+
+Phase 5B2d accepts live destination-port, inbound-port and TCP network metadata
+on the local mixed TCP path. Dynamically reserved ports must produce exact hit
+and adjacent miss outcomes; the same TCP connection must match TCP and reject
+UDP. Source-port binding, UDP ingress and nonzero DSCP capture remain separate
+RULE-06 gates.
+
 ### Phase 5B3a accepted scope
 
 Phase 5B3a accepts `IN-TYPE` for the current mixed TCP input set. HTTP
