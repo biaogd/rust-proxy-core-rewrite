@@ -93,6 +93,32 @@ pub struct TrafficSnapshot {
     pub down_total: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ProxyDelayHistory {
+    pub time: String,
+    pub delay: u16,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProxyUrlHealth {
+    pub alive: bool,
+    pub history: Vec<ProxyDelayHistory>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProxyHealthSnapshot {
+    pub alive: bool,
+    pub history: Vec<ProxyDelayHistory>,
+    pub extra: BTreeMap<String, ProxyUrlHealth>,
+}
+
+#[derive(Debug)]
+struct ProxyHealth {
+    alive: bool,
+    history: Vec<ProxyDelayHistory>,
+    extra: BTreeMap<String, ProxyUrlHealth>,
+}
+
 #[derive(Debug)]
 pub struct RuntimeState {
     next_id: AtomicU64,
@@ -101,6 +127,8 @@ pub struct RuntimeState {
     connections: Mutex<BTreeMap<u64, ActiveConnection>>,
     logs: broadcast::Sender<LogEvent>,
     storage: Mutex<BTreeMap<String, Vec<u8>>>,
+    global_proxy: Mutex<String>,
+    proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
 }
@@ -133,6 +161,8 @@ impl Default for RuntimeState {
             connections: Mutex::new(BTreeMap::new()),
             logs,
             storage: Mutex::new(BTreeMap::new()),
+            global_proxy: Mutex::new("DIRECT".to_owned()),
+            proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
         }
@@ -266,6 +296,85 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(key);
+    }
+
+    #[must_use]
+    pub fn global_proxy(&self) -> String {
+        self.global_proxy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_global_proxy(&self, name: &str) -> bool {
+        if !matches!(name, "DIRECT" | "REJECT") {
+            return false;
+        }
+        name.clone_into(
+            &mut self
+                .global_proxy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        true
+    }
+
+    #[must_use]
+    pub fn proxy_health(&self, name: &str) -> ProxyHealthSnapshot {
+        self.proxy_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .map_or_else(
+                || ProxyHealthSnapshot {
+                    alive: true,
+                    history: Vec::new(),
+                    extra: BTreeMap::new(),
+                },
+                |health| ProxyHealthSnapshot {
+                    alive: health.alive,
+                    history: health.history.clone(),
+                    extra: health.extra.clone(),
+                },
+            )
+    }
+
+    pub fn record_proxy_delay(&self, name: &str, url: &str, delay: u16, alive: bool) {
+        const HISTORY_LIMIT: usize = 10;
+        let record = ProxyDelayHistory {
+            time: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default(),
+            delay: if alive { delay } else { 0 },
+        };
+        let mut health = self
+            .proxy_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let health = health
+            .entry(name.to_owned())
+            .or_insert_with(|| ProxyHealth {
+                alive: true,
+                history: Vec::new(),
+                extra: BTreeMap::new(),
+            });
+        health.alive = alive;
+        health.history.push(record.clone());
+        if health.history.len() > HISTORY_LIMIT {
+            health.history.remove(0);
+        }
+        let url_health = health
+            .extra
+            .entry(url.to_owned())
+            .or_insert_with(|| ProxyUrlHealth {
+                alive: true,
+                history: Vec::new(),
+            });
+        url_health.alive = alive;
+        url_health.history.push(record);
+        if url_health.history.len() > HISTORY_LIMIT {
+            url_health.history.remove(0);
+        }
     }
 
     #[must_use]
@@ -895,6 +1004,29 @@ mod tests {
         state.storage_delete("ui/key");
         state.storage_delete("ui/key");
         assert!(state.storage_get("ui/key").is_none());
+    }
+
+    #[test]
+    fn controller_proxy_selection_and_health_share_runtime_state() {
+        let state = RuntimeState::default();
+        assert_eq!(state.global_proxy(), "DIRECT");
+        assert!(!state.set_global_proxy("missing"));
+        assert!(state.set_global_proxy("REJECT"));
+        assert_eq!(state.global_proxy(), "REJECT");
+
+        let initial = state.proxy_health("DIRECT");
+        assert!(initial.alive);
+        assert!(initial.history.is_empty());
+        state.record_proxy_delay("DIRECT", "http://health.test/", 42, true);
+        let healthy = state.proxy_health("DIRECT");
+        assert!(healthy.alive);
+        assert_eq!(healthy.history[0].delay, 42);
+        assert!(healthy.extra["http://health.test/"].alive);
+        state.record_proxy_delay("DIRECT", "http://health.test/", 0, false);
+        let failed = state.proxy_health("DIRECT");
+        assert!(!failed.alive);
+        assert_eq!(failed.history[1].delay, 0);
+        assert_eq!(failed.extra["http://health.test/"].history.len(), 2);
     }
 
     #[test]

@@ -98,10 +98,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
-| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04, broader rule rendering and storage persistence retain listed gaps | Bearer/query-token/CORS, observability, connection/config/rule mutations and process-local JSON storage pass |
+| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05, broader rule rendering and storage persistence retain listed gaps | Bearer/query-token/CORS, observability, connection/config/rule mutations, storage and built-in proxy/GLOBAL control pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage gates run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy gates run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3453,6 +3453,24 @@ does not claim storage across process restart or interchange with the oracle's
 cache database; that persistence boundary remains separate from the accepted
 HTTP contract.
 
+The current built-in proxy registry and implicit GLOBAL selector are now
+visible through `/proxies` and `/group`. The JSON view preserves the seven
+built-in names and types, adapter UUID conventions (including zero IDs for
+PASS/PASS-RULE and no selector ID), initial alive state, capability flags,
+GLOBAL members/current choice and exact not-found/non-selector/invalid-choice
+errors. GLOBAL selection is shared by the controller's runtime state and can
+switch between DIRECT and REJECT.
+
+Proxy delay uses Hyper's maintained HTTP/1 client connection and sends the
+oracle's HEAD request through the current local DIRECT/COMPATIBLE boundary.
+Successful tests update the ten-entry adapter history and per-URL `extra`
+health state; GLOBAL group delay tests its current built-in member set and
+returns the successful DIRECT result. `compat/scripts/phase5d_proxies.py`
+compares list/detail/group shapes, mutations, validation, positive local delay,
+history side effects and group results. Remote adapters/groups, HTTPS, GLOBAL
+data-plane routing, exhaustive failure/timeout behavior and selection
+reload/persistence remain unclaimed.
+
 Local focused evidence:
 
 ```sh
@@ -3462,6 +3480,7 @@ PHASE5DCORS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scrip
 PHASE5DCONFIGS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_configs.py
 PHASE5DRULES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_rules.py
 PHASE5DSTORAGE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_storage.py
+PHASE5DPROXIES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_proxies.py
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 cargo fmt --manifest-path rust/Cargo.toml --all --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings

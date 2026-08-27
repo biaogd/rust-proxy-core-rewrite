@@ -9,6 +9,9 @@ publish.workspace = true
 axum.workspace = true
 base64.workspace = true
 futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-dns = { path = "../dns" }
 rewrite-state = { path = "../state" }

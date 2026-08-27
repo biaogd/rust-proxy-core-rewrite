@@ -15,6 +15,9 @@ use axum::routing::{any, delete, get};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{StreamExt, stream};
+use http_body_util::Empty;
+use hyper::client::conn::http1;
+use hyper_util::rt::TokioIo;
 use rewrite_config::Config;
 use rewrite_dns::DnsService;
 use rewrite_state::RuntimeState;
@@ -259,6 +262,17 @@ fn controller_router(state: ControllerState) -> Router {
             "/storage/{key}",
             get(get_storage).put(set_storage).delete(delete_storage),
         )
+        .route("/proxies", get(proxies))
+        .route("/proxies/", get(proxies))
+        .route("/proxies/{name}/delay", get(proxy_delay))
+        .route(
+            "/proxies/{name}",
+            get(proxy).put(select_proxy).delete(unfix_proxy),
+        )
+        .route("/group", get(groups))
+        .route("/group/", get(groups))
+        .route("/group/{name}/delay", get(group_delay))
+        .route("/group/{name}", get(group))
         .route(
             "/connections",
             get(connections).delete(close_all_connections),
@@ -484,6 +498,326 @@ async fn set_storage(
 async fn delete_storage(State(state): State<ControllerState>, Path(key): Path<String>) -> Response {
     state.runtime.storage_delete(&key);
     empty_response(StatusCode::NO_CONTENT)
+}
+
+const PROXY_NAMES: [&str; 7] = [
+    "COMPATIBLE",
+    "DIRECT",
+    "GLOBAL",
+    "PASS",
+    "PASS-RULE",
+    "REJECT",
+    "REJECT-DROP",
+];
+
+async fn proxies(State(state): State<ControllerState>) -> Response {
+    let proxies: serde_json::Map<String, serde_json::Value> = PROXY_NAMES
+        .into_iter()
+        .map(|name| (name.to_owned(), proxy_snapshot(name, &state.runtime)))
+        .collect();
+    json_response(StatusCode::OK, &json!({"proxies": proxies}))
+}
+
+async fn proxy(State(state): State<ControllerState>, Path(name): Path<String>) -> Response {
+    if !PROXY_NAMES.contains(&name.as_str()) {
+        return proxy_not_found();
+    }
+    json_response(StatusCode::OK, &proxy_snapshot(&name, &state.runtime))
+}
+
+async fn groups(State(state): State<ControllerState>) -> Response {
+    json_response(
+        StatusCode::OK,
+        &json!({"proxies": [proxy_snapshot("GLOBAL", &state.runtime)]}),
+    )
+}
+
+async fn group(State(state): State<ControllerState>, Path(name): Path<String>) -> Response {
+    if name != "GLOBAL" {
+        return proxy_not_found();
+    }
+    json_response(StatusCode::OK, &proxy_snapshot("GLOBAL", &state.runtime))
+}
+
+async fn proxy_delay(
+    State(state): State<ControllerState>,
+    Path(name): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !PROXY_NAMES.contains(&name.as_str()) {
+        return proxy_not_found();
+    }
+    let parameters = query_parameters(&uri);
+    let Some(timeout) = parameters
+        .get("timeout")
+        .and_then(|value| value.parse::<i16>().ok())
+    else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let Some(expected) = parameters
+        .get("expected")
+        .map_or(Some(Vec::new()), |value| parse_status_ranges(value))
+    else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let url = parameters.get("url").map_or("", String::as_str);
+    let tested_name = if name == "GLOBAL" {
+        state.runtime.global_proxy()
+    } else {
+        name.clone()
+    };
+    if timeout <= 0 {
+        state.runtime.record_proxy_delay(&name, url, 0, false);
+        return json_response(StatusCode::GATEWAY_TIMEOUT, &json!({"message": "Timeout"}));
+    }
+    let result = tokio::time::timeout(
+        Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
+        measure_http_delay(&tested_name, url, &expected),
+    )
+    .await;
+    match result {
+        Ok(Ok(delay)) if delay > 0 => {
+            state.runtime.record_proxy_delay(&name, url, delay, true);
+            json_response(StatusCode::OK, &json!({"delay": delay}))
+        }
+        Err(_) => {
+            state.runtime.record_proxy_delay(&name, url, 0, false);
+            json_response(StatusCode::GATEWAY_TIMEOUT, &json!({"message": "Timeout"}))
+        }
+        _ => {
+            state.runtime.record_proxy_delay(&name, url, 0, false);
+            json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"message": "An error occurred in the delay test"}),
+            )
+        }
+    }
+}
+
+async fn group_delay(
+    State(state): State<ControllerState>,
+    Path(name): Path<String>,
+    uri: Uri,
+) -> Response {
+    if name != "GLOBAL" {
+        return proxy_not_found();
+    }
+    let parameters = query_parameters(&uri);
+    let Some(timeout) = parameters
+        .get("timeout")
+        .and_then(|value| value.parse::<i32>().ok())
+    else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let Some(expected) = parameters
+        .get("expected")
+        .map_or(Some(Vec::new()), |value| parse_status_ranges(value))
+    else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let url = parameters.get("url").map_or("", String::as_str);
+    if timeout <= 0 {
+        return json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            &json!({"message": "get delay: all proxies timeout"}),
+        );
+    }
+    let result = tokio::time::timeout(
+        Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
+        measure_http_delay("DIRECT", url, &expected),
+    )
+    .await;
+    match result {
+        Ok(Ok(delay)) if delay > 0 => {
+            state.runtime.record_proxy_delay("DIRECT", url, delay, true);
+            state.runtime.record_proxy_delay("REJECT", url, 0, false);
+            json_response(StatusCode::OK, &json!({"DIRECT": delay}))
+        }
+        _ => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            &json!({"message": "get delay: all proxies timeout"}),
+        ),
+    }
+}
+
+async fn measure_http_delay(name: &str, raw_url: &str, expected: &[(u16, u16)]) -> Result<u16, ()> {
+    if !matches!(name, "DIRECT" | "COMPATIBLE") {
+        return Err(());
+    }
+    let url = url::Url::parse(raw_url).map_err(|_| ())?;
+    if url.scheme() != "http" {
+        return Err(());
+    }
+    let host = url.host_str().ok_or(())?;
+    let port = url.port_or_known_default().ok_or(())?;
+    let started = tokio::time::Instant::now();
+    let stream = tokio::net::TcpStream::connect((host, port))
+        .await
+        .map_err(|_| ())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| ())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut target = url.path().to_owned();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = url
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+    let request = hyper::Request::builder()
+        .method(hyper::Method::HEAD)
+        .uri(target)
+        .header(hyper::header::HOST, authority)
+        .body(Empty::<Bytes>::new())
+        .map_err(|_| ())?;
+    let response = sender.send_request(request).await.map_err(|_| ())?;
+    let status = response.status().as_u16();
+    if !expected.is_empty()
+        && !expected
+            .iter()
+            .any(|(start, end)| (*start..=*end).contains(&status))
+    {
+        return Err(());
+    }
+    u16::try_from(started.elapsed().as_millis()).map_err(|_| ())
+}
+
+fn parse_status_ranges(value: &str) -> Option<Vec<(u16, u16)>> {
+    let value = value.trim();
+    if value.is_empty() || value == "*" {
+        return Some(Vec::new());
+    }
+    let parts: Vec<_> = value
+        .replace(',', "/")
+        .split('/')
+        .map(str::to_owned)
+        .collect();
+    if parts.len() > 28 {
+        return None;
+    }
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut bounds = part.split('-');
+            let start = bounds.next()?.trim().parse::<u16>().ok()?;
+            let end = bounds
+                .next()
+                .map_or(Some(start), |value| value.trim().parse::<u16>().ok())?;
+            if bounds.next().is_some() || start > end {
+                return None;
+            }
+            Some((start, end))
+        })
+        .collect()
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct ProxySelection {
+    name: String,
+}
+
+async fn select_proxy(
+    State(state): State<ControllerState>,
+    Path(name): Path<String>,
+    request: Request,
+) -> Response {
+    if !PROXY_NAMES.contains(&name.as_str()) {
+        return proxy_not_found();
+    }
+    let Ok(selection) = decode_json_body::<ProxySelection>(request).await else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    if name != "GLOBAL" {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"message": "Must be a Selector"}),
+        );
+    }
+    if !state.runtime.set_global_proxy(&selection.name) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"message": "Selector update error: proxy not exist"}),
+        );
+    }
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn unfix_proxy(Path(name): Path<String>) -> Response {
+    if !PROXY_NAMES.contains(&name.as_str()) {
+        return proxy_not_found();
+    }
+    json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}))
+}
+
+fn proxy_snapshot(name: &str, runtime: &RuntimeState) -> serde_json::Value {
+    let kind = match name {
+        "DIRECT" => "Direct",
+        "REJECT" => "Reject",
+        "REJECT-DROP" => "RejectDrop",
+        "COMPATIBLE" => "Compatible",
+        "PASS" => "Pass",
+        "PASS-RULE" => "PassRule",
+        "GLOBAL" => "Selector",
+        _ => "Unknown",
+    };
+    let health = runtime.proxy_health(name);
+    let mut value = json!({
+        "alive": health.alive,
+        "dialer-proxy": "",
+        "extra": health.extra,
+        "history": health.history,
+        "id": proxy_id(name),
+        "interface": "",
+        "mptcp": false,
+        "name": name,
+        "provider-name": "",
+        "routing-mark": 0,
+        "smux": false,
+        "tfo": false,
+        "type": kind,
+        "udp": true,
+        "uot": false,
+        "xudp": false,
+    });
+    if name == "GLOBAL" {
+        let object = value.as_object_mut().expect("proxy snapshot is an object");
+        object.remove("id");
+        object.insert("all".to_owned(), json!(["DIRECT", "REJECT"]));
+        object.insert("emptyFallback".to_owned(), json!("COMPATIBLE"));
+        object.insert("hidden".to_owned(), json!(false));
+        object.insert("icon".to_owned(), json!(""));
+        object.insert("now".to_owned(), json!(runtime.global_proxy()));
+        object.insert("testUrl".to_owned(), json!(""));
+    }
+    value
+}
+
+fn proxy_id(name: &str) -> &'static str {
+    match name {
+        "DIRECT" => "00000000-0000-4000-8000-000000000001",
+        "REJECT" => "00000000-0000-4000-8000-000000000002",
+        "REJECT-DROP" => "00000000-0000-4000-8000-000000000003",
+        "COMPATIBLE" => "00000000-0000-4000-8000-000000000004",
+        "PASS" | "PASS-RULE" => "00000000-0000-0000-0000-000000000000",
+        "GLOBAL" => "00000000-0000-4000-8000-000000000007",
+        _ => "00000000-0000-4000-8000-000000000000",
+    }
+}
+
+fn proxy_not_found() -> Response {
+    json_response(
+        StatusCode::NOT_FOUND,
+        &json!({"message": "Resource not found"}),
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -1120,5 +1454,17 @@ mod tests {
             "https://exact.example.test",
             "https://other.example.test"
         ));
+    }
+
+    #[test]
+    fn parses_controller_expected_status_ranges() {
+        assert_eq!(parse_status_ranges(""), Some(Vec::new()));
+        assert_eq!(parse_status_ranges("*"), Some(Vec::new()));
+        assert_eq!(
+            parse_status_ranges("200/204,301-303"),
+            Some(vec![(200, 200), (204, 204), (301, 303)])
+        );
+        assert_eq!(parse_status_ranges("invalid"), None);
+        assert_eq!(parse_status_ranges("303-301"), None);
     }
 }

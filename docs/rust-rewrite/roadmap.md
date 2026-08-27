@@ -1081,6 +1081,20 @@ after invalid or oversized writes in `compat/scripts/phase5d_storage.py`.
 Cross-restart persistence and database-format interchange remain a separate
 storage migration gate.
 
+The built-in proxy control gate exposes the seven oracle built-ins and the
+implicit GLOBAL selector through `/proxies` and `/group`. It preserves each
+adapter's JSON shape, UUID convention, initial health state, selector members
+and exact list/detail/mutation errors. GLOBAL selection is shared controller
+state and supports the current DIRECT/REJECT members. A Hyper HTTP/1 client
+performs deterministic local HEAD delay tests; the resulting history and
+per-URL health state are returned by subsequent proxy views, while GLOBAL
+group delay reports the successful DIRECT member. Acceptance is consolidated
+in `compat/scripts/phase5d_proxies.py`.
+
+Configured remote adapters and groups, HTTPS health checks, GLOBAL selection
+as a data-plane route, health failure/timeout exhaustiveness and selection
+reload/persistence remain later `API-05` gates.
+
 TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior, remaining
 PATCH fields, safe-root/default configuration path loading, `/configs/geo`,
