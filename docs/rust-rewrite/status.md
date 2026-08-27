@@ -106,6 +106,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C2b manual file-provider refresh | Complete in declared serial transaction scope; PROV-01/PROV-03 remain partial | PUT atomically replaces members/dependent groups; malformed YAML returns 503 and retains controller/data-plane state |
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
 | Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
+| Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3848,6 +3849,20 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controll
 
 Automatic group types, restart-persisted choices, provider-driven nested
 membership changes and exhaustive invalid-DAG diagnostics remain unclaimed.
+
+Phase 5C1e applies `exclude-type` after name filtering over explicit, nested and
+provider-derived members. Type matching is case-insensitive and recognizes the
+current built-ins, HTTP, SOCKS5 and Selector adapters. If every candidate is
+removed, the configured empty fallback becomes the sole runtime member, while
+the compatible provider continues to expose its unfiltered explicit inventory.
+
+```sh
+PHASE5CEXCLUDETYPE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_exclude_type.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Future adapter types join this filter only with their owning protocol slice;
+automatic-group health policy remains separate.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

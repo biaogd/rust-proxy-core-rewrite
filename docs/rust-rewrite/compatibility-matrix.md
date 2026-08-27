@@ -79,7 +79,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | `external-controller-cors` defaults/config/reload | Oracle | **Parity** | Allow-all defaults/empty list, exact/single-wildcard origins, Private Network, denied method/header, auth ordering and hot reload in `compat/scripts/phase5d_cors.py` |
 | UI paths/download settings and safe-path checks | Oracle | Not started | Path traversal and normalization cases |
 | Proxies and built-in proxy insertion | Oracle | Not started | Normalized inventory/error corpus |
-| Proxy groups and cycle/order validation | Oracle | Partial | Nested select forward references, cycle rejection, recursive selection plus ordered filter/exclude, all three include-all forms and empty fallback pass; automatic groups and exhaustive validation remain |
+| Proxy groups and cycle/order validation | Oracle | Partial | Nested select forward references, cycle rejection, recursive selection plus ordered name/type exclusion, all three include-all forms and empty fallback pass; automatic groups and exhaustive validation remain |
 | Proxy providers and health checks | Oracle | Partial | Local YAML file load, views, selected routing, manual transactional refresh/rollback and filtered composition pass; HTTP/scheduled vehicles and real health state remain |
 | Rules, sub-rules and rule providers | Oracle | Partial | Phase 2 pure rule/sub-rule subset only; providers and runtime resources are not started |
 | Named listeners | Oracle | Not started | Type-specific accepted/rejected configs |

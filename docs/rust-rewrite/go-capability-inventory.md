@@ -164,7 +164,7 @@ Primary anchors: [`adapter/outboundgroup`](../../adapter/outboundgroup),
 | --- | --- | --- | --- |
 | GRP-01 | Selector and manual selection/persistence | Partial: nested configured selectors, recursive live TCP routing and SIGHUP state reconciliation | 5C1 restart-persistence gate |
 | GRP-02 | URL-test, fallback and load-balance strategies | Not started | 5C1 |
-| GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: flat file-provider composition, ordered include/filter/exclude and empty fallback | 5C1 automatic groups/health policies |
+| GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: file-provider composition, ordered name/type exclusion, include-all and empty fallback | 5C1 automatic groups/health policies |
 | PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Partial: local YAML file load/manual refresh, REST views and group consumption | 5C2 HTTP/interval/override/persistence gates |
 | PROV-02 | Rule providers: text/YAML/MRS formats, classical/domain/IP behavior, refresh and persistence | Not started | 5C4 |
 | PROV-03 | Concurrent update, failure rollback, resource cleanup and SIGHUP interaction | Partial: selector SIGHUP plus manual file-refresh transaction/rollback | 5C5 concurrency/cleanup gates |

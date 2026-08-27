@@ -120,6 +120,7 @@ pub struct ProxyGroupConfig {
     pub providers: Vec<String>,
     pub filter: Option<String>,
     pub exclude_filter: Option<String>,
+    pub exclude_types: Vec<String>,
     pub empty_fallback: String,
     pub default_selected: Option<String>,
 }
@@ -646,6 +647,7 @@ struct RawProxyGroup {
     providers: Option<Vec<String>>,
     filter: Option<String>,
     exclude_filter: Option<String>,
+    exclude_type: Option<String>,
     include_all: Option<bool>,
     include_all_proxies: Option<bool>,
     include_all_providers: Option<bool>,
@@ -1034,8 +1036,15 @@ impl Config {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
         next.proxy_providers[index].proxies = proxies;
+        let providers = next.proxy_providers.clone();
+        let group_names: BTreeSet<_> = next
+            .proxy_groups
+            .iter()
+            .map(|group| group.name.clone())
+            .collect();
+        let proxy_types = proxy_member_types(&next.proxies, &providers, &group_names);
         for group in &mut next.proxy_groups {
-            group.proxies = expand_proxy_group(group, &next.proxy_providers)?;
+            group.proxies = expand_proxy_group(group, &providers, &proxy_types)?;
         }
         Ok(next)
     }
@@ -3239,6 +3248,15 @@ fn parse_proxy_groups(
     }
     validate_proxy_group_cycles(&groups, &group_names)?;
     proxy_names.extend(group_names.iter().cloned());
+    let proxy_types = proxy_member_types(proxies, providers, &group_names);
+    let catalog = ProxyGroupCatalog {
+        proxy_names: &proxy_names,
+        top_level_names: &top_level_names,
+        all_proxies: &all_proxies,
+        all_providers: &all_providers,
+        providers,
+        proxy_types: &proxy_types,
+    };
 
     let mut parsed = Vec::new();
     for group in groups {
@@ -3248,15 +3266,7 @@ fn parse_proxy_groups(
             .filter(|name| !name.is_empty())
             .cloned()
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
-        parsed.push(parse_proxy_group(
-            group,
-            name,
-            &proxy_names,
-            &top_level_names,
-            &all_proxies,
-            &all_providers,
-            providers,
-        )?);
+        parsed.push(parse_proxy_group(group, name, &catalog)?);
     }
     Ok(parsed)
 }
@@ -3310,24 +3320,37 @@ fn is_reserved_proxy_name(name: &str) -> bool {
     )
 }
 
+struct ProxyGroupCatalog<'a> {
+    proxy_names: &'a BTreeSet<String>,
+    top_level_names: &'a BTreeSet<String>,
+    all_proxies: &'a [String],
+    all_providers: &'a [String],
+    providers: &'a [ProxyProviderConfig],
+    proxy_types: &'a BTreeMap<String, String>,
+}
+
 fn parse_proxy_group(
     group: RawProxyGroup,
     name: String,
-    proxy_names: &BTreeSet<String>,
-    top_level_names: &BTreeSet<String>,
-    all_proxies: &[String],
-    all_providers: &[String],
-    providers: &[ProxyProviderConfig],
+    catalog: &ProxyGroupCatalog<'_>,
 ) -> Result<ProxyGroupConfig, ConfigError> {
     let filter = group.filter.filter(|value| !value.is_empty());
     let exclude_filter = group.exclude_filter.filter(|value| !value.is_empty());
+    let exclude_types: Vec<_> = group
+        .exclude_type
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .flat_map(|value| value.split('|').map(str::to_owned).collect::<Vec<String>>())
+        .collect();
     let filter_regexes = compile_group_regexes(filter.as_deref(), &name)?;
     compile_group_regexes(exclude_filter.as_deref(), &name)?;
     let empty_fallback = group
         .empty_fallback
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "COMPATIBLE".to_owned());
-    if !top_level_names.contains(empty_fallback.as_str()) && !is_group_builtin(&empty_fallback) {
+    if !catalog.top_level_names.contains(empty_fallback.as_str())
+        && !is_group_builtin(&empty_fallback)
+    {
         return Err(ConfigError::UnsupportedProxy(name));
     }
 
@@ -3337,9 +3360,9 @@ fn parse_proxy_group(
     let mut compatible_proxies = group.proxies.unwrap_or_default();
     if include_all_proxies {
         if filter_regexes.is_empty() {
-            compatible_proxies.extend(all_proxies.iter().cloned());
+            compatible_proxies.extend(catalog.all_proxies.iter().cloned());
         } else {
-            for proxy in all_proxies {
+            for proxy in catalog.all_proxies {
                 for pattern in &filter_regexes {
                     if group_regex_matches(pattern, proxy) {
                         compatible_proxies.push(proxy.clone());
@@ -3349,12 +3372,13 @@ fn parse_proxy_group(
         }
     }
     let provider_names = if include_all_providers {
-        all_providers.to_vec()
+        catalog.all_providers.to_vec()
     } else {
         group.providers.unwrap_or_default()
     };
     for provider_name in &provider_names {
-        providers
+        catalog
+            .providers
             .iter()
             .find(|provider| provider.name == *provider_name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
@@ -3364,7 +3388,7 @@ fn parse_proxy_group(
     }
     if compatible_proxies
         .iter()
-        .any(|member| !proxy_names.contains(member.as_str()) && !is_group_builtin(member))
+        .any(|member| !catalog.proxy_names.contains(member.as_str()) && !is_group_builtin(member))
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -3375,14 +3399,15 @@ fn parse_proxy_group(
         providers: provider_names,
         filter,
         exclude_filter,
+        exclude_types,
         empty_fallback,
         default_selected: group.default_selected,
     };
-    parsed.proxies = expand_proxy_group(&parsed, providers)?;
+    parsed.proxies = expand_proxy_group(&parsed, catalog.providers, catalog.proxy_types)?;
     if parsed
         .proxies
         .iter()
-        .any(|member| !proxy_names.contains(member.as_str()) && !is_group_builtin(member))
+        .any(|member| !catalog.proxy_names.contains(member.as_str()) && !is_group_builtin(member))
         || parsed
             .default_selected
             .as_ref()
@@ -3418,9 +3443,43 @@ fn group_regex_matches(pattern: &fancy_regex::Regex, name: &str) -> bool {
     pattern.is_match(name).unwrap_or(false)
 }
 
+fn proxy_member_types(
+    proxies: &[ProxyConfig],
+    providers: &[ProxyProviderConfig],
+    group_names: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut types: BTreeMap<_, _> = [
+        ("DIRECT", "Direct"),
+        ("REJECT", "Reject"),
+        ("REJECT-DROP", "RejectDrop"),
+        ("COMPATIBLE", "Compatible"),
+        ("PASS", "Pass"),
+        ("PASS-RULE", "Pass"),
+    ]
+    .into_iter()
+    .map(|(name, kind)| (name.to_owned(), kind.to_owned()))
+    .collect();
+    for proxy in proxies.iter().chain(
+        providers
+            .iter()
+            .flat_map(|provider| provider.proxies.iter()),
+    ) {
+        let kind = match proxy.kind {
+            ProxyKind::Http => "Http",
+            ProxyKind::Socks5 => "Socks5",
+        };
+        types.insert(proxy.name.clone(), kind.to_owned());
+    }
+    for name in group_names {
+        types.insert(name.clone(), "Selector".to_owned());
+    }
+    types
+}
+
 fn expand_proxy_group(
     group: &ProxyGroupConfig,
     providers: &[ProxyProviderConfig],
+    proxy_types: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, ConfigError> {
     let filter_regexes = compile_group_regexes(group.filter.as_deref(), &group.name)?;
     let exclude_regexes = compile_group_regexes(group.exclude_filter.as_deref(), &group.name)?;
@@ -3476,6 +3535,14 @@ fn expand_proxy_group(
         !exclude_regexes
             .iter()
             .any(|pattern| group_regex_matches(pattern, member))
+    });
+    members.retain(|member| {
+        proxy_types.get(member).is_none_or(|kind| {
+            !group
+                .exclude_types
+                .iter()
+                .any(|excluded| excluded.eq_ignore_ascii_case(kind))
+        })
     });
     if members.is_empty() {
         members.push(group.empty_fallback.clone());
@@ -4640,11 +4707,13 @@ dns:
             providers: vec!["local-file".to_owned()],
             filter: Some("provider-beta`provider-alpha".to_owned()),
             exclude_filter: Some("omit".to_owned()),
+            exclude_types: Vec::new(),
             empty_fallback: "DIRECT".to_owned(),
             default_selected: None,
         };
+        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeSet::new());
         assert_eq!(
-            expand_proxy_group(&group, &[provider]).expect("group expansion"),
+            expand_proxy_group(&group, &[provider], &types).expect("group expansion"),
             ["provider-beta", "provider-alpha", "REJECT"]
         );
     }
@@ -4670,11 +4739,13 @@ dns:
             providers: vec!["local-file".to_owned()],
             filter: Some("^missing$".to_owned()),
             exclude_filter: None,
+            exclude_types: Vec::new(),
             empty_fallback: "REJECT".to_owned(),
             default_selected: Some("REJECT".to_owned()),
         };
+        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeSet::new());
         assert_eq!(
-            expand_proxy_group(&group, &[provider]).expect("empty fallback"),
+            expand_proxy_group(&group, &[provider], &types).expect("empty fallback"),
             ["REJECT"]
         );
     }

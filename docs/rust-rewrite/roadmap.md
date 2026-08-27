@@ -1235,6 +1235,16 @@ direct-versus-proxied wire behavior and two-node cycle rejection. Automatic
 group types, cross-process persistence and provider-driven nested reloads remain
 separate gates.
 
+### Phase 5C1e accepted scope
+
+Select groups apply case-insensitive `exclude-type` after name filtering across
+explicit built-ins, configured HTTP/SOCKS5 proxies, local-provider members and
+nested selectors. Empty results use `empty-fallback`; compatible-provider views
+retain the pre-filter explicit inventory exactly like the oracle. Acceptance in
+`compat/scripts/phase5c_exclude_type.py` compares membership, fallback, adapter
+views and DIRECT versus authenticated SOCKS5 wire routing. Later protocol types
+and automatic health strategies remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

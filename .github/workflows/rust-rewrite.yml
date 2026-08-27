@@ -166,6 +166,7 @@ jobs:
         run: |
           for phase_script in \
           compat/scripts/phase5c_provider_refresh.py \
+          compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \
           compat/scripts/phase5c_file_provider.py \
