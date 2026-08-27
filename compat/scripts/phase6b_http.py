@@ -10,9 +10,10 @@ import socket
 import socketserver
 import tempfile
 import threading
+import time
 from typing import Any
 
-from phase1 import EchoHandler, ROOT, recv_exact, recv_until, reserve_port, start_server, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, recv_exact, recv_until, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, connect_domain, debug_files
 
@@ -84,6 +85,29 @@ def relay(left: socket.socket, right: socket.socket) -> None:
             key.data.sendall(data)
 
 
+def proxied_route(mixed_port: int, echo_port: int) -> bool:
+    with connect_domain(mixed_port, "localhost", echo_port) as stream:
+        stream.sendall(b"http-outbound")
+        try:
+            return recv_exact(stream, 13) == b"http-outbound"
+        except (EOFError, ConnectionResetError):
+            return False
+
+
+def wait_proxy_route(process, mixed_port: int, echo_port: int) -> None:
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during readiness with {process.returncode}")
+        try:
+            if proxied_route(mixed_port, echo_port):
+                return
+        except OSError:
+            pass
+        time.sleep(0.02)
+    raise TimeoutError("HTTP outbound did not become ready")
+
+
 def exercise(binary, scratch) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     upstream = ConnectProxyServer()
@@ -109,9 +133,9 @@ rules:
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
-        with connect_domain(mixed_port, "localhost", echo.port) as stream:
-            stream.sendall(b"http-outbound")
-            echoed = recv_exact(stream, 13) == b"http-outbound"
+        wait_proxy_route(process, mixed_port, echo.port)
+        upstream.observations.clear()
+        echoed = proxied_route(mixed_port, echo.port)
         with connect_domain(mixed_port, "127.0.0.1", echo.port) as stream:
             try:
                 stream.sendall(b"reject")

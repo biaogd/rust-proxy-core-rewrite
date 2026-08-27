@@ -3640,6 +3640,13 @@ and changing the next scenario's initial `default-selected` observation. The
 Phase 5C reload and initial-selector fixtures pass consecutively in CI order;
 the change normalizes no product output and only isolates process state.
 
+The plaintext HTTP outbound fixture now uses the same bounded data-plane
+readiness gate as the authenticated SOCKS5 fixture before clearing setup
+observations and collecting its one comparable CONNECT exchange. A transient
+first connection during Go listener startup can therefore no longer abort the
+aggregate run, while a route that never carries the exact echo bytes still
+fails within the common I/O deadline.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
