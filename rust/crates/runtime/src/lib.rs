@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
-use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode, ProxyKind};
+use rewrite_config::{
+    Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode, ProxyGroupKind, ProxyKind,
+};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
@@ -318,13 +320,17 @@ async fn apply_generation(
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
     state.sync_selectors(
-        config.proxy_groups.iter().map(|group| {
-            (
-                group.name.as_str(),
-                group.proxies.as_slice(),
-                group.default_selected.as_deref(),
-            )
-        }),
+        config
+            .proxy_groups
+            .iter()
+            .filter(|group| group.kind == ProxyGroupKind::Select)
+            .map(|group| {
+                (
+                    group.name.as_str(),
+                    group.proxies.as_slice(),
+                    group.default_selected.as_deref(),
+                )
+            }),
         config.profile.store_selected,
     );
 }
@@ -795,9 +801,17 @@ fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) 
         if !visited.insert(current.clone()) {
             return None;
         }
-        current = state
-            .selector_proxy(&group.name)
-            .or_else(|| group.proxies.first().cloned())?;
+        current = match group.kind {
+            ProxyGroupKind::Select => state
+                .selector_proxy(&group.name)
+                .or_else(|| group.proxies.first().cloned())?,
+            ProxyGroupKind::Fallback => group
+                .proxies
+                .iter()
+                .find(|member| state.proxy_alive_for_url(member, &group.test_url))
+                .or_else(|| group.proxies.first())?
+                .clone(),
+        };
     }
     Some(current)
 }

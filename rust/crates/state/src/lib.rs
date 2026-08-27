@@ -403,6 +403,16 @@ impl RuntimeState {
             )
     }
 
+    #[must_use]
+    pub fn proxy_alive_for_url(&self, name: &str, url: &str) -> bool {
+        self.proxy_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .and_then(|health| health.extra.get(url))
+            .is_none_or(|health| health.alive)
+    }
+
     pub fn record_proxy_delay(&self, name: &str, url: &str, delay: u16, alive: bool) {
         const HISTORY_LIMIT: usize = 10;
         let record = ProxyDelayHistory {

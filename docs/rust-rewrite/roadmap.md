@@ -1258,6 +1258,20 @@ observing REJECT versus authenticated HTTP TCP routing. Malformed-database
 recovery, concurrent writers and automatic group health state remain separate
 gates.
 
+### Phase 5C1g accepted scope
+
+The first automatic-group slice accepts `fallback` with ordered members plus
+`url`, `expected-status`, `hidden`, `icon` and `disable-udp`. It renders the
+oracle's Fallback REST shape, routes TCP through the first currently healthy
+member, and reuses the compatible-provider healthcheck endpoint to recover from
+an unavailable configured HTTP member to DIRECT. The deterministic fixture
+starts with live authenticated HTTP forwarding, removes that member, crosses
+the oracle's one-second coalescing window, triggers healthcheck and observes
+both REST selection and DIRECT echo. `compat/scripts/phase5c_fallback.py` is the
+acceptance gate. Background interval/lazy scheduling, arbitrary remote-member
+health tests, fallback PUT/fixed persistence, group-delay, UDP forwarding,
+URL-test and load-balance remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

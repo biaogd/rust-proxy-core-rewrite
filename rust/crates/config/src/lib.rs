@@ -121,6 +121,7 @@ pub struct ProxyConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyGroupConfig {
     pub name: String,
+    pub kind: ProxyGroupKind,
     pub proxies: Vec<String>,
     pub compatible_proxies: Vec<String>,
     pub providers: Vec<String>,
@@ -129,6 +130,17 @@ pub struct ProxyGroupConfig {
     pub exclude_types: Vec<String>,
     pub empty_fallback: String,
     pub default_selected: Option<String>,
+    pub test_url: String,
+    pub expected_status: String,
+    pub hidden: bool,
+    pub icon: String,
+    pub disable_udp: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyGroupKind {
+    Select,
+    Fallback,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -660,6 +672,11 @@ struct RawProxyGroup {
     include_all_providers: Option<bool>,
     empty_fallback: Option<String>,
     default_selected: Option<String>,
+    url: Option<String>,
+    expected_status: Option<String>,
+    hidden: Option<bool>,
+    icon: Option<String>,
+    disable_udp: Option<bool>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1044,12 +1061,18 @@ impl Config {
         }
         next.proxy_providers[index].proxies = proxies;
         let providers = next.proxy_providers.clone();
-        let group_names: BTreeSet<_> = next
+        let group_types: BTreeMap<_, _> = next
             .proxy_groups
             .iter()
-            .map(|group| group.name.clone())
+            .map(|group| {
+                let kind = match group.kind {
+                    ProxyGroupKind::Select => "Selector",
+                    ProxyGroupKind::Fallback => "Fallback",
+                };
+                (group.name.clone(), kind.to_owned())
+            })
             .collect();
-        let proxy_types = proxy_member_types(&next.proxies, &providers, &group_names);
+        let proxy_types = proxy_member_types(&next.proxies, &providers, &group_types);
         for group in &mut next.proxy_groups {
             group.proxies = expand_proxy_group(group, &providers, &proxy_types)?;
         }
@@ -3250,7 +3273,7 @@ fn parse_proxy_groups(
             .as_deref()
             .filter(|name| !name.is_empty())
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
-        if group.kind.as_deref() != Some("select")
+        if !matches!(group.kind.as_deref(), Some("select" | "fallback"))
             || !group.extra.is_empty()
             || !group_names.insert(name.to_owned())
             || proxy_names.contains(name)
@@ -3260,8 +3283,20 @@ fn parse_proxy_groups(
         }
     }
     validate_proxy_group_cycles(&groups, &group_names)?;
+    let group_types: BTreeMap<_, _> = groups
+        .iter()
+        .filter_map(|group| {
+            let name = group.name.as_ref()?;
+            let kind = match group.kind.as_deref()? {
+                "select" => "Selector",
+                "fallback" => "Fallback",
+                _ => return None,
+            };
+            Some((name.clone(), kind.to_owned()))
+        })
+        .collect();
     proxy_names.extend(group_names.iter().cloned());
-    let proxy_types = proxy_member_types(proxies, providers, &group_names);
+    let proxy_types = proxy_member_types(proxies, providers, &group_types);
     let catalog = ProxyGroupCatalog {
         proxy_names: &proxy_names,
         top_level_names: &top_level_names,
@@ -3347,6 +3382,11 @@ fn parse_proxy_group(
     name: String,
     catalog: &ProxyGroupCatalog<'_>,
 ) -> Result<ProxyGroupConfig, ConfigError> {
+    let kind = match group.kind.as_deref() {
+        Some("select") => ProxyGroupKind::Select,
+        Some("fallback") => ProxyGroupKind::Fallback,
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
     let filter = group.filter.filter(|value| !value.is_empty());
     let exclude_filter = group.exclude_filter.filter(|value| !value.is_empty());
     let exclude_types: Vec<_> = group
@@ -3407,6 +3447,7 @@ fn parse_proxy_group(
     }
     let mut parsed = ProxyGroupConfig {
         name,
+        kind,
         proxies: Vec::new(),
         compatible_proxies,
         providers: provider_names,
@@ -3415,16 +3456,28 @@ fn parse_proxy_group(
         exclude_types,
         empty_fallback,
         default_selected: group.default_selected,
+        test_url: group
+            .url
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "https://www.gstatic.com/generate_204".to_owned()),
+        expected_status: group
+            .expected_status
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "*".to_owned()),
+        hidden: group.hidden.unwrap_or(false),
+        icon: group.icon.unwrap_or_default(),
+        disable_udp: group.disable_udp.unwrap_or(false),
     };
     parsed.proxies = expand_proxy_group(&parsed, catalog.providers, catalog.proxy_types)?;
     if parsed
         .proxies
         .iter()
         .any(|member| !catalog.proxy_names.contains(member.as_str()) && !is_group_builtin(member))
-        || parsed
-            .default_selected
-            .as_ref()
-            .is_some_and(|default| !parsed.proxies.contains(default))
+        || (parsed.kind == ProxyGroupKind::Select
+            && parsed
+                .default_selected
+                .as_ref()
+                .is_some_and(|default| !parsed.proxies.contains(default)))
     {
         return Err(ConfigError::UnsupportedProxy(parsed.name));
     }
@@ -3459,7 +3512,7 @@ fn group_regex_matches(pattern: &fancy_regex::Regex, name: &str) -> bool {
 fn proxy_member_types(
     proxies: &[ProxyConfig],
     providers: &[ProxyProviderConfig],
-    group_names: &BTreeSet<String>,
+    group_types: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut types: BTreeMap<_, _> = [
         ("DIRECT", "Direct"),
@@ -3483,9 +3536,7 @@ fn proxy_member_types(
         };
         types.insert(proxy.name.clone(), kind.to_owned());
     }
-    for name in group_names {
-        types.insert(name.clone(), "Selector".to_owned());
-    }
+    types.extend(group_types.clone());
     types
 }
 
@@ -4103,6 +4154,21 @@ dns:
         )
         .expect("disabled selector persistence");
         assert!(!disabled.profile.store_selected);
+    }
+
+    #[test]
+    fn parses_manual_health_fallback_group() {
+        let config = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: recovery\n    type: fallback\n    proxies: [REJECT, DIRECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    hidden: true\n    icon: fallback.svg\n    disable-udp: true\n"
+        ))
+        .expect("fallback group");
+        let group = &config.proxy_groups[0];
+        assert_eq!(group.kind, ProxyGroupKind::Fallback);
+        assert_eq!(group.proxies, ["REJECT", "DIRECT"]);
+        assert_eq!(group.expected_status, "204");
+        assert!(group.hidden);
+        assert_eq!(group.icon, "fallback.svg");
+        assert!(group.disable_udp);
     }
 
     #[test]
@@ -4729,6 +4795,7 @@ dns:
         };
         let group = ProxyGroupConfig {
             name: "filtered".to_owned(),
+            kind: ProxyGroupKind::Select,
             proxies: Vec::new(),
             compatible_proxies: vec!["REJECT".to_owned()],
             providers: vec!["local-file".to_owned()],
@@ -4737,8 +4804,13 @@ dns:
             exclude_types: Vec::new(),
             empty_fallback: "DIRECT".to_owned(),
             default_selected: None,
+            test_url: "https://www.gstatic.com/generate_204".to_owned(),
+            expected_status: "*".to_owned(),
+            hidden: false,
+            icon: String::new(),
+            disable_udp: false,
         };
-        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeSet::new());
+        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(
             expand_proxy_group(&group, &[provider], &types).expect("group expansion"),
             ["provider-beta", "provider-alpha", "REJECT"]
@@ -4761,6 +4833,7 @@ dns:
         };
         let group = ProxyGroupConfig {
             name: "empty".to_owned(),
+            kind: ProxyGroupKind::Select,
             proxies: Vec::new(),
             compatible_proxies: Vec::new(),
             providers: vec!["local-file".to_owned()],
@@ -4769,8 +4842,13 @@ dns:
             exclude_types: Vec::new(),
             empty_fallback: "REJECT".to_owned(),
             default_selected: Some("REJECT".to_owned()),
+            test_url: "https://www.gstatic.com/generate_204".to_owned(),
+            expected_status: "*".to_owned(),
+            hidden: false,
+            icon: String::new(),
+            disable_udp: false,
         };
-        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeSet::new());
+        let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(
             expand_proxy_group(&group, &[provider], &types).expect("empty fallback"),
             ["REJECT"]

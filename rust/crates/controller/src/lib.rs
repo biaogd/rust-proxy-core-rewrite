@@ -917,17 +917,29 @@ fn selector_snapshot(
     runtime: &RuntimeState,
 ) -> serde_json::Value {
     let health = runtime.proxy_health(&group.name);
-    let selected = runtime.selector_proxy(&group.name).unwrap_or_default();
-    let udp = selector_supports_udp(&selected, config, runtime, &mut Vec::new());
-    json!({
+    let selected = group_selected_proxy(group, runtime);
+    let udp =
+        !group.disable_udp && selector_supports_udp(&selected, config, runtime, &mut Vec::new());
+    let (kind, test_url) = match group.kind {
+        rewrite_config::ProxyGroupKind::Select => (
+            "Selector",
+            if group.test_url == "https://www.gstatic.com/generate_204" {
+                ""
+            } else {
+                group.test_url.as_str()
+            },
+        ),
+        rewrite_config::ProxyGroupKind::Fallback => ("Fallback", group.test_url.as_str()),
+    };
+    let mut snapshot = json!({
         "alive": health.alive,
         "all": group.proxies,
         "dialer-proxy": "",
         "emptyFallback": group.empty_fallback,
         "extra": health.extra,
-        "hidden": false,
+        "hidden": group.hidden,
         "history": health.history,
-        "icon": "",
+        "icon": group.icon,
         "interface": "",
         "mptcp": false,
         "name": group.name,
@@ -935,13 +947,37 @@ fn selector_snapshot(
         "provider-name": "",
         "routing-mark": 0,
         "smux": false,
-        "testUrl": "",
+        "testUrl": test_url,
         "tfo": false,
-        "type": "Selector",
+        "type": kind,
         "udp": udp,
         "uot": false,
         "xudp": false,
-    })
+    });
+    if group.kind == rewrite_config::ProxyGroupKind::Fallback {
+        let object = snapshot.as_object_mut().expect("group snapshot object");
+        object.insert("expectedStatus".to_owned(), json!(group.expected_status));
+        object.insert("fixed".to_owned(), json!(""));
+    }
+    snapshot
+}
+
+fn group_selected_proxy(
+    group: &rewrite_config::ProxyGroupConfig,
+    runtime: &RuntimeState,
+) -> String {
+    match group.kind {
+        rewrite_config::ProxyGroupKind::Select => {
+            runtime.selector_proxy(&group.name).unwrap_or_default()
+        }
+        rewrite_config::ProxyGroupKind::Fallback => group
+            .proxies
+            .iter()
+            .find(|member| runtime.proxy_alive_for_url(member, &group.test_url))
+            .or_else(|| group.proxies.first())
+            .cloned()
+            .unwrap_or_default(),
+    }
 }
 
 fn selector_supports_udp(
@@ -964,10 +1000,8 @@ fn selector_supports_udp(
         return false;
     }
     visited.push(selected.to_owned());
-    let nested = runtime
-        .selector_proxy(&group.name)
-        .or_else(|| group.proxies.first().cloned())
-        .is_some_and(|nested| selector_supports_udp(&nested, config, runtime, visited));
+    let nested = group_selected_proxy(group, runtime);
+    let nested = !group.disable_udp && selector_supports_udp(&nested, config, runtime, visited);
     visited.pop();
     nested
 }
@@ -1102,6 +1136,28 @@ async fn healthcheck_proxy_provider(
             .any(|candidate| candidate.name == provider && !candidate.compatible_proxies.is_empty())
     {
         return proxy_not_found();
+    }
+    if let Some(group) = config.proxy_groups.iter().find(|candidate| {
+        candidate.name == provider && candidate.kind == rewrite_config::ProxyGroupKind::Fallback
+    }) {
+        let expected = parse_status_ranges(&group.expected_status).unwrap_or_default();
+        for member in &group.proxies {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                measure_http_delay(member, &group.test_url, &expected),
+            )
+            .await;
+            match result {
+                Ok(Ok(delay)) if delay > 0 => {
+                    state
+                        .runtime
+                        .record_proxy_delay(member, &group.test_url, delay, true);
+                }
+                _ => state
+                    .runtime
+                    .record_proxy_delay(member, &group.test_url, 0, false),
+            }
+        }
     }
     empty_response(StatusCode::NO_CONTENT)
 }

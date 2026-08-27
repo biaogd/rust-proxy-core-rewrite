@@ -143,6 +143,7 @@ jobs:
       PHASE5CEXCLUDETYPE_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CPROVIDERREFRESH_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CSELECTORPERSIST_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CFALLBACK_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -175,6 +176,7 @@ jobs:
           for phase_script in \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
+          compat/scripts/phase5c_fallback.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \

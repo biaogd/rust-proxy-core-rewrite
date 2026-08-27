@@ -143,7 +143,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references and cycles; Phases 5B3d/5B3f prove basic AND/OR/NOT and SUB-RULE mixed-TCP DIRECT/REJECT routing; lazy DNS/process helpers and the broader nested corpus remain pending |
 | PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan and cycles; Phases 5B3e–5B3g prove live PASS/PASS-RULE plus REMATCH name mutation and sub-rule switching; live cycle/failure behavior remains pending |
-| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Selectors support nested DAGs, local-provider composition, name/type filters, reload reconciliation and restart-persisted choices with bidirectional Go/Rust cache interchange. Automatic URL-test/fallback/load-balance strategies and health policy remain unclaimed |
+| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Selectors support nested DAGs, provider composition/filtering, reload and persistence. A fallback slice adds exact metadata, HTTP→DIRECT TCP recovery after explicit compatible-provider healthcheck, and disabled-UDP reporting. Scheduled health checks, general member tests, URL-test and load-balance remain unclaimed |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
 | Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |
 
