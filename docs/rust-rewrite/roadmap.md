@@ -1223,6 +1223,18 @@ and mixed TCP routing use the resulting member list. Acceptance in
 and live authenticated HTTP forwarding. Nested groups, type exclusion,
 automatic strategies and health/status policies remain separate gates.
 
+### Phase 5C1d accepted scope
+
+Select groups may reference other select groups before or after their own YAML
+entry. The complete dependency graph is cycle-checked before configuration
+publication. TCP routing recursively resolves every current selection into
+HTTP, DIRECT or REJECT, and controller snapshots project nested UDP support and
+compatible-provider members. `compat/scripts/phase5c_nested_selector.py`
+compares forward-reference startup, both inner and outer live mutations,
+direct-versus-proxied wire behavior and two-node cycle rejection. Automatic
+group types, cross-process persistence and provider-driven nested reloads remain
+separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

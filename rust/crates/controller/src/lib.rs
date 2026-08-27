@@ -543,7 +543,10 @@ async fn proxies(State(state): State<ControllerState>) -> Response {
         );
     }
     for group in &config.proxy_groups {
-        proxies.insert(group.name.clone(), selector_snapshot(group, &state.runtime));
+        proxies.insert(
+            group.name.clone(),
+            selector_snapshot(group, &config, &state.runtime),
+        );
     }
     json_response(StatusCode::OK, &json!({"proxies": proxies}))
 }
@@ -560,7 +563,10 @@ async fn proxy(State(state): State<ControllerState>, Path(name): Path<String>) -
         );
     }
     if let Some(group) = config.proxy_groups.iter().find(|group| group.name == name) {
-        return json_response(StatusCode::OK, &selector_snapshot(group, &state.runtime));
+        return json_response(
+            StatusCode::OK,
+            &selector_snapshot(group, &config, &state.runtime),
+        );
     }
     proxy_not_found()
 }
@@ -572,7 +578,7 @@ async fn groups(State(state): State<ControllerState>) -> Response {
         config
             .proxy_groups
             .iter()
-            .map(|group| selector_snapshot(group, &state.runtime)),
+            .map(|group| selector_snapshot(group, &config, &state.runtime)),
     );
     json_response(StatusCode::OK, &json!({"proxies": groups}))
 }
@@ -587,7 +593,10 @@ async fn group(State(state): State<ControllerState>, Path(name): Path<String>) -
         .iter()
         .find(|group| group.name == name)
         .map_or_else(proxy_not_found, |group| {
-            json_response(StatusCode::OK, &selector_snapshot(group, &state.runtime))
+            json_response(
+                StatusCode::OK,
+                &selector_snapshot(group, &config, &state.runtime),
+            )
         })
 }
 
@@ -904,11 +913,12 @@ fn configured_proxy_snapshot_with_provider(
 
 fn selector_snapshot(
     group: &rewrite_config::ProxyGroupConfig,
+    config: &Config,
     runtime: &RuntimeState,
 ) -> serde_json::Value {
     let health = runtime.proxy_health(&group.name);
     let selected = runtime.selector_proxy(&group.name).unwrap_or_default();
-    let udp = matches!(selected.as_str(), "DIRECT" | "REJECT" | "REJECT-DROP");
+    let udp = selector_supports_udp(&selected, config, runtime, &mut Vec::new());
     json!({
         "alive": health.alive,
         "all": group.proxies,
@@ -932,6 +942,34 @@ fn selector_snapshot(
         "uot": false,
         "xudp": false,
     })
+}
+
+fn selector_supports_udp(
+    selected: &str,
+    config: &Config,
+    runtime: &RuntimeState,
+    visited: &mut Vec<String>,
+) -> bool {
+    if matches!(selected, "DIRECT" | "REJECT" | "REJECT-DROP") {
+        return true;
+    }
+    let Some(group) = config
+        .proxy_groups
+        .iter()
+        .find(|group| group.name == selected)
+    else {
+        return false;
+    };
+    if visited.iter().any(|name| name == selected) {
+        return false;
+    }
+    visited.push(selected.to_owned());
+    let nested = runtime
+        .selector_proxy(&group.name)
+        .or_else(|| group.proxies.first().cloned())
+        .is_some_and(|nested| selector_supports_udp(&nested, config, runtime, visited));
+    visited.pop();
+    nested
 }
 
 fn proxy_id(name: &str) -> &'static str {
@@ -1090,7 +1128,10 @@ async fn proxy_provider_member(
             .iter()
             .find(|group| group.name == name)
             .map_or_else(proxy_not_found, |group| {
-                json_response(StatusCode::OK, &selector_snapshot(group, &state.runtime))
+                json_response(
+                    StatusCode::OK,
+                    &selector_snapshot(group, &config, &state.runtime),
+                )
             });
     }
     config
@@ -1141,7 +1182,7 @@ fn proxy_provider_snapshot(config: &Config, runtime: &RuntimeState) -> serde_jso
         config
             .proxy_groups
             .iter()
-            .map(|group| selector_snapshot(group, runtime)),
+            .map(|group| selector_snapshot(group, config, runtime)),
     );
     json!({
         "name": "default",
@@ -1234,6 +1275,13 @@ fn named_proxy_snapshot(
         .iter()
         .find(|proxy| proxy.name == name)
         .map(|proxy| configured_proxy_snapshot(proxy, runtime))
+        .or_else(|| {
+            config
+                .proxy_groups
+                .iter()
+                .find(|group| group.name == name)
+                .map(|group| selector_snapshot(group, config, runtime))
+        })
 }
 
 #[derive(Default, Deserialize)]

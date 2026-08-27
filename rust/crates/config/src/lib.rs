@@ -3205,23 +3205,41 @@ fn parse_proxy_groups(
     proxies: &[ProxyConfig],
     providers: &[ProxyProviderConfig],
 ) -> Result<Vec<ProxyGroupConfig>, ConfigError> {
-    let proxy_names: BTreeSet<_> = proxies
+    let mut proxy_names: BTreeSet<_> = proxies
         .iter()
         .chain(
             providers
                 .iter()
                 .flat_map(|provider| provider.proxies.iter()),
         )
-        .map(|proxy| proxy.name.as_str())
+        .map(|proxy| proxy.name.clone())
         .collect();
-    let top_level_names: BTreeSet<_> = proxies.iter().map(|proxy| proxy.name.as_str()).collect();
+    let top_level_names: BTreeSet<_> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
     let mut all_proxies: Vec<_> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
     all_proxies.sort();
     let all_providers: Vec<_> = providers
         .iter()
         .map(|provider| provider.name.clone())
         .collect();
-    let mut names = BTreeSet::new();
+    let mut group_names = BTreeSet::new();
+    for group in &groups {
+        let name = group
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
+        if group.kind.as_deref() != Some("select")
+            || !group.extra.is_empty()
+            || !group_names.insert(name.to_owned())
+            || proxy_names.contains(name)
+            || is_reserved_proxy_name(name)
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+    }
+    validate_proxy_group_cycles(&groups, &group_names)?;
+    proxy_names.extend(group_names.iter().cloned());
+
     let mut parsed = Vec::new();
     for group in groups {
         let name = group
@@ -3230,23 +3248,6 @@ fn parse_proxy_groups(
             .filter(|name| !name.is_empty())
             .cloned()
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
-        if group.kind.as_deref() != Some("select")
-            || !group.extra.is_empty()
-            || !names.insert(name.clone())
-            || proxy_names.contains(name.as_str())
-            || matches!(
-                name.as_str(),
-                "DIRECT"
-                    | "REJECT"
-                    | "REJECT-DROP"
-                    | "COMPATIBLE"
-                    | "PASS"
-                    | "PASS-RULE"
-                    | "GLOBAL"
-            )
-        {
-            return Err(ConfigError::UnsupportedProxy(name));
-        }
         parsed.push(parse_proxy_group(
             group,
             name,
@@ -3260,11 +3261,60 @@ fn parse_proxy_groups(
     Ok(parsed)
 }
 
+fn validate_proxy_group_cycles(
+    groups: &[RawProxyGroup],
+    group_names: &BTreeSet<String>,
+) -> Result<(), ConfigError> {
+    let mapping: BTreeMap<_, _> = groups
+        .iter()
+        .filter_map(|group| group.name.as_deref().map(|name| (name, group)))
+        .collect();
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for name in group_names {
+        visit_proxy_group(name, &mapping, group_names, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
+fn visit_proxy_group<'a>(
+    name: &'a str,
+    groups: &BTreeMap<&'a str, &'a RawProxyGroup>,
+    group_names: &BTreeSet<String>,
+    visiting: &mut BTreeSet<&'a str>,
+    visited: &mut BTreeSet<&'a str>,
+) -> Result<(), ConfigError> {
+    if visited.contains(name) {
+        return Ok(());
+    }
+    if !visiting.insert(name) {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let group = groups
+        .get(name)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    for dependency in group.proxies.iter().flatten() {
+        if group_names.contains(dependency.as_str()) {
+            visit_proxy_group(dependency, groups, group_names, visiting, visited)?;
+        }
+    }
+    visiting.remove(name);
+    visited.insert(name);
+    Ok(())
+}
+
+fn is_reserved_proxy_name(name: &str) -> bool {
+    matches!(
+        name,
+        "DIRECT" | "REJECT" | "REJECT-DROP" | "COMPATIBLE" | "PASS" | "PASS-RULE" | "GLOBAL"
+    )
+}
+
 fn parse_proxy_group(
     group: RawProxyGroup,
     name: String,
-    proxy_names: &BTreeSet<&str>,
-    top_level_names: &BTreeSet<&str>,
+    proxy_names: &BTreeSet<String>,
+    top_level_names: &BTreeSet<String>,
     all_proxies: &[String],
     all_providers: &[String],
     providers: &[ProxyProviderConfig],
@@ -3314,7 +3364,7 @@ fn parse_proxy_group(
     }
     if compatible_proxies
         .iter()
-        .any(|member| !top_level_names.contains(member.as_str()) && !is_group_builtin(member))
+        .any(|member| !proxy_names.contains(member.as_str()) && !is_group_builtin(member))
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -4627,5 +4677,19 @@ dns:
             expand_proxy_group(&group, &[provider]).expect("empty fallback"),
             ["REJECT"]
         );
+    }
+
+    #[test]
+    fn accepts_forward_nested_groups_and_rejects_cycles() {
+        let nested = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: outer\n    type: select\n    proxies: [inner, DIRECT]\n  - name: inner\n    type: select\n    proxies: [REJECT, DIRECT]\n"
+        ))
+        .expect("forward nested groups");
+        assert_eq!(nested.proxy_groups[0].proxies, ["inner", "DIRECT"]);
+
+        let cycle = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: cycle-a\n    type: select\n    proxies: [cycle-b]\n  - name: cycle-b\n    type: select\n    proxies: [cycle-a]\n"
+        ));
+        assert!(matches!(cycle, Err(ConfigError::UnsupportedProxy(_))));
     }
 }

@@ -62,7 +62,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-01 | General ports, bind/LAN/auth, mode, logging, IPv6, interface, routing mark, TFO, MPTCP, TCP concurrency and keepalive | Partial | 5A9 plus listener/platform gates |
 | CFG-02 | Controller TCP/TLS/Unix/Windows pipe, routing mark, CORS, secret, external UI/URL/name and external DoH mount | Partial | 5D1–5D3 |
 | CFG-03 | Proxies, reserved built-ins, duplicate/reserved-name checks and dependency ordering | Not started | 6A0 |
-| CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: flat select filters/include-all/empty fallback | 5C1 automatic/nesting/validation gates |
+| CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: nested select DAG plus filters/include-all/empty fallback | 5C1 automatic/remaining validation gates |
 | CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: local file proxy provider load/manual refresh | 5C2–5C4 |
 | CFG-06 | Rules, sub-rules and provider-backed rule construction | Partial | 5B1–5B5 |
 | CFG-07 | Named listeners and legacy fixed protocol listener fields | Not started | One gate per IN ID |
@@ -162,7 +162,7 @@ Primary anchors: [`adapter/outboundgroup`](../../adapter/outboundgroup),
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| GRP-01 | Selector and manual selection/persistence | Partial: flat configured selector, live TCP routing and SIGHUP state reconciliation | 5C1 restart-persistence/nesting gates |
+| GRP-01 | Selector and manual selection/persistence | Partial: nested configured selectors, recursive live TCP routing and SIGHUP state reconciliation | 5C1 restart-persistence gate |
 | GRP-02 | URL-test, fallback and load-balance strategies | Not started | 5C1 |
 | GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: flat file-provider composition, ordered include/filter/exclude and empty fallback | 5C1 automatic groups/health policies |
 | PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Partial: local YAML file load/manual refresh, REST views and group consumption | 5C2 HTTP/interval/override/persistence gates |

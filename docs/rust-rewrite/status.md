@@ -105,6 +105,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C2a local file proxy provider | Complete in declared initial-load HTTP/SOCKS5 TCP scope; PROV-01/GRP-03 remain partial | YAML members, `use` composition, exact File/Compatible provider REST views and selected HTTP routing pass |
 | Phase 5C2b manual file-provider refresh | Complete in declared serial transaction scope; PROV-01/PROV-03 remain partial | PUT atomically replaces members/dependent groups; malformed YAML returns 503 and retains controller/data-plane state |
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
+| Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3830,9 +3831,23 @@ PHASE5CGROUPFILTERS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 comp
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-Nested groups, include/exclude proxy types, automatic group strategies, lazy
-health checks, expected-status policies and cross-process selection persistence
-remain separate gates.
+Include/exclude proxy types, automatic group strategies, lazy health checks,
+expected-status policies and cross-process selection persistence remain
+separate gates.
+
+Phase 5C1d admits select groups as explicit members of other select groups.
+Configuration validates the complete dependency graph before publication and
+rejects self or multi-node cycles while allowing forward references. Runtime
+resolution follows the current selection at every level, and controller UDP
+capability plus compatible-provider member views project the nested selection.
+
+```sh
+PHASE5CNESTED_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_nested_selector.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Automatic group types, restart-persisted choices, provider-driven nested
+membership changes and exhaustive invalid-DAG diagnostics remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

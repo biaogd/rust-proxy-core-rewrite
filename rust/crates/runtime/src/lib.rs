@@ -701,9 +701,8 @@ async fn connect_tcp_outbound(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) -> Option<rewrite_outbound::BoxedOutboundStream> {
-    let selected = state.selector_proxy(target);
-    let outbound_target = selected.as_deref().unwrap_or(target);
-    if matches!(outbound_target, "REJECT" | "REJECT-DROP") {
+    let outbound_target = resolve_selector_target(target, config, state)?;
+    if matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
         return None;
     }
     if route == Route::Direct || outbound_target == "DIRECT" {
@@ -776,6 +775,24 @@ async fn connect_tcp_outbound(
             }
         },
     }
+}
+
+fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) -> Option<String> {
+    let mut current = target.to_owned();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(group) = config
+        .proxy_groups
+        .iter()
+        .find(|group| group.name == current)
+    {
+        if !visited.insert(current.clone()) {
+            return None;
+        }
+        current = state
+            .selector_proxy(&group.name)
+            .or_else(|| group.proxies.first().cloned())?;
+    }
+    Some(current)
 }
 
 async fn relay_tracked_tcp(
