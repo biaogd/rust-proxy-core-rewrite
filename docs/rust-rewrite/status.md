@@ -115,10 +115,11 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1k round-robin load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Exact non-selector REST/control, A/B alternation, unhealthy skip/failover, remote group-delay and wire routing pass |
 | Phase 5C1l hashing load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Default/explicit consistent hashing and bounded sticky sessions prove same-key stability, unhealthy replacement, REST/control and wire routing |
 | Phase 5C1m automatic group health schedule | Complete in declared local HTTP/TCP scope; GRP-02/03 remain partial | Startup plus eager/lazy interval checks, per-member timeout, touch activation, health failover and lifecycle cancellation pass |
+| Phase 5C1n group dial-failure activation | Complete in declared grouped-HTTP/TCP scope; GRP-02/03 remain partial | Default/explicit failure threshold parsing, bounded group retry, below/at-threshold behavior, refused-connection immediate health activation and survivor routing pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 110 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards: core, encrypted/general DNS, two CLI/lifecycle shards, rules, groups/providers and controller/outbound |
+| Differential harness | Implemented | All 111 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards: core, encrypted/general DNS, two CLI/lifecycle shards, rules, groups/providers and controller/outbound |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3990,8 +3991,26 @@ PHASE5CHEALTHSCHEDULE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 co
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-Dial-failure `max-failed-times`, exhaustive failure/status behavior, concurrent
-reload races, SOCKS5 health evidence and UDP remain unclaimed.
+Phase 5C1n adds dial-failure-triggered health activation for the current
+grouped HTTP/TCP path. Configuration preserves the oracle's default threshold
+of five and explicit `max-failed-times`. A bounded ten-attempt group retry
+records ordinary failures against that threshold; TCP connection refusal
+activates health immediately. Trigger delivery is owned by the runtime health
+scheduler, coalesces with scheduled work and resets its counter after the
+check. The differential proves threshold two versus below-threshold 99,
+refused-connection bypass, eventual unhealthy state and subsequent routing
+through the surviving HTTP proxy. The initiating tunnel outcome is retained as
+diagnostic rather than compatibility evidence because Go combines asynchronous
+health work with jittered retry backoff.
+
+```sh
+PHASE5CDIALFAILURE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_dial_failure.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Exact timeout-window differential evidence, delayed-handshake success reset,
+exhaustive status behavior, concurrent reload races, SOCKS5 health evidence and
+UDP remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

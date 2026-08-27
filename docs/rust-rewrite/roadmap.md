@@ -1351,6 +1351,25 @@ lazy skip, post-touch discovery and survivor TCP routing on Go and Rust.
 Dial-failure `max-failed-times`, exhaustive error/status policy, SOCKS5 health
 evidence, concurrent reload races and UDP remain later gates.
 
+### Phase 5C1n accepted scope
+
+Configured HTTP members reached through fallback, URL-test or load-balance
+groups now participate in the oracle's dial-failure activation boundary.
+`max-failed-times` defaults to five; ordinary proxy errors accumulate during
+the bounded group retry loop and request a coalesced health check at the
+configured threshold, while a refused TCP connection requests one
+immediately. The health result updates the existing per-URL state and later
+TCP connections use the surviving member. `compat/scripts/phase5c_dial_failure.py`
+proves a threshold of two activates, a threshold of 99 does not activate
+during the same bounded attempt, and connection refusal bypasses that high
+threshold. The initiating tunnel's success or closure is not compared because
+Go runs the health check asynchronously and randomizes retry backoff; the
+stable compatibility boundary is eventual health state and subsequent route.
+
+The exact timeout-window reset under scheduler pressure, delayed-handshake
+success reset, SOCKS5 errors, UDP and exhaustive status/error classes remain
+later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

@@ -145,6 +145,7 @@ pub struct GroupHealthConfig {
     pub interval: u64,
     pub timeout: u64,
     pub lazy: bool,
+    pub max_failed_times: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -701,6 +702,7 @@ struct RawProxyGroup {
     interval: Option<u64>,
     timeout: Option<u64>,
     lazy: Option<bool>,
+    max_failed_times: Option<u64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3415,7 +3417,7 @@ fn parse_proxy_group(
     let kind = parse_proxy_group_kind(group.kind.as_deref(), &name)?;
     let load_balance_strategy =
         parse_load_balance_strategy(kind, group.strategy.as_deref(), &name)?;
-    let health = normalize_group_health(kind, group.interval, group.timeout, group.lazy);
+    let health = normalize_group_health(kind, &group);
     let filter = group.filter.filter(|value| !value.is_empty());
     let exclude_filter = group.exclude_filter.filter(|value| !value.is_empty());
     let exclude_types: Vec<_> = group
@@ -3540,22 +3542,21 @@ fn parse_load_balance_strategy(
     }
 }
 
-fn normalize_group_health(
-    kind: ProxyGroupKind,
-    interval: Option<u64>,
-    timeout: Option<u64>,
-    lazy: Option<bool>,
-) -> GroupHealthConfig {
+fn normalize_group_health(kind: ProxyGroupKind, group: &RawProxyGroup) -> GroupHealthConfig {
     GroupHealthConfig {
-        interval: match (kind, interval.unwrap_or(0)) {
+        interval: match (kind, group.interval.unwrap_or(0)) {
             (ProxyGroupKind::Select, interval) | (_, interval @ 1..) => interval,
             (_, 0) => 300,
         },
-        timeout: match timeout.unwrap_or(0) {
+        timeout: match group.timeout.unwrap_or(0) {
             0 => 5000,
             timeout => timeout,
         },
-        lazy: lazy.unwrap_or(true),
+        lazy: group.lazy.unwrap_or(true),
+        max_failed_times: match group.max_failed_times.unwrap_or(0) {
+            0 => 5,
+            max_failed_times => max_failed_times,
+        },
     }
 }
 
@@ -4246,7 +4247,7 @@ dns:
     #[test]
     fn parses_manual_health_fallback_group() {
         let config = Config::from_yaml(&format!(
-            "{MINIMAL}\nproxy-groups:\n  - name: recovery\n    type: fallback\n    proxies: [REJECT, DIRECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    interval: 7\n    timeout: 250\n    lazy: false\n    hidden: true\n    icon: fallback.svg\n    disable-udp: true\n"
+            "{MINIMAL}\nproxy-groups:\n  - name: recovery\n    type: fallback\n    proxies: [REJECT, DIRECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    interval: 7\n    timeout: 250\n    max-failed-times: 2\n    lazy: false\n    hidden: true\n    icon: fallback.svg\n    disable-udp: true\n"
         ))
         .expect("fallback group");
         let group = &config.proxy_groups[0];
@@ -4258,6 +4259,7 @@ dns:
         assert!(group.disable_udp);
         assert_eq!(group.health.interval, 7);
         assert_eq!(group.health.timeout, 250);
+        assert_eq!(group.health.max_failed_times, 2);
         assert!(!group.health.lazy);
     }
 
@@ -4948,6 +4950,7 @@ dns:
                 interval: 0,
                 timeout: 5000,
                 lazy: true,
+                max_failed_times: 5,
             },
             load_balance_strategy: None,
         };
@@ -4993,6 +4996,7 @@ dns:
                 interval: 0,
                 timeout: 5000,
                 lazy: true,
+                max_failed_times: 5,
             },
             load_balance_strategy: None,
         };

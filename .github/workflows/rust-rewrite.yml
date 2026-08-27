@@ -23,6 +23,7 @@ env:
   GO_VERSION: 1.26.5
   PHASE5CLOADBALANCEHASH_CARGO_TARGET: /tmp/mihomo-phase5c-load-balance-hashing-target
   PHASE5CHEALTHSCHEDULE_CARGO_TARGET: /tmp/mihomo-phase5c-health-schedule-target
+  PHASE5CDIALFAILURE_CARGO_TARGET: /tmp/mihomo-phase5c-dial-failure-target
 
 jobs:
   rust-quality:
@@ -174,6 +175,7 @@ jobs:
       PHASE5CLOADBALANCE_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CLOADBALANCEHASH_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CHEALTHSCHEDULE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CDIALFAILURE_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DCONFIGS_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/rust/target
@@ -221,6 +223,7 @@ jobs:
           compat/scripts/phase5c_load_balance.py \
           compat/scripts/phase5c_load_balance_hashing.py \
           compat/scripts/phase5c_health_schedule.py \
+          compat/scripts/phase5c_dial_failure.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \

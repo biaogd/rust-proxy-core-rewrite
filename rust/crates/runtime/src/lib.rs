@@ -244,14 +244,16 @@ async fn run_group_health_scheduler(
                 continue;
             }
             let interval = Duration::from_secs(group.health.interval);
-            if initial
+            if (initial
                 || !group.health.lazy
-                || state.proxy_group_touched_within(&group.name, interval)
+                || state.proxy_group_touched_within(&group.name, interval))
+                && state.begin_group_health_check(&group.name)
             {
                 tokio::select! {
                     () = shutdown.cancelled() => return,
                     () = rewrite_controller::healthcheck_proxy_group(group, &current, &state) => {}
                 }
+                state.finish_group_health_check(&group.name);
             }
             deadlines.insert(group.name.clone(), tokio::time::Instant::now() + interval);
         }
@@ -267,6 +269,16 @@ async fn run_group_health_scheduler(
                     return;
                 }
                 deadlines.clear();
+            }
+            name = state.next_group_health_trigger() => {
+                let current = Arc::clone(&config.borrow());
+                if let Some(group) = current.proxy_groups.iter().find(|group| group.name == name) {
+                    tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        () = rewrite_controller::healthcheck_proxy_group(group, &current, &state) => {}
+                    }
+                }
+                state.finish_group_health_check(&name);
             }
             () = tokio::time::sleep_until(wake_at) => {}
         }
@@ -781,7 +793,8 @@ async fn connect_tcp_outbound(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) -> Option<rewrite_outbound::BoxedOutboundStream> {
-    let outbound_target = resolve_selector_target(target, metadata, config, state)?;
+    let (outbound_target, traversed_groups) =
+        resolve_selector_target(target, metadata, config, state)?;
     if matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
         return None;
     }
@@ -805,16 +818,72 @@ async fn connect_tcp_outbound(
             }
         };
     }
-    let proxy = config
-        .proxies
-        .iter()
-        .chain(
-            config
-                .proxy_providers
-                .iter()
-                .flat_map(|provider| provider.proxies.iter()),
-        )
-        .find(|proxy| proxy.name == outbound_target)?;
+    let attempts = if traversed_groups.is_empty() { 1 } else { 10 };
+    let mut initial_resolution = Some((outbound_target, traversed_groups));
+    for attempt in 0..attempts {
+        let (outbound_target, traversed_groups) = initial_resolution
+            .take()
+            .or_else(|| resolve_selector_target(target, metadata, config, state))?;
+        if matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
+            return None;
+        }
+        if outbound_target == "DIRECT" {
+            let destination =
+                match resolve_direct_destination(&metadata.destination, fake_host, config).await {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        state.log("error", format!("DIRECT DNS resolution failed: {error}"));
+                        return None;
+                    }
+                };
+            return tokio::select! {
+                () = shutdown.cancelled() => None,
+                result = rewrite_outbound::connect(&destination, config.ipv6) => match result {
+                    Ok(remote) => Some(Box::new(remote)),
+                    Err(error) => {
+                        state.log("error", format!("DIRECT connection failed: {error}"));
+                        None
+                    }
+                }
+            };
+        }
+        let proxy = config
+            .proxies
+            .iter()
+            .chain(
+                config
+                    .proxy_providers
+                    .iter()
+                    .flat_map(|provider| provider.proxies.iter()),
+            )
+            .find(|proxy| proxy.name == outbound_target)?;
+        let result = tokio::select! {
+            () = shutdown.cancelled() => return None,
+            result = connect_configured_proxy(proxy, &metadata.destination, config.ipv6) => result,
+        };
+        match result {
+            Ok(remote) => return Some(remote),
+            Err(error) => {
+                record_group_proxy_failure(&traversed_groups, config, state, &error);
+                state.log("error", error);
+            }
+        }
+        if attempt + 1 < attempts {
+            let delay = group_retry_delay(attempt);
+            tokio::select! {
+                () = shutdown.cancelled() => return None,
+                () = tokio::time::sleep(delay) => {}
+            }
+        }
+    }
+    None
+}
+
+async fn connect_configured_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    allow_ipv6: bool,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let server = Destination {
         host: proxy
             .server
@@ -824,37 +893,22 @@ async fn connect_tcp_outbound(
     };
     let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
     match proxy.kind {
-        ProxyKind::Http => tokio::select! {
-            () = shutdown.cancelled() => None,
-            result = rewrite_outbound::connect_http(
-                &server,
-                &metadata.destination,
-                config.ipv6,
-                credentials,
-            ) => match result {
-                Ok(remote) => Some(remote),
-                Err(error) => {
-                    state.log("error", format!("HTTP proxy connection failed: {error}"));
-                    None
-                }
-            }
-        },
-        ProxyKind::Socks5 => tokio::select! {
-            () = shutdown.cancelled() => None,
-            result = rewrite_outbound::connect_socks5(
-                &server,
-                &metadata.destination,
-                config.ipv6,
-                credentials,
-            ) => match result {
-                Ok(remote) => Some(remote),
-                Err(error) => {
-                    state.log("error", format!("SOCKS5 proxy connection failed: {error}"));
-                    None
-                }
-            }
-        },
+        ProxyKind::Http => {
+            rewrite_outbound::connect_http(&server, destination, allow_ipv6, credentials)
+                .await
+                .map_err(|error| format!("HTTP proxy connection failed: {error}"))
+        }
+        ProxyKind::Socks5 => {
+            rewrite_outbound::connect_socks5(&server, destination, allow_ipv6, credentials)
+                .await
+                .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
+        }
     }
+}
+
+fn group_retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1_u64 << u32::try_from(attempt.min(7)).unwrap_or(7);
+    Duration::from_millis(10_u64.saturating_mul(multiplier).min(1000))
 }
 
 fn resolve_selector_target(
@@ -862,9 +916,10 @@ fn resolve_selector_target(
     metadata: &Metadata,
     config: &Config,
     state: &RuntimeState,
-) -> Option<String> {
+) -> Option<(String, Vec<String>)> {
     let mut current = target.to_owned();
     let mut visited = std::collections::BTreeSet::new();
+    let mut traversed = Vec::new();
     while let Some(group) = config
         .proxy_groups
         .iter()
@@ -873,6 +928,7 @@ fn resolve_selector_target(
         if !visited.insert(current.clone()) {
             return None;
         }
+        traversed.push(group.name.clone());
         state.touch_proxy_group(&group.name);
         current = match group.kind {
             ProxyGroupKind::Select => state
@@ -908,7 +964,27 @@ fn resolve_selector_target(
             },
         };
     }
-    Some(current)
+    Some((current, traversed))
+}
+
+fn record_group_proxy_failure(
+    groups: &[String],
+    config: &Config,
+    state: &RuntimeState,
+    error: &str,
+) {
+    let connection_refused = error.to_ascii_lowercase().contains("connection refused");
+    for name in groups {
+        let Some(group) = config.proxy_groups.iter().find(|group| group.name == *name) else {
+            continue;
+        };
+        state.record_group_dial_failure(
+            name,
+            Duration::from_millis(group.health.timeout),
+            group.health.max_failed_times,
+            connection_refused,
+        );
+    }
 }
 
 fn load_balance_key(metadata: &Metadata, include_source: bool) -> String {

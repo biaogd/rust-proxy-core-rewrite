@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
@@ -17,7 +17,7 @@ use rewrite_model::{Host, InboundProtocol, Metadata, Network};
 use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize)]
@@ -124,6 +124,13 @@ struct ProxyHealth {
     extra: BTreeMap<String, ProxyUrlHealth>,
 }
 
+#[derive(Debug, Default)]
+struct GroupDialHealth {
+    failed_times: u64,
+    failed_at: Option<Instant>,
+    testing: bool,
+}
+
 #[derive(Debug)]
 pub struct RuntimeState {
     next_id: AtomicU64,
@@ -139,6 +146,9 @@ pub struct RuntimeState {
     sticky_groups: Mutex<BTreeMap<String, LruCache<u64, StickySession>>>,
     load_balance_hasher: RandomState,
     group_touches: Mutex<BTreeMap<String, Instant>>,
+    group_dial_health: Mutex<BTreeMap<String, GroupDialHealth>>,
+    group_health_pending: Mutex<BTreeSet<String>>,
+    group_health_notify: Notify,
     selectors_loaded: AtomicBool,
     store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
@@ -202,6 +212,9 @@ impl Default for RuntimeState {
             sticky_groups: Mutex::new(BTreeMap::new()),
             load_balance_hasher: RandomState::new(),
             group_touches: Mutex::new(BTreeMap::new()),
+            group_dial_health: Mutex::new(BTreeMap::new()),
+            group_health_pending: Mutex::new(BTreeSet::new()),
+            group_health_notify: Notify::new(),
             selectors_loaded: AtomicBool::new(false),
             store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
@@ -544,6 +557,99 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|name, _| names.contains(name.as_str()));
+        self.group_dial_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|name, _| names.contains(name.as_str()));
+        self.group_health_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|name| names.contains(name.as_str()));
+    }
+
+    pub fn record_group_dial_failure(
+        &self,
+        name: &str,
+        timeout: Duration,
+        max_failed_times: u64,
+        connection_refused: bool,
+    ) {
+        let now = Instant::now();
+        let mut groups = self
+            .group_dial_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let group = groups.entry(name.to_owned()).or_default();
+        let trigger = if connection_refused {
+            !group.testing
+        } else {
+            group.failed_times = group.failed_times.saturating_add(1);
+            if group.failed_times == 1 {
+                group.failed_at = Some(now);
+                false
+            } else if group
+                .failed_at
+                .is_some_and(|failed_at| now.duration_since(failed_at) > timeout)
+            {
+                group.failed_times = 0;
+                group.failed_at = None;
+                false
+            } else {
+                group.failed_times >= max_failed_times && !group.testing
+            }
+        };
+        if trigger {
+            group.testing = true;
+        }
+        drop(groups);
+        if trigger {
+            self.group_health_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(name.to_owned());
+            self.group_health_notify.notify_one();
+        }
+    }
+
+    pub async fn next_group_health_trigger(&self) -> String {
+        loop {
+            let notified = self.group_health_notify.notified();
+            if let Some(name) = self
+                .group_health_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_first()
+            {
+                return name;
+            }
+            notified.await;
+        }
+    }
+
+    #[must_use]
+    pub fn begin_group_health_check(&self, name: &str) -> bool {
+        let mut groups = self
+            .group_dial_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let group = groups.entry(name.to_owned()).or_default();
+        if group.testing {
+            return false;
+        }
+        group.testing = true;
+        true
+    }
+
+    pub fn finish_group_health_check(&self, name: &str) {
+        let mut groups = self
+            .group_dial_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(group) = groups.get_mut(name) {
+            group.testing = false;
+            group.failed_times = 0;
+            group.failed_at = None;
+        }
     }
 
     #[must_use]
@@ -1388,6 +1494,37 @@ mod tests {
         assert!(!failed.alive);
         assert_eq!(failed.history[1].delay, 0);
         assert_eq!(failed.extra["http://health.test/"].history.len(), 2);
+    }
+
+    #[test]
+    fn group_dial_failures_trigger_health_checks_at_the_go_boundaries() {
+        let state = RuntimeState::default();
+        let window = Duration::from_secs(1);
+        let take_trigger = || {
+            state
+                .group_health_pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_first()
+        };
+
+        state.record_group_dial_failure("fallback", window, 2, false);
+        assert_eq!(take_trigger(), None);
+        state.record_group_dial_failure("fallback", window, 2, false);
+        assert_eq!(take_trigger().as_deref(), Some("fallback"));
+        state.finish_group_health_check("fallback");
+
+        state.record_group_dial_failure("fallback", Duration::ZERO, 2, false);
+        std::thread::sleep(Duration::from_millis(1));
+        state.record_group_dial_failure("fallback", Duration::ZERO, 2, false);
+        state.record_group_dial_failure("fallback", window, 2, false);
+        assert_eq!(take_trigger(), None);
+        state.record_group_dial_failure("fallback", window, 2, false);
+        assert_eq!(take_trigger().as_deref(), Some("fallback"));
+        state.finish_group_health_check("fallback");
+
+        state.record_group_dial_failure("fallback", window, 99, true);
+        assert_eq!(take_trigger().as_deref(), Some("fallback"));
     }
 
     #[test]
