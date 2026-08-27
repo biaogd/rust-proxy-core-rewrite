@@ -334,6 +334,34 @@ def connect_tunnel(proxy_port: int, host: str, port: int) -> socket.socket:
     return stream
 
 
+def wait_route_ready(
+    process: subprocess.Popen[bytes], proxy_port: int, echo_port: int
+) -> None:
+    """Wait for an observable end-to-end DIRECT route after the listener binds.
+
+    The Go listener can accept a readiness TCP probe before the initial provider
+    startup work has settled.  A disposable CONNECT/echo exchange is the
+    capability barrier needed by the network cases below; the measured requests
+    are still issued exactly once after this returns.
+    """
+    deadline = time.monotonic() + STARTUP_DEADLINE
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited during route readiness with {process.returncode}"
+            )
+        try:
+            with connect_tunnel(proxy_port, "127.0.0.1", echo_port) as stream:
+                stream.sendall(b"ready")
+                if recv_exact(stream, 5) == b"ready":
+                    return
+        except (OSError, EOFError, AssertionError) as error:
+            last_error = error
+        time.sleep(0.02)
+    raise TimeoutError(f"proxy DIRECT route did not become ready: {last_error}")
+
+
 def socks_connect(proxy_port: int, atyp: int, address: bytes, port: int) -> socket.socket:
     stream = connect_proxy(proxy_port)
     stream.sendall(b"\x05\x01\x00")
@@ -379,6 +407,7 @@ def exercise_proxy(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
         )
         try:
             wait_ready(process, proxy_port)
+            wait_route_ready(process, proxy_port, echo.port)
             observation: dict[str, Any] = {"startup": "ready"}
 
             # Fragment the absolute-form request, including a body and a proxy-only header.

@@ -139,9 +139,22 @@ def exercise(
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_dns_ready(process, dns_port)
-        time.sleep(0.1)
         identifier = int.from_bytes(query[:2], "big")
-        response = encrypted_udp_query(dns_port, query)
+        deadline = time.monotonic() + IO_DEADLINE
+        while True:
+            response = encrypted_udp_query(dns_port, query)
+            # The Go DNS listener can become reachable just before its DoQ
+            # resolver finishes initialising.  Treat only that explicit,
+            # empty SERVFAIL as a readiness observation and retry the same
+            # query.  Other responses are measured exactly as returned.
+            empty_servfail = (
+                len(response) >= 12
+                and response[3] & 0x0F == 2
+                and response[6:12] == b"\x00\x00\x00\x00\x00\x00"
+            )
+            if not empty_servfail or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
         observed = (
             observe_response(response, identifier)
             if expect_answer
