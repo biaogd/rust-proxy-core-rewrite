@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ipnet::IpNet;
 use rewrite_model::{Metadata, Network};
@@ -47,11 +50,34 @@ impl Decision {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RuleSet {
     rules: Vec<Rule>,
     sub_rules: BTreeMap<String, Vec<Rule>>,
     actions: BTreeMap<String, Action>,
+    runtime: Vec<Arc<RuleRuntime>>,
+}
+
+#[derive(Debug, Default)]
+struct RuleRuntime {
+    disabled: AtomicBool,
+    hit_count: AtomicU64,
+    hit_at_unix_nanos: AtomicI64,
+    miss_count: AtomicU64,
+    miss_at_unix_nanos: AtomicI64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleSnapshot {
+    pub index: usize,
+    pub kind: String,
+    pub payload: String,
+    pub target: String,
+    pub disabled: bool,
+    pub hit_count: u64,
+    pub hit_at_unix_nanos: i64,
+    pub miss_count: u64,
+    pub miss_at_unix_nanos: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,6 +238,9 @@ impl RuleSet {
         verify_sub_rule_cycles(&sub_rules)?;
 
         Ok(Self {
+            runtime: (0..rules.len())
+                .map(|_| Arc::new(RuleRuntime::default()))
+                .collect(),
             rules,
             sub_rules,
             actions,
@@ -237,20 +266,33 @@ impl RuleSet {
         let mut metadata = metadata.clone();
         let mut rematch_chain = BTreeSet::new();
         for _ in 0..64 {
+            let top_level = metadata.special_rules.is_empty();
             let rules = self
                 .sub_rules
                 .get(&metadata.special_rules)
                 .unwrap_or(&self.rules);
             let mut pending_rematch: Option<(&Rule, &RematchSpec)> = None;
 
-            for rule in rules {
+            for (index, rule) in rules.iter().enumerate() {
+                let runtime = top_level.then(|| &self.runtime[index]);
+                if runtime.is_some_and(|runtime| runtime.disabled.load(Ordering::Acquire)) {
+                    continue;
+                }
                 let target = match rule.match_target(&metadata, self, allow_resolution) {
                     RuleMatchResult::Target(target) => target,
-                    RuleMatchResult::NoMatch => continue,
+                    RuleMatchResult::NoMatch => {
+                        if let Some(runtime) = runtime {
+                            runtime.record_miss();
+                        }
+                        continue;
+                    }
                     RuleMatchResult::ResolveDestinationIp => {
                         return LazyEvaluation::ResolveDestinationIp;
                     }
                 };
+                if let Some(runtime) = runtime {
+                    runtime.record_hit();
+                }
                 let Some(action) = self.actions.get(&target) else {
                     continue;
                 };
@@ -300,6 +342,32 @@ impl RuleSet {
     #[must_use]
     pub fn select(&self, metadata: &Metadata) -> Route {
         self.evaluate(metadata).route()
+    }
+
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<RuleSnapshot> {
+        self.rules
+            .iter()
+            .zip(&self.runtime)
+            .enumerate()
+            .map(|(index, (rule, runtime))| RuleSnapshot {
+                index,
+                kind: rule.kind(),
+                payload: rule.payload(),
+                target: rule.target.clone(),
+                disabled: runtime.disabled.load(Ordering::Acquire),
+                hit_count: runtime.hit_count.load(Ordering::Relaxed),
+                hit_at_unix_nanos: runtime.hit_at_unix_nanos.load(Ordering::Relaxed),
+                miss_count: runtime.miss_count.load(Ordering::Relaxed),
+                miss_at_unix_nanos: runtime.miss_at_unix_nanos.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
+
+    pub fn set_disabled(&self, index: usize, disabled: bool) {
+        if let Some(runtime) = self.runtime.get(index) {
+            runtime.disabled.store(disabled, Ordering::Release);
+        }
     }
 
     #[must_use]
@@ -386,6 +454,10 @@ impl Rule {
         self.matcher.kind().to_owned()
     }
 
+    fn payload(&self) -> String {
+        self.matcher.payload()
+    }
+
     fn has_phase_three_target(&self, actions: &BTreeMap<String, Action>) -> bool {
         matches!(self.matcher, Matcher::SubRule { .. })
             || matches!(
@@ -394,6 +466,28 @@ impl Rule {
             )
             || matches!(actions.get(&self.target), Some(Action::Rematch(_)))
     }
+}
+
+impl RuleRuntime {
+    fn record_hit(&self) {
+        self.hit_count.fetch_add(1, Ordering::Relaxed);
+        self.hit_at_unix_nanos
+            .store(now_unix_nanos(), Ordering::Relaxed);
+    }
+
+    fn record_miss(&self) {
+        self.miss_count.fetch_add(1, Ordering::Relaxed);
+        self.miss_at_unix_nanos
+            .store(now_unix_nanos(), Ordering::Relaxed);
+    }
+}
+
+fn now_unix_nanos() -> i64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    i64::try_from(nanos).unwrap_or(i64::MAX)
 }
 
 impl Matcher {
@@ -529,6 +623,53 @@ impl Matcher {
             Self::Or(_) => "OR",
             Self::Not(_) => "NOT",
             Self::SubRule { .. } => "SubRules",
+        }
+    }
+
+    fn payload(&self) -> String {
+        match self {
+            Self::Domain(value)
+            | Self::DomainSuffix(value)
+            | Self::DomainKeyword(value)
+            | Self::DomainWildcard(value) => value.clone(),
+            Self::DomainRegex(regex) => regex.pattern.clone(),
+            Self::IpCidr { network, .. } => network.to_string(),
+            Self::IpSuffix { address, bits, .. } => format!("{address}/{bits}"),
+            Self::Port { ranges, .. } => ranges
+                .iter()
+                .map(|range| {
+                    if range.start == range.end {
+                        range.start.to_string()
+                    } else {
+                        format!("{}-{}", range.start, range.end)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
+            Self::Network(network) => match network {
+                Network::Tcp => "TCP".to_owned(),
+                Network::Udp => "UDP".to_owned(),
+            },
+            Self::InType(types) => types
+                .iter()
+                .map(|kind| format!("{kind:?}").to_uppercase())
+                .collect::<Vec<_>>()
+                .join("/"),
+            Self::InName(names) | Self::InUser(names) | Self::RematchName(names) => names.join("/"),
+            Self::Dscp(ranges) => ranges
+                .iter()
+                .map(|range| {
+                    if range.start == range.end {
+                        range.start.to_string()
+                    } else {
+                        format!("{}-{}", range.start, range.end)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
+            Self::Match | Self::And(_) | Self::Or(_) | Self::Not(_) | Self::SubRule { .. } => {
+                String::new()
+            }
         }
     }
 }
@@ -1064,6 +1205,51 @@ mod tests {
             program.evaluate(&metadata("www.example.com", 80)).target,
             "DIRECT"
         );
+    }
+
+    #[test]
+    fn tracks_and_disables_top_level_rules() {
+        let rules = vec![
+            "DOMAIN-SUFFIX,example.com,DIRECT".to_owned(),
+            "MATCH,REJECT".to_owned(),
+        ];
+        let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+        let initial = program.snapshots();
+        assert_eq!(initial[0].kind, "DomainSuffix");
+        assert_eq!(initial[0].payload, "example.com");
+        assert_eq!(initial[0].target, "DIRECT");
+        assert_eq!(initial[0].hit_at_unix_nanos, 0);
+
+        assert_eq!(
+            program.evaluate(&metadata("www.example.com", 443)).target,
+            "DIRECT"
+        );
+        assert_eq!(
+            program.evaluate(&metadata("other.test", 443)).target,
+            "REJECT"
+        );
+        let observed = program.snapshots();
+        assert_eq!((observed[0].hit_count, observed[0].miss_count), (1, 1));
+        assert_eq!((observed[1].hit_count, observed[1].miss_count), (1, 0));
+        assert!(observed[0].hit_at_unix_nanos > 0);
+        assert!(observed[0].miss_at_unix_nanos > 0);
+
+        program.set_disabled(0, true);
+        assert_eq!(
+            program.evaluate(&metadata("www.example.com", 443)).target,
+            "REJECT"
+        );
+        let disabled = program.snapshots();
+        assert!(disabled[0].disabled);
+        assert_eq!((disabled[0].hit_count, disabled[0].miss_count), (1, 1));
+        assert_eq!(disabled[1].hit_count, 2);
+
+        program.set_disabled(0, false);
+        assert_eq!(
+            program.evaluate(&metadata("www.example.com", 443)).target,
+            "DIRECT"
+        );
+        assert_eq!(program.snapshots()[0].hit_count, 2);
     }
 
     #[test]

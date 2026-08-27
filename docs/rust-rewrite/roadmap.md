@@ -1063,6 +1063,15 @@ REJECT and back, verifies payload-over-path precedence, and proves malformed
 YAML leaves both routing and the reported generation unchanged in
 `compat/scripts/phase5d_configs.py`.
 
+The rules control gate exposes the current top-level executable program at
+`GET /rules`, including stable indexes, normalized type/payload/target fields,
+wrapper-style disabled state and atomic hit/miss counters with their latest
+timestamps. `PATCH /rules/disable` changes that same state in place, so a
+disabled matching rule is skipped immediately without rebuilding the runtime
+generation. Acceptance proves ordered DomainSuffix/MATCH inventory, both
+counter directions, ignored indexes, malformed JSON, DIRECT-to-REJECT disable
+side effects and restoration after enable in `compat/scripts/phase5d_rules.py`.
+
 TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior, remaining
 PATCH fields, safe-root/default configuration path loading, `/configs/geo` and

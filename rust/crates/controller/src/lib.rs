@@ -20,6 +20,8 @@ use rewrite_dns::DnsService;
 use rewrite_state::RuntimeState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -250,6 +252,9 @@ fn controller_router(state: ControllerState) -> Router {
             "/configs/",
             get(configs).put(update_configs).patch(patch_configs),
         )
+        .route("/rules", get(rules))
+        .route("/rules/", get(rules))
+        .route("/rules/disable", axum::routing::patch(disable_rules))
         .route(
             "/connections",
             get(connections).delete(close_all_connections),
@@ -389,6 +394,57 @@ async fn version() -> Response {
 
 async fn configs(State(state): State<ControllerState>) -> Response {
     json_response(StatusCode::OK, &config_snapshot(&state.current_config()))
+}
+
+async fn rules(State(state): State<ControllerState>) -> Response {
+    let rules: Vec<_> = state
+        .current_config()
+        .rules
+        .snapshots()
+        .into_iter()
+        .map(|rule| {
+            json!({
+                "index": rule.index,
+                "type": rule.kind,
+                "payload": rule.payload,
+                "proxy": rule.target,
+                "size": -1,
+                "extra": {
+                    "disabled": rule.disabled,
+                    "hitCount": rule.hit_count,
+                    "hitAt": rule_timestamp(rule.hit_at_unix_nanos),
+                    "missCount": rule.miss_count,
+                    "missAt": rule_timestamp(rule.miss_at_unix_nanos),
+                }
+            })
+        })
+        .collect();
+    json_response(StatusCode::OK, &json!({"rules": rules}))
+}
+
+async fn disable_rules(State(state): State<ControllerState>, request: Request) -> Response {
+    let Ok(updates) = decode_json_body::<BTreeMap<i64, bool>>(request).await else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let config = state.current_config();
+    for (index, disabled) in updates {
+        if let Ok(index) = usize::try_from(index) {
+            config.rules.set_disabled(index, disabled);
+        }
+    }
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+fn rule_timestamp(unix_nanos: i64) -> String {
+    if unix_nanos == 0 {
+        return "1970-01-01T00:00:00Z".to_owned();
+    }
+    if let Ok(timestamp) = OffsetDateTime::from_unix_timestamp_nanos(i128::from(unix_nanos))
+        && let Ok(formatted) = timestamp.format(&Rfc3339)
+    {
+        return formatted;
+    }
+    "1970-01-01T00:00:00Z".to_owned()
 }
 
 #[derive(Default, Deserialize)]
