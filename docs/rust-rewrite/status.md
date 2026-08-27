@@ -3633,6 +3633,13 @@ Phase 4F11 differential instead of being sampled concurrently by two phases.
 The previously fluctuating Phase 4E1, 4E17, 4F6 and 4F11 focused suites pass
 locally with these scope-specific normalizations.
 
+The shared product launcher now binds `HOME`, `XDG_CONFIG_HOME` and
+`CLASH_HOME_DIR` to each scenario's scratch tree. This prevents the Go
+oracle's selector `cache.db` from escaping through a runner-provided XDG path
+and changing the next scenario's initial `default-selected` observation. The
+Phase 5C reload and initial-selector fixtures pass consecutively in CI order;
+the change normalizes no product output and only isolates process state.
+
 ## Reproducible baseline
 
 Observed toolchain on the phase 0 development host:
