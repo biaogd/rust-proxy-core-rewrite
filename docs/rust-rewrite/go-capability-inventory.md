@@ -163,7 +163,7 @@ Primary anchors: [`adapter/outboundgroup`](../../adapter/outboundgroup),
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | GRP-01 | Selector and manual selection/persistence | Partial: nested configured selectors, recursive live TCP routing, SIGHUP reconciliation and restart-persisted choices with Go/Rust bbolt interchange | 5C1 automatic/health-group gates |
-| GRP-02 | URL-test, fallback and load-balance strategies | Partial: fallback configuration/view, current HTTP/DIRECT TCP routing and explicit compatible-provider health recovery | 5C1 automatic scheduling, URL-test and load-balance gates |
+| GRP-02 | URL-test, fallback and load-balance strategies | Partial: fallback configuration/view, HTTP/DIRECT TCP routing, fixed selection/persistence, explicit provider health recovery and group-delay | 5C1 automatic scheduling, general health, URL-test and load-balance gates |
 | GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: file-provider composition, ordered name/type exclusion, include-all and empty fallback | 5C1 automatic groups/health policies |
 | PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Partial: local YAML file load/manual refresh, REST views and group consumption | 5C2 HTTP/interval/override/persistence gates |
 | PROV-02 | Rule providers: text/YAML/MRS formats, classical/domain/IP behavior, refresh and persistence | Not started | 5C4 |

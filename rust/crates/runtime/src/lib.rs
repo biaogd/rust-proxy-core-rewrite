@@ -319,18 +319,15 @@ async fn apply_generation(
 }
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
-    state.sync_selectors(
-        config
-            .proxy_groups
-            .iter()
-            .filter(|group| group.kind == ProxyGroupKind::Select)
-            .map(|group| {
-                (
-                    group.name.as_str(),
-                    group.proxies.as_slice(),
-                    group.default_selected.as_deref(),
-                )
-            }),
+    state.sync_group_choices(
+        config.proxy_groups.iter().map(|group| {
+            (
+                group.name.as_str(),
+                group.proxies.as_slice(),
+                group.default_selected.as_deref(),
+                group.kind == ProxyGroupKind::Fallback,
+            )
+        }),
         config.profile.store_selected,
     );
 }
@@ -805,12 +802,9 @@ fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) 
             ProxyGroupKind::Select => state
                 .selector_proxy(&group.name)
                 .or_else(|| group.proxies.first().cloned())?,
-            ProxyGroupKind::Fallback => group
-                .proxies
-                .iter()
-                .find(|member| state.proxy_alive_for_url(member, &group.test_url))
-                .or_else(|| group.proxies.first())?
-                .clone(),
+            ProxyGroupKind::Fallback => {
+                state.fallback_proxy(&group.name, &group.proxies, &group.test_url)?
+            }
         };
     }
     Some(current)

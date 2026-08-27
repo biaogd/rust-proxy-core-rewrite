@@ -1272,6 +1272,27 @@ acceptance gate. Background interval/lazy scheduling, arbitrary remote-member
 health tests, fallback PUT/fixed persistence, group-delay, UDP forwarding,
 URL-test and load-balance remain separate gates.
 
+### Phase 5C1h accepted scope
+
+Fallback groups implement the oracle's SelectAble control boundary: controller
+PUT fixes a valid member, rejects an unknown member without changing state and
+immediately affects new TCP connections. Fixed choices use the shared
+`selected` bbolt bucket, survive restart and interchange in both Go→Rust and
+Rust→Go directions. `compat/scripts/phase5c_fallback_control.py` distinguishes
+authenticated HTTP from DIRECT on the wire as well as comparing `now`/`fixed`.
+Automatic health scheduling and unhealthy-fixed recovery remain separate.
+
+### Phase 5C1i accepted scope
+
+`GET /group/{fallback}/delay` tests the accepted built-in DIRECT/REJECT member
+set concurrently and returns the successful delay map or the oracle's 400/504
+error classes. Like Go, it clears and durably stores the empty fixed choice
+before query validation, so invalid expected-status and zero-timeout requests
+also unfix the group. `compat/scripts/phase5c_fallback_delay.py` proves this
+ordering and restart persistence. Configured remote-member delay measurement,
+group-delay for selectors and other automatic groups, and scheduler policy are
+later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

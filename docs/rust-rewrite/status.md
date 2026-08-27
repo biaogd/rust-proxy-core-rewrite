@@ -109,6 +109,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
 | Phase 5C1f selector persistence | Complete in declared restart/interchange scope; GRP-01 remains partial | Default-enabled and explicitly disabled restart behavior plus Go→Rust→Go bbolt `selected` bucket interchange and live routing pass |
 | Phase 5C1g fallback recovery | Complete in declared explicit-healthcheck TCP scope; GRP-02/03 remain partial | Exact Fallback metadata, authenticated HTTP initial route, compatible-provider health transition and DIRECT recovery pass |
+| Phase 5C1h fallback fixed control | Complete in declared current-member TCP/persistence scope; GRP-02 remains partial | Valid/invalid PUT, HTTP versus DIRECT routing, restart restoration and Go↔Rust bbolt interchange pass |
+| Phase 5C1i fallback group-delay | Complete in declared built-in-member scope; API-05/GRP-02 remain partial | Concurrent DIRECT/REJECT delay, 400/504 errors, pre-validation unfix ordering and durable empty choice pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3896,8 +3898,32 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p
 ```
 
 Scheduled/`lazy` checks, interval/timeout/max-failure policy, general remote
-health measurement, fixed fallback PUT/persistence, group-delay, UDP routing,
-URL-test and load-balance remain unclaimed.
+health measurement, UDP routing, URL-test and load-balance remain unclaimed.
+
+Phase 5C1h adds fallback's manual fixed-member lifecycle. Controller PUT shares
+the validated member and bbolt persistence path with selectors while retaining
+fallback's empty string as the dynamic state. The differential distinguishes
+HTTP-proxied from DIRECT TCP, checks invalid-choice rollback and process
+restart, then exchanges both fixed values through Go and Rust.
+
+```sh
+PHASE5CFALLBACKCONTROL_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_fallback_control.py
+```
+
+Phase 5C1i adds fallback group-delay over the currently accepted built-in
+health-test members. Tests run concurrently under the request timeout and
+record per-URL health. The controller deliberately clears and persists the
+fixed choice before parsing the query, preserving Go's otherwise surprising
+side effect for malformed and zero-timeout requests.
+
+```sh
+PHASE5CFALLBACKDELAY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_fallback_delay.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+General configured-proxy delay measurement, automatic scheduling, selector or
+future automatic-group delay, UDP routing, URL-test and load-balance remain
+unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

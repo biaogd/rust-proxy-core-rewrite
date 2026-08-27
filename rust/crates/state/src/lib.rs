@@ -325,9 +325,9 @@ impl RuntimeState {
         true
     }
 
-    pub fn sync_selectors<'a>(
+    pub fn sync_group_choices<'a>(
         &self,
-        groups: impl IntoIterator<Item = (&'a str, &'a [String], Option<&'a str>)>,
+        groups: impl IntoIterator<Item = (&'a str, &'a [String], Option<&'a str>, bool)>,
         store_selected: bool,
     ) {
         self.store_selected.store(store_selected, Ordering::Release);
@@ -339,11 +339,15 @@ impl RuntimeState {
             selectors.extend(load_selected_state());
         }
         let mut current = BTreeMap::new();
-        for (name, members, default) in groups {
-            let selected = match selectors.get(name) {
-                Some(previous) if members.contains(previous) => Some(previous.clone()),
-                Some(_) => members.first().cloned(),
-                None => default
+        for (name, members, default, allow_empty) in groups {
+            let selected = match (selectors.get(name), allow_empty) {
+                (Some(previous), true) if previous.is_empty() || members.contains(previous) => {
+                    Some(previous.clone())
+                }
+                (Some(_) | None, true) => Some(String::new()),
+                (Some(previous), false) if members.contains(previous) => Some(previous.clone()),
+                (Some(_), false) => members.first().cloned(),
+                (None, false) => default
                     .filter(|selected| members.iter().any(|member| member == selected))
                     .map(str::to_owned)
                     .or_else(|| members.first().cloned()),
@@ -381,6 +385,38 @@ impl RuntimeState {
             store_selected_state(name, selected);
         }
         true
+    }
+
+    pub fn clear_group_choice(&self, name: &str, persist: bool) -> bool {
+        let mut selectors = self
+            .selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(value) = selectors.get_mut(name) else {
+            return false;
+        };
+        value.clear();
+        drop(selectors);
+        if persist && self.store_selected.load(Ordering::Acquire) {
+            store_selected_state(name, "");
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn fallback_proxy(&self, name: &str, members: &[String], url: &str) -> Option<String> {
+        let fixed = self.selector_proxy(name).unwrap_or_default();
+        if !fixed.is_empty() && self.proxy_alive_for_url(&fixed, url) {
+            return Some(fixed);
+        }
+        if !fixed.is_empty() {
+            self.clear_group_choice(name, false);
+        }
+        members
+            .iter()
+            .find(|member| self.proxy_alive_for_url(member, url))
+            .or_else(|| members.first())
+            .cloned()
     }
 
     #[must_use]
@@ -1146,6 +1182,18 @@ mod tests {
         assert!(!failed.alive);
         assert_eq!(failed.history[1].delay, 0);
         assert_eq!(failed.extra["http://health.test/"].history.len(), 2);
+    }
+
+    #[test]
+    fn fallback_choice_starts_dynamic_and_can_be_fixed_or_cleared() {
+        let state = RuntimeState::default();
+        let members = vec!["proxy-a".to_owned(), "DIRECT".to_owned()];
+        state.sync_group_choices([("recovery", members.as_slice(), None, true)], false);
+        assert_eq!(state.selector_proxy("recovery").as_deref(), Some(""));
+        assert!(state.set_selector_proxy("recovery", "DIRECT", &members));
+        assert_eq!(state.selector_proxy("recovery").as_deref(), Some("DIRECT"));
+        assert!(state.clear_group_choice("recovery", false));
+        assert_eq!(state.selector_proxy("recovery").as_deref(), Some(""));
     }
 
     #[test]

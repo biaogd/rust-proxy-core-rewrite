@@ -90,7 +90,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | NTP | Oracle | Not started | Local NTP server and ordering tests |
 | iptables | Oracle | Not started | Linux namespace integration tests |
 | TLS/custom CA/client auth/ECH | Oracle | Not started | Certificate and handshake fixtures |
-| Profile persistence | Oracle | Partial | Fake-IP mapping/allocation and selector choices persist in the shared Go-compatible bbolt `cache.db`; Go→Rust and Rust→Go selector interchange plus `store-selected: false` pass. Corruption recovery and other profile state remain unclaimed |
+| Profile persistence | Oracle | Partial | Fake-IP state plus selector and fixed-fallback choices persist in the shared Go-compatible bbolt `cache.db`; bidirectional Go/Rust group interchange and `store-selected: false` pass. Corruption recovery and other profile state remain unclaimed |
 | Sniffer | Oracle | Not started | HTTP/TLS/QUIC payload fixtures |
 | Geodata URLs/loaders/matchers/updates | Oracle | Not started | Pinned local data files, no public latest |
 | Experimental and build-feature settings | Oracle | Not started | Feature-profile parser/runtime tests |
@@ -143,7 +143,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references and cycles; Phases 5B3d/5B3f prove basic AND/OR/NOT and SUB-RULE mixed-TCP DIRECT/REJECT routing; lazy DNS/process helpers and the broader nested corpus remain pending |
 | PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan and cycles; Phases 5B3e–5B3g prove live PASS/PASS-RULE plus REMATCH name mutation and sub-rule switching; live cycle/failure behavior remains pending |
-| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Selectors support nested DAGs, provider composition/filtering, reload and persistence. A fallback slice adds exact metadata, HTTP→DIRECT TCP recovery after explicit compatible-provider healthcheck, and disabled-UDP reporting. Scheduled health checks, general member tests, URL-test and load-balance remain unclaimed |
+| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Selectors support nested composition/reload/persistence. Fallback adds metadata, HTTP→DIRECT recovery, fixed PUT and persistence/interchange, explicit provider healthcheck and group-delay/unfix. Scheduling, general member tests, URL-test and load-balance remain unclaimed |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
 | Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |
 

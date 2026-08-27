@@ -14,7 +14,7 @@ use axum::response::Response;
 use axum::routing::{any, delete, get};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, future::join_all, stream};
 use http_body_util::Empty;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -662,8 +662,19 @@ async fn group_delay(
     Path(name): Path<String>,
     uri: Uri,
 ) -> Response {
-    if name != "GLOBAL" {
+    let config = state.current_config();
+    let fallback = (name != "GLOBAL")
+        .then(|| {
+            config.proxy_groups.iter().find(|group| {
+                group.name == name && group.kind == rewrite_config::ProxyGroupKind::Fallback
+            })
+        })
+        .flatten();
+    if name != "GLOBAL" && fallback.is_none() {
         return proxy_not_found();
+    }
+    if fallback.is_some() {
+        state.runtime.clear_group_choice(&name, true);
     }
     let parameters = query_parameters(&uri);
     let Some(timeout) = parameters
@@ -684,6 +695,36 @@ async fn group_delay(
             StatusCode::GATEWAY_TIMEOUT,
             &json!({"message": "get delay: all proxies timeout"}),
         );
+    }
+    if let Some(group) = fallback {
+        let timeout = Duration::from_millis(u64::try_from(timeout).unwrap_or_default());
+        let results = join_all(group.proxies.iter().map(|member| {
+            let expected = &expected;
+            async move {
+                let result =
+                    tokio::time::timeout(timeout, measure_http_delay(member, url, expected)).await;
+                (member, result)
+            }
+        }))
+        .await;
+        let mut delays = BTreeMap::new();
+        for (member, result) in results {
+            match result {
+                Ok(Ok(delay)) if delay > 0 => {
+                    state.runtime.record_proxy_delay(member, url, delay, true);
+                    delays.insert(member.clone(), delay);
+                }
+                _ => state.runtime.record_proxy_delay(member, url, 0, false),
+            }
+        }
+        return if delays.is_empty() {
+            json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &json!({"message": "get delay: all proxies timeout"}),
+            )
+        } else {
+            json_response(StatusCode::OK, &delays)
+        };
     }
     let result = tokio::time::timeout(
         Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
@@ -957,7 +998,10 @@ fn selector_snapshot(
     if group.kind == rewrite_config::ProxyGroupKind::Fallback {
         let object = snapshot.as_object_mut().expect("group snapshot object");
         object.insert("expectedStatus".to_owned(), json!(group.expected_status));
-        object.insert("fixed".to_owned(), json!(""));
+        object.insert(
+            "fixed".to_owned(),
+            json!(runtime.selector_proxy(&group.name).unwrap_or_default()),
+        );
     }
     snapshot
 }
@@ -970,12 +1014,8 @@ fn group_selected_proxy(
         rewrite_config::ProxyGroupKind::Select => {
             runtime.selector_proxy(&group.name).unwrap_or_default()
         }
-        rewrite_config::ProxyGroupKind::Fallback => group
-            .proxies
-            .iter()
-            .find(|member| runtime.proxy_alive_for_url(member, &group.test_url))
-            .or_else(|| group.proxies.first())
-            .cloned()
+        rewrite_config::ProxyGroupKind::Fallback => runtime
+            .fallback_proxy(&group.name, &group.proxies, &group.test_url)
             .unwrap_or_default(),
     }
 }
