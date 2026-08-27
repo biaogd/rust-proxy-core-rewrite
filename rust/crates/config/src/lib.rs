@@ -13,7 +13,7 @@ use serde_yaml_ng::{Mapping, Value};
 use thiserror::Error;
 use url::Url;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Global,
@@ -789,7 +789,6 @@ impl TryFrom<ConfigSpec> for Config {
             (spec.tproxy_port != 0, "tproxy-port"),
             (spec.allow_lan, "allow-lan"),
             (spec.bind_address != "*", "bind-address"),
-            (spec.mode != Mode::Rule, "mode"),
             (spec.unified_delay, "unified-delay"),
             (!spec.interface_name.is_empty(), "interface-name"),
             (spec.routing_mark != 0, "routing-mark"),
@@ -3037,6 +3036,19 @@ rules:
             let source = MINIMAL.replace("log-level: info", &format!("log-level: {value}"));
             let config = Config::from_yaml(&source).expect("controller log level is executable");
             assert_eq!(config.log_level, expected);
+        }
+    }
+
+    #[test]
+    fn accepts_all_live_routing_modes() {
+        for (value, expected) in [
+            ("rule", Mode::Rule),
+            ("direct", Mode::Direct),
+            ("global", Mode::Global),
+        ] {
+            let source = MINIMAL.replace("mode: rule", &format!("mode: {value}"));
+            let config = Config::from_yaml(&source).expect("routing mode is executable");
+            assert_eq!(config.mode, expected);
         }
     }
 

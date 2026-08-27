@@ -108,7 +108,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| RULE-01 | MATCH plus Rule/Direct/Global modes and target resolution | Partial | 5B1 |
+| RULE-01 | MATCH plus Rule/Direct/Global modes and target resolution | Partial: all modes on current local TCP/UDP and built-in targets | 5B1 plus outbound gates |
 | RULE-02 | DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD | Partial (current local host path live-complete) | Sniffer/static-tunnel completion |
 | RULE-03 | DOMAIN-REGEX and DOMAIN-WILDCARD | Partial (declared 5B1a/5B1b corpus) | 5B1 exhaustive exit gate |
 | RULE-04 | IP-CIDR/IP-CIDR6/SRC-IP-CIDR and lazy/no-resolve semantics | Partial (current IPv4 live plus IPv6 pure) | Native IPv6/live-context completion |
@@ -234,7 +234,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | API-07 | `/connections` list/WebSocket/delete-one/delete-all | Complete on current local TCP controller surface | 5D9 |
 | API-08 | Proxy/rule provider list/detail/update/health endpoints | Not started | 5D10 |
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
-| API-10 | `/storage/{key}` GET/PUT/DELETE | Not started | 5D11 |
+| API-10 | `/storage/{key}` GET/PUT/DELETE | Partial: complete process-local JSON lifecycle | 5D11 persistence gate |
 | API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Not started | 5D12 |
 | API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: external DoH mount passes Phase 4F15; UI and debug/GC remain | 5D13 |
 | API-13 | Exact JSON fields, headers, status/error bodies, stream cadence and concurrent behavior across all routes | Partial | Required in each API gate |

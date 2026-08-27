@@ -828,6 +828,7 @@ struct ConfigPatch {
     mixed_port: Option<i64>,
     log_level: Option<rewrite_config::LogLevel>,
     ipv6: Option<bool>,
+    mode: Option<rewrite_config::Mode>,
 }
 
 #[derive(Default, Deserialize)]
@@ -855,6 +856,9 @@ async fn patch_configs(State(state): State<ControllerState>, request: Request) -
     }
     if let Some(ipv6) = patch.ipv6 {
         config.ipv6 = ipv6;
+    }
+    if let Some(mode) = patch.mode {
+        config.mode = mode;
     }
     apply_config_update(&state, config).await
 }

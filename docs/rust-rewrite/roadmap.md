@@ -1091,9 +1091,19 @@ per-URL health state are returned by subsequent proxy views, while GLOBAL
 group delay reports the successful DIRECT member. Acceptance is consolidated
 in `compat/scripts/phase5d_proxies.py`.
 
-Configured remote adapters and groups, HTTPS health checks, GLOBAL selection
-as a data-plane route, health failure/timeout exhaustiveness and selection
-reload/persistence remain later `API-05` gates.
+Configured remote adapters and groups, HTTPS health checks, health
+failure/timeout exhaustiveness and selection reload/persistence remain later
+`API-05` gates.
+
+The live routing-mode gate connects the configuration and proxy-control
+surfaces to the data plane. Rule mode retains ordered rule evaluation, Direct
+mode bypasses a rejecting rule, and Global mode reads the current GLOBAL
+DIRECT/REJECT selection for every new TCP connection and SOCKS UDP session.
+Both PATCH and inline-YAML PUT can switch modes transactionally. Acceptance in
+`compat/scripts/phase5d_modes.py` exercises every transition on real mixed TCP
+and UDP echo paths, invalid-mode rollback and live selector changes. The UDP
+fixture deliberately creates a new client session after each change because
+the oracle retains the selected adapter for an existing SOCKS UDP association.
 
 TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior, remaining

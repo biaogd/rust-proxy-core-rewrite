@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
-use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind};
+use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
@@ -514,7 +514,8 @@ async fn handle_udp(
     // SOCKS UDP listener and therefore expose DEFAULT-SOCKS, not DEFAULT-MIXED.
     "DEFAULT-SOCKS".clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, &config, &state);
-    let decision = config.rules.evaluate(&metadata);
+    let decision =
+        mode_decision(&config, &state).unwrap_or_else(|| config.rules.evaluate(&metadata));
     if decision.route() != Route::Direct {
         return;
     }
@@ -716,6 +717,9 @@ async fn evaluate_tcp_rules(
     config: &Config,
     state: &RuntimeState,
 ) -> rewrite_rules::Decision {
+    if let Some(decision) = mode_decision(config, state) {
+        return decision;
+    }
     match config.rules.evaluate_lazy(metadata) {
         LazyEvaluation::Decision(decision) => decision,
         LazyEvaluation::ResolveDestinationIp => {
@@ -726,6 +730,21 @@ async fn evaluate_tcp_rules(
             config.rules.evaluate(metadata)
         }
     }
+}
+
+fn mode_decision(config: &Config, state: &RuntimeState) -> Option<rewrite_rules::Decision> {
+    let target = match config.mode {
+        Mode::Rule => return None,
+        Mode::Direct => "DIRECT".to_owned(),
+        Mode::Global => state.global_proxy(),
+    };
+    Some(rewrite_rules::Decision {
+        target,
+        matched_kind: None,
+        rematch_cycle: false,
+        rematch_name: String::new(),
+        special_rules: String::new(),
+    })
 }
 
 async fn resolve_direct_destination(
