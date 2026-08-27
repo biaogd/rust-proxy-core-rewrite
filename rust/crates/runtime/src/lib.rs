@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
-use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode};
+use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode, ProxyKind};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
@@ -738,20 +738,37 @@ async fn connect_tcp_outbound(
         port: proxy.port,
     };
     let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
-    tokio::select! {
-        () = shutdown.cancelled() => None,
-        result = rewrite_outbound::connect_http(
-            &server,
-            &metadata.destination,
-            config.ipv6,
-            credentials,
-        ) => match result {
-            Ok(remote) => Some(remote),
-            Err(error) => {
-                state.log("error", format!("HTTP proxy connection failed: {error}"));
-                None
+    match proxy.kind {
+        ProxyKind::Http => tokio::select! {
+            () = shutdown.cancelled() => None,
+            result = rewrite_outbound::connect_http(
+                &server,
+                &metadata.destination,
+                config.ipv6,
+                credentials,
+            ) => match result {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    state.log("error", format!("HTTP proxy connection failed: {error}"));
+                    None
+                }
             }
-        }
+        },
+        ProxyKind::Socks5 => tokio::select! {
+            () = shutdown.cancelled() => None,
+            result = rewrite_outbound::connect_socks5(
+                &server,
+                &metadata.destination,
+                config.ipv6,
+                credentials,
+            ) => match result {
+                Ok(remote) => Some(remote),
+                Err(error) => {
+                    state.log("error", format!("SOCKS5 proxy connection failed: {error}"));
+                    None
+                }
+            }
+        },
     }
 }
 

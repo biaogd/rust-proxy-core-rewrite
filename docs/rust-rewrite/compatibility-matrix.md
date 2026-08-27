@@ -156,7 +156,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | REJECT / REJECT-DROP | Oracle | Partial | Phase 3 immediate TCP REJECT parity only; REJECT-DROP timing and full UDP behavior are not claimed |
 | DNS / PASS / PASS-RULE / REMATCH | Oracle | Not started | Routing semantics and metadata mutation |
 | HTTP | Oracle | Partial | `phase6b_http.py` proves configured plaintext HTTP proxy parsing, Basic authentication, exact CONNECT authority/Host and bidirectional mixed-TCP relay with a rejecting fallback; TLS, unauthenticated/error/timeout matrices, UDP and controller adapter views remain unclaimed |
-| SOCKS5 | Oracle | Not started | TCP/UDP/auth/resolve interop |
+| SOCKS5 | Oracle | Partial | `phase6b_socks5.py` proves configured username/password, strict auth-method offer, CONNECT address bytes, exact adapter JSON and bidirectional mixed-TCP relay with a rejecting fallback; unauthenticated/failure matrices, domain-resolution policy, TLS, UDP/UoT and chaining remain unclaimed |
 | Shadowsocks (`ss`) | Oracle | Not started | Cipher/plugin/UoT interop |
 | ShadowsocksR (`ssr`) | Oracle | Not started | Cipher/protocol/obfs interop |
 | VMess | Oracle | Not started | Security/early-data/transport interop |

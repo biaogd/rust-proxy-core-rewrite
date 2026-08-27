@@ -97,6 +97,7 @@ pub struct Config {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProxyKind {
     Http,
+    Socks5,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3069,7 +3070,7 @@ fn parse_proxies(
                     target_sub_rule: proxy.target_sub_rule,
                 });
             }
-            Some("http") => {
+            Some(kind @ ("http" | "socks5")) => {
                 if proxy.target_rematch_name.is_some()
                     || proxy.target_sub_rule.is_some()
                     || proxy.username.is_some() != proxy.password.is_some()
@@ -3088,7 +3089,11 @@ fn parse_proxies(
                     .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
                 outbounds.push(ProxyConfig {
                     name,
-                    kind: ProxyKind::Http,
+                    kind: if kind == "http" {
+                        ProxyKind::Http
+                    } else {
+                        ProxyKind::Socks5
+                    },
                     server,
                     port,
                     username: proxy.username,

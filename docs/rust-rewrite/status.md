@@ -101,6 +101,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
+| Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy/mode/provider gates run by default in GitHub Actions |
@@ -3742,6 +3743,24 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p
 
 Nested groups, providers, reload/persistence and URL-test/fallback/load-balance
 remain outside this selector gate.
+
+The Phase 6B2a SOCKS5 gate reuses the same configured outbound and boxed async
+stream boundaries as HTTP. `fast-socks5` 1.0.0 supplies Tokio target-address
+encoding, CONNECT processing and stream I/O under the MIT license. Its default
+password client also advertises no-auth, whereas the pinned Go oracle advertises
+only password when credentials exist; the local compatibility adapter therefore
+performs that small strict negotiation before handing the socket back to the
+library for the command/reply state machine.
+
+Local focused evidence:
+
+```sh
+PHASE6BSOCKS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_socks5.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+No-auth, resolution-policy permutations, TLS, complete failures/timeouts,
+SOCKS5 UDP/UoT and dialer chains remain outside this gate.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

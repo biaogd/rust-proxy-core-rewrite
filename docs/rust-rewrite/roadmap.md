@@ -1162,6 +1162,18 @@ authenticated HTTP outbound, echo relay, invalid-choice rollback and reset to
 REJECT. Nested groups, provider composition, reload/persistence and
 URL-test/fallback/load-balance remain separate gates.
 
+### Phase 6B2a accepted scope
+
+The first SOCKS5 outbound slice accepts a configured server/port plus a complete
+username/password pair as a TCP rule target. `fast-socks5` owns target address
+encoding, CONNECT reply parsing and the upgraded async stream. A narrow auth
+adapter offers only username/password when credentials are configured, matching
+the oracle and preventing a server from silently downgrading to no-auth.
+`compat/scripts/phase6b_socks5.py` observes greeting/auth/request bytes at a
+deterministic local SOCKS5 server, compares the configured adapter view and
+proves relay plus an independent REJECT route. No-auth, domain-resolution
+policy, TLS, errors/timeouts, UDP/UoT and dialer chains remain later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

@@ -870,6 +870,10 @@ fn configured_proxy_snapshot(
     runtime: &RuntimeState,
 ) -> serde_json::Value {
     let health = runtime.proxy_health(&proxy.name);
+    let kind = match proxy.kind {
+        rewrite_config::ProxyKind::Http => "Http",
+        rewrite_config::ProxyKind::Socks5 => "Socks5",
+    };
     json!({
         "alive": health.alive,
         "dialer-proxy": "",
@@ -883,7 +887,7 @@ fn configured_proxy_snapshot(
         "routing-mark": 0,
         "smux": false,
         "tfo": false,
-        "type": "Http",
+        "type": kind,
         "udp": false,
         "uot": false,
         "xudp": false,
