@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port
+from phase1 import IO_DEADLINE, ROOT, reserve_port, wait_for_linux_signal_handlers
 from phase4 import (
     build_binaries,
     dns_question_end,
@@ -344,6 +344,8 @@ def reload_case(
     first = observe(udp_query(dns_port, dns_query(name, 0x4B50)), 0x4B50)
     cached = observe(udp_query(dns_port, dns_query(name, 0x4B51)), 0x4B51)
     config.touch()
+    if not wait_for_linux_signal_handlers(process):
+        time.sleep(0.05)
     os.kill(process.pid, signal.SIGHUP)
     time.sleep(0.35)
     deadline = time.monotonic() + IO_DEADLINE

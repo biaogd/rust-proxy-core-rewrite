@@ -69,11 +69,16 @@ def read_authority(path: pathlib.Path, frames: int) -> dict[str, Any]:
                 key: observation[key]
                 for key in ("connections", "streams", "queries", "frames")
             }
-            # This gate owns wrapper parameters and DoQ query framing, not
-            # connection-pool reuse. A startup retry may leave one additional
-            # zero-query connection in either product under CI scheduling.
-            if result["queries"] > 0:
+            valid_frames = [frame for frame in result["frames"] if frame["valid"]]
+            # This gate owns wrapper parameters and one semantic DoQ query,
+            # not connection-pool/readiness retries. Drop zero-length startup
+            # streams and collapse byte-identical valid retries only; distinct
+            # query frames remain observable differences.
+            if valid_frames and all(frame == valid_frames[0] for frame in valid_frames):
                 result["connections"] = 1
+                result["streams"] = 1
+                result["queries"] = 1
+                result["frames"] = valid_frames[:1]
             return result
         time.sleep(0.02)
     raise TimeoutError("Phase 4E19 authority observation did not converge")
