@@ -169,6 +169,7 @@ pub struct ProxyProviderConfig {
     pub vehicle: ProxyProviderVehicle,
     pub path: PathBuf,
     pub url: Option<String>,
+    pub interval: u64,
     pub proxies: Vec<ProxyConfig>,
 }
 
@@ -722,6 +723,7 @@ struct RawProxyProvider {
     kind: Option<String>,
     path: Option<String>,
     url: Option<String>,
+    interval: Option<u64>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3790,6 +3792,7 @@ fn parse_proxy_providers(
             vehicle,
             path,
             url,
+            interval: provider.interval.unwrap_or(0),
             proxies,
         });
     }
@@ -4982,6 +4985,7 @@ dns:
             vehicle: ProxyProviderVehicle::File,
             path: PathBuf::from("provider.yaml"),
             url: None,
+            interval: 0,
             proxies: ["provider-alpha", "provider-beta", "provider-omit"]
                 .into_iter()
                 .map(|name| ProxyConfig {
@@ -5033,6 +5037,7 @@ dns:
             vehicle: ProxyProviderVehicle::File,
             path: PathBuf::from("provider.yaml"),
             url: None,
+            interval: 0,
             proxies: vec![ProxyConfig {
                 name: "provider-alpha".to_owned(),
                 kind: ProxyKind::Http,
@@ -5076,7 +5081,7 @@ dns:
 
     #[test]
     fn parses_and_populates_initial_http_proxy_provider() {
-        let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [REJECT]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
+        let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\n    interval: 60\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [REJECT]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
         let path = std::env::temp_dir().join("mihomo-http-provider-config.yaml");
         let config = Config::from_yaml_at_path_with_geodata_mode(source, &path, false)
             .expect("HTTP provider declaration");
@@ -5085,6 +5090,7 @@ dns:
             ProxyProviderVehicle::Http
         );
         assert!(config.proxy_providers[0].proxies.is_empty());
+        assert_eq!(config.proxy_providers[0].interval, 60);
         assert_eq!(config.proxy_groups[0].proxies, ["REJECT"]);
 
         let populated = config

@@ -1229,6 +1229,23 @@ HTTPS, optional hashed paths, headers, size-limit configuration, provider
 proxy/rule routing, stale-cache refresh, intervals, ETag, manual remote update,
 failure rollback and concurrent lifecycle behavior remain later gates.
 
+### Phase 5C2d accepted scope
+
+Plaintext HTTP proxy providers now retain their configured second interval and
+share one runtime-owned refresh transaction between controller PUT and the
+interval scheduler. Each refresh obtains a bounded payload, validates all
+provider and dependent-group state, atomically replaces the explicit cache and
+only then publishes the new generation. Manual refresh returns 204 after the
+new generation is live; malformed YAML and non-success HTTP status return 503
+while preserving cache bytes, provider views, group selection and routing.
+`compat/scripts/phase5c_http_provider_refresh.py` compares initial-to-replaced
+members, cache contents, old-member removal, authenticated TCP forwarding,
+manual failure rollback and an autonomous one-second refresh on Go and Rust.
+
+HTTPS, conditional ETag requests, custom headers, hashed default paths,
+provider proxy/rule routing, concurrent/coalesced refresh, interval mutation
+across SIGHUP and shutdown races remain later gates.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with

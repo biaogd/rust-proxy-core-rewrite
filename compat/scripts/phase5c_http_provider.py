@@ -27,14 +27,17 @@ class ProviderHandler(http.server.BaseHTTPRequestHandler):
     server: "ProviderServer"
 
     def do_GET(self) -> None:
+        with self.server.lock:
+            status = self.server.status
+            payload = self.server.payload
         self.server.observations.append(
             {"method": self.command, "path": self.path, "host-present": bool(self.headers["Host"])}
         )
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/yaml")
-        self.send_header("Content-Length", str(len(self.server.payload)))
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(self.server.payload)
+        self.wfile.write(payload)
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -44,6 +47,8 @@ class ProviderServer(http.server.ThreadingHTTPServer):
     def __init__(self, payload: bytes) -> None:
         super().__init__(("127.0.0.1", 0), ProviderHandler)
         self.payload = payload
+        self.status = 200
+        self.lock = threading.Lock()
         self.observations: list[dict[str, Any]] = []
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -51,6 +56,11 @@ class ProviderServer(http.server.ThreadingHTTPServer):
     @property
     def port(self) -> int:
         return int(self.server_address[1])
+
+    def respond(self, payload: bytes, status: int = 200) -> None:
+        with self.lock:
+            self.payload = payload
+            self.status = status
 
     def close(self) -> None:
         self.shutdown()

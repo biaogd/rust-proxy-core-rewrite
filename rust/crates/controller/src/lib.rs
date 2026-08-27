@@ -45,8 +45,13 @@ struct ControllerState {
 
 /// Transactional runtime configuration request initiated by the controller.
 pub struct ConfigUpdate {
-    pub config: Config,
+    pub kind: ConfigUpdateKind,
     pub completion: oneshot::Sender<Result<(), String>>,
+}
+
+pub enum ConfigUpdateKind {
+    Replace(Box<Config>),
+    RefreshProxyProvider(String),
 }
 
 impl ControllerState {
@@ -1229,12 +1234,15 @@ async fn update_proxy_provider(
     {
         return empty_response(StatusCode::NO_CONTENT);
     }
-    if !config
+    let Some(configured) = config
         .proxy_providers
         .iter()
-        .any(|candidate| candidate.name == provider)
-    {
+        .find(|candidate| candidate.name == provider)
+    else {
         return proxy_not_found();
+    };
+    if configured.vehicle == rewrite_config::ProxyProviderVehicle::Http {
+        return apply_provider_refresh(&state, provider).await;
     }
     let next = match config.reload_proxy_provider(&provider) {
         Ok(next) => next,
@@ -1574,10 +1582,32 @@ async fn decode_json_body<T: for<'de> Deserialize<'de>>(request: Request) -> Res
 }
 
 async fn apply_config_update(state: &ControllerState, config: Config) -> Response {
+    apply_update(
+        state,
+        ConfigUpdateKind::Replace(Box::new(config)),
+        StatusCode::BAD_REQUEST,
+    )
+    .await
+}
+
+async fn apply_provider_refresh(state: &ControllerState, provider: String) -> Response {
+    apply_update(
+        state,
+        ConfigUpdateKind::RefreshProxyProvider(provider),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await
+}
+
+async fn apply_update(
+    state: &ControllerState,
+    kind: ConfigUpdateKind,
+    failure_status: StatusCode,
+) -> Response {
     let (completion, result) = oneshot::channel();
     if state
         .config_updates
-        .send(ConfigUpdate { config, completion })
+        .send(ConfigUpdate { kind, completion })
         .await
         .is_err()
     {
@@ -1588,7 +1618,7 @@ async fn apply_config_update(state: &ControllerState, config: Config) -> Respons
     }
     match result.await {
         Ok(Ok(())) => empty_response(StatusCode::NO_CONTENT),
-        Ok(Err(error)) => json_response(StatusCode::BAD_REQUEST, &json!({"message": error})),
+        Ok(Err(error)) => json_response(failure_status, &json!({"message": error})),
         Err(_) => json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &json!({"message": "runtime configuration result was dropped"}),

@@ -137,6 +137,8 @@ async fn run_with_reload_inner(
     )
     .await?;
     let health = start_group_health_scheduler(config_receiver.clone(), Arc::clone(&state));
+    let providers =
+        start_http_provider_scheduler(config_receiver.clone(), controller_update_sender.clone());
     let shutdown_barrier = lifecycle.map(
         |LifecycleSignals {
              ready,
@@ -177,8 +179,8 @@ async fn run_with_reload_inner(
                 let Some(update) = update else {
                     continue;
                 };
-                let result = apply_generation(
-                    update.config,
+                apply_controller_update(
+                    update,
                     &config_sender,
                     &config_receiver,
                     &state,
@@ -187,13 +189,7 @@ async fn run_with_reload_inner(
                     &mut listeners,
                     &mut controller,
                     &mut dns,
-                ).await.map_err(|error| error.to_string());
-                if let Err(error) = &result {
-                    state.log("error", format!("controller configuration update failed: {error}"));
-                } else {
-                    state.log("info", "controller configuration updated");
-                }
-                let _ = update.completion.send(result);
+                ).await;
             }
         }
     }
@@ -213,7 +209,56 @@ async fn run_with_reload_inner(
         stop_task(task).await;
     }
     stop_task(health).await;
+    stop_task(providers).await;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_controller_update(
+    update: rewrite_controller::ConfigUpdate,
+    config_sender: &watch::Sender<Arc<Config>>,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    controller_update_sender: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
+    listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
+    controller: &mut Option<(SocketAddr, RuntimeTask)>,
+    dns: &mut Option<(SocketAddr, RuntimeTask)>,
+) {
+    let next = match update.kind {
+        rewrite_controller::ConfigUpdateKind::Replace(config) => Ok(*config),
+        rewrite_controller::ConfigUpdateKind::RefreshProxyProvider(name) => {
+            let mut config = config_receiver.borrow().as_ref().clone();
+            refresh_http_proxy_provider(&mut config, &name)
+                .await
+                .map(|()| config)
+        }
+    };
+    let result = match next {
+        Ok(next) => apply_generation(
+            next,
+            config_sender,
+            config_receiver,
+            state,
+            dns_service,
+            controller_update_sender,
+            listeners,
+            controller,
+            dns,
+        )
+        .await
+        .map_err(|error| error.to_string()),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = &result {
+        state.log(
+            "error",
+            format!("controller configuration update failed: {error}"),
+        );
+    } else {
+        state.log("info", "controller configuration updated");
+    }
+    let _ = update.completion.send(result);
 }
 
 fn start_group_health_scheduler(
@@ -224,6 +269,79 @@ fn start_group_health_scheduler(
     let child_shutdown = shutdown.clone();
     let handle = tokio::spawn(run_group_health_scheduler(config, state, child_shutdown));
     RuntimeTask { shutdown, handle }
+}
+
+fn start_http_provider_scheduler(
+    config: watch::Receiver<Arc<Config>>,
+    updates: mpsc::Sender<rewrite_controller::ConfigUpdate>,
+) -> RuntimeTask {
+    let shutdown = CancellationToken::new();
+    let child_shutdown = shutdown.clone();
+    let handle = tokio::spawn(run_http_provider_scheduler(config, updates, child_shutdown));
+    RuntimeTask { shutdown, handle }
+}
+
+async fn run_http_provider_scheduler(
+    mut config: watch::Receiver<Arc<Config>>,
+    updates: mpsc::Sender<rewrite_controller::ConfigUpdate>,
+    shutdown: CancellationToken,
+) {
+    let mut deadlines = BTreeMap::<String, tokio::time::Instant>::new();
+    loop {
+        let current = Arc::clone(&config.borrow_and_update());
+        let scheduled: BTreeMap<_, _> = current
+            .proxy_providers
+            .iter()
+            .filter(|provider| {
+                provider.vehicle == ProxyProviderVehicle::Http && provider.interval > 0
+            })
+            .map(|provider| (provider.name.clone(), provider.interval))
+            .collect();
+        deadlines.retain(|name, _| scheduled.contains_key(name));
+        let now = tokio::time::Instant::now();
+        for (name, interval) in &scheduled {
+            deadlines
+                .entry(name.clone())
+                .or_insert(now + Duration::from_secs(*interval));
+        }
+        let wake_at = deadlines
+            .values()
+            .min()
+            .copied()
+            .unwrap_or_else(|| now + Duration::from_hours(1));
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = config.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep_until(wake_at) => {
+                let now = tokio::time::Instant::now();
+                let due: Vec<_> = deadlines
+                    .iter()
+                    .filter(|(_, deadline)| **deadline <= now)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for name in due {
+                    let interval = scheduled.get(&name).copied().unwrap_or(1);
+                    deadlines.insert(name.clone(), now + Duration::from_secs(interval));
+                    let (completion, result) = oneshot::channel();
+                    let update = rewrite_controller::ConfigUpdate {
+                        kind: rewrite_controller::ConfigUpdateKind::RefreshProxyProvider(name),
+                        completion,
+                    };
+                    if updates.send(update).await.is_err() {
+                        return;
+                    }
+                    tokio::select! {
+                        () = shutdown.cancelled() => return,
+                        _ = result => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn run_group_health_scheduler(
@@ -300,32 +418,11 @@ async fn hydrate_http_proxy_providers(config: &mut Config, state: &RuntimeState)
         .filter(|provider| {
             provider.vehicle == ProxyProviderVehicle::Http && provider.proxies.is_empty()
         })
-        .filter_map(|provider| {
-            Some((
-                provider.name.clone(),
-                provider.url.clone()?,
-                provider.path.clone(),
-            ))
-        })
+        .map(|provider| provider.name.clone())
         .collect();
-    for (name, url, path) in pending {
-        let result = async {
-            let payload =
-                tokio::time::timeout(HTTP_PROVIDER_TIMEOUT, fetch_http_proxy_provider(&url))
-                    .await
-                    .map_err(|_| "provider HTTP request timed out".to_owned())??;
-            let source = std::str::from_utf8(&payload)
-                .map_err(|error| format!("provider payload is not UTF-8: {error}"))?;
-            let next = config
-                .replace_proxy_provider_source(&name, source)
-                .map_err(|error| error.to_string())?;
-            persist_http_proxy_provider(&path, &payload).map_err(|error| error.to_string())?;
-            Ok::<Config, String>(next)
-        }
-        .await;
-        match result {
-            Ok(next) => {
-                *config = next;
+    for name in pending {
+        match refresh_http_proxy_provider(config, &name).await {
+            Ok(()) => {
                 state.log("info", format!("initial proxy provider {name} loaded"));
             }
             Err(error) => state.log(
@@ -334,6 +431,33 @@ async fn hydrate_http_proxy_providers(config: &mut Config, state: &RuntimeState)
             ),
         }
     }
+}
+
+async fn refresh_http_proxy_provider(config: &mut Config, name: &str) -> Result<(), String> {
+    let provider = config
+        .proxy_providers
+        .iter()
+        .find(|provider| provider.name == name)
+        .ok_or_else(|| format!("proxy provider {name} not found"))?;
+    if provider.vehicle != ProxyProviderVehicle::Http {
+        return Err(format!("proxy provider {name} is not an HTTP provider"));
+    }
+    let url = provider
+        .url
+        .clone()
+        .ok_or_else(|| format!("proxy provider {name} has no URL"))?;
+    let path = provider.path.clone();
+    let payload = tokio::time::timeout(HTTP_PROVIDER_TIMEOUT, fetch_http_proxy_provider(&url))
+        .await
+        .map_err(|_| "provider HTTP request timed out".to_owned())??;
+    let source = std::str::from_utf8(&payload)
+        .map_err(|error| format!("provider payload is not UTF-8: {error}"))?;
+    let next = config
+        .replace_proxy_provider_source(name, source)
+        .map_err(|error| error.to_string())?;
+    persist_http_proxy_provider(&path, &payload).map_err(|error| error.to_string())?;
+    *config = next;
+    Ok(())
 }
 
 async fn fetch_http_proxy_provider(raw_url: &str) -> Result<Vec<u8>, String> {
