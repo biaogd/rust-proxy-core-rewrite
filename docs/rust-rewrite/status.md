@@ -1,6 +1,6 @@
 # Rust rewrite status
 
-Last updated: 2026-08-26
+Last updated: 2026-08-27
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
@@ -98,9 +98,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
+| Phase 5D aggregate controller observability | Complete in declared read-only stream scope; API-02/03/07 retain listed gaps | Bearer/query-token WebSocket auth and memory/traffic/logs/connections HTTP/WS observations pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B1a–5B3g TCP rules and the aggregate Phase 5B UDP/core suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller streams run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3359,6 +3360,41 @@ Both aggregate and fixed differentials pass locally. Native IPv6 network
 routing, exhaustive IDNA/sniffer contexts and remaining resolver-call variants
 retain their explicit matrix gaps.
 
+## Phase 5D aggregate controller observability deliverables and evidence
+
+The controller now uses Axum's WebSocket implementation for the four existing
+read-only observability surfaces. `/traffic` and `/memory` emit one JSON text
+frame per second, `/logs` delivers filtered runtime events, and
+`/connections` sends an immediate snapshot followed by the requested
+millisecond interval. Socket receive branches observe peer close/error while
+the runtime cancellation token stops every stream during shutdown.
+
+Authentication preserves the pinned oracle boundary: ordinary HTTP and
+WebSockets may use `Authorization: Bearer`; only an actual WebSocket upgrade
+may replace it with a nonempty `token` query parameter. A wrong nonempty query
+token does not fall back to the header. `/memory` preserves the zero-valued
+first frame expected by the controller UI. Current Rust memory remains zero,
+so real process-memory accounting is not claimed.
+
+`compat/scripts/phase5d_streams.py` starts complete Go and Rust products and
+compares wrong-token rejection, both successful authorization forms,
+handshake headers, HTTP memory and WebSocket memory/traffic/connections first
+frames, interval parsing and a live mixed-TCP log event. It passed locally on
+Darwin arm64 on 2026-08-27.
+
+Local focused evidence:
+
+```sh
+PHASE5DSTREAMS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_streams.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-controller --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+CORS/config parsing, TLS/Unix/pipe listeners, real process memory, structured
+logs, exhaustive filters/cadence/backpressure and connection DELETE operations
+remain explicit Phase 5D gaps.
+
 ## Controller HTTP infrastructure refactor
 
 The post-Phase 4F15 controller now uses Axum 0.8.9 over Hyper 1.11.0 instead of
@@ -3370,12 +3406,14 @@ connection lifecycle, while explicit response helpers retain the oracle's
 JSON, DNS-message, text and empty-body content classes. Traffic and log streams
 remain streaming bodies tied to the runtime cancellation token.
 
-This is intentionally a behavior-neutral infrastructure change. It does not
-claim TLS/Unix/pipe listeners, WebSockets, CORS, mutation APIs, external UI or
+This was intentionally a behavior-neutral infrastructure change. At that
+refactor boundary it did not claim TLS/Unix/pipe listeners, WebSockets, CORS,
+mutation APIs, external UI or
 any additional DNS/proxy protocol. `axum` is MIT licensed, has a Rust 1.80
 minimum below the workspace Rust 1.95 toolchain, is maintained in the Tokio
-project, and supports the existing portable Tokio TCP boundary. Its optional
-features are limited here to HTTP/1, JSON and Tokio integration.
+project, and supports the existing portable Tokio TCP boundary. The initial
+feature set was HTTP/1, JSON and Tokio integration; the later Phase 5D gate
+additionally enables Axum's maintained WebSocket stack.
 
 Local evidence on 2026-08-26:
 
@@ -3537,7 +3575,9 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust behavior stops at the Phase 5A3a controller/secret override boundary.
+Rust controller behavior stops at the Phase 5D read-only observability stream
+boundary, while other workstreams stop at their latest independently accepted
+rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.

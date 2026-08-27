@@ -213,7 +213,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
 | RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Not started | Platform gates |
-| RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Partial | 5D4 |
+| RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Partial HTTP/WebSocket local subset | 5D4 |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
 | RUN-08 | Power/network change handling and resolver/connection reset | Not started | 8F |
 | RUN-09 | Bounded queues, backpressure, concurrency limits, cancellation and leak/stress behavior | Partial | Every release/protocol gate |
@@ -226,12 +226,12 @@ the mounted route files below [`hub/route`](../../hub/route).
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | API-01 | TCP/TLS/Unix/Windows-pipe controller listeners, routing mark and replacement | Partial TCP only | 5D1 plus platform gates |
-| API-02 | Bearer/query/WebSocket authentication and CORS | Partial Bearer only | 5D2 |
-| API-03 | `/`, `/version`, `/memory`, `/traffic`, `/logs` HTTP/WebSocket contracts | Partial | 5D3–5D4 |
+| API-02 | Bearer/query/WebSocket authentication and CORS | Partial: Bearer plus WebSocket query token | 5D2 |
+| API-03 | `/`, `/version`, `/memory`, `/traffic`, `/logs` HTTP/WebSocket contracts | Partial: ordinary JSON and observability streams | 5D3–5D4 |
 | API-04 | `/configs` GET/PUT/PATCH and `/configs/geo` | Partial GET subset | 5D5 |
 | API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Not started | 5D7 |
 | API-06 | `/rules` list/statistics and disable mutation | Not started | 5D8 |
-| API-07 | `/connections` list/WebSocket/delete-one/delete-all | Partial list subset | 5D9 |
+| API-07 | `/connections` list/WebSocket/delete-one/delete-all | Partial list/WebSocket subset | 5D9 |
 | API-08 | Proxy/rule provider list/detail/update/health endpoints | Not started | 5D10 |
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
 | API-10 | `/storage/{key}` GET/PUT/DELETE | Not started | 5D11 |

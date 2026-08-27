@@ -1025,6 +1025,24 @@ normalization, plus pure IPv6 suffix hit/miss/source and invalid-width cases.
 Native IPv6 live routing, sniffer/static-tunnel contexts and exhaustive resolver
 instrumentation remain later contextual gates.
 
+### Phase 5D aggregate controller observability accepted scope
+
+This aggregate gate advances `API-02`, `API-03`, `API-07` and `RUN-06` through
+one shared read-only controller boundary. Axum owns the WebSocket handshake and
+framing. A configured secret accepts the existing Bearer header or a nonempty
+`token` query parameter only on WebSocket upgrades, and rejects a wrong query
+token before upgrade. `/memory`, `/traffic`, `/logs` and `/connections` expose
+their declared JSON shapes over WebSocket; `/memory` also preserves the
+oracle's zero-valued first HTTP and WebSocket frames, and `/connections`
+supports its millisecond interval query.
+
+Acceptance compares handshake status/headers, first-frame JSON shapes, both
+authorization forms and one live TCP log event in
+`compat/scripts/phase5d_streams.py`. CORS and controller configuration parsing,
+real process-memory accounting, structured logs, exhaustive level/cadence/
+backpressure behavior, connection deletion and all mutation APIs remain later
+5D gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

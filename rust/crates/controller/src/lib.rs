@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
@@ -73,6 +75,7 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/connections", get(connections))
         .route("/connections/", get(connections))
         .route("/traffic", get(traffic))
+        .route("/memory", get(memory))
         .route("/logs", get(logs))
         .route("/cache/dns/flush", any(flush_dns_cache))
         .route("/cache/fakeip/flush", any(flush_fake_ip_cache))
@@ -91,20 +94,33 @@ async fn authenticate_or_serve_doh(
     if is_doh_path(request.uri().path(), &config.external_doh_server) {
         return handle_doh(request, &state, &config).await;
     }
-    let expected = format!("Bearer {}", config.secret);
-    if !config.secret.is_empty()
-        && request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            != Some(expected.as_str())
-    {
+    if !config.secret.is_empty() && !is_authorized(&request, &config.secret) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             &json!({"message": "Unauthorized"}),
         );
     }
     next.run(request).await
+}
+
+fn is_authorized(request: &Request, secret: &str) -> bool {
+    let websocket_token = request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        .then(|| query_parameters(request.uri()).remove("token"))
+        .flatten()
+        .filter(|token| !token.is_empty());
+    if let Some(token) = websocket_token {
+        return token == secret;
+    }
+    let expected = format!("Bearer {secret}");
+    request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some(expected.as_str())
 }
 
 fn is_doh_path(path: &str, mount: &str) -> bool {
@@ -190,8 +206,21 @@ async fn configs(State(state): State<ControllerState>) -> Response {
     json_response(StatusCode::OK, &config_snapshot(&state.current_config()))
 }
 
-async fn connections(State(state): State<ControllerState>) -> Response {
-    json_response(StatusCode::OK, &state.runtime.connections())
+async fn connections(
+    websocket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    State(state): State<ControllerState>,
+    uri: Uri,
+) -> Response {
+    let Ok(websocket) = websocket else {
+        return json_response(StatusCode::OK, &state.runtime.connections());
+    };
+    let interval = query_parameters(&uri)
+        .get("interval")
+        .map_or(Ok(1_000_u64), |value| value.parse::<u64>());
+    let Ok(interval) = interval else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    websocket.on_upgrade(move |socket| connections_websocket(socket, state, interval))
 }
 
 async fn flush_dns_cache(State(state): State<ControllerState>, method: Method) -> Response {
@@ -246,7 +275,13 @@ async fn dns_query(State(state): State<ControllerState>, method: Method, uri: Ur
     }
 }
 
-async fn traffic(State(state): State<ControllerState>) -> Response {
+async fn traffic(
+    websocket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    State(state): State<ControllerState>,
+) -> Response {
+    if let Ok(websocket) = websocket {
+        return websocket.on_upgrade(move |socket| traffic_websocket(socket, state));
+    }
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.tick().await;
     let runtime = Arc::clone(&state.runtime);
@@ -266,27 +301,58 @@ async fn traffic(State(state): State<ControllerState>) -> Response {
     typed_response(StatusCode::OK, "application/json", body)
 }
 
-async fn logs(State(state): State<ControllerState>, uri: Uri) -> Response {
-    if uri
-        .query()
-        .is_some_and(|query| query.contains("level=invalid"))
-    {
+async fn memory(
+    websocket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    State(state): State<ControllerState>,
+) -> Response {
+    if let Ok(websocket) = websocket {
+        return websocket.on_upgrade(move |socket| memory_websocket(socket, state));
+    }
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+    let shutdown = state.shutdown.clone();
+    let body = Body::from_stream(stream::unfold(
+        (interval, shutdown),
+        |(mut interval, shutdown)| async move {
+            tokio::select! {
+                () = shutdown.cancelled() => None,
+                _ = interval.tick() => {
+                    let line = json_line(&MemorySnapshot { inuse: 0, oslimit: 0 });
+                    Some((Ok::<Bytes, Infallible>(line), (interval, shutdown)))
+                }
+            }
+        },
+    ));
+    typed_response(StatusCode::OK, "application/json", body)
+}
+
+async fn logs(
+    websocket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    State(state): State<ControllerState>,
+    uri: Uri,
+) -> Response {
+    let parameters = query_parameters(&uri);
+    let Some(level) = LogFilter::parse(parameters.get("level").map_or("info", String::as_str))
+    else {
         return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    if let Ok(websocket) = websocket {
+        return websocket.on_upgrade(move |socket| logs_websocket(socket, state, level));
     }
     let receiver = state.runtime.subscribe_logs();
     let shutdown = state.shutdown.clone();
     let body = Body::from_stream(stream::unfold(
         (receiver, shutdown),
-        |(mut receiver, shutdown)| async move {
+        move |(mut receiver, shutdown)| async move {
             loop {
                 tokio::select! {
                     () = shutdown.cancelled() => return None,
                     result = receiver.recv() => match result {
-                        Ok(event) => {
+                        Ok(event) if level.includes(&event.level) => {
                             let line = json_line(&event);
                             return Some((Ok::<Bytes, Infallible>(line), (receiver, shutdown)));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                     }
                 }
@@ -294,6 +360,128 @@ async fn logs(State(state): State<ControllerState>, uri: Uri) -> Response {
         },
     ));
     typed_response(StatusCode::OK, "application/json", body)
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct MemorySnapshot {
+    inuse: u64,
+    oslimit: u64,
+}
+
+#[derive(Clone, Copy)]
+enum LogFilter {
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Silent,
+}
+
+impl LogFilter {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "debug" => Some(Self::Debug),
+            "info" | "" => Some(Self::Info),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            "silent" => Some(Self::Silent),
+            _ => None,
+        }
+    }
+
+    fn includes(self, level: &str) -> bool {
+        let event = match level {
+            "debug" => 0,
+            "warning" => 2,
+            "error" => 3,
+            _ => 1,
+        };
+        let minimum = match self {
+            Self::Debug => 0,
+            Self::Info => 1,
+            Self::Warning => 2,
+            Self::Error => 3,
+            Self::Silent => 4,
+        };
+        event >= minimum
+    }
+}
+
+async fn connections_websocket(
+    mut socket: WebSocket,
+    state: ControllerState,
+    interval_millis: u64,
+) {
+    if send_json_message(&mut socket, &state.runtime.connections())
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut interval = tokio::time::interval(Duration::from_millis(interval_millis.max(1)));
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            () = state.shutdown.cancelled() => break,
+            message = socket.recv() => if websocket_closed(message.as_ref()) { break },
+            _ = interval.tick() => if send_json_message(&mut socket, &state.runtime.connections()).await.is_err() { break },
+        }
+    }
+}
+
+async fn traffic_websocket(mut socket: WebSocket, state: ControllerState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            () = state.shutdown.cancelled() => break,
+            message = socket.recv() => if websocket_closed(message.as_ref()) { break },
+            _ = interval.tick() => if send_json_message(&mut socket, &state.runtime.traffic()).await.is_err() { break },
+        }
+    }
+}
+
+async fn memory_websocket(mut socket: WebSocket, state: ControllerState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            () = state.shutdown.cancelled() => break,
+            message = socket.recv() => if websocket_closed(message.as_ref()) { break },
+            _ = interval.tick() => {
+                if send_json_message(&mut socket, &MemorySnapshot { inuse: 0, oslimit: 0 }).await.is_err() { break }
+            },
+        }
+    }
+}
+
+async fn logs_websocket(mut socket: WebSocket, state: ControllerState, level: LogFilter) {
+    let mut receiver = state.runtime.subscribe_logs();
+    loop {
+        tokio::select! {
+            () = state.shutdown.cancelled() => break,
+            message = socket.recv() => if websocket_closed(message.as_ref()) { break },
+            result = receiver.recv() => match result {
+                Ok(event) if level.includes(&event.level) => {
+                    if send_json_message(&mut socket, &event).await.is_err() { break }
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+        }
+    }
+}
+
+async fn send_json_message<T: Serialize>(socket: &mut WebSocket, value: &T) -> Result<(), ()> {
+    let message = String::from_utf8(json_line(value).to_vec()).map_err(|_| ())?;
+    socket
+        .send(Message::Text(message.into()))
+        .await
+        .map_err(|_| ())
+}
+
+fn websocket_closed(message: Option<&Result<Message, axum::Error>>) -> bool {
+    matches!(message, None | Some(Ok(Message::Close(_)) | Err(_)))
 }
 
 async fn method_not_allowed() -> Response {

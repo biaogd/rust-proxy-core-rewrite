@@ -132,6 +132,7 @@ jobs:
       PHASE5B3G_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5BUDP_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5BCORE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DSTREAMS_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -162,6 +163,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5d_streams.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
