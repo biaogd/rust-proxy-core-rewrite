@@ -638,4 +638,20 @@ mod tests {
         assert_eq!(&bytes[request.body_offset..], b"payload");
         assert_eq!(request.headers[1].1, b"value");
     }
+
+    #[test]
+    fn decodes_udp_rule_metadata_without_tcp_auth_identity() {
+        let source = SocketAddr::from(([127, 0, 0, 1], 40_001));
+        let packet = [0, 0, 0, 1, 127, 0, 0, 1, 0x20, 0x21, b'u', b'd', b'p'];
+        let accepted = decode_socks5_udp(&packet, source, 10_800).expect("UDP packet");
+        assert_eq!(accepted.metadata.network, Network::Udp);
+        assert_eq!(accepted.metadata.inbound, InboundProtocol::Socks5);
+        assert_eq!(accepted.metadata.source_ip, Some(source.ip()));
+        assert_eq!(accepted.metadata.source_port, source.port());
+        assert_eq!(accepted.metadata.destination.port, 0x2021);
+        assert_eq!(accepted.metadata.inbound_port, 10_800);
+        assert_eq!(accepted.metadata.dscp, 0);
+        assert!(accepted.metadata.inbound_user.is_empty());
+        assert_eq!(accepted.payload, b"udp");
+    }
 }

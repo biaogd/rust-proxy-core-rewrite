@@ -480,9 +480,12 @@ async fn handle_udp(
         }
     };
     let mut metadata = accepted.metadata.clone();
+    // Both pinned default SOCKS and mixed UDP listeners are backed by the Go
+    // SOCKS UDP listener and therefore expose DEFAULT-SOCKS, not DEFAULT-MIXED.
+    "DEFAULT-SOCKS".clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, &config, &state);
     let decision = config.rules.evaluate(&metadata);
-    if config.rules.select(&metadata) != Route::Direct {
+    if decision.route() != Route::Direct {
         return;
     }
     let tracker = state.register(

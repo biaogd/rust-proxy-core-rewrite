@@ -96,9 +96,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3e live PASS routing | Complete in declared local-TCP scope; RULE-12 remains partial | A matched PASS continues ordered scanning into later DIRECT and REJECT results instead of becoming an outbound |
 | Phase 5B3f live sub-rule routing | Complete in declared local-TCP scope; RULE-11/12 remain partial | SUB-RULE enters a named branch; PASS-RULE continues within it and returns to the main scan when exhausted |
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
+| Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle and Phase 5B1a–5B3g rule-routing suites run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B1a–5B3g TCP rules and the aggregate Phase 5B UDP metadata suite run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3292,6 +3293,38 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 The focused differential and checks pass locally. REMATCH cycle termination
 and mutation-failure paths remain pending, so aggregate RULE-12 stays partial.
+
+## Phase 5B current SOCKS5 UDP metadata deliverables and evidence
+
+This aggregate phase closes the rule-metadata loop for the currently available
+SOCKS5 UDP ingress instead of splitting every field into a separate migration.
+One AND rule consumes the real UDP source, destination and inbound ports,
+`NETWORK,UDP`, default `DSCP,0`, `IN-TYPE,SOCKS5` and the listener name before
+the packet can reach a local echo server.
+
+The pinned Go default mixed UDP socket is implemented by its SOCKS UDP listener,
+so both `socks-port` and `mixed-port` expose `DEFAULT-SOCKS`; Rust now preserves
+that non-obvious behavior. UDP packets also do not inherit the TCP SOCKS auth
+identity in the oracle. The differential enables authentication and places an
+`IN-USER,alice,REJECT` rule first, proving the raw UDP metadata remains empty
+rather than fabricating an association user.
+
+`compat/scripts/phase5b_udp.py` sends bound UDP clients through both fixed
+listeners and compares complete SOCKS5 UDP echo/timeout outcomes. A third
+unlisted source port proves the composite matcher falls through to REJECT.
+
+Local evidence on 2026-08-27:
+
+```sh
+PHASE5BUDP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b_udp.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-inbound -p rewrite-runtime --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+The aggregate differential passes locally. Nonzero DSCP extraction,
+transparent/TUN metadata, YAML named listeners and future inbound protocols
+remain attached to their platform or protocol phases.
 
 ## Controller HTTP infrastructure refactor
 

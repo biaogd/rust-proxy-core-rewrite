@@ -1004,6 +1004,17 @@ rule scan and yield distinct DIRECT/REJECT outcomes against the oracle. The
 action is executable without becoming a network outbound. Cycle termination
 and update-failure behavior remain a separate RULE-12 gate.
 
+### Phase 5B current SOCKS5 UDP metadata accepted scope
+
+This aggregate gate accepts the complete rule metadata carried by the current
+fixed SOCKS5 UDP ingress: source/destination/inbound ports, UDP network, default
+DSCP, inbound type, user and name. Acceptance requires live packets through
+both `socks-port` and `mixed-port`, one composite rule that depends on every
+nonempty field, and a source-port miss that receives no response. It must also
+preserve the oracle's two counterintuitive defaults: both UDP listeners use
+`DEFAULT-SOCKS`, and UDP packets do not inherit a TCP authentication username.
+Transparent/TUN DSCP, named listeners and future protocols remain later gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed
