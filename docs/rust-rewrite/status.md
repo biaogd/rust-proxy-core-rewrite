@@ -100,6 +100,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
 | Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
+| Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy/mode/provider gates run by default in GitHub Actions |
@@ -3723,6 +3724,24 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 TLS, partial credentials, full failure/timeout behavior, controller rendering,
 proxy groups/providers and UDP remain explicitly outside this gate.
+
+The Phase 5C1a selector gate adds flat configured selectors without claiming
+the automatic group families. Runtime state retains each valid selection while
+the configuration generation remains active; the controller exposes exact
+configured HTTP/Selector detail JSON and validates PUT choices. The selected
+member is resolved only when opening a new TCP connection, and its UDP support
+field changes with the member just as in the oracle. Both configured objects
+also join the implicit `default` compatible provider and its member lookup.
+
+Local focused evidence:
+
+```sh
+PHASE5CSELECTOR_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_selector.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Nested groups, providers, reload/persistence and URL-test/fallback/load-balance
+remain outside this selector gate.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

@@ -259,6 +259,13 @@ async fn apply_generation(
         None
     };
 
+    state.sync_selectors(next.proxy_groups.iter().map(|group| {
+        (
+            group.name.as_str(),
+            group.proxies.as_slice(),
+            group.default_selected.as_deref(),
+        )
+    }));
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
@@ -694,7 +701,12 @@ async fn connect_tcp_outbound(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) -> Option<rewrite_outbound::BoxedOutboundStream> {
-    if route == Route::Direct {
+    let selected = state.selector_proxy(target);
+    let outbound_target = selected.as_deref().unwrap_or(target);
+    if matches!(outbound_target, "REJECT" | "REJECT-DROP") {
+        return None;
+    }
+    if route == Route::Direct || outbound_target == "DIRECT" {
         let destination =
             match resolve_direct_destination(&metadata.destination, fake_host, config).await {
                 Ok(destination) => destination,
@@ -714,7 +726,10 @@ async fn connect_tcp_outbound(
             }
         };
     }
-    let proxy = config.proxies.iter().find(|proxy| proxy.name == target)?;
+    let proxy = config
+        .proxies
+        .iter()
+        .find(|proxy| proxy.name == outbound_target)?;
     let server = Destination {
         host: proxy
             .server

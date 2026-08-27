@@ -1149,6 +1149,19 @@ echo server, compares the upstream request fields and proves a separate rule
 still rejects. TLS, broader authentication/error combinations, groups,
 providers, UDP and adapter-controller rendering remain separate gates.
 
+### Phase 5C1a accepted scope
+
+The first group slice accepts one or more flat `select` groups whose members
+are current DIRECT/REJECT or configured proxy names. A valid
+`default-selected` initializes the process-local choice, and controller PUT
+changes the target used by new TCP connections immediately. The controller
+renders the configured HTTP adapter and selector with the oracle's exact
+current fields, including the selected member's UDP capability.
+`compat/scripts/phase5c_selector.py` proves initial REJECT, selection of the
+authenticated HTTP outbound, echo relay, invalid-choice rollback and reset to
+REJECT. Nested groups, provider composition, reload/persistence and
+URL-test/fallback/load-balance remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

@@ -128,6 +128,7 @@ pub struct RuntimeState {
     logs: broadcast::Sender<LogEvent>,
     storage: Mutex<BTreeMap<String, Vec<u8>>>,
     global_proxy: Mutex<String>,
+    selectors: Mutex<BTreeMap<String, String>>,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
@@ -162,6 +163,7 @@ impl Default for RuntimeState {
             logs,
             storage: Mutex::new(BTreeMap::new()),
             global_proxy: Mutex::new("DIRECT".to_owned()),
+            selectors: Mutex::new(BTreeMap::new()),
             proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
@@ -316,6 +318,57 @@ impl RuntimeState {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
+        true
+    }
+
+    pub fn sync_selectors<'a>(
+        &self,
+        groups: impl IntoIterator<Item = (&'a str, &'a [String], Option<&'a str>)>,
+    ) {
+        let mut selectors = self
+            .selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = BTreeMap::new();
+        for (name, members, default) in groups {
+            let selected = selectors
+                .get(name)
+                .filter(|selected| members.contains(selected))
+                .cloned()
+                .or_else(|| {
+                    default
+                        .filter(|selected| members.iter().any(|member| member == selected))
+                        .map(str::to_owned)
+                })
+                .or_else(|| members.first().cloned());
+            if let Some(selected) = selected {
+                current.insert(name.to_owned(), selected);
+            }
+        }
+        *selectors = current;
+    }
+
+    #[must_use]
+    pub fn selector_proxy(&self, name: &str) -> Option<String> {
+        self.selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned()
+    }
+
+    pub fn set_selector_proxy(&self, name: &str, selected: &str, members: &[String]) -> bool {
+        if !members.iter().any(|member| member == selected) {
+            return false;
+        }
+        let mut selectors = self
+            .selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(value) = selectors.get_mut(name) else {
+            return false;
+        };
+        selected.clone_into(value);
         true
     }
 

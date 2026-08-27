@@ -67,6 +67,7 @@ pub struct ConfigSpec {
     pub raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub rematches: Vec<RematchSpec>,
     pub proxies: Vec<ProxyConfig>,
+    pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     unsupported_keys: Vec<String>,
 }
@@ -89,6 +90,7 @@ pub struct Config {
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub proxies: Vec<ProxyConfig>,
+    pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
 }
 
@@ -105,6 +107,13 @@ pub struct ProxyConfig {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyGroupConfig {
+    pub name: String,
+    pub proxies: Vec<String>,
+    pub default_selected: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -504,6 +513,7 @@ struct RawConfig {
     rules: Option<Vec<String>>,
     sub_rules: Option<BTreeMap<String, Vec<String>>>,
     proxies: Option<Vec<RawProxy>>,
+    proxy_groups: Option<Vec<RawProxyGroup>>,
     rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -609,6 +619,18 @@ struct RawProxy {
     extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawProxyGroup {
+    name: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    proxies: Option<Vec<String>>,
+    default_selected: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("configuration YAML error: {0}")]
@@ -686,7 +708,12 @@ impl ConfigSpec {
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
         let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default())?;
-        let proxy_targets = proxies.iter().map(|proxy| proxy.name.clone()).collect();
+        let proxy_groups = parse_proxy_groups(raw.proxy_groups.unwrap_or_default(), &proxies)?;
+        let proxy_targets = proxies
+            .iter()
+            .map(|proxy| proxy.name.clone())
+            .chain(proxy_groups.iter().map(|group| group.name.clone()))
+            .collect();
         let rules =
             RuleSet::parse_with_targets(&raw_rules, &raw_sub_rules, &rematches, &proxy_targets)?;
         let store_fake_ip = parse_profile(raw.profile)?;
@@ -735,6 +762,7 @@ impl ConfigSpec {
             raw_sub_rules,
             rematches,
             proxies,
+            proxy_groups,
             rules,
             unsupported_keys: raw.extra.into_keys().collect(),
         })
@@ -812,6 +840,7 @@ impl TryFrom<ConfigSpec> for Config {
             .proxies
             .iter()
             .map(|proxy| proxy.name.clone())
+            .chain(spec.proxy_groups.iter().map(|group| group.name.clone()))
             .collect();
         let unsupported = [
             (spec.redir_port != 0, "redir-port"),
@@ -852,6 +881,7 @@ impl TryFrom<ConfigSpec> for Config {
             dns: spec.dns,
             hosts: spec.hosts,
             proxies: spec.proxies,
+            proxy_groups: spec.proxy_groups,
             rules: spec.rules,
         })
     }
@@ -3042,6 +3072,7 @@ fn parse_proxies(
             Some("http") => {
                 if proxy.target_rematch_name.is_some()
                     || proxy.target_sub_rule.is_some()
+                    || proxy.username.is_some() != proxy.password.is_some()
                     || !proxy.extra.is_empty()
                 {
                     return Err(ConfigError::UnsupportedProxy(name));
@@ -3068,6 +3099,57 @@ fn parse_proxies(
         }
     }
     Ok((rematches, outbounds))
+}
+
+fn parse_proxy_groups(
+    groups: Vec<RawProxyGroup>,
+    proxies: &[ProxyConfig],
+) -> Result<Vec<ProxyGroupConfig>, ConfigError> {
+    let proxy_names: BTreeSet<_> = proxies.iter().map(|proxy| proxy.name.as_str()).collect();
+    let mut names = BTreeSet::new();
+    let mut parsed = Vec::new();
+    for group in groups {
+        let name = group
+            .name
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
+        if group.kind.as_deref() != Some("select")
+            || !group.extra.is_empty()
+            || !names.insert(name.clone())
+            || proxy_names.contains(name.as_str())
+            || matches!(
+                name.as_str(),
+                "DIRECT"
+                    | "REJECT"
+                    | "REJECT-DROP"
+                    | "COMPATIBLE"
+                    | "PASS"
+                    | "PASS-RULE"
+                    | "GLOBAL"
+            )
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        let members = group.proxies.unwrap_or_default();
+        if members.is_empty()
+            || members.iter().any(|member| {
+                !proxy_names.contains(member.as_str())
+                    && !matches!(member.as_str(), "DIRECT" | "REJECT")
+            })
+            || group
+                .default_selected
+                .as_ref()
+                .is_some_and(|default| !members.contains(default))
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        parsed.push(ProxyGroupConfig {
+            name,
+            proxies: members,
+            default_selected: group.default_selected,
+        });
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
