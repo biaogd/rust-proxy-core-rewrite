@@ -23,6 +23,8 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tower::{Layer, Service};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 const MAX_DNS_MESSAGE: usize = 65_535;
 
@@ -54,16 +56,177 @@ pub async fn serve(
         runtime: Arc::clone(&runtime),
         shutdown: shutdown.clone(),
     };
-    let app = controller_router(state.clone()).layer(middleware::from_fn_with_state(
-        state,
-        authenticate_or_serve_doh,
-    ));
+    let app = controller_router(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            authenticate_or_serve_doh,
+        ))
+        .layer(middleware::from_fn_with_state(state, apply_dynamic_cors));
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await
     {
         runtime.log("error", format!("controller server failed: {error}"));
     }
+}
+
+async fn apply_dynamic_cors(
+    State(state): State<ControllerState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let preflight = is_preflight(&request);
+    if preflight && !valid_preflight_contract(&request) {
+        return denied_preflight_response();
+    }
+    if preflight {
+        normalize_preflight_request(&mut request);
+    }
+    let cors = cors_layer(&state.current_config().controller_cors);
+    let mut service = cors.layer(next);
+    let mut response = match service.call(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+    normalize_cors_vary(&mut response, preflight);
+    response
+}
+
+fn normalize_preflight_request(request: &mut Request) {
+    if let Some(method) = request
+        .headers()
+        .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_ascii_uppercase)
+        .and_then(|value| HeaderValue::from_str(&value).ok())
+    {
+        request
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_REQUEST_METHOD, method);
+    }
+    let headers = request
+        .headers()
+        .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|name| match name.trim().to_ascii_lowercase().as_str() {
+                    "authorization" => Some("Authorization"),
+                    "content-type" => Some("Content-Type"),
+                    "origin" => Some("Origin"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+    match headers {
+        Some(headers) if !headers.is_empty() => {
+            if let Ok(headers) = HeaderValue::from_str(&headers) {
+                request
+                    .headers_mut()
+                    .insert(header::ACCESS_CONTROL_REQUEST_HEADERS, headers);
+            }
+        }
+        _ => {
+            request
+                .headers_mut()
+                .remove(header::ACCESS_CONTROL_REQUEST_HEADERS);
+        }
+    }
+}
+
+fn is_preflight(request: &Request) -> bool {
+    request.method() == Method::OPTIONS
+        && request
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
+        && request.headers().contains_key(header::ORIGIN)
+}
+
+fn valid_preflight_contract(request: &Request) -> bool {
+    let method = request
+        .headers()
+        .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+        return false;
+    }
+    request
+        .headers()
+        .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|headers| {
+            headers
+                .split(',')
+                .filter(|name| !name.trim().is_empty())
+                .all(|name| {
+                    matches!(
+                        name.trim().to_ascii_lowercase().as_str(),
+                        "content-type" | "authorization" | "origin"
+                    )
+                })
+        })
+}
+
+fn denied_preflight_response() -> Response {
+    let mut response = empty_response(StatusCode::OK);
+    normalize_cors_vary(&mut response, true);
+    response
+}
+
+fn normalize_cors_vary(response: &mut Response, preflight: bool) {
+    response.headers_mut().remove(header::VARY);
+    let values = if preflight {
+        &[
+            "Origin",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers",
+        ][..]
+    } else {
+        &["Origin"][..]
+    };
+    for value in values {
+        response
+            .headers_mut()
+            .append(header::VARY, HeaderValue::from_static(value));
+    }
+}
+
+fn cors_layer(config: &rewrite_config::ControllerCors) -> CorsLayer {
+    let origins = config
+        .allow_origins
+        .iter()
+        .map(|origin| origin.to_lowercase())
+        .collect::<Vec<_>>();
+    let allow_origin = if origins.is_empty() || origins.iter().any(|origin| origin == "*") {
+        AllowOrigin::any()
+    } else {
+        AllowOrigin::predicate(move |origin, _| {
+            let Ok(origin) = origin.to_str() else {
+                return false;
+            };
+            let origin = origin.to_lowercase();
+            origins
+                .iter()
+                .any(|allowed| wildcard_origin_matches(allowed, &origin))
+        })
+    };
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_private_network(config.allow_private_network)
+        .max_age(Duration::from_mins(5))
+}
+
+fn wildcard_origin_matches(allowed: &str, origin: &str) -> bool {
+    allowed.split_once('*').map_or_else(
+        || allowed == origin,
+        |(prefix, suffix)| origin.starts_with(prefix) && origin.ends_with(suffix),
+    )
 }
 
 fn controller_router(state: ControllerState) -> Router {
@@ -720,5 +883,25 @@ mod tests {
         assert!(is_doh_path("/dns-query/child", "/dns-query"));
         assert!(!is_doh_path("/dns-query-other", "/dns-query"));
         assert!(!is_doh_path("/dns-query", "dns-query"));
+    }
+
+    #[test]
+    fn mirrors_go_single_wildcard_origin_matching() {
+        assert!(wildcard_origin_matches(
+            "https://*.example.test",
+            "https://app.example.test"
+        ));
+        assert!(!wildcard_origin_matches(
+            "https://*.example.test",
+            "http://app.example.test"
+        ));
+        assert!(wildcard_origin_matches(
+            "https://exact.example.test",
+            "https://exact.example.test"
+        ));
+        assert!(!wildcard_origin_matches(
+            "https://exact.example.test",
+            "https://other.example.test"
+        ));
     }
 }

@@ -226,7 +226,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | API-01 | TCP/TLS/Unix/Windows-pipe controller listeners, routing mark and replacement | Partial TCP only | 5D1 plus platform gates |
-| API-02 | Bearer/query/WebSocket authentication and CORS | Partial: Bearer plus WebSocket query token | 5D2 |
+| API-02 | Bearer/query/WebSocket authentication and CORS | Complete on current TCP controller surface | 5D2 |
 | API-03 | `/`, `/version`, `/memory`, `/traffic`, `/logs` HTTP/WebSocket contracts | Partial: ordinary JSON and observability streams | 5D3–5D4 |
 | API-04 | `/configs` GET/PUT/PATCH and `/configs/geo` | Partial GET subset | 5D5 |
 | API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Not started | 5D7 |

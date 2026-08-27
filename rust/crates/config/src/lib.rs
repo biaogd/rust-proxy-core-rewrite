@@ -59,6 +59,7 @@ pub struct ConfigSpec {
     pub external_controller: String,
     pub external_doh_server: String,
     pub secret: String,
+    pub controller_cors: ControllerCors,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
@@ -82,10 +83,17 @@ pub struct Config {
     pub external_controller: String,
     pub external_doh_server: String,
     pub secret: String,
+    pub controller_cors: ControllerCors,
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub rules: RuleSet,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerCors {
+    pub allow_origins: Vec<String>,
+    pub allow_private_network: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -471,6 +479,7 @@ struct RawConfig {
     external_controller: Option<String>,
     external_doh_server: Option<String>,
     secret: Option<String>,
+    external_controller_cors: Option<RawControllerCors>,
     profile: Option<RawProfile>,
     tls: Option<RawTls>,
     dns: Option<RawDns>,
@@ -481,6 +490,13 @@ struct RawConfig {
     rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawControllerCors {
+    allow_origins: Option<Vec<String>>,
+    allow_private_network: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -654,6 +670,7 @@ impl ConfigSpec {
         let trust_certificates = parse_tls(raw.tls)?;
         let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
+        let controller_cors = parse_controller_cors(raw.external_controller_cors);
         let dns = parse_dns(
             raw.dns,
             &trust_certificates,
@@ -687,6 +704,7 @@ impl ConfigSpec {
             external_controller: raw.external_controller.unwrap_or_default(),
             external_doh_server: raw.external_doh_server.unwrap_or_default(),
             secret: raw.secret.unwrap_or_default(),
+            controller_cors,
             store_fake_ip,
             dns,
             hosts: parse_hosts(raw.hosts.unwrap_or_default())?,
@@ -802,6 +820,7 @@ impl TryFrom<ConfigSpec> for Config {
             external_controller: spec.external_controller,
             external_doh_server: spec.external_doh_server,
             secret: spec.secret,
+            controller_cors: spec.controller_cors,
             store_fake_ip: spec.store_fake_ip,
             dns: spec.dns,
             hosts: spec.hosts,
@@ -964,6 +983,14 @@ fn parse_authentication(records: Vec<String>) -> Vec<AuthUser> {
             })
         })
         .collect()
+}
+
+fn parse_controller_cors(raw: Option<RawControllerCors>) -> ControllerCors {
+    let raw = raw.unwrap_or_default();
+    ControllerCors {
+        allow_origins: raw.allow_origins.unwrap_or_else(|| vec!["*".to_owned()]),
+        allow_private_network: raw.allow_private_network.unwrap_or(true),
+    }
 }
 
 fn parse_profile(raw: Option<RawProfile>) -> Result<bool, ConfigError> {
@@ -3997,5 +4024,29 @@ dns:
                 override_existing: true,
             })
         );
+    }
+
+    #[test]
+    fn applies_controller_cors_defaults_and_partial_overrides() {
+        let defaults = Config::from_yaml(MINIMAL).expect("default controller CORS");
+        assert_eq!(defaults.controller_cors.allow_origins, ["*"]);
+        assert!(defaults.controller_cors.allow_private_network);
+
+        let configured = Config::from_yaml(&format!(
+            "{MINIMAL}\nexternal-controller-cors:\n  allow-origins:\n    - https://*.example.test\n"
+        ))
+        .expect("configured controller CORS");
+        assert_eq!(
+            configured.controller_cors.allow_origins,
+            ["https://*.example.test"]
+        );
+        assert!(configured.controller_cors.allow_private_network);
+
+        let disabled = Config::from_yaml(&format!(
+            "{MINIMAL}\nexternal-controller-cors:\n  allow-origins: []\n  allow-private-network: false\n"
+        ))
+        .expect("empty origins retain Go allow-all behavior");
+        assert!(disabled.controller_cors.allow_origins.is_empty());
+        assert!(!disabled.controller_cors.allow_private_network);
     }
 }

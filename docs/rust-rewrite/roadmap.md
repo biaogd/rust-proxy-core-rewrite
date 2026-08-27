@@ -1025,7 +1025,7 @@ normalization, plus pure IPv6 suffix hit/miss/source and invalid-width cases.
 Native IPv6 live routing, sniffer/static-tunnel contexts and exhaustive resolver
 instrumentation remain later contextual gates.
 
-### Phase 5D aggregate controller observability and connections accepted scope
+### Phase 5D aggregate controller core accepted scope
 
 This aggregate gate advances `API-02`, `API-03`, `API-07` and `RUN-06` through
 one shared read-only controller boundary. Axum owns the WebSocket handshake and
@@ -1044,7 +1044,15 @@ only that live tunnel, deleting a missing ID remains idempotent, and deleting
 the collection closes every tracked tunnel and clears the snapshot. These
 side effects are compared in `compat/scripts/phase5d_connections.py`.
 
-CORS and controller configuration parsing, real process-memory accounting,
+The same controller core gate completes `API-02` on the current TCP surface.
+`external-controller-cors` preserves the oracle's allow-all defaults and empty
+list, case-insensitive exact and single-`*` origins, allowed method/header
+validation, 300-second preflight age, Private Network toggle, `Vary` contract,
+preflight-before-auth ordering and same-address hot reload. `tower-http` owns
+the standard CORS service; a narrow compatibility wrapper validates the fixed
+Go method/header set and normalizes its request-dependent `Vary` values.
+
+TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior and mutation
 APIs outside the completed connections row remain later 5D gates.
 

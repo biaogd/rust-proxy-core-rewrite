@@ -75,7 +75,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 3 local authentication records | Oracle | **Parity** | HTTP Basic, SOCKS4 USERID and SOCKS5 username/password accept/reject cases |
 | LAN allow/deny and skip-auth prefixes | Oracle | Not started | Parser plus remote-address connection decisions |
 | Phase 3 controller TCP address and secret | Oracle | **Parity** | Live loopback TCP controller and Bearer authorization observations |
-| Controller TLS/Unix/pipe and CORS | Oracle | Not started | Per-platform live controller fixtures |
+| Controller TLS/Unix/pipe | Oracle | Not started | Per-platform live controller fixtures |
+| `external-controller-cors` defaults/config/reload | Oracle | **Parity** | Allow-all defaults/empty list, exact/single-wildcard origins, Private Network, denied method/header, auth ordering and hot reload in `compat/scripts/phase5d_cors.py` |
 | UI paths/download settings and safe-path checks | Oracle | Not started | Path traversal and normalization cases |
 | Proxies and built-in proxy insertion | Oracle | Not started | Normalized inventory/error corpus |
 | Proxy groups and cycle/order validation | Oracle | Not started | DAG, duplicate and reserved-name cases |
@@ -244,7 +245,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Surface | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
 | TCP/TLS/Unix/Windows pipe listeners | Oracle | Partial | Phase 3 loopback TCP only; TLS/Unix/pipe are not started |
-| Secret auth, WebSocket token and CORS | Oracle | Partial | Bearer and nonempty WebSocket query-token authorization, including rejection, pass in `compat/scripts/phase5d_streams.py`; CORS remains unclaimed |
+| Secret auth, WebSocket token and CORS | Oracle | **Parity** | Current TCP controller Bearer/query-token acceptance/rejection plus default/configured/reloaded CORS actual/preflight contracts pass in `phase5d_streams.py` and `phase5d_cors.py` |
 | `/`, `/version`, `/memory`, `/traffic` | Oracle | Partial | Phase 3 root/version/traffic HTTP evidence plus Phase 5D memory HTTP/WS first frames and traffic WS first frame; sustained cadence and real process-memory accounting remain unclaimed |
 | `/logs` WebSocket/stream | Oracle | Partial | Plain HTTP info/invalid-level and WebSocket info-event contracts pass; structured format, exhaustive filtering, lag/backpressure and sustained cadence remain unclaimed |
 | `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | Phase 3 declared GET field subset only; all mutation/geo surfaces are not started |
@@ -331,7 +332,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
-| Darwin arm64 — Phase 5D controller observability/connections | Oracle | **Parity** | Native HTTP/WS streams, Bearer/query-token auth and single/all live connection deletion differentials passed, 2026-08-27 |
+| Darwin arm64 — Phase 5D controller core | Oracle | **Parity** | Native HTTP/WS streams, Bearer/query-token/CORS and single/all live connection deletion differentials passed, 2026-08-27 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -377,7 +378,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5B aggregate local rules | Oracle | Pending | Default aggregate rule differentials are configured; no result is claimed before completion |
-| Linux amd64 — Phase 5D controller observability/connections | Oracle | Pending | Default HTTP/WebSocket stream and live connection deletion differentials are configured; no result is claimed before completion |
+| Linux amd64 — Phase 5D controller core | Oracle | Pending | Default HTTP/WebSocket, CORS and live connection deletion differentials are configured; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |

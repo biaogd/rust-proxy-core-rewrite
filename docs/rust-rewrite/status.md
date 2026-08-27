@@ -98,10 +98,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
-| Phase 5D aggregate controller observability/connections | Complete in declared current-local API-07 scope; API-02/03 retain listed gaps | Bearer/query-token WS, four observability streams and single/missing/all connection deletion pass |
+| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03 retains listed stream/accounting gaps | Bearer/query-token/CORS, four observability streams and single/missing/all connection deletion pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection gates run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS gates run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3360,7 +3360,7 @@ Both aggregate and fixed differentials pass locally. Native IPv6 network
 routing, exhaustive IDNA/sniffer contexts and remaining resolver-call variants
 retain their explicit matrix gaps.
 
-## Phase 5D aggregate controller observability/connections deliverables and evidence
+## Phase 5D aggregate controller core deliverables and evidence
 
 The controller now uses Axum's WebSocket implementation for the four existing
 read-only observability surfaces. `/traffic` and `/memory` emit one JSON text
@@ -3392,19 +3392,35 @@ other remains usable after single deletion, then proves collection deletion
 closes the survivor and returns a null connection list. All three mutations
 match the oracle's empty 204 response.
 
+Controller authentication and CORS are now complete on the current TCP
+surface. Rust parses the Go defaults (`allow-origins: ["*"]` and Private
+Network enabled), nested partial overrides and the oracle's empty-list
+allow-all behavior. `tower-http` 0.7.0 supplies CORS framing and preflight
+handling; a small compatibility wrapper retains the fixed Go method/header
+allowlist, single-wildcard origin matching and exact ordinary/preflight `Vary`
+headers. Because the layer reads the shared watched configuration per request,
+same-address SIGHUP reload changes the policy without a listener gap.
+
+`compat/scripts/phase5d_cors.py` compares default allowed and unauthorized
+actual requests, allowed Private Network preflight, denied method/header,
+configured exact/wildcard/denied origins, disabled Private Network and two hot
+reloads including an explicit empty origin list. Preflight succeeds without a
+Bearer token, matching the oracle's CORS-before-auth middleware order.
+
 Local focused evidence:
 
 ```sh
 PHASE5DSTREAMS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_streams.py
 PHASE5DCONNECTIONS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_connections.py
-cargo test --manifest-path rust/Cargo.toml -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+PHASE5DCORS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_cors.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 cargo fmt --manifest-path rust/Cargo.toml --all --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 ```
 
-CORS/config parsing, TLS/Unix/pipe listeners, real process memory, structured
-logs, exhaustive filters/cadence/backpressure and mutations outside the now
-complete current-local connections resource remain explicit Phase 5D gaps.
+TLS/Unix/pipe listeners, real process memory, structured logs, exhaustive
+filters/cadence/backpressure and mutations outside the now-complete
+current-local connections resource remain explicit Phase 5D gaps.
 
 ## Controller HTTP infrastructure refactor
 
@@ -3586,9 +3602,9 @@ unskipped interop and stress suites remain required at protocol/release gates.
 
 ## Phase boundary
 
-Rust controller behavior stops at the Phase 5D read-only observability stream
-boundary, while other workstreams stop at their latest independently accepted
-rows above.
+Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
+connections boundary, while other workstreams stop at their latest
+independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.
