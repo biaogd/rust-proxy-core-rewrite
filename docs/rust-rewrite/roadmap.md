@@ -1255,8 +1255,9 @@ The plaintext HTTP vehicle now carries ordered repeated request-header values,
 honors the configured byte limit and participates in the global
 `etag-support` switch. A successful response stores its ETag in the active
 runtime generation; later manual or scheduled refresh sends `If-None-Match`,
-accepts 304 without parsing or rewriting the cache, and replaces that ETag only
-after a changed payload validates and publishes. Disabled ETag support keeps
+accepts 304 without parsing or changing cache bytes, refreshes cache freshness,
+and replaces that ETag only after a changed payload validates and publishes.
+Disabled ETag support keeps
 all refreshes unconditional. An over-limit response returns the existing 503
 class while provider members, selected routing and cache bytes remain intact.
 `compat/scripts/phase5c_http_provider_contract.py` compares all of these request
@@ -1282,6 +1283,23 @@ request count, restart views, selection and TCP routing against Go.
 HTTPS, durable ETag metadata, stale-on-start forced refresh, cache permission/
 corruption matrices, provider-aware download routing, concurrent refresh and
 override expressions remain later gates.
+
+### Phase 5C2g accepted scope
+
+HTTP provider configuration now records the modification time only after a
+cache file parses successfully. The runtime scheduler derives its first delay
+from that age: a fresh cache waits for the remaining configured interval,
+while a cache older than the interval requests an immediate transactional
+refresh. A successful response validates before atomically replacing cache and
+members; a non-success response leaves the valid old cache, provider view,
+selection and TCP data plane active. An unreadable-as-YAML cache takes the
+existing initial remote hydration path and is replaced only by valid remote
+bytes. `compat/scripts/phase5c_http_provider_stale.py` compares stale success,
+stale HTTP failure and corrupt-cache recovery against the Go oracle.
+
+Cache permission/platform errors, durable ETag database interchange, retry
+backoff timing, concurrent/coalesced refresh, HTTPS, provider-aware download
+routing and override expressions remain later gates.
 
 ### Phase 5C1c accepted scope
 

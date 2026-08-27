@@ -108,6 +108,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C2d HTTP provider refresh lifecycle | Complete in declared serial plaintext/manual/interval scope; CFG-05/PROV-01/PROV-03 remain partial | Remote PUT and one-second scheduler atomically replace cache/config/group members; malformed YAML and HTTP status failure return 503 and preserve the prior data plane |
 | Phase 5C2e HTTP provider request contract | Complete in declared plaintext/process-local ETag scope; CFG-05/PROV-01 remain partial | Repeated custom headers, global ETag enable/disable, If-None-Match/304 cache reuse, changed-ETag publication and configured size-limit rollback pass |
 | Phase 5C2f HTTP provider default cache/restart | Complete in declared CLI-home/plaintext scope; CFG-05/PROV-01 remain partial | URL-MD5 default path, first atomic write, network-free cache startup, post-restart PUT replacement/routing and malformed-payload rollback pass |
+| Phase 5C2g HTTP provider cache age/recovery | Complete in declared plaintext/serial lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Stale-start immediate refresh, corrupt-cache remote repair and failed-refresh old-cache/provider/selection/TCP retention pass |
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
 | Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
 | Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
@@ -124,7 +125,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 116 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
+| Differential harness | Implemented | All 117 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3880,10 +3881,10 @@ client. Provider declarations retain ordered repeated headers and an optional
 byte limit, while executable configuration now carries the existing global
 `etag-support` switch. Successful 200 responses retain their ETag in the active
 generation; later refreshes send `If-None-Match`, treat 304 as a successful
-no-op and keep cache modification out of that path. A changed ETag validates
-and publishes new members, while an over-limit body returns 503 before cache or
-configuration mutation. The disabled-switch scenario proves repeated custom
-headers remain present while conditional requests remain absent.
+same-byte freshness update, and leave members unchanged. A changed ETag
+validates and publishes new members, while an over-limit body returns 503 before
+cache or configuration mutation. The disabled-switch scenario proves repeated
+custom headers remain present while conditional requests remain absent.
 
 ```sh
 PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_http_provider_contract.py
@@ -3913,6 +3914,24 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-cli -p r
 HTTPS, durable ETag metadata, stale-cache startup refresh, permission and
 corruption matrices, provider-aware routing, concurrent refresh and overrides
 remain unclaimed.
+
+Phase 5C2g gives the HTTP provider scheduler cache-age input without teaching
+the configuration layer to read process environment. Only successfully parsed
+cache files contribute a modification timestamp. Fresh caches retain their
+remaining interval; caches older than the configured interval enter the
+existing controller-owned refresh transaction immediately. The differential
+proves that successful stale refresh replaces members/cache and routes through
+the new authenticated proxy, HTTP failure preserves the old provider and data
+plane, and malformed cache YAML is repaired from valid remote bytes.
+
+```sh
+PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_http_provider_stale.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-runtime --all-features
+```
+
+Permission/platform error classes, durable ETag metadata, retry-backoff timing,
+concurrent refresh, HTTPS, provider-aware routing and overrides remain
+unclaimed.
 
 Phase 5C1c composes flat selectors from explicit proxies, named file providers,
 all top-level proxies, all providers or both. Provider filters use the oracle's

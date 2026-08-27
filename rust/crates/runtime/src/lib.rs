@@ -3,7 +3,7 @@ use std::future::pending;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Limited};
@@ -295,14 +295,19 @@ async fn run_http_provider_scheduler(
             .filter(|provider| {
                 provider.vehicle == ProxyProviderVehicle::Http && provider.interval > 0
             })
-            .map(|provider| (provider.name.clone(), provider.interval))
+            .map(|provider| {
+                (
+                    provider.name.clone(),
+                    (provider.interval, provider.cache_modified),
+                )
+            })
             .collect();
         deadlines.retain(|name, _| scheduled.contains_key(name));
         let now = tokio::time::Instant::now();
-        for (name, interval) in &scheduled {
+        for (name, (interval, cache_modified)) in &scheduled {
             deadlines
                 .entry(name.clone())
-                .or_insert(now + Duration::from_secs(*interval));
+                .or_insert_with(|| now + http_provider_initial_delay(*interval, *cache_modified));
         }
         let wake_at = deadlines
             .values()
@@ -324,7 +329,7 @@ async fn run_http_provider_scheduler(
                     .map(|(name, _)| name.clone())
                     .collect();
                 for name in due {
-                    let interval = scheduled.get(&name).copied().unwrap_or(1);
+                    let interval = scheduled.get(&name).map_or(1, |(interval, _)| *interval);
                     deadlines.insert(name.clone(), now + Duration::from_secs(interval));
                     let (completion, result) = oneshot::channel();
                     let update = rewrite_controller::ConfigUpdate {
@@ -342,6 +347,14 @@ async fn run_http_provider_scheduler(
             }
         }
     }
+}
+
+fn http_provider_initial_delay(interval: u64, cache_modified: Option<SystemTime>) -> Duration {
+    let interval = Duration::from_secs(interval);
+    let age = cache_modified
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .unwrap_or_default();
+    interval.saturating_sub(age)
 }
 
 async fn run_group_health_scheduler(
@@ -465,6 +478,15 @@ async fn refresh_http_proxy_provider(config: &mut Config, name: &str) -> Result<
     .await
     .map_err(|_| "provider HTTP request timed out".to_owned())??;
     let HttpProviderFetch::Modified { payload, etag } = fetched else {
+        if let Ok(payload) = std::fs::read(&path) {
+            let _ = persist_http_proxy_provider(&path, &payload);
+        }
+        let provider = config
+            .proxy_providers
+            .iter_mut()
+            .find(|provider| provider.name == name)
+            .expect("looked up proxy provider remains present");
+        provider.cache_modified = Some(SystemTime::now());
         return Ok(());
     };
     let source = std::str::from_utf8(&payload)
@@ -479,6 +501,10 @@ async fn refresh_http_proxy_provider(config: &mut Config, name: &str) -> Result<
         .expect("replaced proxy provider remains present");
     refreshed.etag = etag;
     persist_http_proxy_provider(&path, &payload).map_err(|error| error.to_string())?;
+    refreshed.cache_modified = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .or_else(|| Some(SystemTime::now()));
     *config = next;
     Ok(())
 }

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ipnet::IpNet;
 use md5::{Digest, Md5};
@@ -175,6 +176,7 @@ pub struct ProxyProviderConfig {
     pub headers: BTreeMap<String, Vec<String>>,
     pub size_limit: usize,
     pub etag: Option<String>,
+    pub cache_modified: Option<SystemTime>,
     pub proxies: Vec<ProxyConfig>,
 }
 
@@ -3839,7 +3841,7 @@ fn parse_proxy_providers(
         }
         let directory =
             config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-        let (vehicle, url, path, proxies) = match provider.kind.as_deref() {
+        let (vehicle, url, path, cache_modified, proxies) = match provider.kind.as_deref() {
             Some("file") if provider.url.is_none() => {
                 let configured_path = provider
                     .path
@@ -3850,6 +3852,7 @@ fn parse_proxy_providers(
                     ProxyProviderVehicle::File,
                     None,
                     path.clone(),
+                    None,
                     load_proxy_provider_file(&name, &path)?,
                 )
             }
@@ -3871,8 +3874,21 @@ fn parse_proxy_providers(
                     },
                     |path| directory.join(path),
                 );
-                let cached = load_proxy_provider_file(&name, &path).unwrap_or_default();
-                (ProxyProviderVehicle::Http, Some(url), path, cached)
+                let (cache_modified, cached) = load_proxy_provider_file(&name, &path)
+                    .map(|proxies| {
+                        let modified = std::fs::metadata(&path)
+                            .and_then(|metadata| metadata.modified())
+                            .ok();
+                        (modified, proxies)
+                    })
+                    .unwrap_or_default();
+                (
+                    ProxyProviderVehicle::Http,
+                    Some(url),
+                    path,
+                    cache_modified,
+                    cached,
+                )
             }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         };
@@ -3891,6 +3907,7 @@ fn parse_proxy_providers(
             headers: provider.header.unwrap_or_default(),
             size_limit: provider.size_limit.unwrap_or(0),
             etag: None,
+            cache_modified,
             proxies,
         });
     }
@@ -5087,6 +5104,7 @@ dns:
             headers: BTreeMap::new(),
             size_limit: 0,
             etag: None,
+            cache_modified: None,
             proxies: ["provider-alpha", "provider-beta", "provider-omit"]
                 .into_iter()
                 .map(|name| ProxyConfig {
@@ -5142,6 +5160,7 @@ dns:
             headers: BTreeMap::new(),
             size_limit: 0,
             etag: None,
+            cache_modified: None,
             proxies: vec![ProxyConfig {
                 name: "provider-alpha".to_owned(),
                 kind: ProxyKind::Http,

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import tempfile
+import time
 import threading
 from pathlib import Path
 from typing import Any
@@ -147,6 +149,8 @@ def enabled_contract(binary: Path, scratch: Path) -> dict[str, Any]:
         wait_names(process, controller_port, ["provider-one"])
         initial_request = provider.observations[-1]
 
+        stale = int(time.time()) - 700
+        os.utime(cache, (stale, stale))
         not_modified = update(controller_port)
         unchanged_request = provider.observations[-1]
         unchanged = (
@@ -170,6 +174,7 @@ def enabled_contract(binary: Path, scratch: Path) -> dict[str, Any]:
             "not-modified": not_modified,
             "conditional-v1": unchanged_request["conditional"] == '"v1"',
             "unchanged": unchanged,
+            "not-modified-freshness": int(cache.stat().st_mtime) > stale,
             "modified": modified,
             "modified-sent-v1": modified_request["conditional"] == '"v1"',
             "cache-updated": cache.read_bytes() == second_payload,
