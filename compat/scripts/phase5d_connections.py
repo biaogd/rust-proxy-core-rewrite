@@ -108,6 +108,13 @@ rules:
         wait_controller(process, controller_port)
         first = open_tunnel(mixed_port, echo.port)
         second = open_tunnel(mixed_port, echo.port)
+        # CONNECT success can precede publication in the Go tracker. A byte
+        # round-trip proves both tunnels reached the observable relay state
+        # before the exact controller-count assertion.
+        first.sendall(b"1")
+        second.sendall(b"2")
+        if recv_exact(first, 1) != b"1" or recv_exact(second, 1) != b"2":
+            raise AssertionError("connection tracker readiness echo mismatch")
         first_port = str(first.getsockname()[1])
         second_port = str(second.getsockname()[1])
         active = wait_connection_count(controller_port, 2)

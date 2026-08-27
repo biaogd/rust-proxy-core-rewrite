@@ -143,13 +143,17 @@ def wait_for_real(
 ) -> str:
     deadline = time.monotonic() + IO_DEADLINE
     identifier = 0x7200
-    reload_sent = False
+    next_reload = 0.0
     while time.monotonic() < deadline:
-        if reload_process is not None and not reload_sent:
+        now = time.monotonic()
+        if reload_process is not None and now >= next_reload:
             if reload_process.poll() is not None:
                 raise AssertionError("candidate exited before fake-IP reload became observable")
             os.kill(reload_process.pid, signal.SIGHUP)
-            reload_sent = True
+            # SIGHUP is edge-triggered. Repeating the same idempotent reload at
+            # a bounded cadence avoids losing the only edge between listener
+            # readiness and the async reload receiver becoming runnable.
+            next_reload = now + 0.25
         try:
             data = query_data(port, name, identifier)
             if data == REAL_ADDRESS:
