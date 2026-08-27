@@ -1052,9 +1052,21 @@ preflight-before-auth ordering and same-address hot reload. `tower-http` owns
 the standard CORS service; a narrow compatibility wrapper validates the fixed
 Go method/header set and normalizes its request-dependent `Vary` values.
 
+The executable configuration transaction gate extends the same controller
+family through the current `API-04` subset. `GET /configs` remains the live
+generation snapshot. `PATCH /configs` applies the currently executable HTTP,
+SOCKS and mixed ports plus log level and IPv6 settings. `PUT /configs` parses
+inline YAML, preserves the serving controller's address/secret/CORS boundary,
+and publishes a generation only after all replacement listeners have bound.
+Acceptance moves a live mixed listener, changes a MATCH route from DIRECT to
+REJECT and back, verifies payload-over-path precedence, and proves malformed
+YAML leaves both routing and the reported generation unchanged in
+`compat/scripts/phase5d_configs.py`.
+
 TLS/Unix/pipe controller transports, real process-memory accounting,
-structured logs, exhaustive level/cadence/backpressure behavior and mutation
-APIs outside the completed connections row remain later 5D gates.
+structured logs, exhaustive level/cadence/backpressure behavior, remaining
+PATCH fields, safe-root/default configuration path loading, `/configs/geo` and
+other controller mutation families remain later 5D gates.
 
 ## Phase 6 — established remote protocols
 

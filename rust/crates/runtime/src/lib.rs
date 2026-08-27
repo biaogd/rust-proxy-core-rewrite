@@ -111,6 +111,7 @@ async fn run_with_reload_inner(
     let state = Arc::new(RuntimeState::default());
     let dns_service = Arc::new(rewrite_dns::DnsService::new());
     let (config_sender, config_receiver) = watch::channel(Arc::new(initial.clone()));
+    let (controller_update_sender, mut controller_updates) = mpsc::channel(4);
     let mut listeners = BTreeMap::new();
     let mut controller: Option<(SocketAddr, RuntimeTask)> = None;
     let mut dns: Option<(SocketAddr, RuntimeTask)> = None;
@@ -121,6 +122,7 @@ async fn run_with_reload_inner(
         &config_receiver,
         &state,
         &dns_service,
+        &controller_update_sender,
         &mut listeners,
         &mut controller,
         &mut dns,
@@ -151,6 +153,7 @@ async fn run_with_reload_inner(
                     &config_receiver,
                     &state,
                     &dns_service,
+                    &controller_update_sender,
                     &mut listeners,
                     &mut controller,
                     &mut dns,
@@ -160,6 +163,28 @@ async fn run_with_reload_inner(
                 } else {
                     state.log("info", "configuration reloaded");
                 }
+            }
+            update = controller_updates.recv() => {
+                let Some(update) = update else {
+                    continue;
+                };
+                let result = apply_generation(
+                    update.config,
+                    &config_sender,
+                    &config_receiver,
+                    &state,
+                    &dns_service,
+                    &controller_update_sender,
+                    &mut listeners,
+                    &mut controller,
+                    &mut dns,
+                ).await.map_err(|error| error.to_string());
+                if let Err(error) = &result {
+                    state.log("error", format!("controller configuration update failed: {error}"));
+                } else {
+                    state.log("info", "controller configuration updated");
+                }
+                let _ = update.completion.send(result);
             }
         }
     }
@@ -188,6 +213,7 @@ async fn apply_generation(
     config_receiver: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
+    controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
     listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
     controller: &mut Option<(SocketAddr, RuntimeTask)>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
@@ -260,6 +286,7 @@ async fn apply_generation(
         config_receiver,
         state,
         dns_service,
+        controller_updates,
         controller,
     )
     .await;
@@ -294,6 +321,7 @@ async fn apply_controller_task(
     config: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
+    config_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
     current: &mut Option<(SocketAddr, RuntimeTask)>,
 ) {
     if let Some((address, listener)) = prepared {
@@ -305,12 +333,14 @@ async fn apply_controller_task(
         let task_config = config.clone();
         let task_state = Arc::clone(state);
         let task_dns_service = Arc::clone(dns_service);
+        let task_config_updates = config_updates.clone();
         let handle = tokio::spawn(async move {
             rewrite_controller::serve(
                 listener,
                 task_dns_service,
                 task_config,
                 task_state,
+                task_config_updates,
                 child_shutdown,
             )
             .await;

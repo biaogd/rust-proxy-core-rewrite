@@ -21,7 +21,7 @@ pub enum Mode {
     Direct,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Debug,
@@ -791,7 +791,6 @@ impl TryFrom<ConfigSpec> for Config {
             (spec.bind_address != "*", "bind-address"),
             (spec.mode != Mode::Rule, "mode"),
             (spec.unified_delay, "unified-delay"),
-            (spec.log_level != LogLevel::Info, "log-level"),
             (!spec.interface_name.is_empty(), "interface-name"),
             (spec.routing_mark != 0, "routing-mark"),
             (spec.tcp_concurrent, "tcp-concurrent"),
@@ -3024,6 +3023,21 @@ rules:
         assert_eq!(config.mixed_port, 7890);
         assert_eq!(config.mode, Mode::Rule);
         assert_eq!(config.listener_port().expect("valid port"), 7890);
+    }
+
+    #[test]
+    fn accepts_controller_mutable_log_levels_in_runtime_config() {
+        for (value, expected) in [
+            ("debug", LogLevel::Debug),
+            ("info", LogLevel::Info),
+            ("warning", LogLevel::Warning),
+            ("error", LogLevel::Error),
+            ("silent", LogLevel::Silent),
+        ] {
+            let source = MINIMAL.replace("log-level: info", &format!("log-level: {value}"));
+            let config = Config::from_yaml(&source).expect("controller log level is executable");
+            assert_eq!(config.log_level, expected);
+        }
     }
 
     #[test]

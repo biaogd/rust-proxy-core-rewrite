@@ -98,10 +98,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
-| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03 retains listed stream/accounting gaps | Bearer/query-token/CORS, four observability streams and single/missing/all connection deletion pass |
+| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03 and API-04 retain listed gaps | Bearer/query-token/CORS, four observability streams, connection deletion and executable `/configs` transactions pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS gates run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config gates run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3407,20 +3407,39 @@ configured exact/wildcard/denied origins, disabled Private Network and two hot
 reloads including an explicit empty origin list. Preflight succeeds without a
 Bearer token, matching the oracle's CORS-before-auth middleware order.
 
+The current executable `API-04` configuration subset now uses a bounded
+controller-to-runtime request channel with an explicit completion response.
+The runtime first parses the requested generation and binds every new local
+socket, publishes the watched configuration only after preparation succeeds,
+then retires obsolete listeners. Inline `PUT /configs` preserves the serving
+controller's address, secret, DoH mount and CORS configuration, matching the
+oracle's exclusion of the external controller during `ApplyConfig`. `PATCH`
+updates the currently executable HTTP, SOCKS and mixed ports, log level and
+IPv6 fields; unknown JSON fields remain ignored.
+
+`compat/scripts/phase5d_configs.py` compares the live GET subset, malformed and
+unknown PATCH inputs, mixed-listener migration with closure of the old port,
+inline YAML switching `MATCH` between DIRECT and REJECT, `force=true`, payload
+precedence over a relative path, and malformed-YAML rollback of both routing
+and the visible generation. Safe-root/default path loading, the other Go PATCH
+fields and `/configs/geo` are deliberately still unclaimed.
+
 Local focused evidence:
 
 ```sh
 PHASE5DSTREAMS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_streams.py
 PHASE5DCONNECTIONS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_connections.py
 PHASE5DCORS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_cors.py
+PHASE5DCONFIGS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_configs.py
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 cargo fmt --manifest-path rust/Cargo.toml --all --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 ```
 
 TLS/Unix/pipe listeners, real process memory, structured logs, exhaustive
-filters/cadence/backpressure and mutations outside the now-complete
-current-local connections resource remain explicit Phase 5D gaps.
+filters/cadence/backpressure, the remaining configuration mutations and
+mutations outside the now-complete current-local connections resource remain
+explicit Phase 5D gaps.
 
 ## Controller HTTP infrastructure refactor
 

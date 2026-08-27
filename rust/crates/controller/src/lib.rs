@@ -18,10 +18,10 @@ use futures_util::{StreamExt, stream};
 use rewrite_config::Config;
 use rewrite_dns::DnsService;
 use rewrite_state::RuntimeState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -34,6 +34,13 @@ struct ControllerState {
     config: watch::Receiver<Arc<Config>>,
     runtime: Arc<RuntimeState>,
     shutdown: CancellationToken,
+    config_updates: mpsc::Sender<ConfigUpdate>,
+}
+
+/// Transactional runtime configuration request initiated by the controller.
+pub struct ConfigUpdate {
+    pub config: Config,
+    pub completion: oneshot::Sender<Result<(), String>>,
 }
 
 impl ControllerState {
@@ -48,6 +55,7 @@ pub async fn serve(
     dns_service: Arc<DnsService>,
     config: watch::Receiver<Arc<Config>>,
     runtime: Arc<RuntimeState>,
+    config_updates: mpsc::Sender<ConfigUpdate>,
     shutdown: CancellationToken,
 ) {
     let state = ControllerState {
@@ -55,6 +63,7 @@ pub async fn serve(
         config,
         runtime: Arc::clone(&runtime),
         shutdown: shutdown.clone(),
+        config_updates,
     };
     let app = controller_router(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -233,8 +242,14 @@ fn controller_router(state: ControllerState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/version", get(version))
-        .route("/configs", get(configs))
-        .route("/configs/", get(configs))
+        .route(
+            "/configs",
+            get(configs).put(update_configs).patch(patch_configs),
+        )
+        .route(
+            "/configs/",
+            get(configs).put(update_configs).patch(patch_configs),
+        )
         .route(
             "/connections",
             get(connections).delete(close_all_connections),
@@ -374,6 +389,113 @@ async fn version() -> Response {
 
 async fn configs(State(state): State<ControllerState>) -> Response {
     json_response(StatusCode::OK, &config_snapshot(&state.current_config()))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct ConfigPatch {
+    port: Option<i64>,
+    socks_port: Option<i64>,
+    mixed_port: Option<i64>,
+    log_level: Option<rewrite_config::LogLevel>,
+    ipv6: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+struct ConfigReplacement {
+    path: String,
+    payload: String,
+}
+
+async fn patch_configs(State(state): State<ControllerState>, request: Request) -> Response {
+    let Ok(patch) = decode_json_body::<ConfigPatch>(request).await else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    let mut config = (*state.current_config()).clone();
+    if let Some(port) = patch.port {
+        config.port = port;
+    }
+    if let Some(port) = patch.socks_port {
+        config.socks_port = port;
+    }
+    if let Some(port) = patch.mixed_port {
+        config.mixed_port = port;
+    }
+    if let Some(log_level) = patch.log_level {
+        config.log_level = log_level;
+    }
+    if let Some(ipv6) = patch.ipv6 {
+        config.ipv6 = ipv6;
+    }
+    apply_config_update(&state, config).await
+}
+
+async fn update_configs(State(state): State<ControllerState>, request: Request) -> Response {
+    let Ok(replacement) = decode_json_body::<ConfigReplacement>(request).await else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    if replacement.payload.is_empty() {
+        let message = if replacement.path.is_empty() {
+            "path-based controller reload is not available for this input source".to_owned()
+        } else if !std::path::Path::new(&replacement.path).is_absolute() {
+            "path is not a absolute path".to_owned()
+        } else {
+            "path-based controller reload requires a declared safe root".to_owned()
+        };
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": message}));
+    }
+    let mut config = match Config::from_yaml(&replacement.payload) {
+        Ok(config) => config,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"message": error.to_string()}),
+            );
+        }
+    };
+    // Go ApplyConfig intentionally excludes the external controller. A PUT
+    // updates the data plane without moving or re-keying the request's server.
+    let current = state.current_config();
+    config
+        .external_controller
+        .clone_from(&current.external_controller);
+    config
+        .external_doh_server
+        .clone_from(&current.external_doh_server);
+    config.secret.clone_from(&current.secret);
+    config.controller_cors.clone_from(&current.controller_cors);
+    apply_config_update(&state, config).await
+}
+
+async fn decode_json_body<T: for<'de> Deserialize<'de>>(request: Request) -> Result<T, ()> {
+    const MAX_CONFIG_REQUEST: usize = 16 * 1024 * 1024;
+    let bytes = axum::body::to_bytes(request.into_body(), MAX_CONFIG_REQUEST)
+        .await
+        .map_err(|_| ())?;
+    serde_json::from_slice(&bytes).map_err(|_| ())
+}
+
+async fn apply_config_update(state: &ControllerState, config: Config) -> Response {
+    let (completion, result) = oneshot::channel();
+    if state
+        .config_updates
+        .send(ConfigUpdate { config, completion })
+        .await
+        .is_err()
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": "runtime configuration channel is closed"}),
+        );
+    }
+    match result.await {
+        Ok(Ok(())) => empty_response(StatusCode::NO_CONTENT),
+        Ok(Err(error)) => json_response(StatusCode::BAD_REQUEST, &json!({"message": error})),
+        Err(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": "runtime configuration result was dropped"}),
+        ),
+    }
 }
 
 async fn connections(
