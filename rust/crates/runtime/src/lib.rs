@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::future::pending;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
 use rewrite_config::{
-    Config, ConfigError, DnsMode, HostEntry, ListenerKind, Mode, ProxyGroupKind, ProxyKind,
+    Config, ConfigError, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy, Mode,
+    ProxyGroupKind, ProxyKind,
 };
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
@@ -715,7 +716,7 @@ async fn connect_tcp_outbound(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) -> Option<rewrite_outbound::BoxedOutboundStream> {
-    let outbound_target = resolve_selector_target(target, config, state)?;
+    let outbound_target = resolve_selector_target(target, metadata, config, state)?;
     if matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
         return None;
     }
@@ -791,7 +792,12 @@ async fn connect_tcp_outbound(
     }
 }
 
-fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) -> Option<String> {
+fn resolve_selector_target(
+    target: &str,
+    metadata: &Metadata,
+    config: &Config,
+    state: &RuntimeState,
+) -> Option<String> {
     let mut current = target.to_owned();
     let mut visited = std::collections::BTreeSet::new();
     while let Some(group) = config
@@ -815,12 +821,51 @@ fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) 
                 &group.test_url,
                 group.tolerance,
             )?,
-            ProxyGroupKind::LoadBalance => {
-                state.round_robin_proxy(&group.name, &group.proxies, &group.test_url)?
-            }
+            ProxyGroupKind::LoadBalance => match group
+                .load_balance_strategy
+                .unwrap_or(LoadBalanceStrategy::ConsistentHashing)
+            {
+                LoadBalanceStrategy::ConsistentHashing => state.consistent_hash_proxy(
+                    &group.proxies,
+                    &group.test_url,
+                    &load_balance_key(metadata, false),
+                )?,
+                LoadBalanceStrategy::RoundRobin => {
+                    state.round_robin_proxy(&group.name, &group.proxies, &group.test_url)?
+                }
+                LoadBalanceStrategy::StickySessions => state.sticky_session_proxy(
+                    &group.name,
+                    &group.proxies,
+                    &group.test_url,
+                    &load_balance_key(metadata, true),
+                )?,
+            },
         };
     }
     Some(current)
+}
+
+fn load_balance_key(metadata: &Metadata, include_source: bool) -> String {
+    let destination = if metadata.host.is_empty() {
+        metadata.destination_ip.map(|address| address.to_string())
+    } else if metadata.host.parse::<IpAddr>().is_ok() {
+        Some(metadata.host.clone())
+    } else {
+        psl::domain(metadata.host.as_bytes())
+            .map(|domain| String::from_utf8_lossy(domain.as_bytes()).into_owned())
+    }
+    .unwrap_or_default();
+    if include_source {
+        format!(
+            "{}{}",
+            metadata
+                .source_ip
+                .map_or_else(String::new, |address| address.to_string()),
+            destination
+        )
+    } else {
+        destination
+    }
 }
 
 async fn relay_tracked_tcp(

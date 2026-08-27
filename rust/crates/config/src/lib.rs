@@ -149,7 +149,9 @@ pub enum ProxyGroupKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadBalanceStrategy {
+    ConsistentHashing,
     RoundRobin,
+    StickySessions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3507,12 +3509,16 @@ fn parse_load_balance_strategy(
     name: &str,
 ) -> Result<Option<LoadBalanceStrategy>, ConfigError> {
     match (kind, strategy) {
+        (ProxyGroupKind::LoadBalance, None | Some("consistent-hashing")) => {
+            Ok(Some(LoadBalanceStrategy::ConsistentHashing))
+        }
         (ProxyGroupKind::LoadBalance, Some("round-robin")) => {
             Ok(Some(LoadBalanceStrategy::RoundRobin))
         }
-        (ProxyGroupKind::LoadBalance, _) | (_, Some(_)) => {
-            Err(ConfigError::UnsupportedProxy(name.to_owned()))
+        (ProxyGroupKind::LoadBalance, Some("sticky-sessions")) => {
+            Ok(Some(LoadBalanceStrategy::StickySessions))
         }
+        (_, Some(_)) => Err(ConfigError::UnsupportedProxy(name.to_owned())),
         (_, None) => Ok(None),
     }
 }
@@ -4229,7 +4235,7 @@ dns:
     }
 
     #[test]
-    fn parses_round_robin_load_balance_group() {
+    fn parses_load_balance_strategies() {
         let config = Config::from_yaml(&format!(
             "{MINIMAL}\nproxy-groups:\n  - name: balanced\n    type: load-balance\n    strategy: round-robin\n    proxies: [DIRECT, REJECT]\n    url: http://127.0.0.1:18080/health\n"
         ))
@@ -4241,10 +4247,23 @@ dns:
             Some(LoadBalanceStrategy::RoundRobin)
         );
 
-        let unsupported = Config::from_yaml(&format!(
+        let default = Config::from_yaml(&format!(
             "{MINIMAL}\nproxy-groups:\n  - name: balanced\n    type: load-balance\n    proxies: [DIRECT, REJECT]\n"
-        ));
-        assert!(matches!(unsupported, Err(ConfigError::UnsupportedProxy(_))));
+        ))
+        .expect("default consistent-hashing group");
+        assert_eq!(
+            default.proxy_groups[0].load_balance_strategy,
+            Some(LoadBalanceStrategy::ConsistentHashing)
+        );
+
+        let sticky = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: balanced\n    type: load-balance\n    strategy: sticky-sessions\n    proxies: [DIRECT, REJECT]\n"
+        ))
+        .expect("sticky-sessions group");
+        assert_eq!(
+            sticky.proxy_groups[0].load_balance_strategy,
+            Some(LoadBalanceStrategy::StickySessions)
+        );
     }
 
     #[test]

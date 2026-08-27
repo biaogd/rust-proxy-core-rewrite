@@ -1322,6 +1322,19 @@ and REST/error parity. Consistent-hashing, sticky-sessions, UDP and automatic
 scheduling remain separate gates because Go's hash seed is process-random and
 requires property-based rather than member-by-member differential evidence.
 
+### Phase 5C1l accepted scope
+
+`load-balance` accepts the oracle's default/explicit `consistent-hashing` and
+explicit `sticky-sessions` strategies. Destination keys use the registrable
+domain or destination IP; sticky keys additionally include source IP and are
+held in a 1000-entry, ten-minute LRU. The differential treats Go's process-
+random hash seed and sticky initial choice as nondeterministic: on each product
+it proves four same-key TCP connections remain on one member, an explicit
+health transition moves all later connections to the survivor, and REST/non-
+selector behavior stays equal. `psl` supplies public-suffix semantics and
+`lru` supplies bounded recency. UDP and automatic health scheduling remain
+separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bbolt_rs::{
     Bolt, BucketApi, BucketRwApi, CursorApi, DbApi, DbRwAPI, Error as BoltError, TxApi, TxRwRefApi,
 };
 use ipnet::IpNet;
+use lru::LruCache;
 use rewrite_model::{Host, InboundProtocol, Metadata, Network};
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -131,6 +136,8 @@ pub struct RuntimeState {
     selectors: Mutex<BTreeMap<String, String>>,
     automatic_groups: Mutex<BTreeMap<String, String>>,
     round_robin_groups: Mutex<BTreeMap<String, usize>>,
+    sticky_groups: Mutex<BTreeMap<String, LruCache<u64, StickySession>>>,
+    load_balance_hasher: RandomState,
     selectors_loaded: AtomicBool,
     store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
@@ -148,6 +155,27 @@ struct DnsMapping {
 struct ActiveConnection {
     info: ConnectionInfo,
     cancellation: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StickySession {
+    index: usize,
+    touched: Instant,
+}
+
+fn jump_hash(mut key: u64, buckets: usize) -> usize {
+    let mut previous = -1_i64;
+    let mut candidate = 0_i64;
+    let bucket_limit = i64::try_from(buckets).unwrap_or(i64::MAX);
+    while candidate < bucket_limit {
+        previous = candidate;
+        key = key.wrapping_mul(2_862_933_555_777_941_757).wrapping_add(1);
+        let numerator = u64::try_from(previous + 1)
+            .unwrap_or_default()
+            .saturating_mul(1_u64 << 31);
+        candidate = i64::try_from(numerator / ((key >> 33) + 1)).unwrap_or(i64::MAX);
+    }
+    usize::try_from(previous).unwrap_or_default()
 }
 
 #[derive(Debug, Default)]
@@ -170,6 +198,8 @@ impl Default for RuntimeState {
             selectors: Mutex::new(BTreeMap::new()),
             automatic_groups: Mutex::new(BTreeMap::new()),
             round_robin_groups: Mutex::new(BTreeMap::new()),
+            sticky_groups: Mutex::new(BTreeMap::new()),
+            load_balance_hasher: RandomState::new(),
             selectors_loaded: AtomicBool::new(false),
             store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
@@ -497,6 +527,76 @@ impl RuntimeState {
             }
         }
         Some(members[0].clone())
+    }
+
+    #[must_use]
+    pub fn consistent_hash_proxy(
+        &self,
+        members: &[String],
+        url: &str,
+        key: &str,
+    ) -> Option<String> {
+        let hash = self.load_balance_hasher.hash_one(key);
+        self.hashed_healthy_proxy(members, url, hash)
+    }
+
+    #[must_use]
+    pub fn sticky_session_proxy(
+        &self,
+        name: &str,
+        members: &[String],
+        url: &str,
+        key: &str,
+    ) -> Option<String> {
+        if members.is_empty() {
+            return None;
+        }
+        let hash = self.load_balance_hasher.hash_one(key);
+        let now = Instant::now();
+        let mut groups = self
+            .sticky_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sessions = groups
+            .entry(name.to_owned())
+            .or_insert_with(|| LruCache::new(NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN)));
+        if let Some(session) = sessions.get(&hash).copied()
+            && now.duration_since(session.touched) < Duration::from_mins(10)
+            && session.index < members.len()
+            && self.proxy_alive_for_url(&members[session.index], url)
+        {
+            return Some(members[session.index].clone());
+        }
+        let selected = self.hashed_healthy_index(members, url, hash).unwrap_or(0);
+        sessions.put(
+            hash,
+            StickySession {
+                index: selected,
+                touched: now,
+            },
+        );
+        Some(members[selected].clone())
+    }
+
+    fn hashed_healthy_proxy(&self, members: &[String], url: &str, hash: u64) -> Option<String> {
+        let selected = self.hashed_healthy_index(members, url, hash)?;
+        Some(members[selected].clone())
+    }
+
+    fn hashed_healthy_index(&self, members: &[String], url: &str, hash: u64) -> Option<usize> {
+        if members.is_empty() {
+            return None;
+        }
+        for attempt in 0..5_u64 {
+            let index = jump_hash(hash.wrapping_add(attempt), members.len());
+            if self.proxy_alive_for_url(&members[index], url) {
+                return Some(index);
+            }
+        }
+        members
+            .iter()
+            .position(|member| self.proxy_alive_for_url(member, url))
+            .or(Some(0))
     }
 
     #[must_use]
@@ -1324,6 +1424,48 @@ mod tests {
                 .round_robin_proxy("balanced", &members, url)
                 .as_deref(),
             Some("proxy-b")
+        );
+    }
+
+    #[test]
+    fn consistent_hashing_is_key_stable_and_skips_unhealthy_members() {
+        let state = RuntimeState::default();
+        let members = vec!["proxy-a".to_owned(), "proxy-b".to_owned()];
+        let url = "http://health.test/";
+        let selected = state
+            .consistent_hash_proxy(&members, url, "example.test")
+            .expect("selected member");
+        assert_eq!(
+            state.consistent_hash_proxy(&members, url, "example.test"),
+            Some(selected.clone())
+        );
+        state.record_proxy_delay(&selected, url, 0, false);
+        assert_ne!(
+            state.consistent_hash_proxy(&members, url, "example.test"),
+            Some(selected)
+        );
+    }
+
+    #[test]
+    fn sticky_sessions_cache_a_healthy_member_and_replace_a_failed_one() {
+        let state = RuntimeState::default();
+        let members = vec!["proxy-a".to_owned(), "proxy-b".to_owned()];
+        let url = "http://health.test/";
+        let selected = state
+            .sticky_session_proxy("sticky", &members, url, "source.example.test")
+            .expect("selected member");
+        assert_eq!(
+            state.sticky_session_proxy("sticky", &members, url, "source.example.test"),
+            Some(selected.clone())
+        );
+        state.record_proxy_delay(&selected, url, 0, false);
+        let replacement = state
+            .sticky_session_proxy("sticky", &members, url, "source.example.test")
+            .expect("replacement member");
+        assert_ne!(replacement, selected);
+        assert_eq!(
+            state.sticky_session_proxy("sticky", &members, url, "source.example.test"),
+            Some(replacement)
         );
     }
 

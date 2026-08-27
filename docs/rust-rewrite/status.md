@@ -113,6 +113,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1i fallback group-delay | Complete in declared built-in-member scope; API-05/GRP-02 remain partial | Concurrent DIRECT/REJECT delay, 400/504 errors, pre-validation unfix ordering and durable empty choice pass |
 | Phase 5C1j URL-test group | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02/03 remain partial | Real two-proxy delay ranking, tolerance, fixed/restart control, group-delay unfix and selected wire routing pass |
 | Phase 5C1k round-robin load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Exact non-selector REST/control, A/B alternation, unhealthy skip/failover, remote group-delay and wire routing pass |
+| Phase 5C1l hashing load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Default/explicit consistent hashing and bounded sticky sessions prove same-key stability, unhealthy replacement, REST/control and wire routing |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3957,8 +3958,24 @@ PHASE5CLOADBALANCE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compa
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-Consistent-hashing, sticky-sessions, automatic interval/lazy scheduling,
-SOCKS5 health evidence and UDP remain unclaimed.
+Phase 5C1l completes the currently configured TCP load-balance strategy set.
+Default and explicit `consistent-hashing` use a process-random hash of the
+registrable destination domain or destination IP. `sticky-sessions` adds the
+source IP and retains the selected index in a 1000-entry LRU for ten minutes.
+Because the Go oracle intentionally seeds its hash per process and initially
+salts sticky choices with wall-clock nanoseconds, the black-box gate compares
+properties rather than literal A/B identity: each implementation must keep
+four same-key connections together, then move every connection to the other
+member once the first member fails health checking. REST shape and PUT failure
+remain exact differentials.
+
+```sh
+PHASE5CLOADBALANCEHASH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_load_balance_hashing.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-runtime --all-features
+```
+
+Automatic interval/lazy scheduling, exhaustive health policy, SOCKS5 health
+evidence and UDP remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

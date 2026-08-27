@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 bbolt-rs.workspace = true
 ipnet.workspace = true
+lru.workspace = true
 rewrite-model = { path = "../model" }
 serde.workspace = true
 serde_json.workspace = true

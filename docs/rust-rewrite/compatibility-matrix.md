@@ -143,7 +143,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references and cycles; Phases 5B3d/5B3f prove basic AND/OR/NOT and SUB-RULE mixed-TCP DIRECT/REJECT routing; lazy DNS/process helpers and the broader nested corpus remain pending |
 | PASS/PASS-RULE/REMATCH scan | Oracle | **Partial** | Phase 2 proves pure ordered scan and cycles; Phases 5B3e–5B3g prove live PASS/PASS-RULE plus REMATCH name mutation and sub-rule switching; live cycle/failure behavior remains pending |
-| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Select/fallback/URL-test retain prior control and health behavior. Round-robin load-balance adds exact REST shape, deterministic alternation, unhealthy-member skipping, remote group-delay and TCP wire evidence. Scheduling, exhaustive health, consistent-hashing and sticky-sessions remain |
+| Proxy groups/select/fallback/url-test/load-balance | Oracle | Partial | Select/fallback/URL-test retain prior control and health behavior. All three load-balance strategies now have REST/control and TCP wire evidence: round-robin exact alternation, hashing strategies property-differential same-key stability, and health failover. Scheduling and exhaustive health remain |
 | Lazy DNS/process resolution | Oracle | Not started | Call-count, ordering and error tests |
 | Rule hit/miss statistics and disable API | Oracle | Not started | REST and concurrent match tests |
 
