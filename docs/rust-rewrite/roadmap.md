@@ -1015,6 +1015,16 @@ preserve the oracle's two counterintuitive defaults: both UDP listeners use
 `DEFAULT-SOCKS`, and UDP packets do not inherit a TCP authentication username.
 Transparent/TUN DSCP, named listeners and future protocols remain later gates.
 
+### Phase 5B aggregate core domain/IP accepted scope
+
+This aggregate gate accepts the current local execution paths for RULE-02,
+RULE-04 and RULE-05 together because they share one host/destination metadata
+boundary. Acceptance requires live exact/suffix/keyword domains, destination
+and source IPv4 CIDR, `no-resolve`, partial-bit IPv4 suffixes and mapped-IPv4
+normalization, plus pure IPv6 suffix hit/miss/source and invalid-width cases.
+Native IPv6 live routing, sniffer/static-tunnel contexts and exhaustive resolver
+instrumentation remain later contextual gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

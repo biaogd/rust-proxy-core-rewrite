@@ -7,7 +7,7 @@ use std::time::Duration;
 use rand::RngExt;
 use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
-use rewrite_model::{Destination, Host, Metadata};
+use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
 use rewrite_state::RuntimeState;
 use thiserror::Error;
@@ -683,7 +683,7 @@ async fn evaluate_tcp_rules(
         LazyEvaluation::Decision(decision) => decision,
         LazyEvaluation::ResolveDestinationIp => {
             match resolve_rule_destination(metadata, config).await {
-                Ok(address) => metadata.destination_ip = Some(address),
+                Ok(address) => metadata.destination_ip = Some(unmap_ip(address)),
                 Err(error) => state.log("error", format!("rule DNS resolution failed: {error}")),
             }
             config.rules.evaluate(metadata)

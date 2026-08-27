@@ -72,10 +72,14 @@ pub struct Metadata {
 
 impl Metadata {
     #[must_use]
-    pub fn new(destination: Destination, inbound: InboundProtocol) -> Self {
-        let (host, destination_ip) = match &destination.host {
-            Host::Ip(address) => (String::new(), Some(*address)),
-            Host::Domain(domain) => (domain.clone(), None),
+    pub fn new(mut destination: Destination, inbound: InboundProtocol) -> Self {
+        let (host, destination_ip) = match destination.host.clone() {
+            Host::Ip(address) => {
+                let address = unmap_ip(address);
+                destination.host = Host::Ip(address);
+                (String::new(), Some(address))
+            }
+            Host::Domain(domain) => (domain, None),
         };
         Self {
             destination,
@@ -102,5 +106,40 @@ impl Metadata {
         } else {
             &self.sniff_host
         }
+    }
+}
+
+/// Converts an IPv4-mapped IPv6 address to its IPv4 form, matching the Go
+/// tunnel metadata boundary. Other addresses are returned unchanged.
+#[must_use]
+pub fn unmap_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or(IpAddr::V6(address), IpAddr::V4),
+        address @ IpAddr::V4(_) => address,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn metadata_unmaps_ipv4_mapped_destinations() {
+        let mapped = "::ffff:127.0.0.1".parse().expect("mapped IPv6");
+        let metadata = Metadata::new(
+            Destination {
+                host: Host::Ip(mapped),
+                port: 80,
+            },
+            InboundProtocol::Https,
+        );
+        assert_eq!(
+            metadata.destination.host,
+            Host::Ip(Ipv4Addr::LOCALHOST.into())
+        );
+        assert_eq!(metadata.destination_ip, Some(Ipv4Addr::LOCALHOST.into()));
     }
 }

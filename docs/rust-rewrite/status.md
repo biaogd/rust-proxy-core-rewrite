@@ -97,9 +97,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3f live sub-rule routing | Complete in declared local-TCP scope; RULE-11/12 remain partial | SUB-RULE enters a named branch; PASS-RULE continues within it and returns to the main scan when exhausted |
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
+| Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B1a–5B3g TCP rules and the aggregate Phase 5B UDP metadata suite run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B1a–5B3g TCP rules and the aggregate Phase 5B UDP/core suites run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3325,6 +3326,38 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 The aggregate differential passes locally. Nonzero DSCP extraction,
 transparent/TUN metadata, YAML named listeners and future inbound protocols
 remain attached to their platform or protocol phases.
+
+## Phase 5B aggregate core domain/IP deliverables and evidence
+
+This aggregate phase advances three related core destination-rule rows in one
+gate. `DOMAIN`, `DOMAIN-SUFFIX` and `DOMAIN-KEYWORD` route hosts-backed names
+through the real mixed TCP path. Destination/source CIDR rules consume real
+socket metadata, while a reserved `.invalid` name proves `no-resolve` falls
+through without relying on the machine's special localhost hosts entry.
+
+IP suffix coverage now includes non-byte-aligned IPv4 hit/miss and a live
+IPv4-mapped IPv6 destination. Rust normalizes mapped addresses at the shared
+metadata boundary, as the Go tunnel does, so rule matching and the final DIRECT
+dial both use IPv4. Fixed Phase 2 cases add IPv6 destination hit/miss, IPv6
+source matching and invalid `/129` validation without depending on native IPv6
+availability in local development.
+
+`compat/scripts/phase5b_core.py` contains the complete live matrix; the pinned
+Phase 2 fixture now contains 41 fixed cases.
+
+Local evidence on 2026-08-27:
+
+```sh
+PHASE5BCORE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b_core.py
+PHASE2_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase2.py --generated-configs 0 --generated-rules 0
+cargo test --manifest-path rust/Cargo.toml -p rewrite-model -p rewrite-inbound -p rewrite-runtime --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+Both aggregate and fixed differentials pass locally. Native IPv6 network
+routing, exhaustive IDNA/sniffer contexts and remaining resolver-call variants
+retain their explicit matrix gaps.
 
 ## Controller HTTP infrastructure refactor
 

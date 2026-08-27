@@ -37,5 +37,10 @@
   {"op":"rules","rules":["DST-PORT,not-a-port,DIRECT"],"metadata":{}},
   {"op":"rules","rules":["NETWORK,ICMP,DIRECT"],"metadata":{}},
   {"op":"rules","rules":["MATCH"],"metadata":{}},
-  {"op":"rules","rules":["NOT,((DOMAIN,one.example),(DOMAIN,two.example)),DIRECT"],"metadata":{}}
+  {"op":"rules","rules":["NOT,((DOMAIN,one.example),(DOMAIN,two.example)),DIRECT"],"metadata":{}},
+
+  {"op":"rules","rules":["IP-SUFFIX,2001:db8::1/1,REJECT","MATCH,DIRECT"],"metadata":{"destination-ip":"2001:db8::3","network":"TCP"}},
+  {"op":"rules","rules":["IP-SUFFIX,2001:db8::1/1,REJECT","MATCH,DIRECT"],"metadata":{"destination-ip":"2001:db8::2","network":"TCP"}},
+  {"op":"rules","rules":["SRC-IP-SUFFIX,2001:db8::5/5,REJECT","MATCH,DIRECT"],"metadata":{"source-ip":"2001:db8::25","network":"TCP"}},
+  {"op":"rules","rules":["IP-SUFFIX,2001:db8::1/129,DIRECT"],"metadata":{}}
 ]

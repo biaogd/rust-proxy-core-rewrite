@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use base64::Engine;
-use rewrite_model::{AuthUser, Destination, Host, InboundProtocol, Metadata, Network};
+use rewrite_model::{AuthUser, Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -102,7 +102,7 @@ pub fn decode_socks5_udp(
     let payload_start = 3 + address_len;
     let mut metadata = Metadata::new(Destination { host, port }, InboundProtocol::Socks5);
     metadata.network = Network::Udp;
-    metadata.source_ip = Some(source.ip());
+    metadata.source_ip = Some(unmap_ip(source.ip()));
     metadata.source_port = source.port();
     metadata.inbound_port = inbound_port;
     Ok(AcceptedUdp {
@@ -501,7 +501,7 @@ fn socket_metadata(
 ) -> Metadata {
     let mut metadata = Metadata::new(destination, inbound);
     if let Ok(peer) = client.peer_addr() {
-        metadata.source_ip = Some(peer.ip());
+        metadata.source_ip = Some(unmap_ip(peer.ip()));
         metadata.source_port = peer.port();
     }
     if let Ok(local) = client.local_addr() {

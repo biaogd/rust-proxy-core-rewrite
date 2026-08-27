@@ -84,7 +84,7 @@ jobs:
         run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
 
   full-differential:
-    name: Full Phase 1-5B current UDP metadata differential regression
+    name: Full Phase 1-5B aggregate rules differential regression
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -131,6 +131,7 @@ jobs:
       PHASE5B3F_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5B3G_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5BUDP_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5BCORE_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -161,6 +162,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
             compat/scripts/phase5b3f.py \
