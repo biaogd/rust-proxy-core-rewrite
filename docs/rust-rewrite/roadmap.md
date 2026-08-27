@@ -1211,6 +1211,18 @@ behavior. `compat/scripts/phase5c_provider_refresh.py` compares this lifecycle.
 Concurrent/coalesced refresh, connection cleanup, scheduled/file-watch refresh,
 HTTP vehicles and persistence remain separate gates.
 
+### Phase 5C1c accepted scope
+
+Flat select groups may compose explicit proxies and local-file providers with
+`filter`, `exclude-filter`, `include-all-proxies`, `include-all-providers` or
+`include-all`. Provider matches preserve the pinned oracle's backtick-regex
+ordering and de-duplication, while top-level include-all names use the oracle's
+sorted inventory. Empty filtered sets expose `empty-fallback`; controller PUT
+and mixed TCP routing use the resulting member list. Acceptance in
+`compat/scripts/phase5c_group_filters.py` compares all five composition forms
+and live authenticated HTTP forwarding. Nested groups, type exclusion,
+automatic strategies and health/status policies remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

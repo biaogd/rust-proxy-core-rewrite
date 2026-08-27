@@ -913,7 +913,7 @@ fn selector_snapshot(
         "alive": health.alive,
         "all": group.proxies,
         "dialer-proxy": "",
-        "emptyFallback": "COMPATIBLE",
+        "emptyFallback": group.empty_fallback,
         "extra": health.extra,
         "hidden": false,
         "history": health.history,
@@ -966,7 +966,11 @@ async fn proxy_providers(State(state): State<ControllerState>) -> Response {
             file_proxy_provider_snapshot(provider, &state.runtime),
         );
     }
-    for group in &config.proxy_groups {
+    for group in config
+        .proxy_groups
+        .iter()
+        .filter(|group| !group.compatible_proxies.is_empty())
+    {
         providers.insert(
             group.name.clone(),
             group_compatible_provider_snapshot(group, &config, &state.runtime),
@@ -995,7 +999,7 @@ async fn proxy_provider(
                 config
                     .proxy_groups
                     .iter()
-                    .find(|group| group.name == provider)
+                    .find(|group| group.name == provider && !group.compatible_proxies.is_empty())
                     .map_or_else(proxy_not_found, |group| {
                         json_response(
                             StatusCode::OK,
@@ -1021,7 +1025,7 @@ async fn update_proxy_provider(
         || config
             .proxy_groups
             .iter()
-            .any(|candidate| candidate.name == provider)
+            .any(|candidate| candidate.name == provider && !candidate.compatible_proxies.is_empty())
     {
         return empty_response(StatusCode::NO_CONTENT);
     }
@@ -1057,7 +1061,7 @@ async fn healthcheck_proxy_provider(
         && !config
             .proxy_groups
             .iter()
-            .any(|candidate| candidate.name == provider)
+            .any(|candidate| candidate.name == provider && !candidate.compatible_proxies.is_empty())
     {
         return proxy_not_found();
     }

@@ -2443,6 +2443,7 @@ dependencies = [
 name = "rewrite-config"
 version = "0.1.0"
 dependencies = [
+ "fancy-regex",
  "ipnet",
  "network-interface",
  "prost",
