@@ -136,7 +136,15 @@ pub struct ProxyGroupConfig {
     pub icon: String,
     pub disable_udp: bool,
     pub tolerance: u16,
+    pub health: GroupHealthConfig,
     pub load_balance_strategy: Option<LoadBalanceStrategy>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroupHealthConfig {
+    pub interval: u64,
+    pub timeout: u64,
+    pub lazy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -690,6 +698,9 @@ struct RawProxyGroup {
     icon: Option<String>,
     disable_udp: Option<bool>,
     tolerance: Option<u16>,
+    interval: Option<u64>,
+    timeout: Option<u64>,
+    lazy: Option<bool>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3401,15 +3412,10 @@ fn parse_proxy_group(
     name: String,
     catalog: &ProxyGroupCatalog<'_>,
 ) -> Result<ProxyGroupConfig, ConfigError> {
-    let kind = match group.kind.as_deref() {
-        Some("select") => ProxyGroupKind::Select,
-        Some("fallback") => ProxyGroupKind::Fallback,
-        Some("url-test") => ProxyGroupKind::UrlTest,
-        Some("load-balance") => ProxyGroupKind::LoadBalance,
-        _ => return Err(ConfigError::UnsupportedProxy(name)),
-    };
+    let kind = parse_proxy_group_kind(group.kind.as_deref(), &name)?;
     let load_balance_strategy =
         parse_load_balance_strategy(kind, group.strategy.as_deref(), &name)?;
+    let health = normalize_group_health(kind, group.interval, group.timeout, group.lazy);
     let filter = group.filter.filter(|value| !value.is_empty());
     let exclude_filter = group.exclude_filter.filter(|value| !value.is_empty());
     let exclude_types: Vec<_> = group
@@ -3485,6 +3491,7 @@ fn parse_proxy_group(
         icon: group.icon.unwrap_or_default(),
         disable_udp: group.disable_udp.unwrap_or(false),
         tolerance: group.tolerance.unwrap_or(0),
+        health,
         load_balance_strategy,
     };
     parsed.proxies = expand_proxy_group(&parsed, catalog.providers, catalog.proxy_types)?;
@@ -3501,6 +3508,16 @@ fn parse_proxy_group(
         return Err(ConfigError::UnsupportedProxy(parsed.name));
     }
     Ok(parsed)
+}
+
+fn parse_proxy_group_kind(kind: Option<&str>, name: &str) -> Result<ProxyGroupKind, ConfigError> {
+    match kind {
+        Some("select") => Ok(ProxyGroupKind::Select),
+        Some("fallback") => Ok(ProxyGroupKind::Fallback),
+        Some("url-test") => Ok(ProxyGroupKind::UrlTest),
+        Some("load-balance") => Ok(ProxyGroupKind::LoadBalance),
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
 }
 
 fn parse_load_balance_strategy(
@@ -3520,6 +3537,25 @@ fn parse_load_balance_strategy(
         }
         (_, Some(_)) => Err(ConfigError::UnsupportedProxy(name.to_owned())),
         (_, None) => Ok(None),
+    }
+}
+
+fn normalize_group_health(
+    kind: ProxyGroupKind,
+    interval: Option<u64>,
+    timeout: Option<u64>,
+    lazy: Option<bool>,
+) -> GroupHealthConfig {
+    GroupHealthConfig {
+        interval: match (kind, interval.unwrap_or(0)) {
+            (ProxyGroupKind::Select, interval) | (_, interval @ 1..) => interval,
+            (_, 0) => 300,
+        },
+        timeout: match timeout.unwrap_or(0) {
+            0 => 5000,
+            timeout => timeout,
+        },
+        lazy: lazy.unwrap_or(true),
     }
 }
 
@@ -4210,7 +4246,7 @@ dns:
     #[test]
     fn parses_manual_health_fallback_group() {
         let config = Config::from_yaml(&format!(
-            "{MINIMAL}\nproxy-groups:\n  - name: recovery\n    type: fallback\n    proxies: [REJECT, DIRECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    hidden: true\n    icon: fallback.svg\n    disable-udp: true\n"
+            "{MINIMAL}\nproxy-groups:\n  - name: recovery\n    type: fallback\n    proxies: [REJECT, DIRECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    interval: 7\n    timeout: 250\n    lazy: false\n    hidden: true\n    icon: fallback.svg\n    disable-udp: true\n"
         ))
         .expect("fallback group");
         let group = &config.proxy_groups[0];
@@ -4220,6 +4256,9 @@ dns:
         assert!(group.hidden);
         assert_eq!(group.icon, "fallback.svg");
         assert!(group.disable_udp);
+        assert_eq!(group.health.interval, 7);
+        assert_eq!(group.health.timeout, 250);
+        assert!(!group.health.lazy);
     }
 
     #[test]
@@ -4905,6 +4944,11 @@ dns:
             icon: String::new(),
             disable_udp: false,
             tolerance: 0,
+            health: GroupHealthConfig {
+                interval: 0,
+                timeout: 5000,
+                lazy: true,
+            },
             load_balance_strategy: None,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
@@ -4945,6 +4989,11 @@ dns:
             icon: String::new(),
             disable_udp: false,
             tolerance: 0,
+            health: GroupHealthConfig {
+                interval: 0,
+                timeout: 5000,
+                lazy: true,
+            },
             load_balance_strategy: None,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());

@@ -1332,8 +1332,22 @@ random hash seed and sticky initial choice as nondeterministic: on each product
 it proves four same-key TCP connections remain on one member, an explicit
 health transition moves all later connections to the survivor, and REST/non-
 selector behavior stays equal. `psl` supplies public-suffix semantics and
-`lru` supplies bounded recency. UDP and automatic health scheduling remain
-separate gates.
+`lru` supplies bounded recency. UDP and automatic health scheduling were
+reserved for separate gates.
+
+### Phase 5C1m accepted scope
+
+Automatic fallback, URL-test and load-balance health checks run once at startup
+and then at the configured second-based `interval`. `lazy: false` checks every
+interval; the default/explicit lazy mode skips idle intervals until data-plane
+group resolution touches the group. `timeout` bounds each member probe, probes
+run concurrently, the scheduler reads committed generations, and runtime
+shutdown cancels it. `compat/scripts/phase5c_health_schedule.py` closes the
+preferred HTTP
+member without invoking controller healthcheck and proves eager discovery,
+lazy skip, post-touch discovery and survivor TCP routing on Go and Rust.
+Dial-failure `max-failed-times`, exhaustive error/status policy, SOCKS5 health
+evidence, concurrent reload races and UDP remain later gates.
 
 ## Phase 7 — advanced and project-specific protocols
 

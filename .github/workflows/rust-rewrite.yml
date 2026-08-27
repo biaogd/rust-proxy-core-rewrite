@@ -22,6 +22,7 @@ env:
   RUST_VERSION: 1.95.0
   GO_VERSION: 1.26.5
   PHASE5CLOADBALANCEHASH_CARGO_TARGET: /tmp/mihomo-phase5c-load-balance-hashing-target
+  PHASE5CHEALTHSCHEDULE_CARGO_TARGET: /tmp/mihomo-phase5c-health-schedule-target
 
 jobs:
   rust-quality:
@@ -187,6 +188,7 @@ jobs:
           compat/scripts/phase5c_url_test.py \
           compat/scripts/phase5c_load_balance.py \
           compat/scripts/phase5c_load_balance_hashing.py \
+          compat/scripts/phase5c_health_schedule.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \

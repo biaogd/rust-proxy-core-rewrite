@@ -114,6 +114,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1j URL-test group | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02/03 remain partial | Real two-proxy delay ranking, tolerance, fixed/restart control, group-delay unfix and selected wire routing pass |
 | Phase 5C1k round-robin load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Exact non-selector REST/control, A/B alternation, unhealthy skip/failover, remote group-delay and wire routing pass |
 | Phase 5C1l hashing load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Default/explicit consistent hashing and bounded sticky sessions prove same-key stability, unhealthy replacement, REST/control and wire routing |
+| Phase 5C1m automatic group health schedule | Complete in declared local HTTP/TCP scope; GRP-02/03 remain partial | Startup plus eager/lazy interval checks, per-member timeout, touch activation, health failover and lifecycle cancellation pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3974,8 +3975,23 @@ PHASE5CLOADBALANCEHASH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 c
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-runtime --all-features
 ```
 
-Automatic interval/lazy scheduling, exhaustive health policy, SOCKS5 health
-evidence and UDP remain unclaimed.
+Phase 5C1m adds the automatic health lifecycle shared by fallback, URL-test and
+load-balance groups. The scheduler performs an initial concurrent check,
+honors the configured second interval and member timeout, skips idle ticks in
+the default lazy mode, and resumes after the data plane touches a group. It
+observes committed config generations and is cancellation-owned by the
+runtime. The differential closes the first authenticated HTTP proxy and
+proves eager groups discover it without traffic, lazy groups preserve their
+previous health while idle and discover it after a route attempt, and both
+subsequently use only the surviving proxy.
+
+```sh
+PHASE5CHEALTHSCHEDULE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_health_schedule.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Dial-failure `max-failed-times`, exhaustive failure/status behavior, concurrent
+reload races, SOCKS5 health evidence and UDP remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

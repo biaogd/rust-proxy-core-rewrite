@@ -138,6 +138,7 @@ pub struct RuntimeState {
     round_robin_groups: Mutex<BTreeMap<String, usize>>,
     sticky_groups: Mutex<BTreeMap<String, LruCache<u64, StickySession>>>,
     load_balance_hasher: RandomState,
+    group_touches: Mutex<BTreeMap<String, Instant>>,
     selectors_loaded: AtomicBool,
     store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
@@ -200,6 +201,7 @@ impl Default for RuntimeState {
             round_robin_groups: Mutex::new(BTreeMap::new()),
             sticky_groups: Mutex::new(BTreeMap::new()),
             load_balance_hasher: RandomState::new(),
+            group_touches: Mutex::new(BTreeMap::new()),
             selectors_loaded: AtomicBool::new(false),
             store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
@@ -527,6 +529,30 @@ impl RuntimeState {
             }
         }
         Some(members[0].clone())
+    }
+
+    pub fn touch_proxy_group(&self, name: &str) {
+        self.group_touches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_owned(), Instant::now());
+    }
+
+    pub fn retain_proxy_groups<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
+        let names: std::collections::BTreeSet<_> = names.into_iter().collect();
+        self.group_touches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|name, _| names.contains(name.as_str()));
+    }
+
+    #[must_use]
+    pub fn proxy_group_touched_within(&self, name: &str, interval: Duration) -> bool {
+        self.group_touches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .is_some_and(|touched| touched.elapsed() < interval)
     }
 
     #[must_use]

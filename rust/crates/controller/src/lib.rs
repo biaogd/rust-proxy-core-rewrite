@@ -1268,26 +1268,39 @@ async fn healthcheck_proxy_provider(
     if let Some(group) = config.proxy_groups.iter().find(|candidate| {
         candidate.name == provider && candidate.kind != rewrite_config::ProxyGroupKind::Select
     }) {
-        let expected = parse_status_ranges(&group.expected_status).unwrap_or_default();
-        for member in &group.proxies {
-            let result = tokio::time::timeout(
-                Duration::from_secs(5),
-                measure_http_delay(member, &group.test_url, &expected, &config),
-            )
-            .await;
-            match result {
-                Ok(Ok(delay)) if delay > 0 => {
-                    state
-                        .runtime
-                        .record_proxy_delay(member, &group.test_url, delay, true);
-                }
-                _ => state
-                    .runtime
-                    .record_proxy_delay(member, &group.test_url, 0, false),
-            }
-        }
+        healthcheck_proxy_group(group, &config, &state.runtime).await;
     }
     empty_response(StatusCode::NO_CONTENT)
+}
+
+/// Measures every member of one automatic group and publishes per-URL health.
+pub async fn healthcheck_proxy_group(
+    group: &rewrite_config::ProxyGroupConfig,
+    config: &Config,
+    state: &RuntimeState,
+) {
+    let expected = parse_status_ranges(&group.expected_status).unwrap_or_default();
+    let timeout = Duration::from_millis(group.health.timeout);
+    let results = join_all(group.proxies.iter().map(|member| {
+        let expected = &expected;
+        async move {
+            let result = tokio::time::timeout(
+                timeout,
+                measure_http_delay(member, &group.test_url, expected, config),
+            )
+            .await;
+            (member, result)
+        }
+    }))
+    .await;
+    for (member, result) in results {
+        match result {
+            Ok(Ok(delay)) if delay > 0 => {
+                state.record_proxy_delay(member, &group.test_url, delay, true);
+            }
+            _ => state.record_proxy_delay(member, &group.test_url, 0, false),
+        }
+    }
 }
 
 async fn proxy_provider_member(

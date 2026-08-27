@@ -131,6 +131,7 @@ async fn run_with_reload_inner(
         &mut dns,
     )
     .await?;
+    let health = start_group_health_scheduler(config_receiver.clone(), Arc::clone(&state));
     let shutdown_barrier = lifecycle.map(
         |LifecycleSignals {
              ready,
@@ -206,7 +207,70 @@ async fn run_with_reload_inner(
     if let Some((_, task)) = dns {
         stop_task(task).await;
     }
+    stop_task(health).await;
     Ok(())
+}
+
+fn start_group_health_scheduler(
+    config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+) -> RuntimeTask {
+    let shutdown = CancellationToken::new();
+    let child_shutdown = shutdown.clone();
+    let handle = tokio::spawn(run_group_health_scheduler(config, state, child_shutdown));
+    RuntimeTask { shutdown, handle }
+}
+
+async fn run_group_health_scheduler(
+    mut config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) {
+    let mut deadlines = BTreeMap::<String, tokio::time::Instant>::new();
+    loop {
+        let current = Arc::clone(&config.borrow_and_update());
+        let automatic: Vec<_> = current
+            .proxy_groups
+            .iter()
+            .filter(|group| group.kind != ProxyGroupKind::Select && group.health.interval != 0)
+            .cloned()
+            .collect();
+        deadlines.retain(|name, _| automatic.iter().any(|group| group.name == *name));
+        let now = tokio::time::Instant::now();
+        for group in &automatic {
+            let initial = !deadlines.contains_key(&group.name);
+            let due = initial || deadlines[&group.name] <= now;
+            if !due {
+                continue;
+            }
+            let interval = Duration::from_secs(group.health.interval);
+            if initial
+                || !group.health.lazy
+                || state.proxy_group_touched_within(&group.name, interval)
+            {
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    () = rewrite_controller::healthcheck_proxy_group(group, &current, &state) => {}
+                }
+            }
+            deadlines.insert(group.name.clone(), tokio::time::Instant::now() + interval);
+        }
+        let wake_at = deadlines
+            .values()
+            .min()
+            .copied()
+            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_hours(1));
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = config.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                deadlines.clear();
+            }
+            () = tokio::time::sleep_until(wake_at) => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,6 +384,7 @@ async fn apply_generation(
 }
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
+    state.retain_proxy_groups(config.proxy_groups.iter().map(|group| group.name.as_str()));
     state.sync_group_choices(
         config
             .proxy_groups
@@ -808,6 +873,7 @@ fn resolve_selector_target(
         if !visited.insert(current.clone()) {
             return None;
         }
+        state.touch_proxy_group(&group.name);
         current = match group.kind {
             ProxyGroupKind::Select => state
                 .selector_proxy(&group.name)
