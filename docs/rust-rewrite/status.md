@@ -112,6 +112,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1h fallback fixed control | Complete in declared current-member TCP/persistence scope; GRP-02 remains partial | Valid/invalid PUT, HTTP versus DIRECT routing, restart restoration and Go↔Rust bbolt interchange pass |
 | Phase 5C1i fallback group-delay | Complete in declared built-in-member scope; API-05/GRP-02 remain partial | Concurrent DIRECT/REJECT delay, 400/504 errors, pre-validation unfix ordering and durable empty choice pass |
 | Phase 5C1j URL-test group | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02/03 remain partial | Real two-proxy delay ranking, tolerance, fixed/restart control, group-delay unfix and selected wire routing pass |
+| Phase 5C1k round-robin load-balance | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02 remains partial | Exact non-selector REST/control, A/B alternation, unhealthy skip/failover, remote group-delay and wire routing pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3940,8 +3941,24 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p
 ```
 
 Periodic/`lazy` scheduling, interval/timeout/max-failure policy, complete
-failure/status handling, SOCKS5 health evidence, UDP and load-balance remain
-unclaimed.
+failure/status handling, SOCKS5 health evidence and UDP remain unclaimed.
+
+Phase 5C1k adds the first load-balance strategy. Round-robin position advances
+only for data-plane selection, scans forward over members whose per-URL health
+is false and returns the first member if none are healthy, matching the pinned
+Go algorithm. Unlike selectable automatic groups it owns no fixed choice, so
+its REST view omits `now`/`fixed` and PUT returns `Must be a Selector`. The
+differential observes alternating authenticated HTTP proxy connections, closes
+the first proxy, refreshes health and proves every later connection and the
+group-delay result use only the survivor.
+
+```sh
+PHASE5CLOADBALANCE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_load_balance.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Consistent-hashing, sticky-sessions, automatic interval/lazy scheduling,
+SOCKS5 health evidence and UDP remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

@@ -1308,6 +1308,20 @@ carried every TCP echo. Background interval/lazy scheduling, complete
 timeout/error/status policy, SOCKS5 health evidence and load-balance remain
 later gates.
 
+### Phase 5C1k accepted scope
+
+`load-balance` accepts the explicit `round-robin` strategy over current group
+composition. Its REST shape intentionally has neither `now` nor `fixed`, PUT
+returns the oracle's non-selector error, and `disable-udp` controls the group
+capability. Each new TCP connection advances to the next healthy member;
+unhealthy entries are skipped and all-unhealthy behavior retains the first
+member fallback. Compatible-provider healthcheck and group-delay reuse real
+HTTP CONNECT measurement. `compat/scripts/phase5c_load_balance.py` proves
+A→B→A→B wire routing, A failure followed by B-only routing, remote delay keys
+and REST/error parity. Consistent-hashing, sticky-sessions, UDP and automatic
+scheduling remain separate gates because Go's hash seed is process-random and
+requires property-based rather than member-by-member differential evidence.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

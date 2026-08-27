@@ -674,7 +674,12 @@ async fn group_delay(
     if name != "GLOBAL" && automatic_group.is_none() {
         return proxy_not_found();
     }
-    if automatic_group.is_some() {
+    if automatic_group.is_some_and(|group| {
+        matches!(
+            group.kind,
+            rewrite_config::ProxyGroupKind::Fallback | rewrite_config::ProxyGroupKind::UrlTest
+        )
+    }) {
         state.runtime.clear_group_choice(&name, true);
     }
     let parameters = query_parameters(&uri);
@@ -897,6 +902,14 @@ async fn select_proxy(
             &json!({"message": "Must be a Selector"}),
         );
     }
+    if configured_group
+        .is_some_and(|group| group.kind == rewrite_config::ProxyGroupKind::LoadBalance)
+    {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"message": "Must be a Selector"}),
+        );
+    }
     let updated = if name == "GLOBAL" {
         state.runtime.set_global_proxy(&selection.name)
     } else {
@@ -1008,8 +1021,9 @@ fn selector_snapshot(
 ) -> serde_json::Value {
     let health = runtime.proxy_health(&group.name);
     let selected = group_selected_proxy(group, runtime);
-    let udp =
-        !group.disable_udp && selector_supports_udp(&selected, config, runtime, &mut Vec::new());
+    let udp = !group.disable_udp
+        && (group.kind == rewrite_config::ProxyGroupKind::LoadBalance
+            || selector_supports_udp(&selected, config, runtime, &mut Vec::new()));
     let (kind, test_url) = match group.kind {
         rewrite_config::ProxyGroupKind::Select => (
             "Selector",
@@ -1021,6 +1035,7 @@ fn selector_snapshot(
         ),
         rewrite_config::ProxyGroupKind::Fallback => ("Fallback", group.test_url.as_str()),
         rewrite_config::ProxyGroupKind::UrlTest => ("URLTest", group.test_url.as_str()),
+        rewrite_config::ProxyGroupKind::LoadBalance => ("LoadBalance", group.test_url.as_str()),
     };
     let mut snapshot = json!({
         "alive": health.alive,
@@ -1046,12 +1061,26 @@ fn selector_snapshot(
         "xudp": false,
     });
     if group.kind != rewrite_config::ProxyGroupKind::Select {
+        snapshot
+            .as_object_mut()
+            .expect("group snapshot object")
+            .insert("expectedStatus".to_owned(), json!(group.expected_status));
+    }
+    if matches!(
+        group.kind,
+        rewrite_config::ProxyGroupKind::Fallback | rewrite_config::ProxyGroupKind::UrlTest
+    ) {
         let object = snapshot.as_object_mut().expect("group snapshot object");
-        object.insert("expectedStatus".to_owned(), json!(group.expected_status));
         object.insert(
             "fixed".to_owned(),
             json!(runtime.selector_proxy(&group.name).unwrap_or_default()),
         );
+    }
+    if group.kind == rewrite_config::ProxyGroupKind::LoadBalance {
+        snapshot
+            .as_object_mut()
+            .expect("group snapshot object")
+            .remove("now");
     }
     snapshot
 }
@@ -1075,6 +1104,7 @@ fn group_selected_proxy(
                 group.tolerance,
             )
             .unwrap_or_default(),
+        rewrite_config::ProxyGroupKind::LoadBalance => String::new(),
     }
 }
 

@@ -136,6 +136,7 @@ pub struct ProxyGroupConfig {
     pub icon: String,
     pub disable_udp: bool,
     pub tolerance: u16,
+    pub load_balance_strategy: Option<LoadBalanceStrategy>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +144,12 @@ pub enum ProxyGroupKind {
     Select,
     Fallback,
     UrlTest,
+    LoadBalance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoadBalanceStrategy {
+    RoundRobin,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -663,6 +670,7 @@ struct RawProxyGroup {
     name: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    strategy: Option<String>,
     proxies: Option<Vec<String>>,
     #[serde(rename = "use")]
     providers: Option<Vec<String>>,
@@ -1072,6 +1080,7 @@ impl Config {
                     ProxyGroupKind::Select => "Selector",
                     ProxyGroupKind::Fallback => "Fallback",
                     ProxyGroupKind::UrlTest => "URLTest",
+                    ProxyGroupKind::LoadBalance => "LoadBalance",
                 };
                 (group.name.clone(), kind.to_owned())
             })
@@ -3279,7 +3288,7 @@ fn parse_proxy_groups(
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
         if !matches!(
             group.kind.as_deref(),
-            Some("select" | "fallback" | "url-test")
+            Some("select" | "fallback" | "url-test" | "load-balance")
         ) || !group.extra.is_empty()
             || !group_names.insert(name.to_owned())
             || proxy_names.contains(name)
@@ -3297,6 +3306,7 @@ fn parse_proxy_groups(
                 "select" => "Selector",
                 "fallback" => "Fallback",
                 "url-test" => "URLTest",
+                "load-balance" => "LoadBalance",
                 _ => return None,
             };
             Some((name.clone(), kind.to_owned()))
@@ -3393,8 +3403,11 @@ fn parse_proxy_group(
         Some("select") => ProxyGroupKind::Select,
         Some("fallback") => ProxyGroupKind::Fallback,
         Some("url-test") => ProxyGroupKind::UrlTest,
+        Some("load-balance") => ProxyGroupKind::LoadBalance,
         _ => return Err(ConfigError::UnsupportedProxy(name)),
     };
+    let load_balance_strategy =
+        parse_load_balance_strategy(kind, group.strategy.as_deref(), &name)?;
     let filter = group.filter.filter(|value| !value.is_empty());
     let exclude_filter = group.exclude_filter.filter(|value| !value.is_empty());
     let exclude_types: Vec<_> = group
@@ -3470,6 +3483,7 @@ fn parse_proxy_group(
         icon: group.icon.unwrap_or_default(),
         disable_udp: group.disable_udp.unwrap_or(false),
         tolerance: group.tolerance.unwrap_or(0),
+        load_balance_strategy,
     };
     parsed.proxies = expand_proxy_group(&parsed, catalog.providers, catalog.proxy_types)?;
     if parsed
@@ -3485,6 +3499,22 @@ fn parse_proxy_group(
         return Err(ConfigError::UnsupportedProxy(parsed.name));
     }
     Ok(parsed)
+}
+
+fn parse_load_balance_strategy(
+    kind: ProxyGroupKind,
+    strategy: Option<&str>,
+    name: &str,
+) -> Result<Option<LoadBalanceStrategy>, ConfigError> {
+    match (kind, strategy) {
+        (ProxyGroupKind::LoadBalance, Some("round-robin")) => {
+            Ok(Some(LoadBalanceStrategy::RoundRobin))
+        }
+        (ProxyGroupKind::LoadBalance, _) | (_, Some(_)) => {
+            Err(ConfigError::UnsupportedProxy(name.to_owned()))
+        }
+        (_, None) => Ok(None),
+    }
 }
 
 fn normalize_group_test_url(value: Option<String>) -> String {
@@ -4199,6 +4229,25 @@ dns:
     }
 
     #[test]
+    fn parses_round_robin_load_balance_group() {
+        let config = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: balanced\n    type: load-balance\n    strategy: round-robin\n    proxies: [DIRECT, REJECT]\n    url: http://127.0.0.1:18080/health\n"
+        ))
+        .expect("round-robin group");
+        let group = &config.proxy_groups[0];
+        assert_eq!(group.kind, ProxyGroupKind::LoadBalance);
+        assert_eq!(
+            group.load_balance_strategy,
+            Some(LoadBalanceStrategy::RoundRobin)
+        );
+
+        let unsupported = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: balanced\n    type: load-balance\n    proxies: [DIRECT, REJECT]\n"
+        ));
+        assert!(matches!(unsupported, Err(ConfigError::UnsupportedProxy(_))));
+    }
+
+    #[test]
     fn parses_phase_four_d_one_nameserver_policy() {
         let source = r"
 dns:
@@ -4837,6 +4886,7 @@ dns:
             icon: String::new(),
             disable_udp: false,
             tolerance: 0,
+            load_balance_strategy: None,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(
@@ -4876,6 +4926,7 @@ dns:
             icon: String::new(),
             disable_udp: false,
             tolerance: 0,
+            load_balance_strategy: None,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(

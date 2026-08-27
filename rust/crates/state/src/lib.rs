@@ -130,6 +130,7 @@ pub struct RuntimeState {
     global_proxy: Mutex<String>,
     selectors: Mutex<BTreeMap<String, String>>,
     automatic_groups: Mutex<BTreeMap<String, String>>,
+    round_robin_groups: Mutex<BTreeMap<String, usize>>,
     selectors_loaded: AtomicBool,
     store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
@@ -168,6 +169,7 @@ impl Default for RuntimeState {
             global_proxy: Mutex::new("DIRECT".to_owned()),
             selectors: Mutex::new(BTreeMap::new()),
             automatic_groups: Mutex::new(BTreeMap::new()),
+            round_robin_groups: Mutex::new(BTreeMap::new()),
             selectors_loaded: AtomicBool::new(false),
             store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
@@ -475,6 +477,26 @@ impl RuntimeState {
         }
         automatic.insert(name.to_owned(), fastest.clone());
         Some(fastest)
+    }
+
+    #[must_use]
+    pub fn round_robin_proxy(&self, name: &str, members: &[String], url: &str) -> Option<String> {
+        if members.is_empty() {
+            return None;
+        }
+        let mut positions = self
+            .round_robin_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let position = positions.entry(name.to_owned()).or_default();
+        for offset in 0..members.len() {
+            let index = (*position + offset) % members.len();
+            if self.proxy_alive_for_url(&members[index], url) {
+                *position = (index + 1) % members.len();
+                return Some(members[index].clone());
+            }
+        }
+        Some(members[0].clone())
     }
 
     #[must_use]
@@ -1277,6 +1299,32 @@ mod tests {
             Some("fast")
         );
         assert_eq!(state.selector_proxy("speed").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn round_robin_skips_unhealthy_members() {
+        let state = RuntimeState::default();
+        let members = vec!["proxy-a".to_owned(), "proxy-b".to_owned()];
+        let url = "http://health.test/";
+        assert_eq!(
+            state
+                .round_robin_proxy("balanced", &members, url)
+                .as_deref(),
+            Some("proxy-a")
+        );
+        assert_eq!(
+            state
+                .round_robin_proxy("balanced", &members, url)
+                .as_deref(),
+            Some("proxy-b")
+        );
+        state.record_proxy_delay("proxy-a", url, 0, false);
+        assert_eq!(
+            state
+                .round_robin_proxy("balanced", &members, url)
+                .as_deref(),
+            Some("proxy-b")
+        );
     }
 
     #[test]

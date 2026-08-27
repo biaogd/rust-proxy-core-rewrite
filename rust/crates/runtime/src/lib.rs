@@ -320,14 +320,18 @@ async fn apply_generation(
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
     state.sync_group_choices(
-        config.proxy_groups.iter().map(|group| {
-            (
-                group.name.as_str(),
-                group.proxies.as_slice(),
-                group.default_selected.as_deref(),
-                group.kind != ProxyGroupKind::Select,
-            )
-        }),
+        config
+            .proxy_groups
+            .iter()
+            .filter(|group| group.kind != ProxyGroupKind::LoadBalance)
+            .map(|group| {
+                (
+                    group.name.as_str(),
+                    group.proxies.as_slice(),
+                    group.default_selected.as_deref(),
+                    group.kind != ProxyGroupKind::Select,
+                )
+            }),
         config.profile.store_selected,
     );
 }
@@ -811,6 +815,9 @@ fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) 
                 &group.test_url,
                 group.tolerance,
             )?,
+            ProxyGroupKind::LoadBalance => {
+                state.round_robin_proxy(&group.name, &group.proxies, &group.test_url)?
+            }
         };
     }
     Some(current)

@@ -147,6 +147,7 @@ jobs:
       PHASE5CFALLBACKCONTROL_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CFALLBACKDELAY_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CURLTEST_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CLOADBALANCE_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -183,6 +184,7 @@ jobs:
           compat/scripts/phase5c_fallback_control.py \
           compat/scripts/phase5c_fallback_delay.py \
           compat/scripts/phase5c_url_test.py \
+          compat/scripts/phase5c_load_balance.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \
