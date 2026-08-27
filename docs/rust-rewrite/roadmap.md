@@ -1370,6 +1370,22 @@ The exact timeout-window reset under scheduler pressure, delayed-handshake
 success reset, SOCKS5 errors, UDP and exhaustive status/error classes remain
 later gates.
 
+### Phase 5C1o accepted scope
+
+Authenticated SOCKS5 members now have black-box evidence through the shared
+automatic-group health path. A fallback group performs real HEAD probes over
+SOCKS5 CONNECT at startup and through the explicit compatible-provider
+healthcheck endpoint, detects a closed member on an eager interval, and uses
+the surviving SOCKS5 member for later mixed-TCP traffic. A separate lazy group
+with `max-failed-times: 99` proves connection refusal still requests an
+immediate coalesced health check and failover. The initiating tunnel remains
+outside the comparison because the oracle schedules that check asynchronously.
+`compat/scripts/phase5c_socks5_health.py` is the acceptance gate.
+
+SOCKS5 health behavior in URL-test/load-balance groups, authentication and
+CONNECT status exhaustiveness, exact failure-window reset, delayed-handshake
+success reset, UDP/UoT and concurrent reload remain later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
