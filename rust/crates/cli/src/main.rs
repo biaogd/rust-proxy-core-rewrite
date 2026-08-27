@@ -60,8 +60,14 @@ struct Arguments {
 
 #[derive(Clone, Debug)]
 enum ConfigInput {
-    File(PathBuf),
-    FrozenYaml(String),
+    File {
+        path: PathBuf,
+        provider_directory: PathBuf,
+    },
+    FrozenYaml {
+        source: String,
+        provider_directory: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -106,13 +112,21 @@ impl ConfigInput {
         age_secret_key: &str,
     ) -> Result<ConfigSpec, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::File(path) => Ok(ConfigSpec::from_yaml_at_path_with_geodata_mode(
+            Self::File {
+                path,
+                provider_directory,
+            } => Ok(ConfigSpec::from_yaml_at_path_with_provider_directory(
                 &decrypt_yaml(std::fs::read(path)?.as_slice(), age_secret_key)?,
                 path,
+                provider_directory,
                 geodata_mode,
             )?),
-            Self::FrozenYaml(source) => Ok(ConfigSpec::from_yaml_with_geodata_mode(
+            Self::FrozenYaml {
+                source,
+                provider_directory,
+            } => Ok(ConfigSpec::from_yaml_with_provider_directory(
                 &decrypt_yaml(source.as_bytes(), age_secret_key)?,
+                provider_directory,
                 geodata_mode,
             )?),
         }
@@ -124,13 +138,21 @@ impl ConfigInput {
         age_secret_key: &str,
     ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::File(path) => Ok(Config::from_yaml_at_path_with_geodata_mode(
+            Self::File {
+                path,
+                provider_directory,
+            } => Ok(Config::from_yaml_at_path_with_provider_directory(
                 &decrypt_yaml(std::fs::read(path)?.as_slice(), age_secret_key)?,
                 path,
+                provider_directory,
                 geodata_mode,
             )?),
-            Self::FrozenYaml(source) => Ok(Config::from_yaml_with_geodata_mode(
+            Self::FrozenYaml {
+                source,
+                provider_directory,
+            } => Ok(Config::from_yaml_with_provider_directory(
                 &decrypt_yaml(source.as_bytes(), age_secret_key)?,
+                provider_directory,
                 geodata_mode,
             )?),
         }
@@ -138,8 +160,8 @@ impl ConfigInput {
 
     fn display_path(&self) -> &Path {
         match self {
-            Self::File(path) => path,
-            Self::FrozenYaml(_) => Path::new("config.yaml"),
+            Self::File { path, .. } => path,
+            Self::FrozenYaml { .. } => Path::new("config.yaml"),
         }
     }
 }
@@ -658,9 +680,15 @@ fn resolve_config_input(
             .collect::<Vec<_>>();
         let decoded = STANDARD.decode(encoded)?;
         if decoded.is_empty() {
-            return Ok(ConfigInput::File(PathBuf::from("config.yaml")));
+            return Ok(ConfigInput::File {
+                path: PathBuf::from("config.yaml"),
+                provider_directory: home_directory,
+            });
         }
-        return Ok(ConfigInput::FrozenYaml(String::from_utf8(decoded)?));
+        return Ok(ConfigInput::FrozenYaml {
+            source: String::from_utf8(decoded)?,
+            provider_directory: home_directory,
+        });
     }
 
     let config_file = arguments
@@ -672,9 +700,15 @@ fn resolve_config_input(
         let mut bytes = Vec::new();
         std::io::stdin().read_to_end(&mut bytes)?;
         if bytes.is_empty() {
-            return Ok(ConfigInput::File(PathBuf::from("config.yaml")));
+            return Ok(ConfigInput::File {
+                path: PathBuf::from("config.yaml"),
+                provider_directory: home_directory,
+            });
         }
-        return Ok(ConfigInput::FrozenYaml(String::from_utf8(bytes)?));
+        return Ok(ConfigInput::FrozenYaml {
+            source: String::from_utf8(bytes)?,
+            provider_directory: home_directory,
+        });
     }
 
     let path = if config_file.is_empty() {
@@ -683,7 +717,10 @@ fn resolve_config_input(
         absolute_from(&current_directory, PathBuf::from(config_file))?
     };
     initialize_config_file(&home_directory, &path)?;
-    Ok(ConfigInput::File(path))
+    Ok(ConfigInput::File {
+        path,
+        provider_directory: home_directory,
+    })
 }
 
 fn initialize_config_file(home_directory: &Path, config_path: &Path) -> std::io::Result<()> {

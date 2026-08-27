@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use ipnet::IpNet;
+use md5::{Digest, Md5};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use prost::Message;
 use regex::Regex;
@@ -778,7 +779,7 @@ impl ConfigSpec {
     /// Returns [`ConfigError`] for malformed YAML, invalid enums, unsupported
     /// proxy specifications or invalid pure rules.
     pub fn from_yaml(source: &str) -> Result<Self, ConfigError> {
-        Self::from_source(source, None, false)
+        Self::from_source(source, None, None, false)
     }
 
     /// Parses YAML with the process-level geodata-mode default selected by
@@ -791,7 +792,20 @@ impl ConfigSpec {
         source: &str,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(source, None, geodata_mode)
+        Self::from_source(source, None, None, geodata_mode)
+    }
+
+    /// Parses YAML with provider paths rooted at the supplied home directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] under the same conditions as [`Self::from_yaml`].
+    pub fn from_yaml_with_provider_directory(
+        source: &str,
+        provider_directory: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        Self::from_source(source, None, Some(provider_directory), geodata_mode)
     }
 
     /// Parses YAML while resolving relative resources from a configuration path.
@@ -804,12 +818,32 @@ impl ConfigSpec {
         path: &Path,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(source, path.parent(), geodata_mode)
+        Self::from_source(source, path.parent(), path.parent(), geodata_mode)
+    }
+
+    /// Parses YAML with separate configuration-resource and provider-home directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] under the same conditions as [`Self::from_yaml`].
+    pub fn from_yaml_at_path_with_provider_directory(
+        source: &str,
+        path: &Path,
+        provider_directory: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        Self::from_source(
+            source,
+            path.parent(),
+            Some(provider_directory),
+            geodata_mode,
+        )
     }
 
     fn from_source(
         source: &str,
         config_directory: Option<&Path>,
+        provider_directory: Option<&Path>,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
         let raw = serde_yaml_ng::from_str::<Option<RawConfig>>(source)?.unwrap_or_default();
@@ -820,7 +854,7 @@ impl ConfigSpec {
         let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default())?;
         let proxy_providers = parse_proxy_providers(
             raw.proxy_providers.unwrap_or_default(),
-            config_directory,
+            provider_directory,
             &proxies,
         )?;
         let proxy_groups = parse_proxy_groups(
@@ -894,7 +928,12 @@ impl ConfigSpec {
     ///
     /// Returns [`ConfigError`] for file I/O or specification errors.
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
-        Self::from_source(&std::fs::read_to_string(path)?, path.parent(), false)
+        Self::from_source(
+            &std::fs::read_to_string(path)?,
+            path.parent(),
+            path.parent(),
+            false,
+        )
     }
 
     /// Reads YAML with the process-level geodata-mode default selected by the
@@ -907,7 +946,12 @@ impl ConfigSpec {
         path: &Path,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(&std::fs::read_to_string(path)?, path.parent(), geodata_mode)
+        Self::from_source(
+            &std::fs::read_to_string(path)?,
+            path.parent(),
+            path.parent(),
+            geodata_mode,
+        )
     }
 
     /// Ensures no top-level feature outside the declared Phase 2 parser surface
@@ -1032,6 +1076,20 @@ impl Config {
         ConfigSpec::from_yaml_with_geodata_mode(source, geodata_mode)?.try_into()
     }
 
+    /// Parses runtime YAML with provider paths rooted at the supplied home directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for specification or runtime-scope errors.
+    pub fn from_yaml_with_provider_directory(
+        source: &str,
+        provider_directory: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        ConfigSpec::from_yaml_with_provider_directory(source, provider_directory, geodata_mode)?
+            .try_into()
+    }
+
     /// Parses runtime YAML while resolving relative resources from a path.
     ///
     /// # Errors
@@ -1043,6 +1101,26 @@ impl Config {
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
         ConfigSpec::from_yaml_at_path_with_geodata_mode(source, path, geodata_mode)?.try_into()
+    }
+
+    /// Parses runtime YAML with provider paths rooted at the CLI home directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for specification or runtime-scope errors.
+    pub fn from_yaml_at_path_with_provider_directory(
+        source: &str,
+        path: &Path,
+        provider_directory: &Path,
+        geodata_mode: bool,
+    ) -> Result<Self, ConfigError> {
+        ConfigSpec::from_yaml_at_path_with_provider_directory(
+            source,
+            path,
+            provider_directory,
+            geodata_mode,
+        )?
+        .try_into()
     }
 
     /// Reads, parses and converts a configuration for the current runtime.
@@ -3761,17 +3839,20 @@ fn parse_proxy_providers(
         }
         let directory =
             config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-        let configured_path = provider
-            .path
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-        let path = directory.join(configured_path);
-        let (vehicle, url, proxies) = match provider.kind.as_deref() {
-            Some("file") if provider.url.is_none() => (
-                ProxyProviderVehicle::File,
-                None,
-                load_proxy_provider_file(&name, &path)?,
-            ),
+        let (vehicle, url, path, proxies) = match provider.kind.as_deref() {
+            Some("file") if provider.url.is_none() => {
+                let configured_path = provider
+                    .path
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                let path = directory.join(configured_path);
+                (
+                    ProxyProviderVehicle::File,
+                    None,
+                    path.clone(),
+                    load_proxy_provider_file(&name, &path)?,
+                )
+            }
             Some("http") => {
                 let url = provider
                     .url
@@ -3782,8 +3863,16 @@ fn parse_proxy_providers(
                 if parsed_url.scheme() != "http" || parsed_url.host_str().is_none() {
                     return Err(ConfigError::UnsupportedProxy(name));
                 }
+                let path = provider.path.filter(|path| !path.is_empty()).map_or_else(
+                    || {
+                        directory
+                            .join("proxies")
+                            .join(format!("{:x}", Md5::digest(url.as_bytes())))
+                    },
+                    |path| directory.join(path),
+                );
                 let cached = load_proxy_provider_file(&name, &path).unwrap_or_default();
-                (ProxyProviderVehicle::Http, Some(url), cached)
+                (ProxyProviderVehicle::Http, Some(url), path, cached)
             }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         };
@@ -5127,6 +5216,23 @@ dns:
         assert_eq!(
             populated.proxy_groups[0].proxies,
             ["REJECT", "provider-http"]
+        );
+
+        let provider_directory = std::env::temp_dir().join("mihomo-provider-home");
+        let without_path = source.replace("    path: providers/remote.yaml\n", "");
+        let defaulted = Config::from_yaml_at_path_with_provider_directory(
+            &without_path,
+            &path,
+            &provider_directory,
+            false,
+        )
+        .expect("default HTTP provider cache path");
+        assert_eq!(
+            defaulted.proxy_providers[0].path,
+            provider_directory.join("proxies").join(format!(
+                "{:x}",
+                Md5::digest(b"http://127.0.0.1:18080/provider.yaml")
+            ))
         );
     }
 

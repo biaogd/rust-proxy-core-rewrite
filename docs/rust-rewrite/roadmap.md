@@ -1266,6 +1266,23 @@ HTTPS, redirect/proxy download policy, global User-Agent interaction, hashed
 default cache paths, ETag database/restart interchange, concurrent refresh and
 provider override expressions remain later gates.
 
+### Phase 5C2f accepted scope
+
+The CLI now passes its resolved Mihomo home directory into the configuration
+layer explicitly for file, base64 and stdin sources. Relative provider paths
+are rooted there, and an HTTP provider without `path` uses the oracle's
+`proxies/<lowercase URL MD5>` default. The validated first download is written
+to that location; a subsequent process loads valid cache bytes before runtime
+startup and does not contact a fresh remote while the configured interval is
+not stale. Controller PUT after restart still replaces members/cache and a
+malformed later response rolls back to that replacement.
+`compat/scripts/phase5c_http_provider_cache.py` compares the exact derived path,
+request count, restart views, selection and TCP routing against Go.
+
+HTTPS, durable ETag metadata, stale-on-start forced refresh, cache permission/
+corruption matrices, provider-aware download routing, concurrent refresh and
+override expressions remain later gates.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with
