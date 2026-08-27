@@ -103,6 +103,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
 | Phase 5C1b selector reload lifecycle | Complete in declared SIGHUP scope; GRP-01/PROV-03 remain partial | Valid choices survive, malformed config rolls back, and removed choices fall back to the first new member exactly like Go |
 | Phase 5C2a local file proxy provider | Complete in declared initial-load HTTP/SOCKS5 TCP scope; PROV-01/GRP-03 remain partial | YAML members, `use` composition, exact File/Compatible provider REST views and selected HTTP routing pass |
+| Phase 5C2b manual file-provider refresh | Complete in declared serial transaction scope; PROV-01/PROV-03 remain partial | PUT atomically replaces members/dependent groups; malformed YAML returns 503 and retains controller/data-plane state |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3788,6 +3789,20 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controll
 
 Manual refresh, file-watch/interval scheduling, HTTP vehicles, filters,
 overrides, health state and persistence are outside this initial-load gate.
+
+Phase 5C2b promotes file reload into the existing controller-to-runtime
+configuration transaction. Parsing, duplicate checks, provider replacement and
+dependent group expansion happen on a clone before publication. Successful PUT
+switches member APIs and live routing together; malformed YAML never reaches
+the active generation and produces the oracle's 503 class.
+
+```sh
+PHASE5CPROVIDERREFRESH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_provider_refresh.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Concurrent refresh/coalescing, old live-connection cleanup, intervals/file
+watching, HTTP vehicles, durable cache and health scheduling remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

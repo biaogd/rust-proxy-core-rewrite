@@ -117,6 +117,7 @@ pub struct ProxyGroupConfig {
     pub name: String,
     pub proxies: Vec<String>,
     pub compatible_proxies: Vec<String>,
+    pub providers: Vec<String>,
     pub default_selected: Option<String>,
 }
 
@@ -985,6 +986,58 @@ impl Config {
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
         ConfigSpec::from_path_with_geodata_mode(path, geodata_mode)?.try_into()
+    }
+
+    /// Re-reads one configured local proxy-provider and rebuilds dependent
+    /// selector membership without changing the active value on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] for missing providers, file/YAML failures,
+    /// unsupported proxy records or duplicate names.
+    pub fn reload_proxy_provider(&self, name: &str) -> Result<Self, ConfigError> {
+        let mut next = self.clone();
+        let index = next
+            .proxy_providers
+            .iter()
+            .position(|provider| provider.name == name)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        let path = next.proxy_providers[index].path.clone();
+        let proxies = load_proxy_provider_file(name, &path)?;
+        let mut occupied: BTreeSet<_> = next
+            .proxies
+            .iter()
+            .map(|proxy| proxy.name.clone())
+            .chain(
+                next.proxy_providers
+                    .iter()
+                    .enumerate()
+                    .filter(|(candidate, _)| *candidate != index)
+                    .flat_map(|(_, provider)| {
+                        provider.proxies.iter().map(|proxy| proxy.name.clone())
+                    }),
+            )
+            .collect();
+        if proxies
+            .iter()
+            .any(|proxy| !occupied.insert(proxy.name.clone()))
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        next.proxy_providers[index].proxies = proxies;
+        for group in &mut next.proxy_groups {
+            let mut members = group.compatible_proxies.clone();
+            for provider_name in &group.providers {
+                let provider = next
+                    .proxy_providers
+                    .iter()
+                    .find(|provider| provider.name == *provider_name)
+                    .ok_or_else(|| ConfigError::UnsupportedProxy(group.name.clone()))?;
+                members.extend(provider.proxies.iter().map(|proxy| proxy.name.clone()));
+            }
+            group.proxies = members;
+        }
+        Ok(next)
     }
 
     /// Converts the parsed integer into a bindable runtime port.
@@ -3187,10 +3240,11 @@ fn parse_proxy_groups(
         }
         let compatible_proxies = group.proxies.unwrap_or_default();
         let mut members = compatible_proxies.clone();
-        for provider_name in group.providers.unwrap_or_default() {
+        let provider_names = group.providers.unwrap_or_default();
+        for provider_name in &provider_names {
             let provider = providers
                 .iter()
-                .find(|provider| provider.name == provider_name)
+                .find(|provider| provider.name == *provider_name)
                 .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
             members.extend(provider.proxies.iter().map(|proxy| proxy.name.clone()));
         }
@@ -3210,6 +3264,7 @@ fn parse_proxy_groups(
             name,
             proxies: members,
             compatible_proxies,
+            providers: provider_names,
             default_selected: group.default_selected,
         });
     }
@@ -3235,17 +3290,10 @@ fn parse_proxy_providers(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
         let path = directory.join(configured_path);
-        let source = std::fs::read_to_string(&path)?;
-        let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(&source)?;
-        if !file.extra.is_empty() {
-            return Err(ConfigError::UnsupportedProxy(name));
-        }
-        let (rematches, proxies) = parse_proxies(file.proxies.unwrap_or_default())?;
-        if !rematches.is_empty()
-            || proxies.is_empty()
-            || proxies
-                .iter()
-                .any(|proxy| !names.insert(proxy.name.clone()))
+        let proxies = load_proxy_provider_file(&name, &path)?;
+        if proxies
+            .iter()
+            .any(|proxy| !names.insert(proxy.name.clone()))
         {
             return Err(ConfigError::UnsupportedProxy(name));
         }
@@ -3256,6 +3304,19 @@ fn parse_proxy_providers(
         });
     }
     Ok(parsed)
+}
+
+fn load_proxy_provider_file(name: &str, path: &Path) -> Result<Vec<ProxyConfig>, ConfigError> {
+    let source = std::fs::read_to_string(path)?;
+    let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(&source)?;
+    if !file.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let (rematches, proxies) = parse_proxies(file.proxies.unwrap_or_default())?;
+    if !rematches.is_empty() || proxies.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(proxies)
 }
 
 #[cfg(test)]

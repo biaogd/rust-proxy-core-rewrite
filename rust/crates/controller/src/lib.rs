@@ -1017,19 +1017,31 @@ async fn update_proxy_provider(
     Path(provider): Path<String>,
 ) -> Response {
     let config = state.current_config();
-    if provider != "default"
-        && !config
-            .proxy_providers
-            .iter()
-            .any(|candidate| candidate.name == provider)
-        && !config
+    if provider == "default"
+        || config
             .proxy_groups
             .iter()
             .any(|candidate| candidate.name == provider)
     {
+        return empty_response(StatusCode::NO_CONTENT);
+    }
+    if !config
+        .proxy_providers
+        .iter()
+        .any(|candidate| candidate.name == provider)
+    {
         return proxy_not_found();
     }
-    empty_response(StatusCode::NO_CONTENT)
+    let next = match config.reload_proxy_provider(&provider) {
+        Ok(next) => next,
+        Err(error) => {
+            return json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"message": error.to_string()}),
+            );
+        }
+    };
+    apply_config_update(&state, next).await
 }
 
 async fn healthcheck_proxy_provider(

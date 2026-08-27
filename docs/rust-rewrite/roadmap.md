@@ -1199,6 +1199,18 @@ file modification time. Group-compatible providers expose only explicit
 Refresh mutation, HTTP vehicles, filters/overrides and persistence remain later
 gates.
 
+### Phase 5C2b accepted scope
+
+Manual `PUT /providers/proxies/{name}` refresh reuses the owned configuration
+generation transaction. The file is parsed and globally validated first;
+provider members and every dependent selector are rebuilt in a cloned config,
+then published together. A successful refresh removes old member lookups and
+enables selection/routing through the replacement. File, YAML or duplicate
+errors return 503 without changing controller views, selection or data-plane
+behavior. `compat/scripts/phase5c_provider_refresh.py` compares this lifecycle.
+Concurrent/coalesced refresh, connection cleanup, scheduled/file-watch refresh,
+HTTP vehicles and persistence remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
