@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
 use std::future::pending;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Empty, Limited};
+use hyper::client::conn::http1;
+use hyper_util::rt::TokioIo;
 use rand::RngExt;
 use rewrite_config::{
     Config, ConfigError, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy, Mode,
-    ProxyGroupKind, ProxyKind,
+    ProxyGroupKind, ProxyKind, ProxyProviderVehicle,
 };
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
@@ -285,9 +290,121 @@ async fn run_group_health_scheduler(
     }
 }
 
+const HTTP_PROVIDER_LIMIT: usize = 4 * 1024 * 1024;
+const HTTP_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn hydrate_http_proxy_providers(config: &mut Config, state: &RuntimeState) {
+    let pending: Vec<_> = config
+        .proxy_providers
+        .iter()
+        .filter(|provider| {
+            provider.vehicle == ProxyProviderVehicle::Http && provider.proxies.is_empty()
+        })
+        .filter_map(|provider| {
+            Some((
+                provider.name.clone(),
+                provider.url.clone()?,
+                provider.path.clone(),
+            ))
+        })
+        .collect();
+    for (name, url, path) in pending {
+        let result = async {
+            let payload =
+                tokio::time::timeout(HTTP_PROVIDER_TIMEOUT, fetch_http_proxy_provider(&url))
+                    .await
+                    .map_err(|_| "provider HTTP request timed out".to_owned())??;
+            let source = std::str::from_utf8(&payload)
+                .map_err(|error| format!("provider payload is not UTF-8: {error}"))?;
+            let next = config
+                .replace_proxy_provider_source(&name, source)
+                .map_err(|error| error.to_string())?;
+            persist_http_proxy_provider(&path, &payload).map_err(|error| error.to_string())?;
+            Ok::<Config, String>(next)
+        }
+        .await;
+        match result {
+            Ok(next) => {
+                *config = next;
+                state.log("info", format!("initial proxy provider {name} loaded"));
+            }
+            Err(error) => state.log(
+                "error",
+                format!("initial proxy provider {name} error: {error}"),
+            ),
+        }
+    }
+}
+
+async fn fetch_http_proxy_provider(raw_url: &str) -> Result<Vec<u8>, String> {
+    let url = url::Url::parse(raw_url).map_err(|error| error.to_string())?;
+    if url.scheme() != "http" {
+        return Err("only plaintext HTTP provider URLs are in scope".to_owned());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "provider URL has no host".to_owned())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "provider URL has no port".to_owned())?;
+    let server = Destination {
+        host: host
+            .parse()
+            .map_or_else(|_| Host::Domain(host.to_owned()), Host::Ip),
+        port,
+    };
+    let stream = rewrite_outbound::connect(&server, true)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut target = url.path().to_owned();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = url
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+    let request = hyper::Request::builder()
+        .method(hyper::Method::GET)
+        .uri(target)
+        .header(hyper::header::HOST, authority)
+        .body(Empty::<Bytes>::new())
+        .map_err(|error| error.to_string())?;
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("provider HTTP status {}", response.status()));
+    }
+    Limited::new(response.into_body(), HTTP_PROVIDER_LIMIT)
+        .collect()
+        .await
+        .map(|body| body.to_bytes().to_vec())
+        .map_err(|error| error.to_string())
+}
+
+fn persist_http_proxy_provider(path: &Path, payload: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, payload)?;
+    std::fs::rename(temporary, path)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_generation(
-    next: Config,
+    mut next: Config,
     config_sender: &watch::Sender<Arc<Config>>,
     config_receiver: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
@@ -297,6 +414,7 @@ async fn apply_generation(
     controller: &mut Option<(SocketAddr, RuntimeTask)>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
+    hydrate_http_proxy_providers(&mut next, state).await;
     let desired_listeners = next.listener_ports()?;
     let desired_controller = next.controller_addr()?;
     let desired_dns = next.dns.as_ref().map(|config| config.listen);

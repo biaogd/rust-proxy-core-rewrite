@@ -1213,6 +1213,22 @@ behavior. `compat/scripts/phase5c_provider_refresh.py` compares this lifecycle.
 Concurrent/coalesced refresh, connection cleanup, scheduled/file-watch refresh,
 HTTP vehicles and persistence remain separate gates.
 
+### Phase 5C2c accepted scope
+
+The first HTTP proxy-provider vehicle accepts a plaintext local URL plus an
+explicit cache path. Runtime startup uses Hyper HTTP/1 to fetch an absent
+cache through the direct dial path with a four-MiB body bound, parses and
+duplicate-checks the complete YAML before publication, atomically writes the
+validated bytes, rebuilds dependent group membership and exposes the oracle's
+HTTP vehicle REST view. `compat/scripts/phase5c_http_provider.py` runs a local
+HTTP authority and authenticated CONNECT proxy, observes the GET target,
+cache bytes, provider/group/member views, controller selection and mixed-TCP
+routing on Go and Rust.
+
+HTTPS, optional hashed paths, headers, size-limit configuration, provider
+proxy/rule routing, stale-cache refresh, intervals, ETag, manual remote update,
+failure rollback and concurrent lifecycle behavior remain later gates.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with

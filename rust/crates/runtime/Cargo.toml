@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-controller = { path = "../controller" }
 rewrite-dns = { path = "../dns" }
@@ -20,6 +24,7 @@ psl.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

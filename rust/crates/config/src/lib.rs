@@ -166,8 +166,16 @@ pub enum LoadBalanceStrategy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyProviderConfig {
     pub name: String,
+    pub vehicle: ProxyProviderVehicle,
     pub path: PathBuf,
+    pub url: Option<String>,
     pub proxies: Vec<ProxyConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyProviderVehicle {
+    File,
+    Http,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -713,6 +721,7 @@ struct RawProxyProvider {
     #[serde(rename = "type")]
     kind: Option<String>,
     path: Option<String>,
+    url: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1057,14 +1066,43 @@ impl Config {
     /// Returns [`ConfigError`] for missing providers, file/YAML failures,
     /// unsupported proxy records or duplicate names.
     pub fn reload_proxy_provider(&self, name: &str) -> Result<Self, ConfigError> {
-        let mut next = self.clone();
-        let index = next
+        let index = self
             .proxy_providers
             .iter()
             .position(|provider| provider.name == name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-        let path = next.proxy_providers[index].path.clone();
+        let path = self.proxy_providers[index].path.clone();
         let proxies = load_proxy_provider_file(name, &path)?;
+        self.replace_proxy_provider(index, proxies)
+    }
+
+    /// Parses downloaded provider YAML and rebuilds every dependent group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] without changing this generation when the
+    /// payload is invalid or introduces duplicate proxy names.
+    pub fn replace_proxy_provider_source(
+        &self,
+        name: &str,
+        source: &str,
+    ) -> Result<Self, ConfigError> {
+        let index = self
+            .proxy_providers
+            .iter()
+            .position(|provider| provider.name == name)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        let proxies = parse_proxy_provider_source(name, source)?;
+        self.replace_proxy_provider(index, proxies)
+    }
+
+    fn replace_proxy_provider(
+        &self,
+        index: usize,
+        proxies: Vec<ProxyConfig>,
+    ) -> Result<Self, ConfigError> {
+        let mut next = self.clone();
+        let name = next.proxy_providers[index].name.clone();
         let mut occupied: BTreeSet<_> = next
             .proxies
             .iter()
@@ -1083,7 +1121,7 @@ impl Config {
             .iter()
             .any(|proxy| !occupied.insert(proxy.name.clone()))
         {
-            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+            return Err(ConfigError::UnsupportedProxy(name));
         }
         next.proxy_providers[index].proxies = proxies;
         let providers = next.proxy_providers.clone();
@@ -3710,8 +3748,7 @@ fn parse_proxy_providers(
     let mut names: BTreeSet<_> = top_level.iter().map(|proxy| proxy.name.clone()).collect();
     let mut parsed = Vec::new();
     for (name, provider) in providers {
-        if name.is_empty() || provider.kind.as_deref() != Some("file") || !provider.extra.is_empty()
-        {
+        if name.is_empty() || !provider.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name));
         }
         let directory =
@@ -3721,7 +3758,27 @@ fn parse_proxy_providers(
             .filter(|path| !path.is_empty())
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
         let path = directory.join(configured_path);
-        let proxies = load_proxy_provider_file(&name, &path)?;
+        let (vehicle, url, proxies) = match provider.kind.as_deref() {
+            Some("file") if provider.url.is_none() => (
+                ProxyProviderVehicle::File,
+                None,
+                load_proxy_provider_file(&name, &path)?,
+            ),
+            Some("http") => {
+                let url = provider
+                    .url
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                let parsed_url =
+                    Url::parse(&url).map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
+                if parsed_url.scheme() != "http" || parsed_url.host_str().is_none() {
+                    return Err(ConfigError::UnsupportedProxy(name));
+                }
+                let cached = load_proxy_provider_file(&name, &path).unwrap_or_default();
+                (ProxyProviderVehicle::Http, Some(url), cached)
+            }
+            _ => return Err(ConfigError::UnsupportedProxy(name)),
+        };
         if proxies
             .iter()
             .any(|proxy| !names.insert(proxy.name.clone()))
@@ -3730,7 +3787,9 @@ fn parse_proxy_providers(
         }
         parsed.push(ProxyProviderConfig {
             name,
+            vehicle,
             path,
+            url,
             proxies,
         });
     }
@@ -3739,7 +3798,11 @@ fn parse_proxy_providers(
 
 fn load_proxy_provider_file(name: &str, path: &Path) -> Result<Vec<ProxyConfig>, ConfigError> {
     let source = std::fs::read_to_string(path)?;
-    let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(&source)?;
+    parse_proxy_provider_source(name, &source)
+}
+
+fn parse_proxy_provider_source(name: &str, source: &str) -> Result<Vec<ProxyConfig>, ConfigError> {
+    let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(source)?;
     if !file.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -4916,7 +4979,9 @@ dns:
     fn expands_filtered_provider_members_in_pattern_order() {
         let provider = ProxyProviderConfig {
             name: "local-file".to_owned(),
+            vehicle: ProxyProviderVehicle::File,
             path: PathBuf::from("provider.yaml"),
+            url: None,
             proxies: ["provider-alpha", "provider-beta", "provider-omit"]
                 .into_iter()
                 .map(|name| ProxyConfig {
@@ -4965,7 +5030,9 @@ dns:
     fn filtered_empty_provider_uses_configured_fallback() {
         let provider = ProxyProviderConfig {
             name: "local-file".to_owned(),
+            vehicle: ProxyProviderVehicle::File,
             path: PathBuf::from("provider.yaml"),
+            url: None,
             proxies: vec![ProxyConfig {
                 name: "provider-alpha".to_owned(),
                 kind: ProxyKind::Http,
@@ -5004,6 +5071,35 @@ dns:
         assert_eq!(
             expand_proxy_group(&group, &[provider], &types).expect("empty fallback"),
             ["REJECT"]
+        );
+    }
+
+    #[test]
+    fn parses_and_populates_initial_http_proxy_provider() {
+        let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [REJECT]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
+        let path = std::env::temp_dir().join("mihomo-http-provider-config.yaml");
+        let config = Config::from_yaml_at_path_with_geodata_mode(source, &path, false)
+            .expect("HTTP provider declaration");
+        assert_eq!(
+            config.proxy_providers[0].vehicle,
+            ProxyProviderVehicle::Http
+        );
+        assert!(config.proxy_providers[0].proxies.is_empty());
+        assert_eq!(config.proxy_groups[0].proxies, ["REJECT"]);
+
+        let populated = config
+            .replace_proxy_provider_source(
+                "remote",
+                "proxies:\n  - name: provider-http\n    type: http\n    server: 127.0.0.1\n    port: 8080\n",
+            )
+            .expect("downloaded provider payload");
+        assert_eq!(
+            populated.proxy_providers[0].proxies[0].name,
+            "provider-http"
+        );
+        assert_eq!(
+            populated.proxy_groups[0].proxies,
+            ["REJECT", "provider-http"]
         );
     }
 

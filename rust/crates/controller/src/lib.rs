@@ -1406,10 +1406,14 @@ fn file_proxy_provider_snapshot(
         .ok()
         .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok())
         .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned());
+    let vehicle_type = match provider.vehicle {
+        rewrite_config::ProxyProviderVehicle::File => "File",
+        rewrite_config::ProxyProviderVehicle::Http => "HTTP",
+    };
     json!({
         "name": provider.name,
         "type": "Proxy",
-        "vehicleType": "File",
+        "vehicleType": vehicle_type,
         "proxies": proxies,
         "testUrl": "",
         "expectedStatus": "*",
