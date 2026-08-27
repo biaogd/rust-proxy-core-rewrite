@@ -13,6 +13,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LogEvent {
@@ -97,7 +98,7 @@ pub struct RuntimeState {
     next_id: AtomicU64,
     uploaded: AtomicU64,
     downloaded: AtomicU64,
-    connections: Mutex<BTreeMap<u64, ConnectionInfo>>,
+    connections: Mutex<BTreeMap<u64, ActiveConnection>>,
     logs: broadcast::Sender<LogEvent>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
@@ -107,6 +108,12 @@ pub struct RuntimeState {
 struct DnsMapping {
     host: String,
     recency: u64,
+}
+
+#[derive(Debug)]
+struct ActiveConnection {
+    info: ConnectionInfo,
+    cancellation: CancellationToken,
 }
 
 #[derive(Debug, Default)]
@@ -152,13 +159,21 @@ impl RuntimeState {
             rule: rule.unwrap_or_default().to_owned(),
             rule_payload: String::new(),
         };
+        let cancellation = CancellationToken::new();
         self.connections
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, info);
+            .insert(
+                id,
+                ActiveConnection {
+                    info,
+                    cancellation: cancellation.clone(),
+                },
+            );
         ConnectionGuard {
             id,
             state: Arc::clone(self),
+            cancellation,
         }
     }
 
@@ -169,7 +184,7 @@ impl RuntimeState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .cloned()
+            .map(|connection| connection.info.clone())
             .collect();
         ConnectionSnapshot {
             download_total: self.downloaded.load(Ordering::Relaxed),
@@ -186,6 +201,38 @@ impl RuntimeState {
             down: 0,
             up_total: self.uploaded.load(Ordering::Relaxed),
             down_total: self.downloaded.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Cancels one live connection by its public controller identifier.
+    pub fn close_connection(&self, public_id: &str) {
+        let cancellation = {
+            let mut connections = self
+                .connections
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let id = connections
+                .iter()
+                .find_map(|(id, connection)| (connection.info.id == public_id).then_some(*id));
+            id.and_then(|id| connections.remove(&id))
+                .map(|connection| connection.cancellation)
+        };
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
+    }
+
+    /// Cancels every connection present at the start of this operation.
+    pub fn close_all_connections(&self) {
+        let cancellations: Vec<_> = self
+            .connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extract_if(.., |_, _| true)
+            .map(|(_, connection)| connection.cancellation)
+            .collect();
+        for cancellation in cancellations {
+            cancellation.cancel();
         }
     }
 
@@ -682,9 +729,14 @@ fn number_to_ip(number: u128, network: IpNet) -> IpAddr {
 pub struct ConnectionGuard {
     id: u64,
     state: Arc<RuntimeState>,
+    cancellation: CancellationToken,
 }
 
 impl ConnectionGuard {
+    pub async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+
     pub fn finish(&self, uploaded: u64, downloaded: u64) {
         self.state.uploaded.fetch_add(uploaded, Ordering::Relaxed);
         self.state
@@ -697,8 +749,8 @@ impl ConnectionGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&self.id)
         {
-            info.upload = uploaded;
-            info.download = downloaded;
+            info.info.upload = uploaded;
+            info.info.download = downloaded;
         }
     }
 }

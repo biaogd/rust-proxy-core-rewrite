@@ -250,7 +250,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | Phase 3 declared GET field subset only; all mutation/geo surfaces are not started |
 | `/proxies`, `/group`, delay and selection | Oracle | Not started | JSON, mutation and local health server |
 | `/rules` and disable operation | Oracle | Not started | Ordering/statistics/mutation |
-| `/connections` stream/list/delete | Oracle | Partial | GET snapshot/tracker/totals plus query-token and Bearer WebSocket snapshots/interval parsing pass; DELETE one/all remain unclaimed |
+| `/connections` stream/list/delete | Oracle | **Parity** | Current local TCP tracking, totals, query-token/Bearer WebSocket snapshots and interval plus DELETE one/missing/all with live tunnel closure pass in Phase 3 and `phase5d_streams.py`/`phase5d_connections.py` |
 | Proxy and rule provider APIs | Oracle | Not started | Refresh, health and error behavior |
 | Cache, DNS and storage APIs | Oracle | Partial | Phase 4F15 completes `/dns/query` and both cache flush routes on the declared TCP controller; the Axum/Hyper refactor re-passes 4D4/4F14/4F15 status, method, header, body and side-effect differentials; `/storage` remains unimplemented |
 | Restart and upgrade APIs | Oracle | Not started | Subprocess/re-exec/download fixtures |
@@ -331,7 +331,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
-| Darwin arm64 — Phase 5D controller observability streams | Oracle | **Parity** | Native HTTP/WS memory, traffic, logs and connections plus Bearer/query-token auth differential passed, 2026-08-27 |
+| Darwin arm64 — Phase 5D controller observability/connections | Oracle | **Parity** | Native HTTP/WS streams, Bearer/query-token auth and single/all live connection deletion differentials passed, 2026-08-27 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -377,7 +377,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A7b local-resource shutdown | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5B aggregate local rules | Oracle | Pending | Default aggregate rule differentials are configured; no result is claimed before completion |
-| Linux amd64 — Phase 5D controller observability streams | Oracle | Pending | Default HTTP/WebSocket stream differential is configured; no result is claimed before completion |
+| Linux amd64 — Phase 5D controller observability/connections | Oracle | Pending | Default HTTP/WebSocket stream and live connection deletion differentials are configured; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |

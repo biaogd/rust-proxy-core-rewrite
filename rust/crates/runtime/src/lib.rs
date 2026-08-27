@@ -9,7 +9,7 @@ use rewrite_config::{Config, ConfigError, DnsMode, HostEntry, ListenerKind};
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
-use rewrite_state::RuntimeState;
+use rewrite_state::{ConnectionGuard, RuntimeState};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -656,20 +656,27 @@ async fn serve_connection(
             }
         }
     };
-    let mut client = accepted.client;
+    let client = accepted.client;
     if !accepted.preface.is_empty() && remote.write_all(&accepted.preface).await.is_err() {
         return;
     }
 
+    relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
+}
+
+async fn relay_tracked_tcp(
+    mut client: TcpStream,
+    mut remote: TcpStream,
+    tracker: ConnectionGuard,
+    state: &RuntimeState,
+    shutdown: &CancellationToken,
+) {
     tokio::select! {
         () = shutdown.cancelled() => {}
-        result = rewrite_net::relay(&mut client, &mut remote) => {
-            match result {
-                Ok((uploaded, downloaded)) => tracker.finish(uploaded, downloaded),
-                Err(error) => {
-                    state.log("error", format!("TCP relay failed: {error}"));
-                }
-            }
+        () = tracker.cancelled() => {}
+        result = rewrite_net::relay(&mut client, &mut remote) => match result {
+            Ok((uploaded, downloaded)) => tracker.finish(uploaded, downloaded),
+            Err(error) => state.log("error", format!("TCP relay failed: {error}")),
         }
     }
 }

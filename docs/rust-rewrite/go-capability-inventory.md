@@ -231,7 +231,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | API-04 | `/configs` GET/PUT/PATCH and `/configs/geo` | Partial GET subset | 5D5 |
 | API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Not started | 5D7 |
 | API-06 | `/rules` list/statistics and disable mutation | Not started | 5D8 |
-| API-07 | `/connections` list/WebSocket/delete-one/delete-all | Partial list/WebSocket subset | 5D9 |
+| API-07 | `/connections` list/WebSocket/delete-one/delete-all | Complete on current local TCP controller surface | 5D9 |
 | API-08 | Proxy/rule provider list/detail/update/health endpoints | Not started | 5D10 |
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
 | API-10 | `/storage/{key}` GET/PUT/DELETE | Not started | 5D11 |

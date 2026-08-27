@@ -1025,7 +1025,7 @@ normalization, plus pure IPv6 suffix hit/miss/source and invalid-width cases.
 Native IPv6 live routing, sniffer/static-tunnel contexts and exhaustive resolver
 instrumentation remain later contextual gates.
 
-### Phase 5D aggregate controller observability accepted scope
+### Phase 5D aggregate controller observability and connections accepted scope
 
 This aggregate gate advances `API-02`, `API-03`, `API-07` and `RUN-06` through
 one shared read-only controller boundary. Axum owns the WebSocket handshake and
@@ -1038,10 +1038,15 @@ supports its millisecond interval query.
 
 Acceptance compares handshake status/headers, first-frame JSON shapes, both
 authorization forms and one live TCP log event in
-`compat/scripts/phase5d_streams.py`. CORS and controller configuration parsing,
-real process-memory accounting, structured logs, exhaustive level/cadence/
-backpressure behavior, connection deletion and all mutation APIs remain later
-5D gates.
+`compat/scripts/phase5d_streams.py`. The same aggregate controller family also
+completes the current local-TCP `API-07` boundary: deleting a returned ID closes
+only that live tunnel, deleting a missing ID remains idempotent, and deleting
+the collection closes every tracked tunnel and clears the snapshot. These
+side effects are compared in `compat/scripts/phase5d_connections.py`.
+
+CORS and controller configuration parsing, real process-memory accounting,
+structured logs, exhaustive level/cadence/backpressure behavior and mutation
+APIs outside the completed connections row remain later 5D gates.
 
 ## Phase 6 — established remote protocols
 

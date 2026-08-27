@@ -7,11 +7,11 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{any, get};
+use axum::routing::{any, delete, get};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{StreamExt, stream};
@@ -72,8 +72,15 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/version", get(version))
         .route("/configs", get(configs))
         .route("/configs/", get(configs))
-        .route("/connections", get(connections))
-        .route("/connections/", get(connections))
+        .route(
+            "/connections",
+            get(connections).delete(close_all_connections),
+        )
+        .route(
+            "/connections/",
+            get(connections).delete(close_all_connections),
+        )
+        .route("/connections/{id}", delete(close_connection))
         .route("/traffic", get(traffic))
         .route("/memory", get(memory))
         .route("/logs", get(logs))
@@ -221,6 +228,19 @@ async fn connections(
         return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
     };
     websocket.on_upgrade(move |socket| connections_websocket(socket, state, interval))
+}
+
+async fn close_connection(
+    State(state): State<ControllerState>,
+    Path(public_id): Path<String>,
+) -> Response {
+    state.runtime.close_connection(&public_id);
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn close_all_connections(State(state): State<ControllerState>) -> Response {
+    state.runtime.close_all_connections();
+    empty_response(StatusCode::NO_CONTENT)
 }
 
 async fn flush_dns_cache(State(state): State<ControllerState>, method: Method) -> Response {
