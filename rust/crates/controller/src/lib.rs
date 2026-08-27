@@ -1439,9 +1439,11 @@ async fn flush_fake_ip_cache(State(state): State<ControllerState>, method: Metho
     }
     let config = state.current_config();
     if let Some(fake) = config.dns.as_ref().and_then(|dns| dns.fake_ip.as_ref()) {
-        state
-            .runtime
-            .flush_fake_ips(fake.ipv4_range, fake.ipv6_range, config.store_fake_ip);
+        state.runtime.flush_fake_ips(
+            fake.ipv4_range,
+            fake.ipv6_range,
+            config.profile.store_fake_ip,
+        );
     }
     empty_response(StatusCode::NO_CONTENT)
 }

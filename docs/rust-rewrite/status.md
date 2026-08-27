@@ -107,6 +107,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
 | Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
 | Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
+| Phase 5C1f selector persistence | Complete in declared restart/interchange scope; GRP-01 remains partial | Default-enabled and explicitly disabled restart behavior plus Go→Rust→Go bbolt `selected` bucket interchange and live routing pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3863,6 +3864,22 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controll
 
 Future adapter types join this filter only with their owning protocol slice;
 automatic-group health policy remains separate.
+
+Phase 5C1f moves configured selector choices from process-only state into the
+profile's existing bbolt `cache.db`. `profile.store-selected` defaults to true,
+matching Go, and false suppresses both writes and restart restoration. State is
+loaded before selector membership reconciliation so stale or removed choices
+cannot escape the active configuration. The differential first proves isolated
+Go and Rust restart/reset sequences, then has Go select the HTTP member, Rust
+restore and replace it with REJECT, and Go restore that Rust-written value.
+
+```sh
+PHASE5CSELECTORPERSIST_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_selector_persistence.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Malformed-database recovery, simultaneous profile writers and persistence of
+future automatic-group health state remain unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

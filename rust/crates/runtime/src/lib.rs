@@ -259,13 +259,7 @@ async fn apply_generation(
         None
     };
 
-    state.sync_selectors(next.proxy_groups.iter().map(|group| {
-        (
-            group.name.as_str(),
-            group.proxies.as_slice(),
-            group.default_selected.as_deref(),
-        )
-    }));
+    sync_selector_state(state, &next);
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
@@ -320,6 +314,19 @@ async fn apply_generation(
         }
     }
     Ok(())
+}
+
+fn sync_selector_state(state: &RuntimeState, config: &Config) {
+    state.sync_selectors(
+        config.proxy_groups.iter().map(|group| {
+            (
+                group.name.as_str(),
+                group.proxies.as_slice(),
+                group.default_selected.as_deref(),
+            )
+        }),
+        config.profile.store_selected,
+    );
 }
 
 async fn apply_controller_task(
@@ -911,7 +918,8 @@ fn apply_host_mapping(
                     fake.ipv6_range
                 };
                 if let Some(network) = network
-                    && let Some(host) = state.lookup_fake_ip(network, address, config.store_fake_ip)
+                    && let Some(host) =
+                        state.lookup_fake_ip(network, address, config.profile.store_fake_ip)
                 {
                     metadata.host.clone_from(&host);
                     metadata.destination.host = Host::Domain(host.clone());

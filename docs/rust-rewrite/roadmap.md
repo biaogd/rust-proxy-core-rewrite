@@ -1245,6 +1245,19 @@ retain the pre-filter explicit inventory exactly like the oracle. Acceptance in
 views and DIRECT versus authenticated SOCKS5 wire routing. Later protocol types
 and automatic health strategies remain separate gates.
 
+### Phase 5C1f accepted scope
+
+Configured selector choices persist across clean process restarts when
+`profile.store-selected` is enabled (the Go-compatible default), and disabling
+that setting keeps mutations process-local. Rust reads and writes the
+`selected` bucket in the same profile bbolt `cache.db` already used by the Go
+oracle and fake-IP persistence. Acceptance in
+`compat/scripts/phase5c_selector_persistence.py` proves each implementation's
+own restart lifecycle and both Go→Rust and Rust→Go file interchange while also
+observing REJECT versus authenticated HTTP TCP routing. Malformed-database
+recovery, concurrent writers and automatic group health state remain separate
+gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

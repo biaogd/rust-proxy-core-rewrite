@@ -821,7 +821,7 @@ impl Resolver {
                 _ => None,
             };
             let address = network.map(|network| {
-                state.allocate_fake_ip(network, &question.name, config.store_fake_ip)
+                state.allocate_fake_ip(network, &question.name, config.profile.store_fake_ip)
             });
             return Ok(fake_ip_response(query, &question, address, fake.ttl));
         }

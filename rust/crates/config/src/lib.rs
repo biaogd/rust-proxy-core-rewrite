@@ -60,7 +60,7 @@ pub struct ConfigSpec {
     pub external_doh_server: String,
     pub secret: String,
     pub controller_cors: ControllerCors,
-    pub store_fake_ip: bool,
+    pub profile: ProfileConfig,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub raw_rules: Vec<String>,
@@ -87,7 +87,7 @@ pub struct Config {
     pub external_doh_server: String,
     pub secret: String,
     pub controller_cors: ControllerCors,
-    pub store_fake_ip: bool,
+    pub profile: ProfileConfig,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub proxies: Vec<ProxyConfig>,
@@ -100,6 +100,12 @@ pub struct Config {
 pub enum ProxyKind {
     Http,
     Socks5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProfileConfig {
+    pub store_fake_ip: bool,
+    pub store_selected: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -616,6 +622,7 @@ struct RawRuleProvider {
 #[serde(rename_all = "kebab-case")]
 struct RawProfile {
     store_fake_ip: Option<bool>,
+    store_selected: Option<bool>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -768,7 +775,7 @@ impl ConfigSpec {
             .collect();
         let rules =
             RuleSet::parse_with_targets(&raw_rules, &raw_sub_rules, &rematches, &proxy_targets)?;
-        let store_fake_ip = parse_profile(raw.profile)?;
+        let profile = parse_profile(raw.profile)?;
         let trust_certificates = parse_tls(raw.tls)?;
         let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
@@ -807,7 +814,7 @@ impl ConfigSpec {
             external_doh_server: raw.external_doh_server.unwrap_or_default(),
             secret: raw.secret.unwrap_or_default(),
             controller_cors,
-            store_fake_ip,
+            profile,
             dns,
             hosts: parse_hosts(raw.hosts.unwrap_or_default())?,
             raw_rules,
@@ -930,7 +937,7 @@ impl TryFrom<ConfigSpec> for Config {
             external_doh_server: spec.external_doh_server,
             secret: spec.secret,
             controller_cors: spec.controller_cors,
-            store_fake_ip: spec.store_fake_ip,
+            profile: spec.profile,
             dns: spec.dns,
             hosts: spec.hosts,
             proxies: spec.proxies,
@@ -1155,14 +1162,20 @@ fn parse_controller_cors(raw: Option<RawControllerCors>) -> ControllerCors {
     }
 }
 
-fn parse_profile(raw: Option<RawProfile>) -> Result<bool, ConfigError> {
+fn parse_profile(raw: Option<RawProfile>) -> Result<ProfileConfig, ConfigError> {
     let Some(raw) = raw else {
-        return Ok(false);
+        return Ok(ProfileConfig {
+            store_fake_ip: false,
+            store_selected: true,
+        });
     };
     if let Some(key) = raw.extra.into_keys().next() {
         return Err(ConfigError::UnsupportedKey(format!("profile.{key}")));
     }
-    Ok(raw.store_fake_ip.unwrap_or(false))
+    Ok(ProfileConfig {
+        store_fake_ip: raw.store_fake_ip.unwrap_or(false),
+        store_selected: raw.store_selected.unwrap_or(true),
+    })
 }
 
 fn parse_tls(raw: Option<RawTls>) -> Result<Vec<String>, ConfigError> {
@@ -4064,7 +4077,8 @@ dns:
     - udp://127.0.0.1:15353
 ";
         let config = Config::from_yaml(source).expect("Phase 4C config");
-        assert!(config.store_fake_ip);
+        assert!(config.profile.store_fake_ip);
+        assert!(config.profile.store_selected);
         let dns = config.dns.expect("DNS config");
         assert_eq!(dns.mode, DnsMode::FakeIp);
         assert!(dns.ipv6);
@@ -4076,6 +4090,19 @@ dns:
         );
         assert_eq!(fake.filter_mode, FakeIpFilterMode::Whitelist);
         assert_eq!(fake.ttl, 7);
+    }
+
+    #[test]
+    fn parses_selector_persistence_profile_setting() {
+        let default = Config::from_yaml("mixed-port: 7890\nrules: ['MATCH,DIRECT']\n")
+            .expect("default profile");
+        assert!(default.profile.store_selected);
+
+        let disabled = Config::from_yaml(
+            "mixed-port: 7890\nprofile:\n  store-selected: false\nrules: ['MATCH,DIRECT']\n",
+        )
+        .expect("disabled selector persistence");
+        assert!(!disabled.profile.store_selected);
     }
 
     #[test]

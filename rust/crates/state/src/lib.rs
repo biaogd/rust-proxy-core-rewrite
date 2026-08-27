@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bbolt_rs::{
@@ -129,6 +129,8 @@ pub struct RuntimeState {
     storage: Mutex<BTreeMap<String, Vec<u8>>>,
     global_proxy: Mutex<String>,
     selectors: Mutex<BTreeMap<String, String>>,
+    selectors_loaded: AtomicBool,
+    store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
@@ -164,6 +166,8 @@ impl Default for RuntimeState {
             storage: Mutex::new(BTreeMap::new()),
             global_proxy: Mutex::new("DIRECT".to_owned()),
             selectors: Mutex::new(BTreeMap::new()),
+            selectors_loaded: AtomicBool::new(false),
+            store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
@@ -324,11 +328,16 @@ impl RuntimeState {
     pub fn sync_selectors<'a>(
         &self,
         groups: impl IntoIterator<Item = (&'a str, &'a [String], Option<&'a str>)>,
+        store_selected: bool,
     ) {
+        self.store_selected.store(store_selected, Ordering::Release);
         let mut selectors = self
             .selectors
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store_selected && !self.selectors_loaded.swap(true, Ordering::AcqRel) {
+            selectors.extend(load_selected_state());
+        }
         let mut current = BTreeMap::new();
         for (name, members, default) in groups {
             let selected = match selectors.get(name) {
@@ -367,6 +376,10 @@ impl RuntimeState {
             return false;
         };
         selected.clone_into(value);
+        drop(selectors);
+        if self.store_selected.load(Ordering::Acquire) {
+            store_selected_state(name, selected);
+        }
         true
     }
 
@@ -824,6 +837,51 @@ impl FakeIpPool {
 
 const FAKE_IP_OFFSET_KEY: &[u8] = b"key-offset-fake-ip";
 const FAKE_IP_CYCLE_KEY: &[u8] = b"key-cycle-fake-ip";
+const SELECTED_BUCKET: &[u8] = b"selected";
+
+fn load_selected_state() -> BTreeMap<String, String> {
+    let path = fake_ip_state_path();
+    if !path.exists() {
+        return BTreeMap::new();
+    }
+    let Ok(database) = Bolt::open(path) else {
+        return BTreeMap::new();
+    };
+    let mut selected = BTreeMap::new();
+    let _ = database.view(|transaction| {
+        let Some(bucket) = transaction.bucket(SELECTED_BUCKET) else {
+            return Ok(());
+        };
+        let mut cursor = bucket.cursor();
+        let mut item = cursor.first();
+        while let Some((key, Some(value))) = item {
+            if let (Ok(group), Ok(proxy)) = (std::str::from_utf8(key), std::str::from_utf8(value)) {
+                selected.insert(group.to_owned(), proxy.to_owned());
+            }
+            item = cursor.next();
+        }
+        Ok(())
+    });
+    selected
+}
+
+fn store_selected_state(group: &str, selected: &str) {
+    let path = fake_ip_state_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(mut database) = Bolt::open(path) else {
+        return;
+    };
+    let _ = database.update(|mut transaction| {
+        let mut bucket = transaction.create_bucket_if_not_exists(SELECTED_BUCKET)?;
+        bucket.put(group.as_bytes(), selected.as_bytes())?;
+        Ok(())
+    });
+}
 
 fn fake_ip_state_path() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
