@@ -208,6 +208,20 @@ impl RuleSet {
         raw_sub_rules: &BTreeMap<String, Vec<String>>,
         rematches: &[RematchSpec],
     ) -> Result<Self, RuleError> {
+        Self::parse_with_targets(lines, raw_sub_rules, rematches, &BTreeSet::new())
+    }
+
+    /// Parses a rule program with additional configured outbound/group names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] under the same conditions as [`Self::parse`].
+    pub fn parse_with_targets(
+        lines: &[String],
+        raw_sub_rules: &BTreeMap<String, Vec<String>>,
+        rematches: &[RematchSpec],
+        targets: &BTreeSet<String>,
+    ) -> Result<Self, RuleError> {
         let mut actions = BTreeMap::from([
             ("DIRECT".to_owned(), Action::Select),
             ("REJECT".to_owned(), Action::Select),
@@ -221,6 +235,9 @@ impl RuleSet {
                 return Err(RuleError::InvalidPayload);
             }
             actions.insert(rematch.name.clone(), Action::Rematch(rematch.clone()));
+        }
+        for target in targets {
+            actions.insert(target.clone(), Action::Select);
         }
 
         if raw_sub_rules.keys().any(String::is_empty) {
@@ -388,14 +405,19 @@ impl RuleSet {
 
     #[must_use]
     pub fn is_phase_three_tcp(&self) -> bool {
+        self.is_phase_three_tcp_with_targets(&BTreeSet::new())
+    }
+
+    #[must_use]
+    pub fn is_phase_three_tcp_with_targets(&self, targets: &BTreeSet<String>) -> bool {
         self.rules
             .iter()
-            .all(|rule| rule.has_phase_three_target(&self.actions))
+            .all(|rule| rule.has_executable_tcp_target(&self.actions, targets))
             && self
                 .sub_rules
                 .values()
                 .flatten()
-                .all(|rule| rule.has_phase_three_target(&self.actions))
+                .all(|rule| rule.has_executable_tcp_target(&self.actions, targets))
     }
 
     fn match_sub_rules(
@@ -458,13 +480,18 @@ impl Rule {
         self.matcher.payload()
     }
 
-    fn has_phase_three_target(&self, actions: &BTreeMap<String, Action>) -> bool {
+    fn has_executable_tcp_target(
+        &self,
+        actions: &BTreeMap<String, Action>,
+        targets: &BTreeSet<String>,
+    ) -> bool {
         matches!(self.matcher, Matcher::SubRule { .. })
             || matches!(
                 self.target.as_str(),
                 "DIRECT" | "REJECT" | "PASS" | "PASS-RULE"
             )
             || matches!(actions.get(&self.target), Some(Action::Rematch(_)))
+            || targets.contains(&self.target)
     }
 }
 

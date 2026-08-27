@@ -99,6 +99,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
 | Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
+| Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy/mode/provider gates run by default in GitHub Actions |
@@ -3701,6 +3702,27 @@ unskipped interop and stress suites remain required at protocol/release gates.
 - Maximum acceptable upstream `Alpha` drift at each phase/release gate.
 
 ## Phase boundary
+
+The Phase 6B1a HTTP outbound gate accepts only plaintext TCP CONNECT. The
+configuration model carries a named HTTP server, port and optional Basic
+credentials into the runtime; rule parsing recognizes that name as an
+executable target. Hyper owns the HTTP/1 CONNECT exchange and upgrade, and the
+existing bounded runtime cancellation/tracking path owns the resulting relay.
+The differential fixture observes CONNECT method, normalized ephemeral
+authority/Host, Proxy-Authorization, successful echo and an independent
+REJECT result.
+
+Local focused evidence:
+
+```sh
+PHASE6BHTTP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-rules -p rewrite-outbound -p rewrite-runtime --all-features
+cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+TLS, partial credentials, full failure/timeout behavior, controller rendering,
+proxy groups/providers and UDP remain explicitly outside this gate.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

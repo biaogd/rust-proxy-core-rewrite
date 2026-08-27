@@ -66,6 +66,7 @@ pub struct ConfigSpec {
     pub raw_rules: Vec<String>,
     pub raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub rematches: Vec<RematchSpec>,
+    pub proxies: Vec<ProxyConfig>,
     pub rules: RuleSet,
     unsupported_keys: Vec<String>,
 }
@@ -87,7 +88,23 @@ pub struct Config {
     pub store_fake_ip: bool,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
+    pub proxies: Vec<ProxyConfig>,
     pub rules: RuleSet,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProxyKind {
+    Http,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyConfig {
+    pub name: String,
+    pub kind: ProxyKind,
+    pub server: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,6 +601,10 @@ struct RawProxy {
     kind: Option<String>,
     target_rematch_name: Option<String>,
     target_sub_rule: Option<String>,
+    server: Option<String>,
+    port: Option<i64>,
+    username: Option<String>,
+    password: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -664,8 +685,10 @@ impl ConfigSpec {
         let log_level = parse_log_level(raw.log_level.as_deref().unwrap_or("info"))?;
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
-        let rematches = parse_rematches(raw.proxies.unwrap_or_default())?;
-        let rules = RuleSet::parse(&raw_rules, &raw_sub_rules, &rematches)?;
+        let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default())?;
+        let proxy_targets = proxies.iter().map(|proxy| proxy.name.clone()).collect();
+        let rules =
+            RuleSet::parse_with_targets(&raw_rules, &raw_sub_rules, &rematches, &proxy_targets)?;
         let store_fake_ip = parse_profile(raw.profile)?;
         let trust_certificates = parse_tls(raw.tls)?;
         let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
@@ -711,6 +734,7 @@ impl ConfigSpec {
             raw_rules,
             raw_sub_rules,
             rematches,
+            proxies,
             rules,
             unsupported_keys: raw.extra.into_keys().collect(),
         })
@@ -784,6 +808,11 @@ impl TryFrom<ConfigSpec> for Config {
 
     fn try_from(spec: ConfigSpec) -> Result<Self, Self::Error> {
         spec.validate_declared_surface()?;
+        let proxy_targets = spec
+            .proxies
+            .iter()
+            .map(|proxy| proxy.name.clone())
+            .collect();
         let unsupported = [
             (spec.redir_port != 0, "redir-port"),
             (spec.tproxy_port != 0, "tproxy-port"),
@@ -798,7 +827,7 @@ impl TryFrom<ConfigSpec> for Config {
             (spec.disable_keep_alive, "disable-keep-alive"),
             (!spec.etag_support, "etag-support"),
             (
-                !spec.rules.is_phase_three_tcp(),
+                !spec.rules.is_phase_three_tcp_with_targets(&proxy_targets),
                 "rules outside Phase 3A TCP",
             ),
         ];
@@ -822,6 +851,7 @@ impl TryFrom<ConfigSpec> for Config {
             store_fake_ip: spec.store_fake_ip,
             dns: spec.dns,
             hosts: spec.hosts,
+            proxies: spec.proxies,
             rules: spec.rules,
         })
     }
@@ -2968,27 +2998,76 @@ fn parse_dns_socket_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigE
     Ok(address)
 }
 
-fn parse_rematches(proxies: Vec<RawProxy>) -> Result<Vec<RematchSpec>, ConfigError> {
-    proxies
-        .into_iter()
-        .map(|proxy| {
-            let name = proxy
-                .name
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| ConfigError::UnsupportedProxy("missing name".to_owned()))?;
-            if proxy.kind.as_deref().is_none_or(|kind| kind != "rematch") {
-                return Err(ConfigError::UnsupportedProxy(name));
+fn parse_proxies(
+    proxies: Vec<RawProxy>,
+) -> Result<(Vec<RematchSpec>, Vec<ProxyConfig>), ConfigError> {
+    let mut rematches = Vec::new();
+    let mut outbounds = Vec::new();
+    let mut names = BTreeSet::new();
+    for proxy in proxies {
+        let name = proxy
+            .name
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| ConfigError::UnsupportedProxy("missing name".to_owned()))?;
+        if !names.insert(name.clone())
+            || matches!(
+                name.as_str(),
+                "DIRECT"
+                    | "REJECT"
+                    | "REJECT-DROP"
+                    | "COMPATIBLE"
+                    | "PASS"
+                    | "PASS-RULE"
+                    | "GLOBAL"
+            )
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        match proxy.kind.as_deref() {
+            Some("rematch") => {
+                if proxy.server.is_some()
+                    || proxy.port.is_some()
+                    || proxy.username.is_some()
+                    || proxy.password.is_some()
+                    || !proxy.extra.is_empty()
+                {
+                    return Err(ConfigError::UnsupportedProxy(name));
+                }
+                rematches.push(RematchSpec {
+                    name,
+                    target_rematch_name: proxy.target_rematch_name,
+                    target_sub_rule: proxy.target_sub_rule,
+                });
             }
-            if !proxy.extra.is_empty() {
-                return Err(ConfigError::UnsupportedProxy(name));
+            Some("http") => {
+                if proxy.target_rematch_name.is_some()
+                    || proxy.target_sub_rule.is_some()
+                    || !proxy.extra.is_empty()
+                {
+                    return Err(ConfigError::UnsupportedProxy(name));
+                }
+                let server = proxy
+                    .server
+                    .filter(|server| !server.is_empty())
+                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                let port = proxy
+                    .port
+                    .and_then(|port| u16::try_from(port).ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                outbounds.push(ProxyConfig {
+                    name,
+                    kind: ProxyKind::Http,
+                    server,
+                    port,
+                    username: proxy.username,
+                    password: proxy.password,
+                });
             }
-            Ok(RematchSpec {
-                name,
-                target_rematch_name: proxy.target_rematch_name,
-                target_sub_rule: proxy.target_sub_rule,
-            })
-        })
-        .collect()
+            _ => return Err(ConfigError::UnsupportedProxy(name)),
+        }
+    }
+    Ok((rematches, outbounds))
 }
 
 #[cfg(test)]

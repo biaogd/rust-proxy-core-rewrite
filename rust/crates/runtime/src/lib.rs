@@ -661,31 +661,21 @@ async fn serve_connection(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
-    match route {
-        Route::Direct => {}
-        Route::Reject | Route::RejectDrop | Route::Unsupported => return,
+    if matches!(route, Route::Reject | Route::RejectDrop) {
+        return;
     }
-
-    let direct_destination =
-        match resolve_direct_destination(&metadata.destination, fake_host.as_deref(), config).await
-        {
-            Ok(destination) => destination,
-            Err(error) => {
-                state.log("error", format!("DIRECT DNS resolution failed: {error}"));
-                return;
-            }
-        };
-    let mut remote = tokio::select! {
-        () = shutdown.cancelled() => return,
-        result = rewrite_outbound::connect(&direct_destination, config.ipv6) => {
-            match result {
-                Ok(remote) => remote,
-                Err(error) => {
-                    state.log("error", format!("DIRECT connection failed: {error}"));
-                    return;
-                }
-            }
-        }
+    let Some(mut remote) = connect_tcp_outbound(
+        &metadata,
+        fake_host.as_deref(),
+        &decision.target,
+        route,
+        config,
+        state,
+        shutdown,
+    )
+    .await
+    else {
+        return;
     };
     let client = accepted.client;
     if !accepted.preface.is_empty() && remote.write_all(&accepted.preface).await.is_err() {
@@ -695,9 +685,64 @@ async fn serve_connection(
     relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
 }
 
+async fn connect_tcp_outbound(
+    metadata: &Metadata,
+    fake_host: Option<&str>,
+    target: &str,
+    route: Route,
+    config: &Config,
+    state: &RuntimeState,
+    shutdown: &CancellationToken,
+) -> Option<rewrite_outbound::BoxedOutboundStream> {
+    if route == Route::Direct {
+        let destination =
+            match resolve_direct_destination(&metadata.destination, fake_host, config).await {
+                Ok(destination) => destination,
+                Err(error) => {
+                    state.log("error", format!("DIRECT DNS resolution failed: {error}"));
+                    return None;
+                }
+            };
+        return tokio::select! {
+            () = shutdown.cancelled() => None,
+            result = rewrite_outbound::connect(&destination, config.ipv6) => match result {
+                Ok(remote) => Some(Box::new(remote)),
+                Err(error) => {
+                    state.log("error", format!("DIRECT connection failed: {error}"));
+                    None
+                }
+            }
+        };
+    }
+    let proxy = config.proxies.iter().find(|proxy| proxy.name == target)?;
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
+    tokio::select! {
+        () = shutdown.cancelled() => None,
+        result = rewrite_outbound::connect_http(
+            &server,
+            &metadata.destination,
+            config.ipv6,
+            credentials,
+        ) => match result {
+            Ok(remote) => Some(remote),
+            Err(error) => {
+                state.log("error", format!("HTTP proxy connection failed: {error}"));
+                None
+            }
+        }
+    }
+}
+
 async fn relay_tracked_tcp(
     mut client: TcpStream,
-    mut remote: TcpStream,
+    mut remote: rewrite_outbound::BoxedOutboundStream,
     tracker: ConnectionGuard,
     state: &RuntimeState,
     shutdown: &CancellationToken,

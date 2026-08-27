@@ -2520,6 +2520,11 @@ dependencies = [
 name = "rewrite-outbound"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rewrite-model",
  "thiserror 2.0.20",
  "tokio",

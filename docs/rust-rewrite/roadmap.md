@@ -1136,6 +1136,19 @@ Hysteria/Hysteria2, **6H** TUIC, **6I** WireGuard/AmneziaWG and **6J** SSH.
 TCP and UDP, client and server, and each security/transport variant remain
 separate exit gates inside these labels.
 
+### Phase 6B1a accepted scope
+
+The first remote-protocol slice accepts a single configured plaintext HTTP
+proxy as a rule target. Configuration requires a nonempty unique name, server
+and nonzero port and accepts an optional complete username/password pair. The
+outbound uses Hyper's HTTP/1 client upgrade path for CONNECT, preserves the
+destination authority and Host, emits Basic proxy authentication and relays
+TCP bytes after a successful response. `compat/scripts/phase6b_http.py` places
+a deterministic authenticated CONNECT server between mixed ingress and a TCP
+echo server, compares the upstream request fields and proves a separate rule
+still rejects. TLS, broader authentication/error combinations, groups,
+providers, UDP and adapter-controller rendering remain separate gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
