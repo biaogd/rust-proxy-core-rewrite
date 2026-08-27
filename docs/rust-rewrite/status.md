@@ -102,6 +102,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
 | Phase 5C1b selector reload lifecycle | Complete in declared SIGHUP scope; GRP-01/PROV-03 remain partial | Valid choices survive, malformed config rolls back, and removed choices fall back to the first new member exactly like Go |
+| Phase 5C2a local file proxy provider | Complete in declared initial-load HTTP/SOCKS5 TCP scope; PROV-01/GRP-03 remain partial | YAML members, `use` composition, exact File/Compatible provider REST views and selected HTTP routing pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3772,6 +3773,21 @@ also observes the resulting HTTP/DIRECT data-plane behavior.
 ```sh
 PHASE5CSELECTORRELOAD_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_selector_reload.py
 ```
+
+Phase 5C2a adds synchronous local YAML file providers to configuration
+validation. Provider proxies share the existing typed HTTP/SOCKS5 model and
+outbound implementations, while groups keep separate expanded members and
+explicit compatible-provider members. The controller reports deterministic
+file modification time, File vehicle metadata, provider-name on member
+adapters and the oracle's implicit group-compatible provider.
+
+```sh
+PHASE5CFILEPROVIDER_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_file_provider.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Manual refresh, file-watch/interval scheduling, HTTP vehicles, filters,
+overrides, health state and persistence are outside this initial-load gate.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

@@ -1185,6 +1185,20 @@ Rust preserves that behavior. `compat/scripts/phase5c_selector_reload.py`
 compares controller state and live HTTP/DIRECT routing across all three cases.
 Cross-process persistence and nested/provider membership remain later gates.
 
+### Phase 5C2a accepted scope
+
+The first provider vehicle slice loads one or more local YAML files at
+configuration validation time. Each file must contain nonempty supported
+HTTP/SOCKS5 proxies with globally unique names. A flat selector may append
+their ordered members through `use`; after provider readiness, controller
+selection drives the existing TCP outbound path. Provider list/detail/member
+and health-trigger responses preserve File vehicle fields, provider-name and
+file modification time. Group-compatible providers expose only explicit
+`proxies`, matching Go rather than leaking `use` members.
+`compat/scripts/phase5c_file_provider.py` compares all views and live routing.
+Refresh mutation, HTTP vehicles, filters/overrides and persistence remain later
+gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

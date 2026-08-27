@@ -729,6 +729,12 @@ async fn connect_tcp_outbound(
     let proxy = config
         .proxies
         .iter()
+        .chain(
+            config
+                .proxy_providers
+                .iter()
+                .flat_map(|provider| provider.proxies.iter()),
+        )
         .find(|proxy| proxy.name == outbound_target)?;
     let server = Destination {
         host: proxy

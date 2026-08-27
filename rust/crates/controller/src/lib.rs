@@ -869,6 +869,14 @@ fn configured_proxy_snapshot(
     proxy: &rewrite_config::ProxyConfig,
     runtime: &RuntimeState,
 ) -> serde_json::Value {
+    configured_proxy_snapshot_with_provider(proxy, "", runtime)
+}
+
+fn configured_proxy_snapshot_with_provider(
+    proxy: &rewrite_config::ProxyConfig,
+    provider: &str,
+    runtime: &RuntimeState,
+) -> serde_json::Value {
     let health = runtime.proxy_health(&proxy.name);
     let kind = match proxy.kind {
         rewrite_config::ProxyKind::Http => "Http",
@@ -883,7 +891,7 @@ fn configured_proxy_snapshot(
         "interface": "",
         "mptcp": false,
         "name": proxy.name,
-        "provider-name": "",
+        "provider-name": provider,
         "routing-mark": 0,
         "smux": false,
         "tfo": false,
@@ -947,35 +955,98 @@ fn proxy_not_found() -> Response {
 
 async fn proxy_providers(State(state): State<ControllerState>) -> Response {
     let config = state.current_config();
-    json_response(
-        StatusCode::OK,
-        &json!({"providers": {"default": proxy_provider_snapshot(&config, &state.runtime)}}),
-    )
+    let mut providers = serde_json::Map::new();
+    providers.insert(
+        "default".to_owned(),
+        proxy_provider_snapshot(&config, &state.runtime),
+    );
+    for provider in &config.proxy_providers {
+        providers.insert(
+            provider.name.clone(),
+            file_proxy_provider_snapshot(provider, &state.runtime),
+        );
+    }
+    for group in &config.proxy_groups {
+        providers.insert(
+            group.name.clone(),
+            group_compatible_provider_snapshot(group, &config, &state.runtime),
+        );
+    }
+    json_response(StatusCode::OK, &json!({"providers": providers}))
 }
 
 async fn proxy_provider(
     State(state): State<ControllerState>,
     Path(provider): Path<String>,
 ) -> Response {
-    if provider != "default" {
-        return proxy_not_found();
-    }
     let config = state.current_config();
-    json_response(
-        StatusCode::OK,
-        &proxy_provider_snapshot(&config, &state.runtime),
-    )
+    if provider == "default" {
+        return json_response(
+            StatusCode::OK,
+            &proxy_provider_snapshot(&config, &state.runtime),
+        );
+    }
+    config
+        .proxy_providers
+        .iter()
+        .find(|candidate| candidate.name == provider)
+        .map_or_else(
+            || {
+                config
+                    .proxy_groups
+                    .iter()
+                    .find(|group| group.name == provider)
+                    .map_or_else(proxy_not_found, |group| {
+                        json_response(
+                            StatusCode::OK,
+                            &group_compatible_provider_snapshot(group, &config, &state.runtime),
+                        )
+                    })
+            },
+            |provider| {
+                json_response(
+                    StatusCode::OK,
+                    &file_proxy_provider_snapshot(provider, &state.runtime),
+                )
+            },
+        )
 }
 
-async fn update_proxy_provider(Path(provider): Path<String>) -> Response {
-    if provider != "default" {
+async fn update_proxy_provider(
+    State(state): State<ControllerState>,
+    Path(provider): Path<String>,
+) -> Response {
+    let config = state.current_config();
+    if provider != "default"
+        && !config
+            .proxy_providers
+            .iter()
+            .any(|candidate| candidate.name == provider)
+        && !config
+            .proxy_groups
+            .iter()
+            .any(|candidate| candidate.name == provider)
+    {
         return proxy_not_found();
     }
     empty_response(StatusCode::NO_CONTENT)
 }
 
-async fn healthcheck_proxy_provider(Path(provider): Path<String>) -> Response {
-    if provider != "default" {
+async fn healthcheck_proxy_provider(
+    State(state): State<ControllerState>,
+    Path(provider): Path<String>,
+) -> Response {
+    let config = state.current_config();
+    if provider != "default"
+        && !config
+            .proxy_providers
+            .iter()
+            .any(|candidate| candidate.name == provider)
+        && !config
+            .proxy_groups
+            .iter()
+            .any(|candidate| candidate.name == provider)
+    {
         return proxy_not_found();
     }
     empty_response(StatusCode::NO_CONTENT)
@@ -985,26 +1056,47 @@ async fn proxy_provider_member(
     State(state): State<ControllerState>,
     Path((provider, name)): Path<(String, String)>,
 ) -> Response {
-    if provider != "default" {
-        return proxy_not_found();
-    }
-    if matches!(name.as_str(), "DIRECT" | "REJECT") {
+    if provider == "default" && matches!(name.as_str(), "DIRECT" | "REJECT") {
         return json_response(StatusCode::OK, &proxy_snapshot(&name, &state.runtime));
     }
     let config = state.current_config();
-    if let Some(proxy) = config.proxies.iter().find(|proxy| proxy.name == name) {
+    if provider == "default"
+        && let Some(proxy) = config.proxies.iter().find(|proxy| proxy.name == name)
+    {
         return json_response(
             StatusCode::OK,
             &configured_proxy_snapshot(proxy, &state.runtime),
         );
     }
+    if provider == "default" {
+        return config
+            .proxy_groups
+            .iter()
+            .find(|group| group.name == name)
+            .map_or_else(proxy_not_found, |group| {
+                json_response(StatusCode::OK, &selector_snapshot(group, &state.runtime))
+            });
+    }
     config
-        .proxy_groups
+        .proxy_providers
         .iter()
-        .find(|group| group.name == name)
-        .map_or_else(proxy_not_found, |group| {
-            json_response(StatusCode::OK, &selector_snapshot(group, &state.runtime))
+        .find(|candidate| candidate.name == provider)
+        .and_then(|provider| {
+            provider
+                .proxies
+                .iter()
+                .find(|proxy| proxy.name == name)
+                .map(|proxy| (provider, proxy))
         })
+        .map_or_else(
+            || group_provider_member(&config, &state.runtime, &provider, &name),
+            |(provider, proxy)| {
+                json_response(
+                    StatusCode::OK,
+                    &configured_proxy_snapshot_with_provider(proxy, &provider.name, &state.runtime),
+                )
+            },
+        )
 }
 
 async fn rule_providers() -> Response {
@@ -1044,6 +1136,88 @@ fn proxy_provider_snapshot(config: &Config, runtime: &RuntimeState) -> serde_jso
         "expectedStatus": "*",
         "updatedAt": "0001-01-01T00:00:00Z",
     })
+}
+
+fn file_proxy_provider_snapshot(
+    provider: &rewrite_config::ProxyProviderConfig,
+    runtime: &RuntimeState,
+) -> serde_json::Value {
+    let proxies: Vec<_> = provider
+        .proxies
+        .iter()
+        .map(|proxy| configured_proxy_snapshot_with_provider(proxy, &provider.name, runtime))
+        .collect();
+    let updated_at = std::fs::metadata(&provider.path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok())
+        .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned());
+    json!({
+        "name": provider.name,
+        "type": "Proxy",
+        "vehicleType": "File",
+        "proxies": proxies,
+        "testUrl": "",
+        "expectedStatus": "*",
+        "updatedAt": updated_at,
+    })
+}
+
+fn group_compatible_provider_snapshot(
+    group: &rewrite_config::ProxyGroupConfig,
+    config: &Config,
+    runtime: &RuntimeState,
+) -> serde_json::Value {
+    let proxies: Vec<_> = group
+        .compatible_proxies
+        .iter()
+        .filter_map(|name| named_proxy_snapshot(config, runtime, name))
+        .collect();
+    json!({
+        "name": group.name,
+        "type": "Proxy",
+        "vehicleType": "Compatible",
+        "proxies": proxies,
+        "testUrl": "https://www.gstatic.com/generate_204",
+        "expectedStatus": "*",
+        "updatedAt": "0001-01-01T00:00:00Z",
+    })
+}
+
+fn group_provider_member(
+    config: &Config,
+    runtime: &RuntimeState,
+    provider: &str,
+    name: &str,
+) -> Response {
+    let Some(group) = config
+        .proxy_groups
+        .iter()
+        .find(|group| group.name == provider)
+    else {
+        return proxy_not_found();
+    };
+    if !group.compatible_proxies.iter().any(|member| member == name) {
+        return proxy_not_found();
+    }
+    named_proxy_snapshot(config, runtime, name).map_or_else(proxy_not_found, |snapshot| {
+        json_response(StatusCode::OK, &snapshot)
+    })
+}
+
+fn named_proxy_snapshot(
+    config: &Config,
+    runtime: &RuntimeState,
+    name: &str,
+) -> Option<serde_json::Value> {
+    if PROXY_NAMES.contains(&name) {
+        return Some(proxy_snapshot(name, runtime));
+    }
+    config
+        .proxies
+        .iter()
+        .find(|proxy| proxy.name == name)
+        .map(|proxy| configured_proxy_snapshot(proxy, runtime))
 }
 
 #[derive(Default, Deserialize)]

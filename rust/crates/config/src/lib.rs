@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ipnet::IpNet;
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
@@ -67,6 +67,7 @@ pub struct ConfigSpec {
     pub raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub rematches: Vec<RematchSpec>,
     pub proxies: Vec<ProxyConfig>,
+    pub proxy_providers: Vec<ProxyProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     unsupported_keys: Vec<String>,
@@ -90,6 +91,7 @@ pub struct Config {
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub proxies: Vec<ProxyConfig>,
+    pub proxy_providers: Vec<ProxyProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
 }
@@ -114,7 +116,15 @@ pub struct ProxyConfig {
 pub struct ProxyGroupConfig {
     pub name: String,
     pub proxies: Vec<String>,
+    pub compatible_proxies: Vec<String>,
     pub default_selected: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyProviderConfig {
+    pub name: String,
+    pub path: PathBuf,
+    pub proxies: Vec<ProxyConfig>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -514,6 +524,7 @@ struct RawConfig {
     rules: Option<Vec<String>>,
     sub_rules: Option<BTreeMap<String, Vec<String>>>,
     proxies: Option<Vec<RawProxy>>,
+    proxy_providers: Option<BTreeMap<String, RawProxyProvider>>,
     proxy_groups: Option<Vec<RawProxyGroup>>,
     rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
     #[serde(flatten)]
@@ -627,7 +638,26 @@ struct RawProxyGroup {
     #[serde(rename = "type")]
     kind: Option<String>,
     proxies: Option<Vec<String>>,
+    #[serde(rename = "use")]
+    providers: Option<Vec<String>>,
     default_selected: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawProxyProvider {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    path: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawProxyProviderFile {
+    proxies: Option<Vec<RawProxy>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -709,7 +739,16 @@ impl ConfigSpec {
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
         let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default())?;
-        let proxy_groups = parse_proxy_groups(raw.proxy_groups.unwrap_or_default(), &proxies)?;
+        let proxy_providers = parse_proxy_providers(
+            raw.proxy_providers.unwrap_or_default(),
+            config_directory,
+            &proxies,
+        )?;
+        let proxy_groups = parse_proxy_groups(
+            raw.proxy_groups.unwrap_or_default(),
+            &proxies,
+            &proxy_providers,
+        )?;
         let proxy_targets = proxies
             .iter()
             .map(|proxy| proxy.name.clone())
@@ -763,6 +802,7 @@ impl ConfigSpec {
             raw_sub_rules,
             rematches,
             proxies,
+            proxy_providers,
             proxy_groups,
             rules,
             unsupported_keys: raw.extra.into_keys().collect(),
@@ -882,6 +922,7 @@ impl TryFrom<ConfigSpec> for Config {
             dns: spec.dns,
             hosts: spec.hosts,
             proxies: spec.proxies,
+            proxy_providers: spec.proxy_providers,
             proxy_groups: spec.proxy_groups,
             rules: spec.rules,
         })
@@ -3109,8 +3150,17 @@ fn parse_proxies(
 fn parse_proxy_groups(
     groups: Vec<RawProxyGroup>,
     proxies: &[ProxyConfig],
+    providers: &[ProxyProviderConfig],
 ) -> Result<Vec<ProxyGroupConfig>, ConfigError> {
-    let proxy_names: BTreeSet<_> = proxies.iter().map(|proxy| proxy.name.as_str()).collect();
+    let proxy_names: BTreeSet<_> = proxies
+        .iter()
+        .chain(
+            providers
+                .iter()
+                .flat_map(|provider| provider.proxies.iter()),
+        )
+        .map(|proxy| proxy.name.as_str())
+        .collect();
     let mut names = BTreeSet::new();
     let mut parsed = Vec::new();
     for group in groups {
@@ -3135,7 +3185,15 @@ fn parse_proxy_groups(
         {
             return Err(ConfigError::UnsupportedProxy(name));
         }
-        let members = group.proxies.unwrap_or_default();
+        let compatible_proxies = group.proxies.unwrap_or_default();
+        let mut members = compatible_proxies.clone();
+        for provider_name in group.providers.unwrap_or_default() {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.name == provider_name)
+                .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+            members.extend(provider.proxies.iter().map(|proxy| proxy.name.clone()));
+        }
         if members.is_empty()
             || members.iter().any(|member| {
                 !proxy_names.contains(member.as_str())
@@ -3151,7 +3209,50 @@ fn parse_proxy_groups(
         parsed.push(ProxyGroupConfig {
             name,
             proxies: members,
+            compatible_proxies,
             default_selected: group.default_selected,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_proxy_providers(
+    providers: BTreeMap<String, RawProxyProvider>,
+    config_directory: Option<&Path>,
+    top_level: &[ProxyConfig],
+) -> Result<Vec<ProxyProviderConfig>, ConfigError> {
+    let mut names: BTreeSet<_> = top_level.iter().map(|proxy| proxy.name.clone()).collect();
+    let mut parsed = Vec::new();
+    for (name, provider) in providers {
+        if name.is_empty() || provider.kind.as_deref() != Some("file") || !provider.extra.is_empty()
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        let directory =
+            config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+        let configured_path = provider
+            .path
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+        let path = directory.join(configured_path);
+        let source = std::fs::read_to_string(&path)?;
+        let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(&source)?;
+        if !file.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        let (rematches, proxies) = parse_proxies(file.proxies.unwrap_or_default())?;
+        if !rematches.is_empty()
+            || proxies.is_empty()
+            || proxies
+                .iter()
+                .any(|proxy| !names.insert(proxy.name.clone()))
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        parsed.push(ProxyProviderConfig {
+            name,
+            path,
+            proxies,
         });
     }
     Ok(parsed)
