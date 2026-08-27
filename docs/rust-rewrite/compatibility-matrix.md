@@ -62,7 +62,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 3 local SIGHUP rule/listener reload | Oracle | **Parity** | Same-port rule switch, invalid-config rollback and port migration in `compat/scripts/phase3.py` |
 | Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Malformed-YAML rollback, continued old-generation TCP routing and a following valid reload through the same signal loop in `compat/scripts/phase5a7a.py` |
 | Full SIGHUP reload across all Mihomo resources | Oracle | Partial | Local listener/config generations exist; providers, broader DNS state, TUN and remote adapters are not started |
-| Phase 5A8a Unix `post-up` / `post-down` hooks | Oracle | **Parity** | CLI/environment/explicit-empty precedence, system-shell operators, startup readiness, Go-compatible post-down boundary and asymmetric failure exits in `compat/scripts/phase5a8a.py` |
+| Phase 5A8a Unix `post-up` / `post-down` hooks | Oracle | **Parity** | CLI/environment/explicit-empty precedence, system-shell operators, bounded startup readiness, stable post-down invocation/completion and asymmetric failure exits in `compat/scripts/phase5a8a.py`; listener state during Go's asynchronous shutdown is diagnostic only |
 | Cross-platform and future-resource hook ordering | Oracle | Partial | Windows uses `cmd.exe /C` but needs native differential evidence; every future runtime resource must join the readiness/shutdown barrier |
 
 ## Configuration surface
@@ -331,7 +331,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A6g Sudoku keypair | Oracle | **Parity** | Native canonical split-scalar and independent Edwards25519 public recovery differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7a invalid SIGHUP recovery | Oracle | **Parity** | Native malformed-config rollback and following-valid-reload differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
-| Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, resource-ordering and failure differential passed, 2026-08-26 |
+| Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, bounded startup readiness, stable shutdown-hook invocation and failure differential passed, 2026-08-27 |
 | Darwin arm64 — Phase 5D controller core | Oracle | **Parity in declared rows** | Native HTTP/WS streams, Bearer/query-token/CORS, single/all live connection deletion and the declared executable `/configs` transaction subset passed, 2026-08-27 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |

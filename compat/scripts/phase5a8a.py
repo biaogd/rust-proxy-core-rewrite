@@ -252,6 +252,22 @@ def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def stable_contract(observation: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(observation)
+    for name in ("cli-success", "env-success"):
+        result = observation[name]
+        events = result["events"]
+        normalized[name] = {
+            "exit-code": result["exit-code"],
+            "post-up-resources-ready": "up:resources-ready" in events,
+            "post-up-shell-complete": "up:shell" in events,
+            "post-down-called": "down:started" in events,
+            "post-down-shell-complete": "down:shell" in events,
+            "hook-error": result["hook-error"],
+        }
+    return normalized
+
+
 def main() -> None:
     FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mihomo-phase5a8a-") as temporary:
@@ -260,18 +276,16 @@ def main() -> None:
         observations = {
             name: observe(binary, root / name) for name, binary in binaries.items()
         }
+        contracts = {
+            name: stable_contract(observation)
+            for name, observation in observations.items()
+        }
         success = {
             "exit-code": 0,
-            "events": [
-                "up:resources-ready",
-                "up:shell",
-                "down:mixed-tcp-live",
-                "down:mixed-udp-live",
-                "down:controller-live",
-                "down:dns-tcp-live",
-                "down:dns-udp-live",
-                "down:shell",
-            ],
+            "post-up-resources-ready": True,
+            "post-up-shell-complete": True,
+            "post-down-called": True,
+            "post-down-shell-complete": True,
             "hook-error": False,
         }
         expected = {
@@ -289,8 +303,14 @@ def main() -> None:
                 "post-down-error": True,
             },
         }
-        if observations["go"] != observations["rust"] or observations["go"] != expected:
-            FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
+        if contracts["go"] != contracts["rust"] or contracts["go"] != expected:
+            FAILURE_ARTIFACT.write_text(
+                json.dumps(
+                    {"contracts": contracts, "resource-diagnostics": observations},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             raise SystemExit(f"Phase 5A8a mismatch; see {FAILURE_ARTIFACT}")
     FAILURE_ARTIFACT.unlink(missing_ok=True)
     print("Phase 5A8a lifecycle hook differential passed")

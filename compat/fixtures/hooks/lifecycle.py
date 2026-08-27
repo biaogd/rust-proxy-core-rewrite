@@ -6,11 +6,23 @@ from __future__ import annotations
 import pathlib
 import socket
 import sys
+import time
 
 
 def probe_tcp(port: int) -> None:
     with socket.create_connection(("127.0.0.1", port), timeout=1):
         pass
+
+
+def wait_tcp(port: int) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            probe_tcp(port)
+            return
+        except OSError:
+            time.sleep(0.02)
+    raise OSError(f"TCP port {port} did not become ready during post-up")
 
 
 def bind_udp(port: int) -> None:
@@ -19,12 +31,25 @@ def bind_udp(port: int) -> None:
         listener.bind(("127.0.0.1", port))
 
 
-def require_udp_occupied(port: int) -> None:
+def udp_is_occupied(port: int) -> bool:
     try:
         bind_udp(port)
     except OSError:
-        return
-    raise OSError(f"UDP port {port} was released before post-down")
+        return True
+    return False
+
+
+def tcp_is_live(port: int) -> bool:
+    try:
+        probe_tcp(port)
+    except OSError:
+        return False
+    return True
+
+
+def record_state(path: pathlib.Path, resource: str, live: bool) -> None:
+    state = "live" if live else "released"
+    record_observation(path, f"down:{resource}-{state}")
 
 
 def record_observation(path: pathlib.Path, observation: str) -> None:
@@ -38,19 +63,15 @@ def main() -> None:
     record = pathlib.Path(record_name)
     if action == "up":
         for port in ports:
-            probe_tcp(port)
+            wait_tcp(port)
         record_observation(record, "up:resources-ready")
     elif action == "down":
-        probe_tcp(ports[0])
-        record_observation(record, "down:mixed-tcp-live")
-        require_udp_occupied(ports[0])
-        record_observation(record, "down:mixed-udp-live")
-        probe_tcp(ports[1])
-        record_observation(record, "down:controller-live")
-        probe_tcp(ports[2])
-        record_observation(record, "down:dns-tcp-live")
-        require_udp_occupied(ports[2])
-        record_observation(record, "down:dns-udp-live")
+        record_observation(record, "down:started")
+        record_state(record, "mixed-tcp", tcp_is_live(ports[0]))
+        record_state(record, "mixed-udp", udp_is_occupied(ports[0]))
+        record_state(record, "controller", tcp_is_live(ports[1]))
+        record_state(record, "dns-tcp", tcp_is_live(ports[2]))
+        record_state(record, "dns-udp", udp_is_occupied(ports[2]))
     else:
         raise ValueError(f"unknown lifecycle action: {action}")
 

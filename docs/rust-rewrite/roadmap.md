@@ -871,14 +871,16 @@ shutdown row can become complete.
 Phase 5A8a accepts the Unix local-resource subset of `CLI-12`. `-post-up` and
 `-post-down` use the platform shell rather than an application command parser;
 their environment defaults and explicit-empty CLI overrides match the oracle.
-The startup hook runs after mixed, controller and DNS listeners are ready. At
-the Go-compatible shutdown-hook boundary, profile state has been stored but the
-mixed, controller and DNS services remain available until the hook returns;
-final process teardown then closes them. A failed startup hook exits nonzero
-and skips the shutdown hook, while a failed shutdown hook is logged without
-changing a successful process exit. Windows command execution is implemented
-with `cmd.exe /C`, but native Windows ordering and failure parity remain
-unclaimed.
+The startup hook can observe mixed, controller and DNS listeners within its
+bounded execution window. The pinned Go process initiates executor shutdown
+before its deferred post-down hook, while listener closure proceeds
+asynchronously; individual listener availability during that hook is therefore
+a timing diagnostic, not a deterministic compatibility predicate. Acceptance
+requires post-down invocation and shell completion. A failed startup hook exits
+nonzero and skips the shutdown hook, while a failed shutdown hook is logged
+without changing a successful process exit. Windows command execution is
+implemented with `cmd.exe /C`, but native Windows ordering and failure parity
+remain unclaimed.
 
 ### Phase 5B1a accepted scope
 

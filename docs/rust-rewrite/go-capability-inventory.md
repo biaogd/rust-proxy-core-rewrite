@@ -49,7 +49,7 @@ Primary anchors: [`main.go`](../../main.go), [`hub/hub.go`](../../hub/hub.go),
 | CLI-09 | `generate` subcommand family | Complete for pinned default baseline | Accepted 5A6a–5A6g with per-command differential gates |
 | CLI-10 | `age` subcommand family | Partial: X25519 `keygen`/`convert`/`encrypt`/`decrypt` parity | Accepted 5A4b–5A4d; hybrid/PQ remains |
 | CLI-11 | Startup, readiness, SIGINT/SIGTERM, SIGHUP, invalid-reload rollback and complete resource shutdown | Partial | 5A7, then repeated per resource family |
-| CLI-12 | `post-up` and `post-down` hook ordering, shell behavior and failure handling | Partial: Unix local-resource parity | Accepted 5A8a; native Windows evidence and future-resource ordering remain |
+| CLI-12 | `post-up` and `post-down` hook ordering, shell behavior and failure handling | Partial: Unix shell, invocation/completion and failure parity; Go post-down listener state is timing-dependent | Accepted 5A8a; native Windows evidence and future-resource ordering remain |
 | CLI-13 | Fatal panic/error/log formatting and exit-code classes | Partial | Cross-cutting contract gates |
 
 ## Configuration and application

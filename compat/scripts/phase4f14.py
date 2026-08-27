@@ -207,6 +207,14 @@ def run_reload_case(
         except RuntimeError as error:
             stderr.flush()
             raise RuntimeError(f"{error}: {(scratch / 'stderr.log').read_text()}") from error
+        # Socket readiness can precede the CLI's signal.Notify registration.
+        # SIGHUP is edge-triggered, so sending it in that window loses the
+        # reload permanently. Linux exposes the caught-signal mask as a
+        # deterministic barrier; other platforms retain a bounded fallback.
+        if not wait_for_linux_signal_handlers(process):
+            time.sleep(0.05)
+            if process.poll() is not None:
+                raise AssertionError("candidate exited before reload signal readiness")
         old = query_data(dns_port, "old.range.phase4f14.test", 0x7210)
         config.write_text(
             config_text(
