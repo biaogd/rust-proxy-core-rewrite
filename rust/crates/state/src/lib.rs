@@ -100,6 +100,7 @@ pub struct RuntimeState {
     downloaded: AtomicU64,
     connections: Mutex<BTreeMap<u64, ActiveConnection>>,
     logs: broadcast::Sender<LogEvent>,
+    storage: Mutex<BTreeMap<String, Vec<u8>>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
 }
@@ -131,6 +132,7 @@ impl Default for RuntimeState {
             downloaded: AtomicU64::new(0),
             connections: Mutex::new(BTreeMap::new()),
             logs,
+            storage: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
         }
@@ -241,6 +243,29 @@ impl RuntimeState {
             level: level.to_owned(),
             payload: payload.into(),
         });
+    }
+
+    #[must_use]
+    pub fn storage_get(&self, key: &str) -> Option<Vec<u8>> {
+        self.storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    pub fn storage_set(&self, key: String, value: Vec<u8>) {
+        self.storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, value);
+    }
+
+    pub fn storage_delete(&self, key: &str) {
+        self.storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     #[must_use]
@@ -851,6 +876,25 @@ mod tests {
             Some("first.test")
         );
         assert!(state.lookup_dns_mapping(second).is_none());
+    }
+
+    #[test]
+    fn controller_storage_replaces_and_deletes_exact_bytes() {
+        let state = RuntimeState::default();
+        assert!(state.storage_get("ui/key").is_none());
+        state.storage_set("ui/key".to_owned(), b" {\"enabled\":true} \n".to_vec());
+        assert_eq!(
+            state.storage_get("ui/key").as_deref(),
+            Some(b" {\"enabled\":true} \n".as_slice())
+        );
+        state.storage_set("ui/key".to_owned(), b"null".to_vec());
+        assert_eq!(
+            state.storage_get("ui/key").as_deref(),
+            Some(b"null".as_slice())
+        );
+        state.storage_delete("ui/key");
+        state.storage_delete("ui/key");
+        assert!(state.storage_get("ui/key").is_none());
     }
 
     #[test]

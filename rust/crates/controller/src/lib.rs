@@ -256,6 +256,10 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/rules/", get(rules))
         .route("/rules/disable", axum::routing::patch(disable_rules))
         .route(
+            "/storage/{key}",
+            get(get_storage).put(set_storage).delete(delete_storage),
+        )
+        .route(
             "/connections",
             get(connections).delete(close_all_connections),
         )
@@ -445,6 +449,41 @@ fn rule_timestamp(unix_nanos: i64) -> String {
         return formatted;
     }
     "1970-01-01T00:00:00Z".to_owned()
+}
+
+async fn get_storage(State(state): State<ControllerState>, Path(key): Path<String>) -> Response {
+    state.runtime.storage_get(&key).map_or_else(
+        || typed_response(StatusCode::OK, "application/json", Body::from("null")),
+        |value| typed_response(StatusCode::OK, "application/json", Body::from(value)),
+    )
+}
+
+async fn set_storage(
+    State(state): State<ControllerState>,
+    Path(key): Path<String>,
+    request: Request,
+) -> Response {
+    const MAX_REQUEST: usize = 16 * 1024 * 1024;
+    const MAX_STORAGE_VALUE: usize = 1024 * 1024;
+    let Ok(value) = axum::body::to_bytes(request.into_body(), MAX_REQUEST).await else {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    };
+    if serde_json::from_slice::<serde_json::Value>(&value).is_err() {
+        return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
+    }
+    if value.len() > MAX_STORAGE_VALUE {
+        return json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &json!({"message": "payload exceeds 1MB limit"}),
+        );
+    }
+    state.runtime.storage_set(key, value.to_vec());
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn delete_storage(State(state): State<ControllerState>, Path(key): Path<String>) -> Response {
+    state.runtime.storage_delete(&key);
+    empty_response(StatusCode::NO_CONTENT)
 }
 
 #[derive(Default, Deserialize)]

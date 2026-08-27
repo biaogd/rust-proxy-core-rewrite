@@ -1072,10 +1072,20 @@ generation. Acceptance proves ordered DomainSuffix/MATCH inventory, both
 counter directions, ignored indexes, malformed JSON, DIRECT-to-REJECT disable
 side effects and restoration after enable in `compat/scripts/phase5d_rules.py`.
 
+The controller storage gate accepts the complete process-local JSON lifecycle
+at `/storage/{key}`. Axum owns path decoding and body framing, `serde_json`
+validates values, and runtime state preserves the submitted JSON bytes exactly.
+Acceptance covers missing values, escaped Unicode/path keys, create, raw-byte
+readback, replacement, idempotent deletion, the 1 MiB boundary and rollback
+after invalid or oversized writes in `compat/scripts/phase5d_storage.py`.
+Cross-restart persistence and database-format interchange remain a separate
+storage migration gate.
+
 TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior, remaining
-PATCH fields, safe-root/default configuration path loading, `/configs/geo` and
-other controller mutation families remain later 5D gates.
+PATCH fields, safe-root/default configuration path loading, `/configs/geo`,
+persistent controller storage and other mutation families remain later 5D
+gates.
 
 ## Phase 6 — established remote protocols
 
