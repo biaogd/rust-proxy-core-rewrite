@@ -1318,6 +1318,58 @@ Zero-interval retirement races, retry backoff timing, concurrent/coalesced
 refresh, HTTPS, provider-aware download routing, durable ETag metadata and
 override expressions remain later gates.
 
+### Phase 5C3 accepted scope
+
+Proxy providers now cover inline, file, HTTP and HTTPS vehicles for the
+currently implemented HTTP/SOCKS5 adapters. Provider-level backtick filters,
+name exclusion, type exclusion, regex name replacement and additional
+prefix/suffix transforms run before adapter construction. Configured provider
+health checks share the existing real HTTP delay engine, including startup,
+manual REST, interval, timeout, expected-status and lazy touch behavior. HTTP
+cache `ETag` metadata is atomically persisted with the URL and payload digest,
+so a post-restart PUT can safely send `If-None-Match`; changed bytes cannot
+reuse stale metadata. `compat/scripts/phase5c_provider_features.py`,
+`phase5c_provider_https.py` and the extended
+`phase5c_http_provider_contract.py` are the differential gates.
+
+Provider `proxy`/`dialer-proxy`, protocol-specific structured overrides,
+encrypted subscription payloads and the general `override-expr` language
+depend on later outbound/crypto adapter slices and are not claimed by Phase
+5C3.
+
+### Phase 5C4 accepted scope
+
+Rule providers cover inline, file, HTTP and HTTPS vehicles; YAML, text and MRS
+formats; domain, IP-CIDR and classical behavior; `RULE-SET` evaluation with
+`no-resolve`; initial cache reuse; manual REST refresh; interval refresh;
+cross-platform file watching; atomic cache replacement and failure rollback.
+`/providers/rules` and `PUT /providers/rules/{name}` expose the same declared
+snapshot/status contract. `compat/scripts/phase5c_rule_provider.py` and the
+HTTPS gate compare routing, REST, cache bytes and lifecycle behavior against
+Go.
+
+Provider-aware downloads through a named proxy remain owned by the later
+dialer-proxy slice; file/HTTP providers can already feed the Phase 4F14 fake-IP
+consumer once that integration is separately gated.
+
+### Phase 5C5 accepted scope
+
+The controller may receive provider updates concurrently, but every candidate
+is validated and published through one serialized runtime generation channel.
+Valid update bursts converge without corrupting cache/config state; invalid
+bursts all roll back to the last valid generation. `notify` watches parent
+directories so atomic file replacement is observed on supported desktop
+platforms, coalesces event bursts, and rebinds watches on generation changes.
+Provider/group schedulers and watchers use cancellation tokens, removed
+providers lose REST and health state, and a shutdown deadline aborts only a
+task that ignored normal cancellation. `compat/scripts/phase5c_provider_concurrency.py`
+is the concurrent PUT, rollback, SIGHUP removal and live-process gate.
+
+This completes Phase 5C for the adapter/rule surface available before Phase 6.
+Future proxy protocols add their own provider parsing, override and health
+evidence in their owning slices; this statement is not a whole-Mihomo provider
+compatibility claim.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with

@@ -62,8 +62,8 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-01 | General ports, bind/LAN/auth, mode, logging, IPv6, interface, routing mark, TFO, MPTCP, TCP concurrency and keepalive | Partial | 5A9 plus listener/platform gates |
 | CFG-02 | Controller TCP/TLS/Unix/Windows pipe, routing mark, CORS, secret, external UI/URL/name and external DoH mount | Partial | 5D1–5D3 |
 | CFG-03 | Proxies, reserved built-ins, duplicate/reserved-name checks and dependency ordering | Not started | 6A0 |
-| CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: nested select DAG plus filters/include-all/empty fallback | 5C1 automatic/remaining validation gates |
-| CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: local file load/manual refresh plus plaintext HTTP initial/manual/interval refresh, headers, size bounds, default/explicit cache paths, restart cache and process-local ETag | 5C2–5C4 |
+| CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: Phase 5C current-adapter group strategies/composition/health complete | Later adapter-specific validation gates |
+| CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: Phase 5C current-adapter vehicles/health/lifecycle plus rule providers complete | Named download proxy, override-expression, encryption and later adapter gates |
 | CFG-06 | Rules, sub-rules and provider-backed rule construction | Partial | 5B1–5B5 |
 | CFG-07 | Named listeners and legacy fixed protocol listener fields | Not started | One gate per IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
@@ -162,12 +162,12 @@ Primary anchors: [`adapter/outboundgroup`](../../adapter/outboundgroup),
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| GRP-01 | Selector and manual selection/persistence | Partial: nested configured selectors, recursive live TCP routing, SIGHUP reconciliation and restart-persisted choices with Go/Rust bbolt interchange | 5C1 automatic/health-group gates |
-| GRP-02 | URL-test, fallback and load-balance strategies | Partial: fallback, URL-test and all three load-balance strategies have configuration/views, scheduled real HTTP health/delay, dial-failure activation, failover and TCP routing evidence; authenticated SOCKS5 fallback health/failover also passes | 5C1 exhaustive health gates |
-| GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: file-provider composition, ordered name/type exclusion, include-all, empty fallback, startup/eager/lazy interval and timeout health scheduling, HTTP dial-failure thresholds and SOCKS5 fallback refusal activation | 5C1 remaining health policies |
-| PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Partial: local YAML file load/manual refresh plus bounded plaintext HTTP initial/manual/interval refresh, repeated headers, ETag/304, URL-MD5 default cache, restart reuse, REST views and group consumption | 5C2 HTTPS/override/ETag persistence gates |
-| PROV-02 | Rule providers: text/YAML/MRS formats, classical/domain/IP behavior, refresh and persistence | Not started | 5C4 |
-| PROV-03 | Concurrent update, failure rollback, resource cleanup and SIGHUP interaction | Partial: selector SIGHUP plus serial file/HTTP refresh transaction and config/cache rollback | 5C5 concurrency/cleanup gates |
+| GRP-01 | Selector and manual selection/persistence | Partial: Phase 5C current adapters complete, including nesting, reload and Go/Rust bbolt interchange | Later adapter-specific membership gates |
+| GRP-02 | URL-test, fallback and load-balance strategies | Partial: Phase 5C current HTTP/SOCKS5 strategies, health, failure activation, failover and routing complete | Later adapter/UDP strategy gates |
+| GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Partial: Phase 5C current adapter types and policies complete | Later adapter-type composition gates |
+| PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Partial: inline/file/HTTP/HTTPS, current adapter filters/name transforms, health, refresh, cache and durable ETag complete | Named download proxy, general override expressions, encryption and later adapters |
+| PROV-02 | Rule providers: text/YAML/MRS formats, classical/domain/IP behavior, refresh and persistence | Partial: Phase 5C declared provider/routing/REST/lifecycle scope complete | Named download proxy and later consumer integration |
+| PROV-03 | Concurrent update, failure rollback, resource cleanup and SIGHUP interaction | Partial: Phase 5C process-level concurrency, rollback, watcher/scheduler cancellation and removal cleanup complete | Native multi-platform stress/release gates |
 
 ## DNS
 

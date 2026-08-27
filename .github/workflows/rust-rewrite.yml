@@ -183,6 +183,17 @@ jobs:
       PHASE5CLOADBALANCEHASH_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CHEALTHSCHEDULE_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CDIALFAILURE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CSOCKSHEALTH_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDER_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDERREFRESH_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDERCACHE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CRULEPROVIDER_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CPROVIDERFEATURES_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CPROVIDERHTTPS_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CPROVIDERCONCURRENCY_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DCONFIGS_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/rust/target
@@ -238,6 +249,10 @@ jobs:
           compat/scripts/phase5c_http_provider_cache.py \
           compat/scripts/phase5c_http_provider_stale.py \
           compat/scripts/phase5c_http_provider_reload.py \
+          compat/scripts/phase5c_rule_provider.py \
+          compat/scripts/phase5c_provider_features.py \
+          compat/scripts/phase5c_provider_https.py \
+          compat/scripts/phase5c_provider_concurrency.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \

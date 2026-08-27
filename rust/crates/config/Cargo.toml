@@ -14,6 +14,7 @@ prost.workspace = true
 regex.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-rules = { path = "../rules" }
+rewrite-ruleset = { path = "../ruleset" }
 serde.workspace = true
 serde_yaml_ng.workspace = true
 thiserror.workspace = true

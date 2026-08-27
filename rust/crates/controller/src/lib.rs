@@ -52,6 +52,7 @@ pub struct ConfigUpdate {
 pub enum ConfigUpdateKind {
     Replace(Box<Config>),
     RefreshProxyProvider(String),
+    RefreshRuleProvider(String),
 }
 
 impl ControllerState {
@@ -297,7 +298,7 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/providers/rules/", get(rule_providers))
         .route(
             "/providers/rules/{name}",
-            axum::routing::put(missing_rule_provider),
+            axum::routing::put(update_rule_provider),
         )
         .route(
             "/connections",
@@ -1273,12 +1274,51 @@ async fn healthcheck_proxy_provider(
     {
         return proxy_not_found();
     }
-    if let Some(group) = config.proxy_groups.iter().find(|candidate| {
+    if let Some(configured) = config
+        .proxy_providers
+        .iter()
+        .find(|candidate| candidate.name == provider)
+    {
+        healthcheck_proxy_provider_config(configured, &config, &state.runtime).await;
+    } else if let Some(group) = config.proxy_groups.iter().find(|candidate| {
         candidate.name == provider && candidate.kind != rewrite_config::ProxyGroupKind::Select
     }) {
         healthcheck_proxy_group(group, &config, &state.runtime).await;
     }
     empty_response(StatusCode::NO_CONTENT)
+}
+
+/// Measures every member of one configured proxy provider.
+pub async fn healthcheck_proxy_provider_config(
+    provider: &rewrite_config::ProxyProviderConfig,
+    config: &Config,
+    state: &RuntimeState,
+) {
+    if !provider.health_check.enabled {
+        return;
+    }
+    let expected = parse_status_ranges(&provider.health_check.expected_status).unwrap_or_default();
+    let timeout = Duration::from_millis(provider.health_check.timeout);
+    let results = join_all(provider.proxies.iter().map(|member| {
+        let expected = &expected;
+        async move {
+            let result = tokio::time::timeout(
+                timeout,
+                measure_http_delay(&member.name, &provider.health_check.url, expected, config),
+            )
+            .await;
+            (&member.name, result)
+        }
+    }))
+    .await;
+    for (member, result) in results {
+        match result {
+            Ok(Ok(delay)) if delay > 0 => {
+                state.record_proxy_delay(member, &provider.health_check.url, delay, true);
+            }
+            _ => state.record_proxy_delay(member, &provider.health_check.url, 0, false),
+        }
+    }
 }
 
 /// Measures every member of one automatic group and publishes per-URL health.
@@ -1361,15 +1401,70 @@ async fn proxy_provider_member(
         )
 }
 
-async fn rule_providers() -> Response {
-    json_response(
-        StatusCode::OK,
-        &json!({"providers": serde_json::Map::<String, serde_json::Value>::new()}),
-    )
+async fn rule_providers(State(state): State<ControllerState>) -> Response {
+    let config = state.current_config();
+    let providers: BTreeMap<_, _> = config
+        .rule_providers
+        .iter()
+        .map(|(name, provider)| (name.clone(), rule_provider_snapshot(provider)))
+        .collect();
+    json_response(StatusCode::OK, &json!({"providers": providers}))
 }
 
-async fn missing_rule_provider() -> Response {
-    proxy_not_found()
+async fn update_rule_provider(
+    State(state): State<ControllerState>,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.current_config().rule_providers.contains_key(&name) {
+        return proxy_not_found();
+    }
+    apply_update(
+        &state,
+        ConfigUpdateKind::RefreshRuleProvider(name),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await
+}
+
+fn rule_provider_snapshot(provider: &rewrite_config::RuleProviderConfig) -> serde_json::Value {
+    let behavior = match provider.behavior {
+        rewrite_config::ProviderBehavior::Domain => "Domain",
+        rewrite_config::ProviderBehavior::IpCidr => "IPCIDR",
+        rewrite_config::ProviderBehavior::Classical => "Classical",
+    };
+    let vehicle = match provider.vehicle {
+        rewrite_config::RuleProviderVehicle::Inline => "Inline",
+        rewrite_config::RuleProviderVehicle::File => "File",
+        rewrite_config::RuleProviderVehicle::Http => "HTTP",
+    };
+    let format = match provider.vehicle {
+        rewrite_config::RuleProviderVehicle::Inline => "",
+        _ => match provider.format {
+            rewrite_config::RuleProviderFormat::Yaml => "YamlRule",
+            rewrite_config::RuleProviderFormat::Text => "TextRule",
+            rewrite_config::RuleProviderFormat::Mrs => "MrsRule",
+        },
+    };
+    let updated_at = provider
+        .cache_modified
+        .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok())
+        .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned());
+    let mut snapshot = json!({
+        "behavior": behavior,
+        "format": format,
+        "name": provider.name,
+        "ruleCount": provider.payload.len(),
+        "type": "Rule",
+        "updatedAt": updated_at,
+        "vehicleType": vehicle,
+    });
+    if provider.vehicle == rewrite_config::RuleProviderVehicle::Inline {
+        snapshot
+            .as_object_mut()
+            .expect("rule provider snapshot object")
+            .insert("payload".to_owned(), json!(provider.payload));
+    }
+    snapshot
 }
 
 fn proxy_provider_snapshot(config: &Config, runtime: &RuntimeState) -> serde_json::Value {
@@ -1409,12 +1504,17 @@ fn file_proxy_provider_snapshot(
         .iter()
         .map(|proxy| configured_proxy_snapshot_with_provider(proxy, &provider.name, runtime))
         .collect();
-    let updated_at = std::fs::metadata(&provider.path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
+    let updated_at = provider
+        .cache_modified
+        .or_else(|| {
+            std::fs::metadata(&provider.path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        })
         .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok())
         .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned());
     let vehicle_type = match provider.vehicle {
+        rewrite_config::ProxyProviderVehicle::Inline => "Inline",
         rewrite_config::ProxyProviderVehicle::File => "File",
         rewrite_config::ProxyProviderVehicle::Http => "HTTP",
     };
@@ -1423,8 +1523,8 @@ fn file_proxy_provider_snapshot(
         "type": "Proxy",
         "vehicleType": vehicle_type,
         "proxies": proxies,
-        "testUrl": "",
-        "expectedStatus": "*",
+        "testUrl": provider.health_check.url,
+        "expectedStatus": provider.health_check.expected_status,
         "updatedAt": updated_at,
     })
 }

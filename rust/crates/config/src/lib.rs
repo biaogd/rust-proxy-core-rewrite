@@ -9,7 +9,8 @@ use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use prost::Message;
 use regex::Regex;
 use rewrite_model::AuthUser;
-use rewrite_rules::{RematchSpec, RuleError, RuleSet};
+pub use rewrite_rules::ProviderBehavior;
+use rewrite_rules::{ProviderDefinition, RematchSpec, RuleError, RuleSet};
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::{Mapping, Value};
 use thiserror::Error;
@@ -63,6 +64,7 @@ pub struct ConfigSpec {
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
+    pub trust_certificates: Vec<String>,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub raw_rules: Vec<String>,
@@ -70,6 +72,7 @@ pub struct ConfigSpec {
     pub rematches: Vec<RematchSpec>,
     pub proxies: Vec<ProxyConfig>,
     pub proxy_providers: Vec<ProxyProviderConfig>,
+    pub rule_providers: BTreeMap<String, RuleProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     unsupported_keys: Vec<String>,
@@ -91,12 +94,17 @@ pub struct Config {
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
+    pub trust_certificates: Vec<String>,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub proxies: Vec<ProxyConfig>,
     pub proxy_providers: Vec<ProxyProviderConfig>,
+    pub rule_providers: BTreeMap<String, RuleProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
+    raw_rules: Vec<String>,
+    raw_sub_rules: BTreeMap<String, Vec<String>>,
+    rematches: Vec<RematchSpec>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,12 +186,66 @@ pub struct ProxyProviderConfig {
     pub etag: Option<String>,
     pub cache_modified: Option<SystemTime>,
     pub proxies: Vec<ProxyConfig>,
+    pub health_check: ProviderHealthConfig,
+    transform: ProxyProviderTransform,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProxyProviderVehicle {
+    Inline,
     File,
     Http,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderHealthConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub expected_status: String,
+    pub interval: u64,
+    pub timeout: u64,
+    pub lazy: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ProxyProviderTransform {
+    filters: Vec<String>,
+    exclude_filters: Vec<String>,
+    exclude_types: Vec<String>,
+    additional_prefix: String,
+    additional_suffix: String,
+    name_replacements: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuleProviderConfig {
+    pub name: String,
+    pub behavior: ProviderBehavior,
+    pub vehicle: RuleProviderVehicle,
+    pub format: RuleProviderFormat,
+    pub path: PathBuf,
+    pub url: Option<String>,
+    pub interval: u64,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub size_limit: usize,
+    pub cache_modified: Option<SystemTime>,
+    pub etag: Option<String>,
+    pub payload: Vec<String>,
+    domains: Vec<RuleSetDomain>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleProviderVehicle {
+    Inline,
+    File,
+    Http,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleProviderFormat {
+    Yaml,
+    Text,
+    Mrs,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -661,7 +723,22 @@ struct RawRuleProvider {
     #[serde(rename = "type")]
     kind: Option<String>,
     behavior: Option<String>,
+    format: Option<String>,
+    path: Option<String>,
+    url: Option<String>,
+    interval: Option<u64>,
+    header: Option<BTreeMap<String, Vec<String>>>,
+    size_limit: Option<usize>,
+    proxy: Option<String>,
     payload: Option<Vec<String>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawRuleProviderFile {
+    payload: Option<Vec<String>>,
+    rules: Option<Vec<String>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -675,7 +752,7 @@ struct RawProfile {
     extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawProxy {
     name: Option<String>,
@@ -733,6 +810,44 @@ struct RawProxyProvider {
     interval: Option<u64>,
     header: Option<BTreeMap<String, Vec<String>>>,
     size_limit: Option<usize>,
+    filter: Option<String>,
+    exclude_filter: Option<String>,
+    exclude_type: Option<String>,
+    payload: Option<Vec<RawProxy>>,
+    health_check: Option<RawProviderHealthCheck>,
+    #[serde(rename = "override")]
+    overrides: Option<RawProxyProviderOverride>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawProviderHealthCheck {
+    enable: Option<bool>,
+    url: Option<String>,
+    interval: Option<u64>,
+    timeout: Option<u64>,
+    lazy: Option<bool>,
+    expected_status: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawProxyProviderOverride {
+    additional_prefix: Option<String>,
+    additional_suffix: Option<String>,
+    proxy_name: Option<Vec<RawProxyNameReplacement>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProxyNameReplacement {
+    pattern: String,
+    target: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -742,6 +857,13 @@ struct RawProxyProviderFile {
     proxies: Option<Vec<RawProxy>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProviderEtagCache {
+    url: String,
+    digest: String,
+    etag: String,
 }
 
 #[derive(Debug, Error)]
@@ -864,16 +986,34 @@ impl ConfigSpec {
             &proxies,
             &proxy_providers,
         )?;
+        let rule_providers =
+            parse_rule_providers(raw.rule_providers.unwrap_or_default(), provider_directory)?;
         let proxy_targets = proxies
             .iter()
             .map(|proxy| proxy.name.clone())
             .chain(proxy_groups.iter().map(|group| group.name.clone()))
             .collect();
-        let rules =
-            RuleSet::parse_with_targets(&raw_rules, &raw_sub_rules, &rematches, &proxy_targets)?;
+        let provider_definitions = rule_providers
+            .iter()
+            .map(|(name, provider)| {
+                (
+                    name.clone(),
+                    ProviderDefinition {
+                        behavior: provider.behavior,
+                        payload: provider.payload.clone(),
+                    },
+                )
+            })
+            .collect();
+        let rules = RuleSet::parse_with_targets_and_providers(
+            &raw_rules,
+            &raw_sub_rules,
+            &rematches,
+            &proxy_targets,
+            &provider_definitions,
+        )?;
         let profile = parse_profile(raw.profile)?;
         let trust_certificates = parse_tls(raw.tls)?;
-        let rule_providers = parse_rule_providers(raw.rule_providers.unwrap_or_default())?;
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let controller_cors = parse_controller_cors(raw.external_controller_cors);
         let dns = parse_dns(
@@ -883,7 +1023,6 @@ impl ConfigSpec {
             config_directory,
             geodata_mode,
         )?;
-        validate_rule_provider_usage(&rule_providers, dns.as_ref())?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -911,6 +1050,7 @@ impl ConfigSpec {
             secret: raw.secret.unwrap_or_default(),
             controller_cors,
             profile,
+            trust_certificates,
             dns,
             hosts: parse_hosts(raw.hosts.unwrap_or_default())?,
             raw_rules,
@@ -918,6 +1058,7 @@ impl ConfigSpec {
             rematches,
             proxies,
             proxy_providers,
+            rule_providers,
             proxy_groups,
             rules,
             unsupported_keys: raw.extra.into_keys().collect(),
@@ -1044,12 +1185,17 @@ impl TryFrom<ConfigSpec> for Config {
             secret: spec.secret,
             controller_cors: spec.controller_cors,
             profile: spec.profile,
+            trust_certificates: spec.trust_certificates,
             dns: spec.dns,
             hosts: spec.hosts,
             proxies: spec.proxies,
             proxy_providers: spec.proxy_providers,
+            rule_providers: spec.rule_providers,
             proxy_groups: spec.proxy_groups,
             rules: spec.rules,
+            raw_rules: spec.raw_rules,
+            raw_sub_rules: spec.raw_sub_rules,
+            rematches: spec.rematches,
         })
     }
 }
@@ -1160,7 +1306,8 @@ impl Config {
             .position(|provider| provider.name == name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
         let path = self.proxy_providers[index].path.clone();
-        let proxies = load_proxy_provider_file(name, &path)?;
+        let proxies =
+            load_proxy_provider_file(name, &path, &self.proxy_providers[index].transform)?;
         self.replace_proxy_provider(index, proxies)
     }
 
@@ -1180,7 +1327,8 @@ impl Config {
             .iter()
             .position(|provider| provider.name == name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-        let proxies = parse_proxy_provider_source(name, source)?;
+        let proxies =
+            parse_proxy_provider_source(name, source, &self.proxy_providers[index].transform)?;
         self.replace_proxy_provider(index, proxies)
     }
 
@@ -1230,6 +1378,92 @@ impl Config {
         for group in &mut next.proxy_groups {
             group.proxies = expand_proxy_group(group, &providers, &proxy_types)?;
         }
+        Ok(next)
+    }
+
+    /// Re-reads a file rule provider and rebuilds the active rule program.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] without mutating this generation when the file,
+    /// provider format or rebuilt rule program is invalid.
+    pub fn reload_rule_provider(&self, name: &str) -> Result<Self, ConfigError> {
+        let provider = self
+            .rule_providers
+            .get(name)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        if provider.vehicle == RuleProviderVehicle::Inline {
+            let mut next = self.clone();
+            if let Some(provider) = next.rule_providers.get_mut(name) {
+                provider.cache_modified = Some(SystemTime::now());
+            }
+            return Ok(next);
+        }
+        let payload = load_rule_provider_file(&provider.path, provider.format, provider.behavior)?;
+        self.replace_rule_provider_payload(name, payload)
+    }
+
+    /// Parses downloaded rule-provider bytes and rebuilds the active rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] while preserving this generation when parsing or
+    /// rule-program validation fails.
+    pub fn replace_rule_provider_source(
+        &self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<Self, ConfigError> {
+        let provider = self
+            .rule_providers
+            .get(name)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        let payload = parse_rule_provider_source(source, provider.format, provider.behavior)?;
+        self.replace_rule_provider_payload(name, payload)
+    }
+
+    fn replace_rule_provider_payload(
+        &self,
+        name: &str,
+        payload: Vec<String>,
+    ) -> Result<Self, ConfigError> {
+        let mut next = self.clone();
+        let provider = next
+            .rule_providers
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        provider.domains = payload
+            .iter()
+            .filter_map(|entry| parse_rule_provider_domain(provider.behavior, entry).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        provider.payload = payload;
+        provider.cache_modified = Some(SystemTime::now());
+        let targets = next
+            .proxies
+            .iter()
+            .map(|proxy| proxy.name.clone())
+            .chain(next.proxy_groups.iter().map(|group| group.name.clone()))
+            .collect();
+        let definitions = next
+            .rule_providers
+            .iter()
+            .map(|(name, provider)| {
+                (
+                    name.clone(),
+                    ProviderDefinition {
+                        behavior: provider.behavior,
+                        payload: provider.payload.clone(),
+                    },
+                )
+            })
+            .collect();
+        next.rules = RuleSet::parse_with_targets_and_providers(
+            &next.raw_rules,
+            &next.raw_sub_rules,
+            &next.rematches,
+            &targets,
+            &definitions,
+        )?;
         Ok(next)
     }
 
@@ -1377,7 +1611,7 @@ fn parse_tls(raw: Option<RawTls>) -> Result<Vec<String>, ConfigError> {
 fn parse_dns(
     raw: Option<RawDns>,
     trust_certificates: &[String],
-    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    rule_providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
     geodata_mode: bool,
 ) -> Result<Option<DnsConfig>, ConfigError> {
@@ -2080,98 +2314,189 @@ fn parse_fallback(
     }))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RuleProviderBehavior {
-    Domain,
-    Classical,
-    IpCidr,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParsedRuleProvider {
-    behavior: RuleProviderBehavior,
-    domains: Vec<RuleSetDomain>,
-}
-
+#[allow(clippy::too_many_lines)]
 fn parse_rule_providers(
     raw: BTreeMap<String, RawRuleProvider>,
-) -> Result<BTreeMap<String, ParsedRuleProvider>, ConfigError> {
+    provider_directory: Option<&Path>,
+) -> Result<BTreeMap<String, RuleProviderConfig>, ConfigError> {
     raw.into_iter()
         .map(|(name, provider)| {
-            if provider.kind.as_deref() != Some("inline") {
-                return Err(ConfigError::InvalidDns(format!(
-                    "Phase 4F8 rule provider {name} must use type inline"
-                )));
-            }
-            if let Some(key) = provider.extra.keys().next() {
-                return Err(ConfigError::InvalidDns(format!(
-                    "unsupported Phase 4F8 rule provider field {name}.{key}"
-                )));
+            if name.is_empty() || !provider.extra.is_empty() || provider.proxy.is_some() {
+                return Err(ConfigError::UnsupportedProxy(name));
             }
             let behavior = match provider.behavior.as_deref() {
-                Some("domain") => RuleProviderBehavior::Domain,
-                Some("classical") => RuleProviderBehavior::Classical,
-                Some("ipcidr") => RuleProviderBehavior::IpCidr,
-                _ => {
-                    return Err(ConfigError::InvalidDns(format!(
-                        "Phase 4F8 rule provider {name} has unsupported behavior"
-                    )));
-                }
+                Some("domain") => ProviderBehavior::Domain,
+                Some("classical") => ProviderBehavior::Classical,
+                Some("ipcidr") => ProviderBehavior::IpCidr,
+                _ => return Err(ConfigError::UnsupportedProxy(name)),
             };
-            let domains = provider
-                .payload
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|entry| parse_rule_provider_domain(behavior, &entry).transpose())
+            let format = match provider.format.as_deref() {
+                None | Some("yaml") => RuleProviderFormat::Yaml,
+                Some("text") => RuleProviderFormat::Text,
+                Some("mrs") => RuleProviderFormat::Mrs,
+                _ => return Err(ConfigError::UnsupportedProxy(name)),
+            };
+            let fallback = provider.payload.unwrap_or_default();
+            let (vehicle, path, url, cache_modified, etag, payload) = match provider.kind.as_deref()
+            {
+                Some("inline") if provider.path.is_none() && provider.url.is_none() => (
+                    RuleProviderVehicle::Inline,
+                    PathBuf::new(),
+                    None,
+                    Some(SystemTime::now()),
+                    None,
+                    fallback,
+                ),
+                Some("file") if provider.url.is_none() => {
+                    let directory = provider_directory
+                        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                    let path = provider
+                        .path
+                        .filter(|path| !path.is_empty())
+                        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                    let path = directory.join(path);
+                    let payload = load_rule_provider_file(&path, format, behavior)?;
+                    let modified = std::fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
+                    (
+                        RuleProviderVehicle::File,
+                        path,
+                        None,
+                        modified,
+                        None,
+                        payload,
+                    )
+                }
+                Some("http") => {
+                    let directory = provider_directory
+                        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                    let url = provider
+                        .url
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+                    let parsed = Url::parse(&url)
+                        .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
+                    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                        return Err(ConfigError::UnsupportedProxy(name));
+                    }
+                    let path = provider.path.filter(|path| !path.is_empty()).map_or_else(
+                        || {
+                            directory
+                                .join("rules")
+                                .join(format!("{:x}", Md5::digest(url.as_bytes())))
+                        },
+                        |path| directory.join(path),
+                    );
+                    let (modified, etag, cached) = load_rule_provider_file(&path, format, behavior)
+                        .map(|payload| {
+                            let modified = std::fs::metadata(&path)
+                                .and_then(|metadata| metadata.modified())
+                                .ok();
+                            let etag = load_provider_etag(&path, &url);
+                            (modified, etag, payload)
+                        })
+                        .unwrap_or((None, None, fallback));
+                    (
+                        RuleProviderVehicle::Http,
+                        path,
+                        Some(url),
+                        modified,
+                        etag,
+                        cached,
+                    )
+                }
+                _ => return Err(ConfigError::UnsupportedProxy(name)),
+            };
+            let domains = payload
+                .iter()
+                .filter_map(|entry| parse_rule_provider_domain(behavior, entry).transpose())
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok((name, ParsedRuleProvider { behavior, domains }))
+            Ok((
+                name.clone(),
+                RuleProviderConfig {
+                    name,
+                    behavior,
+                    vehicle,
+                    format,
+                    path,
+                    url,
+                    interval: provider.interval.unwrap_or(0),
+                    headers: provider.header.unwrap_or_default(),
+                    size_limit: provider.size_limit.unwrap_or(0),
+                    cache_modified,
+                    etag,
+                    payload,
+                    domains,
+                },
+            ))
         })
         .collect()
 }
 
-fn validate_rule_provider_usage(
-    providers: &BTreeMap<String, ParsedRuleProvider>,
-    dns: Option<&DnsConfig>,
-) -> Result<(), ConfigError> {
-    let mut used = dns
-        .into_iter()
-        .flat_map(|dns| dns.policies.iter().chain(&dns.proxy_policies))
-        .filter_map(|policy| match &policy.matcher {
-            DnsPolicyMatcher::RuleSet { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    if let Some(fake) = dns.and_then(|dns| dns.fake_ip.as_ref()) {
-        for matcher in &fake.filter {
-            if let DnsPolicyMatcher::RuleSet { name, .. } = matcher {
-                used.insert(name);
+fn load_rule_provider_file(
+    path: &Path,
+    format: RuleProviderFormat,
+    behavior: ProviderBehavior,
+) -> Result<Vec<String>, ConfigError> {
+    let source = std::fs::read(path)?;
+    parse_rule_provider_source(&source, format, behavior)
+}
+
+fn parse_rule_provider_source(
+    source: &[u8],
+    format: RuleProviderFormat,
+    behavior: ProviderBehavior,
+) -> Result<Vec<String>, ConfigError> {
+    match format {
+        RuleProviderFormat::Yaml => {
+            let file = serde_yaml_ng::from_slice::<RawRuleProviderFile>(source)?;
+            if !file.extra.is_empty() {
+                return Err(ConfigError::UnsupportedProxy(
+                    "rule provider YAML".to_owned(),
+                ));
             }
+            Ok(file.rules.or(file.payload).unwrap_or_default())
         }
-        for rule in &fake.rules {
-            if let FakeIpRuleMatcher::RuleSet { name, .. } = &rule.matcher {
-                used.insert(name);
+        RuleProviderFormat::Text => {
+            let source = std::str::from_utf8(source)
+                .map_err(|_| ConfigError::UnsupportedProxy("rule provider text".to_owned()))?;
+            Ok(source
+                .lines()
+                .map(str::trim)
+                .filter(|line| {
+                    !line.is_empty() && !line.starts_with('#') && !line.starts_with("//")
+                })
+                .map(str::to_owned)
+                .collect())
+        }
+        RuleProviderFormat::Mrs => {
+            let text = match behavior {
+                ProviderBehavior::Domain => rewrite_ruleset::domain_mrs_to_text(source),
+                ProviderBehavior::IpCidr => rewrite_ruleset::ipcidr_mrs_to_text(source),
+                ProviderBehavior::Classical => {
+                    return Err(ConfigError::UnsupportedProxy(
+                        "classical MRS rule provider".to_owned(),
+                    ));
+                }
             }
+            .map_err(|_| ConfigError::UnsupportedProxy("rule provider MRS".to_owned()))?;
+            parse_rule_provider_source(&text, RuleProviderFormat::Text, behavior)
         }
     }
-    if let Some(name) = providers.keys().find(|name| !used.contains(name.as_str())) {
-        return Err(ConfigError::UnsupportedKey(format!(
-            "rule-providers.{name} outside DNS policy"
-        )));
-    }
-    Ok(())
 }
 
 fn parse_rule_provider_domain(
-    behavior: RuleProviderBehavior,
+    behavior: ProviderBehavior,
     entry: &str,
 ) -> Result<Option<RuleSetDomain>, ConfigError> {
     match behavior {
-        RuleProviderBehavior::Domain => Ok(Some(RuleSetDomain {
+        ProviderBehavior::Domain => Ok(Some(RuleSetDomain {
             kind: RuleSetDomainKind::Trie,
             value: normalize_policy_pattern(entry)?,
         })),
-        RuleProviderBehavior::IpCidr => Ok(None),
-        RuleProviderBehavior::Classical => {
+        ProviderBehavior::IpCidr => Ok(None),
+        ProviderBehavior::Classical => {
             let mut fields = entry.split(',');
             let kind = fields.next().unwrap_or_default().to_ascii_uppercase();
             let payload = fields.next().unwrap_or_default();
@@ -2203,7 +2528,7 @@ fn parse_dns_policies(
     default_nameservers: &[String],
     prefer_h3: bool,
     trust_certificates: &[String],
-    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    rule_providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<Vec<DnsPolicy>, ConfigError> {
     let mut policies = Vec::new();
@@ -2248,7 +2573,7 @@ fn parse_policy_servers(value: &Value, field: &str) -> Result<Vec<String>, Confi
 
 fn expand_policy_matchers(
     key: &str,
-    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    rule_providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<Vec<DnsPolicyMatcher>, ConfigError> {
     let lower = key.to_ascii_lowercase();
@@ -2265,7 +2590,7 @@ fn expand_policy_matchers(
                 let provider = rule_providers.get(name).ok_or_else(|| {
                     ConfigError::InvalidDns(format!("not found rule-set: {name}"))
                 })?;
-                if provider.behavior == RuleProviderBehavior::IpCidr {
+                if provider.behavior == ProviderBehavior::IpCidr {
                     return Err(ConfigError::InvalidDns(format!(
                         "rule provider type error for {name}: expected domain"
                     )));
@@ -2905,7 +3230,7 @@ fn normalize_tls_server_name(value: &str) -> Result<String, ConfigError> {
 fn parse_fake_ip_config(
     raw: &mut RawDns,
     mode: DnsMode,
-    rule_providers: &BTreeMap<String, ParsedRuleProvider>,
+    rule_providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<Option<FakeIpConfig>, ConfigError> {
     if mode != DnsMode::FakeIp {
@@ -2974,7 +3299,7 @@ fn parse_fake_ip_config(
 
 fn parse_fake_ip_matchers(
     entries: &[String],
-    providers: &BTreeMap<String, ParsedRuleProvider>,
+    providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<Vec<DnsPolicyMatcher>, ConfigError> {
     let mut matchers = Vec::new();
@@ -2990,7 +3315,7 @@ fn parse_fake_ip_matchers(
 
 fn parse_fake_ip_rules(
     entries: &[String],
-    providers: &BTreeMap<String, ParsedRuleProvider>,
+    providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<Vec<FakeIpRule>, ConfigError> {
     entries
@@ -3003,7 +3328,7 @@ fn parse_fake_ip_rules(
 fn parse_fake_ip_rule(
     index: usize,
     entry: &str,
-    providers: &BTreeMap<String, ParsedRuleProvider>,
+    providers: &BTreeMap<String, RuleProviderConfig>,
     config_directory: Option<&Path>,
 ) -> Result<FakeIpRule, ConfigError> {
     let fields = entry.split(',').map(str::trim).collect::<Vec<_>>();
@@ -3072,7 +3397,7 @@ fn parse_fake_ip_rule(
                     "dns.fake-ip-filter[{index}] [{entry}] error: rule-set '{payload}' not found"
                 ))
             })?;
-            if provider.behavior == RuleProviderBehavior::IpCidr {
+            if provider.behavior == ProviderBehavior::IpCidr {
                 return Err(ConfigError::InvalidDns(format!(
                     "dns.fake-ip-filter[{index}] [{entry}] error: rule-set behavior is ipcidr, must be domain or classical"
                 )));
@@ -3631,7 +3956,12 @@ fn parse_proxy_group(
             && parsed
                 .default_selected
                 .as_ref()
-                .is_some_and(|default| !parsed.proxies.contains(default)))
+                .is_some_and(|default| !parsed.proxies.contains(default))
+            && !parsed.providers.iter().any(|name| {
+                catalog.providers.iter().any(|provider| {
+                    provider.name == *name && provider.vehicle == ProxyProviderVehicle::Http
+                })
+            }))
     {
         return Err(ConfigError::UnsupportedProxy(parsed.name));
     }
@@ -3828,6 +4158,7 @@ fn expand_proxy_group(
     Ok(members)
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_proxy_providers(
     providers: BTreeMap<String, RawProxyProvider>,
     config_directory: Option<&Path>,
@@ -3839,10 +4170,24 @@ fn parse_proxy_providers(
         if name.is_empty() || !provider.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name));
         }
-        let directory =
-            config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-        let (vehicle, url, path, cache_modified, proxies) = match provider.kind.as_deref() {
+        let transform = parse_proxy_provider_transform(&name, &provider)?;
+        let health_check = parse_provider_health_check(&name, provider.health_check.as_ref())?;
+        let (vehicle, url, path, cache_modified, etag, proxies) = match provider.kind.as_deref() {
+            Some("inline") if provider.url.is_none() && provider.path.is_none() => (
+                ProxyProviderVehicle::Inline,
+                None,
+                PathBuf::new(),
+                Some(SystemTime::now()),
+                None,
+                parse_proxy_provider_records(
+                    &name,
+                    provider.payload.clone().unwrap_or_default(),
+                    &transform,
+                )?,
+            ),
             Some("file") if provider.url.is_none() => {
+                let directory =
+                    config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
                 let configured_path = provider
                     .path
                     .filter(|path| !path.is_empty())
@@ -3853,17 +4198,22 @@ fn parse_proxy_providers(
                     None,
                     path.clone(),
                     None,
-                    load_proxy_provider_file(&name, &path)?,
+                    None,
+                    load_proxy_provider_file(&name, &path, &transform)?,
                 )
             }
             Some("http") => {
+                let directory =
+                    config_directory.ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
                 let url = provider
                     .url
                     .filter(|url| !url.is_empty())
                     .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
                 let parsed_url =
                     Url::parse(&url).map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
-                if parsed_url.scheme() != "http" || parsed_url.host_str().is_none() {
+                if !matches!(parsed_url.scheme(), "http" | "https")
+                    || parsed_url.host_str().is_none()
+                {
                     return Err(ConfigError::UnsupportedProxy(name));
                 }
                 let path = provider.path.filter(|path| !path.is_empty()).map_or_else(
@@ -3874,19 +4224,22 @@ fn parse_proxy_providers(
                     },
                     |path| directory.join(path),
                 );
-                let (cache_modified, cached) = load_proxy_provider_file(&name, &path)
-                    .map(|proxies| {
-                        let modified = std::fs::metadata(&path)
-                            .and_then(|metadata| metadata.modified())
-                            .ok();
-                        (modified, proxies)
-                    })
-                    .unwrap_or_default();
+                let (cache_modified, etag, cached) =
+                    load_proxy_provider_file(&name, &path, &transform)
+                        .map(|proxies| {
+                            let modified = std::fs::metadata(&path)
+                                .and_then(|metadata| metadata.modified())
+                                .ok();
+                            let etag = load_provider_etag(&path, &url);
+                            (modified, etag, proxies)
+                        })
+                        .unwrap_or_default();
                 (
                     ProxyProviderVehicle::Http,
                     Some(url),
                     path,
                     cache_modified,
+                    etag,
                     cached,
                 )
             }
@@ -3906,29 +4259,237 @@ fn parse_proxy_providers(
             interval: provider.interval.unwrap_or(0),
             headers: provider.header.unwrap_or_default(),
             size_limit: provider.size_limit.unwrap_or(0),
-            etag: None,
+            etag,
             cache_modified,
             proxies,
+            health_check,
+            transform,
         });
     }
     Ok(parsed)
 }
 
-fn load_proxy_provider_file(name: &str, path: &Path) -> Result<Vec<ProxyConfig>, ConfigError> {
+fn load_proxy_provider_file(
+    name: &str,
+    path: &Path,
+    transform: &ProxyProviderTransform,
+) -> Result<Vec<ProxyConfig>, ConfigError> {
     let source = std::fs::read_to_string(path)?;
-    parse_proxy_provider_source(name, &source)
+    parse_proxy_provider_source(name, &source, transform)
 }
 
-fn parse_proxy_provider_source(name: &str, source: &str) -> Result<Vec<ProxyConfig>, ConfigError> {
+fn load_provider_etag(path: &Path, url: &str) -> Option<String> {
+    let payload = std::fs::read(path).ok()?;
+    let cache = std::fs::read(provider_etag_path(path)).ok()?;
+    let cache = serde_yaml_ng::from_slice::<ProviderEtagCache>(&cache).ok()?;
+    (cache.url == url && cache.digest == format!("{:x}", Md5::digest(&payload)))
+        .then_some(cache.etag)
+}
+
+/// Stores or clears durable HTTP provider `ETag` metadata tied to URL and bytes.
+///
+/// # Errors
+///
+/// Returns an I/O error when the sidecar cannot be atomically replaced.
+pub fn persist_provider_etag(
+    path: &Path,
+    url: &str,
+    payload: &[u8],
+    etag: Option<&str>,
+) -> std::io::Result<()> {
+    let sidecar = provider_etag_path(path);
+    let Some(etag) = etag.filter(|etag| !etag.is_empty()) else {
+        match std::fs::remove_file(sidecar) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    };
+    let source = serde_yaml_ng::to_string(&ProviderEtagCache {
+        url: url.to_owned(),
+        digest: format!("{:x}", Md5::digest(payload)),
+        etag: etag.to_owned(),
+    })
+    .map_err(std::io::Error::other)?;
+    let temporary = sidecar.with_extension("etag.tmp");
+    std::fs::write(&temporary, source)?;
+    std::fs::rename(temporary, sidecar)
+}
+
+fn provider_etag_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".etag");
+    PathBuf::from(value)
+}
+
+fn parse_proxy_provider_source(
+    name: &str,
+    source: &str,
+    transform: &ProxyProviderTransform,
+) -> Result<Vec<ProxyConfig>, ConfigError> {
     let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(source)?;
     if !file.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
-    let (rematches, proxies) = parse_proxies(file.proxies.unwrap_or_default())?;
+    parse_proxy_provider_records(name, file.proxies.unwrap_or_default(), transform)
+}
+
+fn parse_proxy_provider_records(
+    name: &str,
+    mut records: Vec<RawProxy>,
+    transform: &ProxyProviderTransform,
+) -> Result<Vec<ProxyConfig>, ConfigError> {
+    let filters = transform
+        .filters
+        .iter()
+        .map(|pattern| fancy_regex::Regex::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let excludes = transform
+        .exclude_filters
+        .iter()
+        .map(|pattern| fancy_regex::Regex::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    records.retain(|record| {
+        let Some(member_name) = record.name.as_deref() else {
+            return false;
+        };
+        if record.kind.as_deref().is_some_and(|kind| {
+            transform
+                .exclude_types
+                .iter()
+                .any(|excluded| excluded.eq_ignore_ascii_case(kind))
+        }) {
+            return false;
+        }
+        if excludes
+            .iter()
+            .any(|pattern| group_regex_matches(pattern, member_name))
+        {
+            return false;
+        }
+        filters.is_empty()
+            || filters
+                .iter()
+                .any(|pattern| group_regex_matches(pattern, member_name))
+    });
+    for record in &mut records {
+        let Some(mut member_name) = record.name.take() else {
+            continue;
+        };
+        for (pattern, target) in &transform.name_replacements {
+            let pattern = regex::Regex::new(pattern)
+                .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+            member_name = pattern.replace_all(&member_name, target).into_owned();
+        }
+        member_name = format!(
+            "{}{}{}",
+            transform.additional_prefix, member_name, transform.additional_suffix
+        );
+        record.name = Some(member_name);
+    }
+    let (rematches, proxies) = parse_proxies(records)?;
     if !rematches.is_empty() || proxies.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok(proxies)
+}
+
+fn parse_proxy_provider_transform(
+    name: &str,
+    provider: &RawProxyProvider,
+) -> Result<ProxyProviderTransform, ConfigError> {
+    let split = |value: Option<&String>| {
+        value
+            .into_iter()
+            .flat_map(|value| value.split('`'))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let filters = split(provider.filter.as_ref());
+    let exclude_filters = split(provider.exclude_filter.as_ref());
+    let exclude_types = provider
+        .exclude_type
+        .as_deref()
+        .into_iter()
+        .flat_map(|value| value.split('|'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for pattern in filters.iter().chain(&exclude_filters) {
+        fancy_regex::Regex::new(pattern)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    }
+    let overrides = provider.overrides.as_ref();
+    if overrides.is_some_and(|overrides| !overrides.extra.is_empty()) {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let mut name_replacements = Vec::new();
+    for replacement in overrides
+        .and_then(|overrides| overrides.proxy_name.as_ref())
+        .into_iter()
+        .flatten()
+    {
+        if !replacement.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        regex::Regex::new(&replacement.pattern)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        name_replacements.push((replacement.pattern.clone(), replacement.target.clone()));
+    }
+    Ok(ProxyProviderTransform {
+        filters,
+        exclude_filters,
+        exclude_types,
+        additional_prefix: overrides
+            .and_then(|overrides| overrides.additional_prefix.clone())
+            .unwrap_or_default(),
+        additional_suffix: overrides
+            .and_then(|overrides| overrides.additional_suffix.clone())
+            .unwrap_or_default(),
+        name_replacements,
+    })
+}
+
+fn parse_provider_health_check(
+    name: &str,
+    raw: Option<&RawProviderHealthCheck>,
+) -> Result<ProviderHealthConfig, ConfigError> {
+    if raw.is_some_and(|raw| !raw.extra.is_empty()) {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let enabled = raw.and_then(|raw| raw.enable).unwrap_or(false);
+    let url = raw
+        .and_then(|raw| raw.url.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if enabled && !url.is_empty() {
+        let parsed =
+            Url::parse(&url).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+    }
+    Ok(ProviderHealthConfig {
+        enabled: enabled && !url.is_empty(),
+        url,
+        expected_status: raw
+            .and_then(|raw| raw.expected_status.clone())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "*".to_owned()),
+        interval: if enabled {
+            raw.and_then(|raw| raw.interval).unwrap_or(300).max(1)
+        } else {
+            0
+        },
+        timeout: raw.and_then(|raw| raw.timeout).unwrap_or(5_000).max(1),
+        lazy: raw.and_then(|raw| raw.lazy).unwrap_or(true),
+    })
 }
 
 #[cfg(test)]
@@ -5105,6 +5666,15 @@ dns:
             size_limit: 0,
             etag: None,
             cache_modified: None,
+            health_check: ProviderHealthConfig {
+                enabled: false,
+                url: String::new(),
+                expected_status: "*".to_owned(),
+                interval: 0,
+                timeout: 5_000,
+                lazy: true,
+            },
+            transform: ProxyProviderTransform::default(),
             proxies: ["provider-alpha", "provider-beta", "provider-omit"]
                 .into_iter()
                 .map(|name| ProxyConfig {
@@ -5161,6 +5731,15 @@ dns:
             size_limit: 0,
             etag: None,
             cache_modified: None,
+            health_check: ProviderHealthConfig {
+                enabled: false,
+                url: String::new(),
+                expected_status: "*".to_owned(),
+                interval: 0,
+                timeout: 5_000,
+                lazy: true,
+            },
+            transform: ProxyProviderTransform::default(),
             proxies: vec![ProxyConfig {
                 name: "provider-alpha".to_owned(),
                 kind: ProxyKind::Http,

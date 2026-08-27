@@ -23,6 +23,19 @@ pub struct RematchSpec {
     pub target_sub_rule: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderBehavior {
+    Domain,
+    IpCidr,
+    Classical,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderDefinition {
+    pub behavior: ProviderBehavior,
+    pub payload: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Decision {
     pub target: String,
@@ -130,6 +143,11 @@ enum Matcher {
         condition: Box<Matcher>,
         name: String,
     },
+    RuleSet {
+        name: String,
+        matchers: Vec<Matcher>,
+        no_resolve: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +240,28 @@ impl RuleSet {
         rematches: &[RematchSpec],
         targets: &BTreeSet<String>,
     ) -> Result<Self, RuleError> {
+        Self::parse_with_targets_and_providers(
+            lines,
+            raw_sub_rules,
+            rematches,
+            targets,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Parses a rule program with additional targets and provider payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for malformed rules, targets, provider references
+    /// or provider entries.
+    pub fn parse_with_targets_and_providers(
+        lines: &[String],
+        raw_sub_rules: &BTreeMap<String, Vec<String>>,
+        rematches: &[RematchSpec],
+        targets: &BTreeSet<String>,
+        providers: &BTreeMap<String, ProviderDefinition>,
+    ) -> Result<Self, RuleError> {
         let mut actions = BTreeMap::from([
             ("DIRECT".to_owned(), Action::Select),
             ("REJECT".to_owned(), Action::Select),
@@ -244,12 +284,12 @@ impl RuleSet {
             return Err(RuleError::EmptySubRuleName);
         }
         let sub_rule_names: BTreeSet<_> = raw_sub_rules.keys().cloned().collect();
-        let rules = parse_rule_list(lines, &actions, &sub_rule_names)?;
+        let rules = parse_rule_list(lines, &actions, &sub_rule_names, providers)?;
         let mut sub_rules = BTreeMap::new();
         for (name, raw_rules) in raw_sub_rules {
             sub_rules.insert(
                 name.clone(),
-                parse_rule_list(raw_rules, &actions, &sub_rule_names)?,
+                parse_rule_list(raw_rules, &actions, &sub_rule_names, providers)?,
             );
         }
         verify_sub_rule_cycles(&sub_rules)?;
@@ -589,30 +629,19 @@ impl Matcher {
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
-            Self::And(matchers) => {
-                for matcher in matchers {
-                    match matcher.match_result(metadata, allow_resolution) {
-                        MatchResult::Matched => {}
-                        result => return result,
-                    }
-                }
-                MatchResult::Matched
-            }
-            Self::Or(matchers) => {
-                for matcher in matchers {
-                    match matcher.match_result(metadata, allow_resolution) {
-                        MatchResult::Unmatched => {}
-                        result => return result,
-                    }
-                }
-                MatchResult::Unmatched
-            }
+            Self::And(matchers) => match_all(matchers, metadata, allow_resolution),
+            Self::Or(matchers) => match_any(matchers, metadata, allow_resolution),
             Self::Not(matcher) => match matcher.match_result(metadata, allow_resolution) {
                 MatchResult::Matched => MatchResult::Unmatched,
                 MatchResult::Unmatched => MatchResult::Matched,
                 MatchResult::ResolveDestinationIp => MatchResult::ResolveDestinationIp,
             },
             Self::SubRule { condition, .. } => condition.match_result(metadata, allow_resolution),
+            Self::RuleSet {
+                matchers,
+                no_resolve,
+                ..
+            } => match_provider(matchers, metadata, allow_resolution && !no_resolve),
         }
     }
 
@@ -650,6 +679,7 @@ impl Matcher {
             Self::Or(_) => "OR",
             Self::Not(_) => "NOT",
             Self::SubRule { .. } => "SubRules",
+            Self::RuleSet { .. } => "RuleSet",
         }
     }
 
@@ -683,6 +713,7 @@ impl Matcher {
                 .collect::<Vec<_>>()
                 .join("/"),
             Self::InName(names) | Self::InUser(names) | Self::RematchName(names) => names.join("/"),
+            Self::RuleSet { name, .. } => name.clone(),
             Self::Dscp(ranges) => ranges
                 .iter()
                 .map(|range| {
@@ -698,6 +729,46 @@ impl Matcher {
                 String::new()
             }
         }
+    }
+}
+
+fn match_all(matchers: &[Matcher], metadata: &Metadata, allow_resolution: bool) -> MatchResult {
+    for matcher in matchers {
+        match matcher.match_result(metadata, allow_resolution) {
+            MatchResult::Matched => {}
+            result => return result,
+        }
+    }
+    MatchResult::Matched
+}
+
+fn match_any(matchers: &[Matcher], metadata: &Metadata, allow_resolution: bool) -> MatchResult {
+    for matcher in matchers {
+        match matcher.match_result(metadata, allow_resolution) {
+            MatchResult::Unmatched => {}
+            result => return result,
+        }
+    }
+    MatchResult::Unmatched
+}
+
+fn match_provider(
+    matchers: &[Matcher],
+    metadata: &Metadata,
+    allow_resolution: bool,
+) -> MatchResult {
+    let mut pending_resolution = false;
+    for matcher in matchers {
+        match matcher.match_result(metadata, allow_resolution) {
+            MatchResult::Matched => return MatchResult::Matched,
+            MatchResult::Unmatched => {}
+            MatchResult::ResolveDestinationIp => pending_resolution = true,
+        }
+    }
+    if pending_resolution {
+        MatchResult::ResolveDestinationIp
+    } else {
+        MatchResult::Unmatched
     }
 }
 
@@ -734,10 +805,11 @@ fn parse_rule_list(
     lines: &[String],
     actions: &BTreeMap<String, Action>,
     sub_rules: &BTreeSet<String>,
+    providers: &BTreeMap<String, ProviderDefinition>,
 ) -> Result<Vec<Rule>, RuleError> {
     lines
         .iter()
-        .map(|line| parse_rule(line, actions, sub_rules))
+        .map(|line| parse_rule(line, actions, sub_rules, providers))
         .collect()
 }
 
@@ -745,6 +817,7 @@ fn parse_rule(
     raw: &str,
     actions: &BTreeMap<String, Action>,
     sub_rules: &BTreeSet<String>,
+    providers: &BTreeMap<String, ProviderDefinition>,
 ) -> Result<Rule, RuleError> {
     let fields = parse_rule_payload(raw, true);
     if fields.target.is_empty() {
@@ -757,7 +830,11 @@ fn parse_rule(
     } else if !actions.contains_key(&fields.target) {
         return Err(RuleError::ProxyNotFound(fields.target));
     }
-    let matcher = parse_matcher(&fields.kind, &fields.payload, &fields.params)?;
+    let matcher = if fields.kind == "RULE-SET" {
+        parse_rule_set(&fields.payload, &fields.params, providers)?
+    } else {
+        parse_matcher(&fields.kind, &fields.payload, &fields.params)?
+    };
     let matcher = if fields.kind == "SUB-RULE" {
         Matcher::SubRule {
             condition: Box::new(matcher),
@@ -770,6 +847,61 @@ fn parse_rule(
         matcher,
         target: fields.target,
     })
+}
+
+fn parse_rule_set(
+    name: &str,
+    params: &[String],
+    providers: &BTreeMap<String, ProviderDefinition>,
+) -> Result<Matcher, RuleError> {
+    let provider = providers
+        .get(name)
+        .ok_or_else(|| RuleError::Unsupported(format!("RULE-SET:{name}")))?;
+    let matchers = provider
+        .payload
+        .iter()
+        .filter_map(|entry| parse_provider_entry(provider.behavior, entry).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Matcher::RuleSet {
+        name: name.to_owned(),
+        matchers,
+        no_resolve: params.iter().any(|param| param == "no-resolve"),
+    })
+}
+
+fn parse_provider_entry(
+    behavior: ProviderBehavior,
+    entry: &str,
+) -> Result<Option<Matcher>, RuleError> {
+    match behavior {
+        ProviderBehavior::Domain => {
+            let entry = entry.trim().to_lowercase();
+            if entry.is_empty() || entry.contains('/') {
+                return Ok(None);
+            }
+            if let Some(suffix) = entry.strip_prefix("+.") {
+                require_payload(suffix, |value| Matcher::DomainSuffix(value.to_owned())).map(Some)
+            } else if entry.contains(['*', '?']) {
+                Ok(Some(Matcher::DomainWildcard(entry)))
+            } else {
+                Ok(Some(Matcher::Domain(entry)))
+            }
+        }
+        ProviderBehavior::IpCidr => match parse_ip_cidr(entry.trim(), false, false) {
+            Ok(matcher) => Ok(Some(matcher)),
+            Err(_) => Ok(None),
+        },
+        ProviderBehavior::Classical => {
+            let fields = parse_rule_payload(entry, false);
+            if matches!(fields.kind.as_str(), "" | "MATCH" | "RULE-SET" | "SUB-RULE") {
+                return Ok(None);
+            }
+            match parse_matcher(&fields.kind, &fields.payload, &fields.params) {
+                Ok(matcher) => Ok(Some(matcher)),
+                Err(_) => Ok(None),
+            }
+        }
+    }
 }
 
 struct RuleFields {

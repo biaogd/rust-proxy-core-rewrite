@@ -6,10 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-bytes.workspace = true
-http-body-util.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
+futures-util.workspace = true
+notify.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-controller = { path = "../controller" }
 rewrite-dns = { path = "../dns" }
@@ -20,6 +18,7 @@ rewrite-outbound = { path = "../outbound" }
 rewrite-rules = { path = "../rules" }
 rewrite-state = { path = "../state" }
 rand.workspace = true
+reqwest.workspace = true
 psl.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

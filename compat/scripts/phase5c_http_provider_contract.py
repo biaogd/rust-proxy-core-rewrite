@@ -165,6 +165,16 @@ def enabled_contract(binary: Path, scratch: Path) -> dict[str, Any]:
         selected = select(controller_port, "provider-two")
         routed = route(mixed_port, echo.port)
 
+        stop(process)
+        stdout.close()
+        stderr.close()
+        process, stdout, stderr = launch(binary, config, scratch)
+        wait_ready(process, mixed_port)
+        wait_controller(process, controller_port)
+        wait_names(process, controller_port, ["provider-two"])
+        restarted = update(controller_port)
+        restart_request = provider.observations[-1]
+
         provider.respond(b"x" * 1024, '"v3"')
         oversized = request(controller_port, "PUT", "/providers/proxies/remote-http")
         oversized_json = json.loads(oversized[1])
@@ -181,6 +191,8 @@ def enabled_contract(binary: Path, scratch: Path) -> dict[str, Any]:
             "selected": selected,
             "route": routed,
             "used-second": bool(second.observations),
+            "restart-not-modified": restarted,
+            "restart-sent-v2": restart_request["conditional"] == '"v2"',
             "oversized": {
                 "status": oversized[0],
                 "message-is-string": isinstance(oversized_json.get("message"), str),

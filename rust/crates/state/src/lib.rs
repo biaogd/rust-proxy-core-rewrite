@@ -799,6 +799,14 @@ impl RuntimeState {
         }
     }
 
+    pub fn retain_proxy_health<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
+        let names: std::collections::BTreeSet<_> = names.into_iter().collect();
+        self.proxy_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|name, _| names.contains(name.as_str()));
+    }
+
     #[must_use]
     pub fn subscribe_logs(&self) -> broadcast::Receiver<LogEvent> {
         self.logs.subscribe()

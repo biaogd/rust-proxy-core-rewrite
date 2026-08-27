@@ -123,10 +123,14 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1m automatic group health schedule | Complete in declared local HTTP/TCP scope; GRP-02/03 remain partial | Startup plus eager/lazy interval checks, per-member timeout, touch activation, health failover and lifecycle cancellation pass |
 | Phase 5C1n group dial-failure activation | Complete in declared grouped-HTTP/TCP scope; GRP-02/03 remain partial | Default/explicit failure threshold parsing, bounded group retry, below/at-threshold behavior, refused-connection immediate health activation and survivor routing pass |
 | Phase 5C1o SOCKS5 fallback health | Complete in declared authenticated SOCKS5/fallback TCP scope; GRP-02/03 remain partial | Real startup/manual/eager health probes, high-threshold refused activation, unhealthy failover and survivor routing pass |
+| Phase 5C3 provider completion | Complete for current HTTP/SOCKS5 adapters; PROV-01 retains later-protocol/dialer/override-expression gaps | Inline/file/HTTP/HTTPS, filters/name transforms, provider health, trusted roots and durable digest-bound ETag restart pass |
+| Phase 5C4 rule providers | Complete in declared current rule/runtime scope; PROV-02 retains later-consumer/dialer gaps | Inline/file/HTTP/HTTPS, YAML/text/MRS, domain/IP/classical RULE-SET, REST, interval/file-watch refresh, cache and rollback pass |
+| Phase 5C5 provider transactions/lifecycle | Complete in declared process/runtime scope; PROV-03 retains native-platform stress gates | Concurrent valid/invalid PUT bursts serialize transactionally; SIGHUP removal clears API/health/schedules and watcher tasks cancel cleanly |
+| Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 118 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
+| Differential harness | Implemented | All 122 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4141,6 +4145,35 @@ SOCKS5 server activates the coalesced health check immediately. As in Phase
 PHASE5CSOCKSHEALTH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_socks5_health.py
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 ```
+
+## Phase 5C aggregate closeout
+
+Phase 5C3 replaces the provider-only handwritten Hyper client with a shared
+`reqwest`/rustls client. It accepts HTTP and HTTPS, follows configured trust
+roots and host mappings, streams into configured/hard size bounds, and
+preserves repeated headers and conditional requests. Inline proxy providers,
+current-adapter filters/type exclusion and structured name transforms use the
+same parser as file/remote bytes. Provider health uses the real delay engine
+for startup, manual, eager and lazy interval checks. ETag sidecars bind URL,
+payload digest and ETag, preventing stale metadata after cache changes.
+
+Phase 5C4 compiles domain, IP-CIDR and classical payloads into ordered
+`RULE-SET` matchers. Inline, YAML, text and MRS inputs share one transactional
+replacement path; file notifications, manual PUT and HTTP(S) interval refresh
+validate the rebuilt rule program before publication. REST snapshots, status,
+live TCP routing and cache bytes are differential evidence.
+
+Phase 5C5 retains mutable configuration ownership in the runtime loop.
+Eight-way valid/invalid PUT bursts prove serialized convergence and rollback;
+SIGHUP removal proves the provider API disappears, routing changes generation,
+stale health is removed, and file/interval tasks rebind or cancel. All 27 Phase
+5C scripts passed consecutively, followed by workspace fmt, warnings-denied
+clippy and tests.
+
+This closes Phase 5C only for adapters already implemented before Phase 6.
+Named provider download proxies, the general override-expression language,
+encrypted subscription bytes, later protocols and native release stress remain
+assigned to their owning later slices.
 
 Exact timeout-window differential evidence, delayed-handshake success reset,
 exhaustive SOCKS5 auth/CONNECT status behavior, concurrent reload races,

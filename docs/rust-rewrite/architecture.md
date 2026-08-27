@@ -714,6 +714,16 @@ Crate/package and binary names are deliberately unresolved until the existing
 README naming condition is reviewed. Published crates should not accidentally
 claim the restricted project name.
 
+Phase 5C provider lifecycle keeps one immutable `Arc<Config>` generation as the
+only data-plane view. Controller requests, HTTP(S) deadlines and coalesced file
+notifications send typed refresh commands to the runtime owner; it downloads
+or reads bytes, parses the affected provider, rebuilds dependent groups/rules,
+persists cache/ETag metadata and only then swaps the generation. A failed step
+returns an error without publishing partial config or cache state. Separate
+cancellation-owned tasks schedule group health, provider health, remote
+refresh and file watching; generation changes re-key their inventories and
+shutdown joins each task with a bounded abort fallback.
+
 ## Architectural risks to track
 
 1. Upstream drift: the Alpha branch changes frequently and uses many MetaCubeX

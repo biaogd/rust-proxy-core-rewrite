@@ -102,6 +102,8 @@ rules:
         initial_route = route(mixed_port, echo.port)
 
         write_provider(provider_file, "provider-two", second.port, 1_700_000_001)
+        wait_names(controller_port, ["provider-two"])
+        watched_names = provider_names(controller_port)
         refreshed = request(
             controller_port, "PUT", "/providers/proxies/local-file"
         )
@@ -123,6 +125,7 @@ rules:
             "initial-select": initial_select,
             "initial-route": initial_route,
             "refresh": (refreshed[0], refreshed[1] == b""),
+            "watched-names": watched_names,
             "old-member": (old_member[0], json.loads(old_member[1])["message"]),
             "second-select": second_select,
             "second-route": second_route,
