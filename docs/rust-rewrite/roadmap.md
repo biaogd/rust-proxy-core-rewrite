@@ -871,6 +871,9 @@ shutdown row can become complete.
 Phase 5A8a accepts the Unix local-resource subset of `CLI-12`. `-post-up` and
 `-post-down` use the platform shell rather than an application command parser;
 their environment defaults and explicit-empty CLI overrides match the oracle.
+The explicit-empty gate owns hook suppression, not the clean shutdown contract
+already covered by Phase 5A7b, so normal and direct SIGTERM termination are
+treated as the same bounded fixture outcome there.
 The startup hook can observe mixed, controller and DNS listeners within its
 bounded execution window. The pinned Go process initiates executor shutdown
 before its deferred post-down hook, while listener closure proceeds

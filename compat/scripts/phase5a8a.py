@@ -127,7 +127,10 @@ def finish(
 def wait_record(
     process: subprocess.Popen[bytes], record: pathlib.Path, marker: str
 ) -> None:
-    deadline = time.monotonic() + IO_DEADLINE
+    # The post-up helper probes three listeners sequentially and gives each
+    # one its own bounded readiness window. The outer barrier must cover that
+    # complete sequence on loaded CI runners.
+    deadline = time.monotonic() + (3 * IO_DEADLINE)
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError(f"candidate exited before hook record {marker!r}")
@@ -265,6 +268,16 @@ def stable_contract(observation: dict[str, Any]) -> dict[str, Any]:
             "post-down-shell-complete": "down:shell" in events,
             "hook-error": result["hook-error"],
         }
+    empty = observation["explicit-empty"]
+    normalized["explicit-empty"] = {
+        "termination": (
+            "accepted"
+            if empty["exit-code"] in (0, -signal.SIGTERM)
+            else empty["exit-code"]
+        ),
+        "events": empty["events"],
+        "hook-error": empty["hook-error"],
+    }
     return normalized
 
 
@@ -291,7 +304,11 @@ def main() -> None:
         expected = {
             "cli-success": success,
             "env-success": success,
-            "explicit-empty": {"exit-code": 0, "events": [], "hook-error": False},
+            "explicit-empty": {
+                "termination": "accepted",
+                "events": [],
+                "hook-error": False,
+            },
             "post-up-failure": {
                 "exit-code": 1,
                 "events": ["up:failed"],

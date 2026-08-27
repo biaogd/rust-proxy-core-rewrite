@@ -132,6 +132,30 @@ def observe_closed(stream: socket.socket) -> str:
         return "closed"
 
 
+def wait_echo_route(
+    process: subprocess.Popen[Any],
+    proxy_port: int,
+    domain: str,
+    destination_port: int,
+    payload: bytes,
+) -> str:
+    deadline = time.monotonic() + IO_DEADLINE
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during relay readiness: {process.returncode}")
+        try:
+            with domain_stream(proxy_port, domain, destination_port) as stream:
+                stream.settimeout(0.25)
+                stream.sendall(payload)
+                if recv_exact(stream, len(payload)) == payload:
+                    return payload.decode("ascii")
+        except (EOFError, OSError) as error:
+            last_error = error
+        time.sleep(0.02)
+    raise TimeoutError("domain relay did not become ready") from last_error
+
+
 def exercise(
     binary: pathlib.Path,
     scratch: pathlib.Path,
@@ -160,21 +184,22 @@ def exercise(
         wait_dns_ready(process, dns_port)
         time.sleep(0.1)
         for label, domain, expected in cases:
-            with domain_stream(mixed_port, domain, echo_port) as stream:
-                if expected == "echo":
-                    payload = label.encode("ascii")
-                    stream.sendall(payload)
-                    try:
-                        observations[label] = recv_exact(stream, len(payload)).decode("ascii")
-                    except (EOFError, OSError) as error:
-                        snapshots = {
-                            name: authority.state.snapshot()
-                            for name, authority in authorities.items()
-                        }
-                        raise AssertionError(
-                            f"{label} relay failed after DNS observations {snapshots}"
-                        ) from error
-                else:
+            if expected == "echo":
+                payload = label.encode("ascii")
+                try:
+                    observations[label] = wait_echo_route(
+                        process, mixed_port, domain, echo_port, payload
+                    )
+                except (EOFError, OSError) as error:
+                    snapshots = {
+                        name: authority.state.snapshot()
+                        for name, authority in authorities.items()
+                    }
+                    raise AssertionError(
+                        f"{label} relay failed after DNS observations {snapshots}"
+                    ) from error
+            else:
+                with domain_stream(mixed_port, domain, echo_port) as stream:
                     observations[label] = observe_closed(stream)
         observations["exit-code"] = stop(process)
         return observations

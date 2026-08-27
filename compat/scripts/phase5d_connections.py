@@ -85,6 +85,32 @@ def open_tunnel(mixed_port: int, echo_port: int) -> socket.socket:
     return stream
 
 
+def open_live_tunnel(
+    process: Any, mixed_port: int, echo_port: int, payload: bytes
+) -> socket.socket:
+    deadline = time.monotonic() + IO_DEADLINE
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited during tunnel readiness: {process.returncode}"
+            )
+        stream: socket.socket | None = None
+        try:
+            stream = open_tunnel(mixed_port, echo_port)
+            stream.settimeout(0.25)
+            stream.sendall(payload)
+            if recv_exact(stream, len(payload)) == payload:
+                stream.settimeout(IO_DEADLINE)
+                return stream
+        except (EOFError, OSError) as error:
+            last_error = error
+        if stream is not None:
+            stream.close()
+        time.sleep(0.02)
+    raise TimeoutError("tracked TCP relay did not become ready") from last_error
+
+
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     mixed_port, controller_port = reserve_port(), reserve_port()
@@ -106,15 +132,11 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
-        first = open_tunnel(mixed_port, echo.port)
-        second = open_tunnel(mixed_port, echo.port)
+        first = open_live_tunnel(process, mixed_port, echo.port, b"1")
+        second = open_live_tunnel(process, mixed_port, echo.port, b"2")
         # CONNECT success can precede publication in the Go tracker. A byte
         # round-trip proves both tunnels reached the observable relay state
         # before the exact controller-count assertion.
-        first.sendall(b"1")
-        second.sendall(b"2")
-        if recv_exact(first, 1) != b"1" or recv_exact(second, 1) != b"2":
-            raise AssertionError("connection tracker readiness echo mismatch")
         first_port = str(first.getsockname()[1])
         second_port = str(second.getsockname()[1])
         active = wait_connection_count(controller_port, 2)
