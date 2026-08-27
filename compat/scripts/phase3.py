@@ -459,6 +459,13 @@ def exercise_controller(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str
         idle, response = http_request(mixed_port, echo.port, None)
         if " 200 " not in status(response):
             raise AssertionError(response)
+        # The Go CONNECT listener acknowledges the tunnel before its worker
+        # necessarily finishes routing and tracker registration. Force one
+        # successful payload round-trip so the connection is observable before
+        # polling the controller, independent of runner scheduling pressure.
+        idle.sendall(b"ready")
+        if recv_exact(idle, 5) != b"ready":
+            raise AssertionError("controller readiness echo mismatch")
         deadline = time.monotonic() + IO_DEADLINE
         while True:
             _, snapshot = controller_request(controller_port, "/connections")

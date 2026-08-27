@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import socket
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,23 @@ from phase4e5 import encrypted_udp_query
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase4e10-diff.json"
+
+
+def reserve_runtime_ports() -> tuple[int, int]:
+    """Reserve distinct mixed TCP and DNS TCP/UDP ports as one operation."""
+    while True:
+        with socket.socket() as mixed, socket.socket() as dns_tcp, socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM
+        ) as dns_udp:
+            mixed.bind(("127.0.0.1", 0))
+            dns_tcp.bind(("127.0.0.1", 0))
+            mixed_port = int(mixed.getsockname()[1])
+            dns_port = int(dns_tcp.getsockname()[1])
+            try:
+                dns_udp.bind(("127.0.0.1", dns_port))
+            except OSError:
+                continue
+            return mixed_port, dns_port
 
 
 def render_config(
@@ -118,7 +136,7 @@ def exercise(
     authority = ReuseTLSAuthority(close_after_response=False)
     authority_thread = threading.Thread(target=authority.serve_forever, daemon=True)
     authority_thread.start()
-    mixed_port, dns_port = reserve_port(), reserve_port()
+    mixed_port, dns_port = reserve_runtime_ports()
     config = scratch / "config.yaml"
     render_config(
         config,
@@ -130,7 +148,16 @@ def exercise(
     )
     process, stdout, stderr = launch(binary, config, scratch)
     try:
-        wait_dns_ready(process, dns_port)
+        try:
+            wait_dns_ready(process, dns_port)
+        except (RuntimeError, TimeoutError) as error:
+            stdout.flush()
+            stderr.flush()
+            raise RuntimeError(
+                f"{error}; "
+                f"stdout={pathlib.Path(stdout.name).read_text(errors='replace')!r}; "
+                f"stderr={pathlib.Path(stderr.name).read_text(errors='replace')!r}"
+            ) from error
         time.sleep(0.1)
         observations: dict[str, Any] = {}
         for inbound, query_fn, identifier in (
@@ -253,15 +280,39 @@ def satisfies_phase_contract(observation: dict[str, Any]) -> bool:
     return True
 
 
+def debug_files(root: pathlib.Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): path.read_text(errors="replace")
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in {".yaml", ".log"}
+    }
+
+
 def main() -> None:
     FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mihomo-phase4e10-") as temporary:
         root = pathlib.Path(temporary)
         binaries = build_binaries(root)
-        observations = {
-            implementation: run_candidate(binary, root / implementation)
-            for implementation, binary in binaries.items()
-        }
+        observations: dict[str, Any] = {}
+        for implementation, binary in binaries.items():
+            try:
+                observations[implementation] = run_candidate(
+                    binary, root / implementation
+                )
+            except Exception as error:
+                FAILURE_ARTIFACT.write_text(
+                    json.dumps(
+                        {
+                            "error": f"{type(error).__name__}: {error}",
+                            "failed-implementation": implementation,
+                            "observations": observations,
+                            "debug": debug_files(root),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                raise
         if observations["go"] != observations["rust"] or not satisfies_phase_contract(
             observations["go"]
         ):

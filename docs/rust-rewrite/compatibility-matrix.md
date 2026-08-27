@@ -74,7 +74,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 2 general ports, mode, logging, IPv6, interface and keepalive fields (spec only) | Oracle | **Parity** | Default/override/null/error observations; no listener/resource application claim |
 | Phase 3 local authentication records | Oracle | **Parity** | HTTP Basic, SOCKS4 USERID and SOCKS5 username/password accept/reject cases |
 | LAN allow/deny and skip-auth prefixes | Oracle | Not started | Parser plus remote-address connection decisions |
-| Phase 3 controller TCP address and secret | Oracle | **Parity** | Live loopback TCP controller and Bearer authorization observations |
+| Phase 3 controller TCP address and secret | Oracle | **Parity** | Live loopback TCP controller and Bearer authorization observations after a confirmed tunnel payload round-trip makes tracker registration deterministic |
 | Controller TLS/Unix/pipe | Oracle | Not started | Per-platform live controller fixtures |
 | `external-controller-cors` defaults/config/reload | Oracle | **Parity** | Allow-all defaults/empty list, exact/single-wildcard origins, Private Network, denied method/header, auth ordering and hot reload in `compat/scripts/phase5d_cors.py` |
 | UI paths/download settings and safe-path checks | Oracle | Not started | Path traversal and normalization cases |
@@ -199,7 +199,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4E7 custom absolute DoH path subset | Oracle | **Parity** | Config acceptance, exact HTTP request target, response/ID and positive-cache observations in `compat/scripts/phase4e7.py` |
 | Phase 4E8 percent-encoded unreserved DoH path subset | Oracle | **Parity** | Encoded-path config acceptance, Go-compatible decoded HTTP target, response/ID and cache observations in `compat/scripts/phase4e8.py` |
 | Phase 4E9 domain DoT/default-port/bootstrap subset | Oracle | **Parity** | `DNS-06`; domain endpoint config, implicit 853 normalization, one classic loopback `default-nameserver`, bootstrap A query, verified DoT wire/cache/process observations in `compat/scripts/phase4e9.py` |
-| Phase 4E10 DoT trust/verification matrix subset | Oracle | **Parity** | `DNS-06`; default system + embedded + global roots, `skip-cert-verify`, `name-cert-verify` precedence, reuse toggle and deterministic trusted/untrusted/name-mismatch observations in `compat/scripts/phase4e10.py` |
+| Phase 4E10 DoT trust/verification matrix subset | Oracle | **Parity** | `DNS-06`; default system + embedded + global roots, `skip-cert-verify`, `name-cert-verify` precedence, reuse toggle and deterministic trusted/untrusted/name-mismatch observations on jointly reserved distinct mixed/DNS fixture ports in `compat/scripts/phase4e10.py` |
 | Phase 4E11 DoT concurrency/timeout/reset/retry subset | Oracle | **Parity** | `DNS-06`; 12 concurrent misses/8 idle cap, five-second response timeout, SIGHUP pool reset, stale one-shot reconnect and fresh-failure retry bound in `compat/scripts/phase4e11.py` |
 | Phase 4E12 plaintext HTTP DoH/default URL subset | Oracle | **Parity** | `DNS-07`; explicit/default port, empty/root/custom path normalization, RFC 8484 GET wire, ID restoration, cache and sequential reuse in `compat/scripts/phase4e12.py` |
 | Phase 4E13 HTTPS root/query/userinfo/redirect subset | Oracle | **Parity** | `DNS-07`; implicit/default port and root path, discarded configured query, ASCII Basic userinfo, persistent same-origin relative redirects and Go-compatible ten-request limit in `compat/scripts/phase4e13.py` |
