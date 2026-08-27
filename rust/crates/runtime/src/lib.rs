@@ -411,6 +411,14 @@ async fn run_group_health_scheduler(
 const HTTP_PROVIDER_LIMIT: usize = 4 * 1024 * 1024;
 const HTTP_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 
+enum HttpProviderFetch {
+    Modified {
+        payload: Vec<u8>,
+        etag: Option<String>,
+    },
+    NotModified,
+}
+
 async fn hydrate_http_proxy_providers(config: &mut Config, state: &RuntimeState) {
     let pending: Vec<_> = config
         .proxy_providers
@@ -447,20 +455,40 @@ async fn refresh_http_proxy_provider(config: &mut Config, name: &str) -> Result<
         .clone()
         .ok_or_else(|| format!("proxy provider {name} has no URL"))?;
     let path = provider.path.clone();
-    let payload = tokio::time::timeout(HTTP_PROVIDER_TIMEOUT, fetch_http_proxy_provider(&url))
-        .await
-        .map_err(|_| "provider HTTP request timed out".to_owned())??;
+    let headers = provider.headers.clone();
+    let size_limit = provider.size_limit;
+    let etag = config.etag_support.then(|| provider.etag.clone()).flatten();
+    let fetched = tokio::time::timeout(
+        HTTP_PROVIDER_TIMEOUT,
+        fetch_http_proxy_provider(&url, &headers, etag.as_deref(), size_limit),
+    )
+    .await
+    .map_err(|_| "provider HTTP request timed out".to_owned())??;
+    let HttpProviderFetch::Modified { payload, etag } = fetched else {
+        return Ok(());
+    };
     let source = std::str::from_utf8(&payload)
         .map_err(|error| format!("provider payload is not UTF-8: {error}"))?;
-    let next = config
+    let mut next = config
         .replace_proxy_provider_source(name, source)
         .map_err(|error| error.to_string())?;
+    let refreshed = next
+        .proxy_providers
+        .iter_mut()
+        .find(|provider| provider.name == name)
+        .expect("replaced proxy provider remains present");
+    refreshed.etag = etag;
     persist_http_proxy_provider(&path, &payload).map_err(|error| error.to_string())?;
     *config = next;
     Ok(())
 }
 
-async fn fetch_http_proxy_provider(raw_url: &str) -> Result<Vec<u8>, String> {
+async fn fetch_http_proxy_provider(
+    raw_url: &str,
+    configured_headers: &BTreeMap<String, Vec<String>>,
+    etag: Option<&str>,
+    size_limit: usize,
+) -> Result<HttpProviderFetch, String> {
     let url = url::Url::parse(raw_url).map_err(|error| error.to_string())?;
     if url.scheme() != "http" {
         return Err("only plaintext HTTP provider URLs are in scope".to_owned());
@@ -497,23 +525,55 @@ async fn fetch_http_proxy_provider(raw_url: &str) -> Result<Vec<u8>, String> {
     let authority = url
         .port()
         .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
-    let request = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method(hyper::Method::GET)
         .uri(target)
         .header(hyper::header::HOST, authority)
         .body(Empty::<Bytes>::new())
         .map_err(|error| error.to_string())?;
+    for (name, values) in configured_headers {
+        let name = hyper::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("invalid provider header name: {error}"))?;
+        for value in values {
+            let value = hyper::header::HeaderValue::from_str(value)
+                .map_err(|error| format!("invalid provider header value: {error}"))?;
+            request.headers_mut().append(name.clone(), value);
+        }
+    }
+    if let Some(etag) = etag {
+        let value = hyper::header::HeaderValue::from_str(etag)
+            .map_err(|error| format!("invalid provider ETag: {error}"))?;
+        request
+            .headers_mut()
+            .insert(hyper::header::IF_NONE_MATCH, value);
+    }
     let response = sender
         .send_request(request)
         .await
         .map_err(|error| error.to_string())?;
+    if etag.is_some() && response.status() == hyper::StatusCode::NOT_MODIFIED {
+        return Ok(HttpProviderFetch::NotModified);
+    }
     if !response.status().is_success() {
         return Err(format!("provider HTTP status {}", response.status()));
     }
-    Limited::new(response.into_body(), HTTP_PROVIDER_LIMIT)
+    let response_etag = response
+        .headers()
+        .get(hyper::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let limit = if size_limit == 0 {
+        HTTP_PROVIDER_LIMIT
+    } else {
+        size_limit.min(HTTP_PROVIDER_LIMIT)
+    };
+    Limited::new(response.into_body(), limit)
         .collect()
         .await
-        .map(|body| body.to_bytes().to_vec())
+        .map(|body| HttpProviderFetch::Modified {
+            payload: body.to_bytes().to_vec(),
+            etag: response_etag,
+        })
         .map_err(|error| error.to_string())
 }
 

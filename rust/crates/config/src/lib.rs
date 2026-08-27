@@ -82,6 +82,7 @@ pub struct Config {
     pub log_level: LogLevel,
     pub ipv6: bool,
     pub geodata_mode: bool,
+    pub etag_support: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
     pub external_doh_server: String,
@@ -170,6 +171,9 @@ pub struct ProxyProviderConfig {
     pub path: PathBuf,
     pub url: Option<String>,
     pub interval: u64,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub size_limit: usize,
+    pub etag: Option<String>,
     pub proxies: Vec<ProxyConfig>,
 }
 
@@ -724,6 +728,8 @@ struct RawProxyProvider {
     path: Option<String>,
     url: Option<String>,
     interval: Option<u64>,
+    header: Option<BTreeMap<String, Vec<String>>>,
+    size_limit: Option<usize>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -968,7 +974,6 @@ impl TryFrom<ConfigSpec> for Config {
             (spec.keep_alive_idle != 0, "keep-alive-idle"),
             (spec.keep_alive_interval != 0, "keep-alive-interval"),
             (spec.disable_keep_alive, "disable-keep-alive"),
-            (!spec.etag_support, "etag-support"),
             (
                 !spec.rules.is_phase_three_tcp_with_targets(&proxy_targets),
                 "rules outside Phase 3A TCP",
@@ -986,6 +991,7 @@ impl TryFrom<ConfigSpec> for Config {
             log_level: spec.log_level,
             ipv6: spec.ipv6,
             geodata_mode: spec.geodata_mode,
+            etag_support: spec.etag_support,
             authentication: spec.authentication,
             external_controller: spec.external_controller,
             external_doh_server: spec.external_doh_server,
@@ -3793,6 +3799,9 @@ fn parse_proxy_providers(
             path,
             url,
             interval: provider.interval.unwrap_or(0),
+            headers: provider.header.unwrap_or_default(),
+            size_limit: provider.size_limit.unwrap_or(0),
+            etag: None,
             proxies,
         });
     }
@@ -4986,6 +4995,9 @@ dns:
             path: PathBuf::from("provider.yaml"),
             url: None,
             interval: 0,
+            headers: BTreeMap::new(),
+            size_limit: 0,
+            etag: None,
             proxies: ["provider-alpha", "provider-beta", "provider-omit"]
                 .into_iter()
                 .map(|name| ProxyConfig {
@@ -5038,6 +5050,9 @@ dns:
             path: PathBuf::from("provider.yaml"),
             url: None,
             interval: 0,
+            headers: BTreeMap::new(),
+            size_limit: 0,
+            etag: None,
             proxies: vec![ProxyConfig {
                 name: "provider-alpha".to_owned(),
                 kind: ProxyKind::Http,
@@ -5081,7 +5096,7 @@ dns:
 
     #[test]
     fn parses_and_populates_initial_http_proxy_provider() {
-        let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\n    interval: 60\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [REJECT]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
+        let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\n    interval: 60\n    size-limit: 1024\n    header:\n      X-Phase: [first, second]\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [REJECT]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
         let path = std::env::temp_dir().join("mihomo-http-provider-config.yaml");
         let config = Config::from_yaml_at_path_with_geodata_mode(source, &path, false)
             .expect("HTTP provider declaration");
@@ -5091,6 +5106,12 @@ dns:
         );
         assert!(config.proxy_providers[0].proxies.is_empty());
         assert_eq!(config.proxy_providers[0].interval, 60);
+        assert_eq!(config.proxy_providers[0].size_limit, 1024);
+        assert_eq!(
+            config.proxy_providers[0].headers["X-Phase"],
+            ["first", "second"]
+        );
+        assert!(config.proxy_providers[0].etag.is_none());
         assert_eq!(config.proxy_groups[0].proxies, ["REJECT"]);
 
         let populated = config

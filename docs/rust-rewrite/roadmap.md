@@ -1249,6 +1249,23 @@ HTTPS, conditional ETag requests, custom headers, hashed default paths,
 provider proxy/rule routing, concurrent/coalesced refresh, interval mutation
 across SIGHUP and shutdown races remain later gates.
 
+### Phase 5C2e accepted scope
+
+The plaintext HTTP vehicle now carries ordered repeated request-header values,
+honors the configured byte limit and participates in the global
+`etag-support` switch. A successful response stores its ETag in the active
+runtime generation; later manual or scheduled refresh sends `If-None-Match`,
+accepts 304 without parsing or rewriting the cache, and replaces that ETag only
+after a changed payload validates and publishes. Disabled ETag support keeps
+all refreshes unconditional. An over-limit response returns the existing 503
+class while provider members, selected routing and cache bytes remain intact.
+`compat/scripts/phase5c_http_provider_contract.py` compares all of these request
+and data-plane observations against Go.
+
+HTTPS, redirect/proxy download policy, global User-Agent interaction, hashed
+default cache paths, ETag database/restart interchange, concurrent refresh and
+provider override expressions remain later gates.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with

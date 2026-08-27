@@ -27,6 +27,7 @@ env:
   PHASE5CSOCKSHEALTH_CARGO_TARGET: /tmp/mihomo-phase5c-socks5-health-target
   PHASE5CHTTPPROVIDER_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-target
   PHASE5CHTTPPROVIDERREFRESH_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-refresh-target
+  PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-contract-target
 
 jobs:
   rust-quality:
@@ -230,6 +231,7 @@ jobs:
           compat/scripts/phase5c_socks5_health.py \
           compat/scripts/phase5c_http_provider.py \
           compat/scripts/phase5c_http_provider_refresh.py \
+          compat/scripts/phase5c_http_provider_contract.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \
