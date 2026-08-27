@@ -232,7 +232,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Partial: current built-ins/GLOBAL plus local-HTTP delay | 5D7 |
 | API-06 | `/rules` list/statistics and disable mutation | Partial: current top-level executable rules | 5D8 |
 | API-07 | `/connections` list/WebSocket/delete-one/delete-all | Complete on current local TCP controller surface | 5D9 |
-| API-08 | Proxy/rule provider list/detail/update/health endpoints | Not started | 5D10 |
+| API-08 | Proxy/rule provider list/detail/update/health endpoints | Partial: implicit default proxy provider and empty rule-provider registry | 5D10 external vehicle/runtime gate |
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
 | API-10 | `/storage/{key}` GET/PUT/DELETE | Partial: complete process-local JSON lifecycle | 5D11 persistence gate |
 | API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Not started | 5D12 |

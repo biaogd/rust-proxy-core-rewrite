@@ -1105,6 +1105,17 @@ and UDP echo paths, invalid-mode rollback and live selector changes. The UDP
 fixture deliberately creates a new client session after each change because
 the oracle retains the selected adapter for an existing SOCKS UDP association.
 
+The implicit-provider gate begins `API-08` without introducing speculative
+provider loading. `/providers/proxies` exposes the oracle-created `default`
+compatible provider and its DIRECT/REJECT member snapshots; detail, no-op
+update and health-check operations preserve the pinned baseline's status/body
+contracts. `/providers/rules` exposes the empty registry, and missing provider
+or member operations return the exact resource error. Acceptance in
+`compat/scripts/phase5d_providers.py` compares all list/detail/member/mutation
+and negative paths. Configured file/HTTP vehicles, refresh scheduling, real
+health state, rule-provider resources and persistence remain the later 5C/5D
+integration gate.
+
 TLS/Unix/pipe controller transports, real process-memory accounting,
 structured logs, exhaustive level/cadence/backpressure behavior, remaining
 PATCH fields, safe-root/default configuration path loading, `/configs/geo`,

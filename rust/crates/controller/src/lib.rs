@@ -273,6 +273,26 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/group/", get(groups))
         .route("/group/{name}/delay", get(group_delay))
         .route("/group/{name}", get(group))
+        .route("/providers/proxies", get(proxy_providers))
+        .route("/providers/proxies/", get(proxy_providers))
+        .route(
+            "/providers/proxies/{provider}",
+            get(proxy_provider).put(update_proxy_provider),
+        )
+        .route(
+            "/providers/proxies/{provider}/healthcheck",
+            get(healthcheck_proxy_provider),
+        )
+        .route(
+            "/providers/proxies/{provider}/{name}",
+            get(proxy_provider_member),
+        )
+        .route("/providers/rules", get(rule_providers))
+        .route("/providers/rules/", get(rule_providers))
+        .route(
+            "/providers/rules/{name}",
+            axum::routing::put(missing_rule_provider),
+        )
         .route(
             "/connections",
             get(connections).delete(close_all_connections),
@@ -818,6 +838,73 @@ fn proxy_not_found() -> Response {
         StatusCode::NOT_FOUND,
         &json!({"message": "Resource not found"}),
     )
+}
+
+async fn proxy_providers(State(state): State<ControllerState>) -> Response {
+    json_response(
+        StatusCode::OK,
+        &json!({"providers": {"default": proxy_provider_snapshot(&state.runtime)}}),
+    )
+}
+
+async fn proxy_provider(
+    State(state): State<ControllerState>,
+    Path(provider): Path<String>,
+) -> Response {
+    if provider != "default" {
+        return proxy_not_found();
+    }
+    json_response(StatusCode::OK, &proxy_provider_snapshot(&state.runtime))
+}
+
+async fn update_proxy_provider(Path(provider): Path<String>) -> Response {
+    if provider != "default" {
+        return proxy_not_found();
+    }
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn healthcheck_proxy_provider(Path(provider): Path<String>) -> Response {
+    if provider != "default" {
+        return proxy_not_found();
+    }
+    empty_response(StatusCode::NO_CONTENT)
+}
+
+async fn proxy_provider_member(
+    State(state): State<ControllerState>,
+    Path((provider, name)): Path<(String, String)>,
+) -> Response {
+    if provider != "default" || !matches!(name.as_str(), "DIRECT" | "REJECT") {
+        return proxy_not_found();
+    }
+    json_response(StatusCode::OK, &proxy_snapshot(&name, &state.runtime))
+}
+
+async fn rule_providers() -> Response {
+    json_response(
+        StatusCode::OK,
+        &json!({"providers": serde_json::Map::<String, serde_json::Value>::new()}),
+    )
+}
+
+async fn missing_rule_provider() -> Response {
+    proxy_not_found()
+}
+
+fn proxy_provider_snapshot(runtime: &RuntimeState) -> serde_json::Value {
+    json!({
+        "name": "default",
+        "type": "Proxy",
+        "vehicleType": "Compatible",
+        "proxies": [
+            proxy_snapshot("DIRECT", runtime),
+            proxy_snapshot("REJECT", runtime),
+        ],
+        "testUrl": "",
+        "expectedStatus": "*",
+        "updatedAt": "0001-01-01T00:00:00Z",
+    })
 }
 
 #[derive(Default, Deserialize)]

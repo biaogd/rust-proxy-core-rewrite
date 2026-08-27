@@ -98,10 +98,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
-| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05, broader rule rendering and storage persistence retain listed gaps | Controller core plus built-in proxy control and live Rule/Direct/Global TCP/UDP modes pass |
+| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy/mode gates run by default in GitHub Actions |
+| Differential harness | Implemented | Phase 1 network, Phase 2 pure policy, Phase 3 local-product, Phase 4A–4F15 DNS, Phase 5A1–5A8a CLI/lifecycle, Phase 5B rules aggregates and Phase 5D controller stream/connection/CORS/config/rules/storage/proxy/mode/provider gates run by default in GitHub Actions |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3486,6 +3486,20 @@ echo behavior. Fresh UDP source sockets model the oracle's association cache;
 existing-association retention and configured remote GLOBAL members remain
 outside this gate.
 
+The controller now also exposes the pinned oracle's implicit provider boundary.
+`/providers/proxies` lists the `default` compatible provider with DIRECT and
+REJECT, including the zero-time `updatedAt` value; provider detail and member
+views reuse the built-in adapter state. The default update and health-check
+operations return 204 because this compatible provider has no external vehicle.
+`/providers/rules` returns the oracle's empty map, while unknown providers and
+members preserve its 404 JSON error.
+
+`compat/scripts/phase5d_providers.py` compares proxy-provider list/detail/member,
+no-op update/health, missing proxy resources, the empty rule-provider list and
+missing rule-provider update. This is deliberately partial `API-08`: file/HTTP
+providers, refresh timers, real health transitions, configured rule providers
+and persistence are not implemented or claimed.
+
 Local focused evidence:
 
 ```sh
@@ -3497,6 +3511,7 @@ PHASE5DRULES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scri
 PHASE5DSTORAGE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_storage.py
 PHASE5DPROXIES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_proxies.py
 PHASE5DMODES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_modes.py
+PHASE5DPROVIDERS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_providers.py
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 cargo fmt --manifest-path rust/Cargo.toml --all --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
