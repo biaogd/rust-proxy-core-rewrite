@@ -14,6 +14,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-dns = { path = "../dns" }
+rewrite-model = { path = "../model" }
+rewrite-outbound = { path = "../outbound" }
 rewrite-state = { path = "../state" }
 serde.workspace = true
 serde_json.workspace = true

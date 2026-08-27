@@ -135,12 +135,14 @@ pub struct ProxyGroupConfig {
     pub hidden: bool,
     pub icon: String,
     pub disable_udp: bool,
+    pub tolerance: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProxyGroupKind {
     Select,
     Fallback,
+    UrlTest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -677,6 +679,7 @@ struct RawProxyGroup {
     hidden: Option<bool>,
     icon: Option<String>,
     disable_udp: Option<bool>,
+    tolerance: Option<u16>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1068,6 +1071,7 @@ impl Config {
                 let kind = match group.kind {
                     ProxyGroupKind::Select => "Selector",
                     ProxyGroupKind::Fallback => "Fallback",
+                    ProxyGroupKind::UrlTest => "URLTest",
                 };
                 (group.name.clone(), kind.to_owned())
             })
@@ -3273,8 +3277,10 @@ fn parse_proxy_groups(
             .as_deref()
             .filter(|name| !name.is_empty())
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing group name".to_owned()))?;
-        if !matches!(group.kind.as_deref(), Some("select" | "fallback"))
-            || !group.extra.is_empty()
+        if !matches!(
+            group.kind.as_deref(),
+            Some("select" | "fallback" | "url-test")
+        ) || !group.extra.is_empty()
             || !group_names.insert(name.to_owned())
             || proxy_names.contains(name)
             || is_reserved_proxy_name(name)
@@ -3290,6 +3296,7 @@ fn parse_proxy_groups(
             let kind = match group.kind.as_deref()? {
                 "select" => "Selector",
                 "fallback" => "Fallback",
+                "url-test" => "URLTest",
                 _ => return None,
             };
             Some((name.clone(), kind.to_owned()))
@@ -3385,6 +3392,7 @@ fn parse_proxy_group(
     let kind = match group.kind.as_deref() {
         Some("select") => ProxyGroupKind::Select,
         Some("fallback") => ProxyGroupKind::Fallback,
+        Some("url-test") => ProxyGroupKind::UrlTest,
         _ => return Err(ConfigError::UnsupportedProxy(name)),
     };
     let filter = group.filter.filter(|value| !value.is_empty());
@@ -3456,17 +3464,12 @@ fn parse_proxy_group(
         exclude_types,
         empty_fallback,
         default_selected: group.default_selected,
-        test_url: group
-            .url
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "https://www.gstatic.com/generate_204".to_owned()),
-        expected_status: group
-            .expected_status
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "*".to_owned()),
+        test_url: normalize_group_test_url(group.url),
+        expected_status: normalize_group_expected_status(group.expected_status),
         hidden: group.hidden.unwrap_or(false),
         icon: group.icon.unwrap_or_default(),
         disable_udp: group.disable_udp.unwrap_or(false),
+        tolerance: group.tolerance.unwrap_or(0),
     };
     parsed.proxies = expand_proxy_group(&parsed, catalog.providers, catalog.proxy_types)?;
     if parsed
@@ -3482,6 +3485,18 @@ fn parse_proxy_group(
         return Err(ConfigError::UnsupportedProxy(parsed.name));
     }
     Ok(parsed)
+}
+
+fn normalize_group_test_url(value: Option<String>) -> String {
+    value
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://www.gstatic.com/generate_204".to_owned())
+}
+
+fn normalize_group_expected_status(value: Option<String>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "*".to_owned())
 }
 
 fn is_group_builtin(name: &str) -> bool {
@@ -4172,6 +4187,18 @@ dns:
     }
 
     #[test]
+    fn parses_url_test_group_policy() {
+        let config = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - name: fastest\n    type: url-test\n    proxies: [DIRECT, REJECT]\n    url: http://127.0.0.1:18080/health\n    expected-status: '204'\n    tolerance: 25\n"
+        ))
+        .expect("URL-test group");
+        let group = &config.proxy_groups[0];
+        assert_eq!(group.kind, ProxyGroupKind::UrlTest);
+        assert_eq!(group.tolerance, 25);
+        assert_eq!(group.expected_status, "204");
+    }
+
+    #[test]
     fn parses_phase_four_d_one_nameserver_policy() {
         let source = r"
 dns:
@@ -4809,6 +4836,7 @@ dns:
             hidden: false,
             icon: String::new(),
             disable_udp: false,
+            tolerance: 0,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(
@@ -4847,6 +4875,7 @@ dns:
             hidden: false,
             icon: String::new(),
             disable_udp: false,
+            tolerance: 0,
         };
         let types = proxy_member_types(&[], std::slice::from_ref(&provider), &BTreeMap::new());
         assert_eq!(

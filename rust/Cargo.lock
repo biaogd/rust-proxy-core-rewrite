@@ -2468,6 +2468,8 @@ dependencies = [
  "hyper-util",
  "rewrite-config",
  "rewrite-dns",
+ "rewrite-model",
+ "rewrite-outbound",
  "rewrite-state",
  "serde",
  "serde_json",

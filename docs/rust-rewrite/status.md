@@ -111,6 +111,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1g fallback recovery | Complete in declared explicit-healthcheck TCP scope; GRP-02/03 remain partial | Exact Fallback metadata, authenticated HTTP initial route, compatible-provider health transition and DIRECT recovery pass |
 | Phase 5C1h fallback fixed control | Complete in declared current-member TCP/persistence scope; GRP-02 remains partial | Valid/invalid PUT, HTTP versus DIRECT routing, restart restoration and Go↔Rust bbolt interchange pass |
 | Phase 5C1i fallback group-delay | Complete in declared built-in-member scope; API-05/GRP-02 remain partial | Concurrent DIRECT/REJECT delay, 400/504 errors, pre-validation unfix ordering and durable empty choice pass |
+| Phase 5C1j URL-test group | Complete in declared explicit-healthcheck HTTP/TCP scope; GRP-02/03 remain partial | Real two-proxy delay ranking, tolerance, fixed/restart control, group-delay unfix and selected wire routing pass |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3921,8 +3922,25 @@ PHASE5CFALLBACKDELAY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 com
 cargo test --manifest-path rust/Cargo.toml -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-General configured-proxy delay measurement, automatic scheduling, selector or
-future automatic-group delay, UDP routing, URL-test and load-balance remain
+Automatic scheduling, exhaustive remote-member status/error cases, SOCKS5
+health evidence, selector delay, UDP routing and load-balance remain unclaimed.
+
+Phase 5C1j adds URL-test on the same typed group boundary. Controller health
+measurement now connects through configured HTTP/SOCKS5 implementations rather
+than treating every remote member as failed; the accepted differential proves
+the HTTP path with authenticated slow and fast CONNECT fixtures. Per-URL delay
+state selects the minimum healthy member, tolerance retains an acceptable
+current member, and fixed PUT uses the same restart-persistent selected bucket.
+Group-delay measures both remote members concurrently, clears fixed before the
+test and returns routing to the faster member.
+
+```sh
+PHASE5CURLTEST_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_url_test.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-state -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+Periodic/`lazy` scheduling, interval/timeout/max-failure policy, complete
+failure/status handling, SOCKS5 health evidence, UDP and load-balance remain
 unclaimed.
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and

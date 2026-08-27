@@ -1293,6 +1293,21 @@ ordering and restart persistence. Configured remote-member delay measurement,
 group-delay for selectors and other automatic groups, and scheduler policy are
 later gates.
 
+### Phase 5C1j accepted scope
+
+`url-test` accepts the current common group composition and metadata plus
+`tolerance`. Health measurement now opens the actual configured HTTP CONNECT
+outbound (and shares the same implementation boundary with SOCKS5) before
+sending the HEAD probe. Explicit compatible-provider healthcheck records two
+deterministically separated delays, selects the fastest healthy member and
+applies tolerance to the retained automatic choice. PUT fixes a member,
+invalid PUT rolls back, bbolt restores it after restart, and group-delay tests
+all members concurrently while durably returning to automatic selection.
+`compat/scripts/phase5c_url_test.py` observes exact REST fields and which proxy
+carried every TCP echo. Background interval/lazy scheduling, complete
+timeout/error/status policy, SOCKS5 health evidence and load-balance remain
+later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

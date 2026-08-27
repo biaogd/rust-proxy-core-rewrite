@@ -325,7 +325,7 @@ fn sync_selector_state(state: &RuntimeState, config: &Config) {
                 group.name.as_str(),
                 group.proxies.as_slice(),
                 group.default_selected.as_deref(),
-                group.kind == ProxyGroupKind::Fallback,
+                group.kind != ProxyGroupKind::Select,
             )
         }),
         config.profile.store_selected,
@@ -805,6 +805,12 @@ fn resolve_selector_target(target: &str, config: &Config, state: &RuntimeState) 
             ProxyGroupKind::Fallback => {
                 state.fallback_proxy(&group.name, &group.proxies, &group.test_url)?
             }
+            ProxyGroupKind::UrlTest => state.url_test_proxy(
+                &group.name,
+                &group.proxies,
+                &group.test_url,
+                group.tolerance,
+            )?,
         };
     }
     Some(current)

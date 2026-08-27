@@ -20,6 +20,7 @@ use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use rewrite_config::Config;
 use rewrite_dns::DnsService;
+use rewrite_model::{Destination, Host};
 use rewrite_state::RuntimeState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -635,7 +636,7 @@ async fn proxy_delay(
     }
     let result = tokio::time::timeout(
         Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
-        measure_http_delay(&tested_name, url, &expected),
+        measure_http_delay(&tested_name, url, &expected, &config),
     )
     .await;
     match result {
@@ -663,17 +664,17 @@ async fn group_delay(
     uri: Uri,
 ) -> Response {
     let config = state.current_config();
-    let fallback = (name != "GLOBAL")
+    let automatic_group = (name != "GLOBAL")
         .then(|| {
             config.proxy_groups.iter().find(|group| {
-                group.name == name && group.kind == rewrite_config::ProxyGroupKind::Fallback
+                group.name == name && group.kind != rewrite_config::ProxyGroupKind::Select
             })
         })
         .flatten();
-    if name != "GLOBAL" && fallback.is_none() {
+    if name != "GLOBAL" && automatic_group.is_none() {
         return proxy_not_found();
     }
-    if fallback.is_some() {
+    if automatic_group.is_some() {
         state.runtime.clear_group_choice(&name, true);
     }
     let parameters = query_parameters(&uri);
@@ -696,13 +697,17 @@ async fn group_delay(
             &json!({"message": "get delay: all proxies timeout"}),
         );
     }
-    if let Some(group) = fallback {
+    if let Some(group) = automatic_group {
         let timeout = Duration::from_millis(u64::try_from(timeout).unwrap_or_default());
+        let config = config.as_ref();
         let results = join_all(group.proxies.iter().map(|member| {
             let expected = &expected;
             async move {
-                let result =
-                    tokio::time::timeout(timeout, measure_http_delay(member, url, expected)).await;
+                let result = tokio::time::timeout(
+                    timeout,
+                    measure_http_delay(member, url, expected, config),
+                )
+                .await;
                 (member, result)
             }
         }))
@@ -728,7 +733,7 @@ async fn group_delay(
     }
     let result = tokio::time::timeout(
         Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
-        measure_http_delay("DIRECT", url, &expected),
+        measure_http_delay("DIRECT", url, &expected, &config),
     )
     .await;
     match result {
@@ -744,20 +749,64 @@ async fn group_delay(
     }
 }
 
-async fn measure_http_delay(name: &str, raw_url: &str, expected: &[(u16, u16)]) -> Result<u16, ()> {
-    if !matches!(name, "DIRECT" | "COMPATIBLE") {
-        return Err(());
-    }
+async fn measure_http_delay(
+    name: &str,
+    raw_url: &str,
+    expected: &[(u16, u16)],
+    config: &Config,
+) -> Result<u16, ()> {
     let url = url::Url::parse(raw_url).map_err(|_| ())?;
     if url.scheme() != "http" {
         return Err(());
     }
     let host = url.host_str().ok_or(())?;
     let port = url.port_or_known_default().ok_or(())?;
+    let destination = Destination {
+        host: host
+            .parse()
+            .map_or_else(|_| Host::Domain(host.to_owned()), Host::Ip),
+        port,
+    };
     let started = tokio::time::Instant::now();
-    let stream = tokio::net::TcpStream::connect((host, port))
-        .await
-        .map_err(|_| ())?;
+    let stream: rewrite_outbound::BoxedOutboundStream = if matches!(name, "DIRECT" | "COMPATIBLE") {
+        Box::new(
+            rewrite_outbound::connect(&destination, config.ipv6)
+                .await
+                .map_err(|_| ())?,
+        )
+    } else {
+        let proxy = config
+            .proxies
+            .iter()
+            .chain(
+                config
+                    .proxy_providers
+                    .iter()
+                    .flat_map(|provider| provider.proxies.iter()),
+            )
+            .find(|proxy| proxy.name == name)
+            .ok_or(())?;
+        let server = Destination {
+            host: proxy
+                .server
+                .parse()
+                .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+            port: proxy.port,
+        };
+        let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
+        match proxy.kind {
+            rewrite_config::ProxyKind::Http => {
+                rewrite_outbound::connect_http(&server, &destination, config.ipv6, credentials)
+                    .await
+                    .map_err(|_| ())?
+            }
+            rewrite_config::ProxyKind::Socks5 => {
+                rewrite_outbound::connect_socks5(&server, &destination, config.ipv6, credentials)
+                    .await
+                    .map_err(|_| ())?
+            }
+        }
+    };
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|_| ())?;
@@ -971,6 +1020,7 @@ fn selector_snapshot(
             },
         ),
         rewrite_config::ProxyGroupKind::Fallback => ("Fallback", group.test_url.as_str()),
+        rewrite_config::ProxyGroupKind::UrlTest => ("URLTest", group.test_url.as_str()),
     };
     let mut snapshot = json!({
         "alive": health.alive,
@@ -995,7 +1045,7 @@ fn selector_snapshot(
         "uot": false,
         "xudp": false,
     });
-    if group.kind == rewrite_config::ProxyGroupKind::Fallback {
+    if group.kind != rewrite_config::ProxyGroupKind::Select {
         let object = snapshot.as_object_mut().expect("group snapshot object");
         object.insert("expectedStatus".to_owned(), json!(group.expected_status));
         object.insert(
@@ -1016,6 +1066,14 @@ fn group_selected_proxy(
         }
         rewrite_config::ProxyGroupKind::Fallback => runtime
             .fallback_proxy(&group.name, &group.proxies, &group.test_url)
+            .unwrap_or_default(),
+        rewrite_config::ProxyGroupKind::UrlTest => runtime
+            .url_test_proxy(
+                &group.name,
+                &group.proxies,
+                &group.test_url,
+                group.tolerance,
+            )
             .unwrap_or_default(),
     }
 }
@@ -1178,13 +1236,13 @@ async fn healthcheck_proxy_provider(
         return proxy_not_found();
     }
     if let Some(group) = config.proxy_groups.iter().find(|candidate| {
-        candidate.name == provider && candidate.kind == rewrite_config::ProxyGroupKind::Fallback
+        candidate.name == provider && candidate.kind != rewrite_config::ProxyGroupKind::Select
     }) {
         let expected = parse_status_ranges(&group.expected_status).unwrap_or_default();
         for member in &group.proxies {
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
-                measure_http_delay(member, &group.test_url, &expected),
+                measure_http_delay(member, &group.test_url, &expected, &config),
             )
             .await;
             match result {

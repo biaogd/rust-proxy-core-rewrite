@@ -129,6 +129,7 @@ pub struct RuntimeState {
     storage: Mutex<BTreeMap<String, Vec<u8>>>,
     global_proxy: Mutex<String>,
     selectors: Mutex<BTreeMap<String, String>>,
+    automatic_groups: Mutex<BTreeMap<String, String>>,
     selectors_loaded: AtomicBool,
     store_selected: AtomicBool,
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
@@ -166,6 +167,7 @@ impl Default for RuntimeState {
             storage: Mutex::new(BTreeMap::new()),
             global_proxy: Mutex::new("DIRECT".to_owned()),
             selectors: Mutex::new(BTreeMap::new()),
+            automatic_groups: Mutex::new(BTreeMap::new()),
             selectors_loaded: AtomicBool::new(false),
             store_selected: AtomicBool::new(true),
             proxy_health: Mutex::new(BTreeMap::new()),
@@ -417,6 +419,62 @@ impl RuntimeState {
             .find(|member| self.proxy_alive_for_url(member, url))
             .or_else(|| members.first())
             .cloned()
+    }
+
+    #[must_use]
+    pub fn url_test_proxy(
+        &self,
+        name: &str,
+        members: &[String],
+        url: &str,
+        tolerance: u16,
+    ) -> Option<String> {
+        let fixed = self.selector_proxy(name).unwrap_or_default();
+        if !fixed.is_empty() && self.proxy_alive_for_url(&fixed, url) {
+            return Some(fixed);
+        }
+        if !fixed.is_empty() {
+            self.clear_group_choice(name, false);
+        }
+
+        let health = self
+            .proxy_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let candidates: Vec<_> = members
+            .iter()
+            .filter_map(|member| {
+                let status = health.get(member).and_then(|health| health.extra.get(url));
+                if status.is_some_and(|status| !status.alive) {
+                    return None;
+                }
+                let delay = status
+                    .and_then(|status| status.history.last())
+                    .map_or(0, |record| record.delay);
+                Some((member, delay))
+            })
+            .collect();
+        drop(health);
+        let (fastest, fastest_delay) = candidates
+            .iter()
+            .min_by_key(|(_, delay)| *delay)
+            .map(|(member, delay)| ((*member).clone(), *delay))
+            .or_else(|| members.first().cloned().map(|member| (member, 0)))?;
+
+        let mut automatic = self
+            .automatic_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = automatic.get(name)
+            && let Some((_, current_delay)) = candidates
+                .iter()
+                .find(|(member, _)| member.as_str() == current)
+            && *current_delay <= fastest_delay.saturating_add(tolerance)
+        {
+            return Some(current.clone());
+        }
+        automatic.insert(name.to_owned(), fastest.clone());
+        Some(fastest)
     }
 
     #[must_use]
@@ -1194,6 +1252,31 @@ mod tests {
         assert_eq!(state.selector_proxy("recovery").as_deref(), Some("DIRECT"));
         assert!(state.clear_group_choice("recovery", false));
         assert_eq!(state.selector_proxy("recovery").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn url_test_chooses_fastest_healthy_or_fixed_member() {
+        let state = RuntimeState::default();
+        let members = vec!["slow".to_owned(), "fast".to_owned()];
+        let url = "http://health.test/";
+        state.sync_group_choices([("speed", members.as_slice(), None, true)], false);
+        state.record_proxy_delay("slow", url, 200, true);
+        state.record_proxy_delay("fast", url, 50, true);
+        assert_eq!(
+            state.url_test_proxy("speed", &members, url, 10).as_deref(),
+            Some("fast")
+        );
+        assert!(state.set_selector_proxy("speed", "slow", &members));
+        assert_eq!(
+            state.url_test_proxy("speed", &members, url, 10).as_deref(),
+            Some("slow")
+        );
+        state.record_proxy_delay("slow", url, 0, false);
+        assert_eq!(
+            state.url_test_proxy("speed", &members, url, 10).as_deref(),
+            Some("fast")
+        );
+        assert_eq!(state.selector_proxy("speed").as_deref(), Some(""));
     }
 
     #[test]

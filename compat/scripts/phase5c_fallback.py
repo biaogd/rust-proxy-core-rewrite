@@ -47,6 +47,22 @@ def summary(controller_port: int, health_url: str) -> dict[str, Any]:
     return result
 
 
+def wait_proxy_route(process, mixed_port: int, echo_port: int) -> str:
+    deadline = time.monotonic() + 5
+    current = "unknown"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during readiness with {process.returncode}")
+        try:
+            current = route(mixed_port, echo_port)
+            if current == "proxy":
+                return current
+        except OSError:
+            pass
+        time.sleep(0.02)
+    raise TimeoutError(f"fallback HTTP route did not become ready: {current}")
+
+
 def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     health_server = start_health_server()
@@ -86,7 +102,7 @@ rules:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
         initial = summary(controller_port, health_url)
-        initial_route = route(mixed_port, echo.port)
+        initial_route = wait_proxy_route(process, mixed_port, echo.port)
         upstream.close()
         upstream_closed = True
         # The Go compatible provider coalesces health checks for one second.
