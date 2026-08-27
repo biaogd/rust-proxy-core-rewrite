@@ -1174,6 +1174,17 @@ deterministic local SOCKS5 server, compares the configured adapter view and
 proves relay plus an independent REJECT route. No-auth, domain-resolution
 policy, TLS, errors/timeouts, UDP/UoT and dialer chains remain later gates.
 
+### Phase 5C1b accepted scope
+
+Selector state now participates in transactional SIGHUP generations. A choice
+that remains a member survives reordered/expanded membership even when
+`default-selected` differs; malformed configuration leaves both generation and
+choice untouched. If the selected member disappears, the pinned oracle falls
+back to the new first member rather than reapplying `default-selected`, and
+Rust preserves that behavior. `compat/scripts/phase5c_selector_reload.py`
+compares controller state and live HTTP/DIRECT routing across all three cases.
+Cross-process persistence and nested/provider membership remain later gates.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

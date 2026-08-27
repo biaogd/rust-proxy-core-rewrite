@@ -162,12 +162,12 @@ Primary anchors: [`adapter/outboundgroup`](../../adapter/outboundgroup),
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| GRP-01 | Selector and manual selection/persistence | Partial: flat configured selector and live manual TCP routing | 5C1 reload/persistence/nesting gates |
+| GRP-01 | Selector and manual selection/persistence | Partial: flat configured selector, live TCP routing and SIGHUP state reconciliation | 5C1 restart-persistence/nesting gates |
 | GRP-02 | URL-test, fallback and load-balance strategies | Not started | 5C1 |
 | GRP-03 | Group filters, include-all, provider composition, empty fallback, lazy health checks and URL/status policies | Not started | 5C1 |
 | PROV-01 | Proxy providers: file/HTTP vehicles, parsing, override, refresh, health checks and persistence | Not started | 5C2–5C3 |
 | PROV-02 | Rule providers: text/YAML/MRS formats, classical/domain/IP behavior, refresh and persistence | Not started | 5C4 |
-| PROV-03 | Concurrent update, failure rollback, resource cleanup and SIGHUP interaction | Not started | 5C5 |
+| PROV-03 | Concurrent update, failure rollback, resource cleanup and SIGHUP interaction | Partial: selector-side SIGHUP reconciliation/rollback only | 5C5 provider update/resource gates |
 
 ## DNS
 

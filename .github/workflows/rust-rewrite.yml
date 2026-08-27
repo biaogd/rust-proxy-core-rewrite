@@ -165,6 +165,7 @@ jobs:
       - name: Run full differential regression
         run: |
           for phase_script in \
+            compat/scripts/phase5c_selector_reload.py \
             compat/scripts/phase6b_socks5.py \
             compat/scripts/phase5c_selector.py \
             compat/scripts/phase6b_http.py \

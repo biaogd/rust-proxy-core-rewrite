@@ -101,6 +101,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
+| Phase 5C1b selector reload lifecycle | Complete in declared SIGHUP scope; GRP-01/PROV-03 remain partial | Valid choices survive, malformed config rolls back, and removed choices fall back to the first new member exactly like Go |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
@@ -3761,6 +3762,16 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound
 
 No-auth, resolution-policy permutations, TLS, complete failures/timeouts,
 SOCKS5 UDP/UoT and dialer chains remain outside this gate.
+
+Phase 5C1b adds selector reconciliation to the transactional generation publish
+barrier. It distinguishes initial `default-selected` from reload recovery: an
+existing valid choice wins, an invalid generation changes nothing, and a choice
+removed by a valid generation falls back to the first new member. The fixture
+also observes the resulting HTTP/DIRECT data-plane behavior.
+
+```sh
+PHASE5CSELECTORRELOAD_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_selector_reload.py
+```
 
 Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
 connections boundary, while other workstreams stop at their latest

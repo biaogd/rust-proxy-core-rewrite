@@ -331,16 +331,14 @@ impl RuntimeState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut current = BTreeMap::new();
         for (name, members, default) in groups {
-            let selected = selectors
-                .get(name)
-                .filter(|selected| members.contains(selected))
-                .cloned()
-                .or_else(|| {
-                    default
-                        .filter(|selected| members.iter().any(|member| member == selected))
-                        .map(str::to_owned)
-                })
-                .or_else(|| members.first().cloned());
+            let selected = match selectors.get(name) {
+                Some(previous) if members.contains(previous) => Some(previous.clone()),
+                Some(_) => members.first().cloned(),
+                None => default
+                    .filter(|selected| members.iter().any(|member| member == selected))
+                    .map(str::to_owned)
+                    .or_else(|| members.first().cloned()),
+            };
             if let Some(selected) = selected {
                 current.insert(name.to_owned(), selected);
             }
