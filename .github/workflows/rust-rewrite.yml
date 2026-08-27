@@ -86,10 +86,32 @@ jobs:
         run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
 
   full-differential:
-    name: Full Phase 1-5B aggregate rules differential regression
+    name: Differential (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          - shard: core
+            regex: 'phase(1|2|3|4|4b|4c|4d[0-9a-z]+)\.py$'
+          - shard: dns-encrypted
+            regex: 'phase4e[0-9]+\.py$'
+          - shard: dns-general
+            regex: 'phase4f[0-9]+\.py$'
+          - shard: cli-config
+            regex: 'phase5a[1-5][0-9a-z]*\.py$'
+          - shard: cli-runtime
+            regex: 'phase5a[6-8][0-9a-z]*\.py$'
+          - shard: rules
+            regex: 'phase5b(_[a-z]+|[0-9a-z]+)\.py$'
+          - shard: groups-providers
+            regex: 'phase5c_[a-z0-9_]+\.py$'
+          - shard: controller-outbound
+            regex: 'phase(5d|6b)_[a-z0-9_]+\.py$'
     env:
+      SHARD_REGEX: ${{ matrix.regex }}
       PHASE1_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE2_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE3_CARGO_TARGET: ${{ github.workspace }}/rust/target
@@ -150,6 +172,16 @@ jobs:
       PHASE5CFALLBACKDELAY_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CURLTEST_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE5CLOADBALANCE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CLOADBALANCEHASH_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5CHEALTHSCHEDULE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DCONFIGS_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DPROXIES_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE6BSOCKS_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -291,14 +323,16 @@ jobs:
             compat/scripts/phase2.py \
             compat/scripts/phase1.py
           do
-            python3 "$phase_script"
+            if [[ "$phase_script" =~ $SHARD_REGEX ]]; then
+              python3 "$phase_script"
+            fi
           done
 
       - name: Upload differential failure evidence
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: full-differential-failure
+          name: differential-failure-${{ matrix.shard }}
           path: compat/artifacts/
           if-no-files-found: ignore
           retention-days: 7
