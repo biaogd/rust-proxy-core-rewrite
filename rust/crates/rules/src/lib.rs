@@ -320,15 +320,14 @@ impl RuleSet {
 
     #[must_use]
     pub fn is_phase_three_tcp(&self) -> bool {
-        self.actions
-            .values()
-            .all(|action| !matches!(action, Action::Rematch(_)))
-            && self.rules.iter().all(Rule::has_phase_three_target)
+        self.rules
+            .iter()
+            .all(|rule| rule.has_phase_three_target(&self.actions))
             && self
                 .sub_rules
                 .values()
                 .flatten()
-                .all(Rule::has_phase_three_target)
+                .all(|rule| rule.has_phase_three_target(&self.actions))
     }
 
     fn match_sub_rules(
@@ -387,12 +386,13 @@ impl Rule {
         self.matcher.kind().to_owned()
     }
 
-    fn has_phase_three_target(&self) -> bool {
+    fn has_phase_three_target(&self, actions: &BTreeMap<String, Action>) -> bool {
         matches!(self.matcher, Matcher::SubRule { .. })
             || matches!(
                 self.target.as_str(),
                 "DIRECT" | "REJECT" | "PASS" | "PASS-RULE"
             )
+            || matches!(actions.get(&self.target), Some(Action::Rematch(_)))
     }
 }
 

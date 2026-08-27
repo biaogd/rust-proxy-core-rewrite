@@ -980,6 +980,14 @@ named branch, one exhausted branch to resume the main scan, and observable
 DIRECT/REJECT outcomes against the oracle. Lazy helper evaluation, live nested
 cycles and REMATCH remain separate gates.
 
+### Phase 5B3g accepted scope
+
+Phase 5B3g accepts live REMATCH mutation and rescan on the local mixed TCP
+path. Both `target-rematch-name` and `target-sub-rule` must change the next
+rule scan and yield distinct DIRECT/REJECT outcomes against the oracle. The
+action is executable without becoming a network outbound. Cycle termination
+and update-failure behavior remain a separate RULE-12 gate.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

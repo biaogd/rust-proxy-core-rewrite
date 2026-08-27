@@ -781,7 +781,6 @@ impl TryFrom<ConfigSpec> for Config {
             (spec.keep_alive_interval != 0, "keep-alive-interval"),
             (spec.disable_keep_alive, "disable-keep-alive"),
             (!spec.etag_support, "etag-support"),
-            (!spec.rematches.is_empty(), "rematch proxies"),
             (
                 !spec.rules.is_phase_three_tcp(),
                 "rules outside Phase 3A TCP",
@@ -2997,6 +2996,22 @@ rules:
         let config = Config::from_yaml(MINIMAL).expect("minimal config must parse");
         assert_eq!(config.mixed_port, 7890);
         assert_eq!(config.mode, Mode::Rule);
+        assert_eq!(config.listener_port().expect("valid port"), 7890);
+    }
+
+    #[test]
+    fn accepts_rematch_proxies_for_runtime_rules() {
+        let source = r"
+mixed-port: 7890
+proxies:
+  - name: SET-NAME
+    type: rematch
+    target-rematch-name: after
+rules:
+  - REMATCH-NAME,after,DIRECT
+  - MATCH,SET-NAME
+";
+        let config = Config::from_yaml(source).expect("rematch is a runtime scan action");
         assert_eq!(config.listener_port().expect("valid port"), 7890);
     }
 
