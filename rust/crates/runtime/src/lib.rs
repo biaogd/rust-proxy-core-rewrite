@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::pending;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -286,7 +286,7 @@ async fn run_http_provider_scheduler(
     updates: mpsc::Sender<rewrite_controller::ConfigUpdate>,
     shutdown: CancellationToken,
 ) {
-    let mut deadlines = BTreeMap::<String, tokio::time::Instant>::new();
+    let mut deadlines = BTreeMap::<String, (HttpProviderSchedule, tokio::time::Instant)>::new();
     loop {
         let current = Arc::clone(&config.borrow_and_update());
         let scheduled: BTreeMap<_, _> = current
@@ -298,21 +298,38 @@ async fn run_http_provider_scheduler(
             .map(|provider| {
                 (
                     provider.name.clone(),
-                    (provider.interval, provider.cache_modified),
+                    HttpProviderSchedule {
+                        interval: provider.interval,
+                        url: provider.url.clone(),
+                        path: provider.path.clone(),
+                        cache_modified: provider.cache_modified,
+                    },
                 )
             })
             .collect();
         deadlines.retain(|name, _| scheduled.contains_key(name));
         let now = tokio::time::Instant::now();
-        for (name, (interval, cache_modified)) in &scheduled {
-            deadlines
-                .entry(name.clone())
-                .or_insert_with(|| now + http_provider_initial_delay(*interval, *cache_modified));
+        for (name, schedule) in &scheduled {
+            if deadlines
+                .get(name)
+                .is_none_or(|(current, _)| current != schedule)
+            {
+                deadlines.insert(
+                    name.clone(),
+                    (
+                        schedule.clone(),
+                        now + http_provider_initial_delay(
+                            schedule.interval,
+                            schedule.cache_modified,
+                        ),
+                    ),
+                );
+            }
         }
         let wake_at = deadlines
             .values()
+            .map(|(_, deadline)| *deadline)
             .min()
-            .copied()
             .unwrap_or_else(|| now + Duration::from_hours(1));
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -325,12 +342,21 @@ async fn run_http_provider_scheduler(
                 let now = tokio::time::Instant::now();
                 let due: Vec<_> = deadlines
                     .iter()
-                    .filter(|(_, deadline)| **deadline <= now)
+                    .filter(|(_, (_, deadline))| *deadline <= now)
                     .map(|(name, _)| name.clone())
                     .collect();
                 for name in due {
-                    let interval = scheduled.get(&name).map_or(1, |(interval, _)| *interval);
-                    deadlines.insert(name.clone(), now + Duration::from_secs(interval));
+                    let schedule = scheduled
+                        .get(&name)
+                        .expect("due HTTP provider remains scheduled")
+                        .clone();
+                    deadlines.insert(
+                        name.clone(),
+                        (
+                            schedule.clone(),
+                            now + Duration::from_secs(schedule.interval.max(1)),
+                        ),
+                    );
                     let (completion, result) = oneshot::channel();
                     let update = rewrite_controller::ConfigUpdate {
                         kind: rewrite_controller::ConfigUpdateKind::RefreshProxyProvider(name),
@@ -347,6 +373,14 @@ async fn run_http_provider_scheduler(
             }
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HttpProviderSchedule {
+    interval: u64,
+    url: Option<String>,
+    path: PathBuf,
+    cache_modified: Option<SystemTime>,
 }
 
 fn http_provider_initial_delay(interval: u64, cache_modified: Option<SystemTime>) -> Duration {

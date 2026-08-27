@@ -1301,6 +1301,23 @@ Cache permission/platform errors, durable ETag database interchange, retry
 backoff timing, concurrent/coalesced refresh, HTTPS, provider-aware download
 routing and override expressions remain later gates.
 
+### Phase 5C2h accepted scope
+
+The runtime scheduler now keys each pending HTTP-provider deadline by provider
+name plus interval, URL, cache path and successfully parsed cache modification
+time. A SIGHUP generation that changes that schedule replaces the old deadline
+instead of inheriting it. The acceptance gate starts from a fresh 600-second
+cache, reloads to one second and observes the new remote member/cache/routing;
+it then reloads URL and path onto a deliberately stale valid cache and observes
+an immediate request to the replacement source. All publication still uses the
+existing validated generation transaction.
+`compat/scripts/phase5c_http_provider_reload.py` compares the lifecycle against
+the Go oracle.
+
+Zero-interval retirement races, retry backoff timing, concurrent/coalesced
+refresh, HTTPS, provider-aware download routing, durable ETag metadata and
+override expressions remain later gates.
+
 ### Phase 5C1c accepted scope
 
 Flat select groups may compose explicit proxies and local-file providers with

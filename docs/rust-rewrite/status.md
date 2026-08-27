@@ -109,6 +109,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C2e HTTP provider request contract | Complete in declared plaintext/process-local ETag scope; CFG-05/PROV-01 remain partial | Repeated custom headers, global ETag enable/disable, If-None-Match/304 cache reuse, changed-ETag publication and configured size-limit rollback pass |
 | Phase 5C2f HTTP provider default cache/restart | Complete in declared CLI-home/plaintext scope; CFG-05/PROV-01 remain partial | URL-MD5 default path, first atomic write, network-free cache startup, post-restart PUT replacement/routing and malformed-payload rollback pass |
 | Phase 5C2g HTTP provider cache age/recovery | Complete in declared plaintext/serial lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Stale-start immediate refresh, corrupt-cache remote repair and failed-refresh old-cache/provider/selection/TCP retention pass |
+| Phase 5C2h HTTP provider SIGHUP scheduling | Complete in declared serial plaintext lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Long-to-short interval mutation plus stale URL/path/cache replacement re-key pending deadlines and publish the new provider/data plane |
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
 | Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
 | Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
@@ -125,7 +126,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 117 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
+| Differential harness | Implemented | All 118 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ attempts and other non-semantic loaded-runner publication latency |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3932,6 +3933,23 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-runtime 
 Permission/platform error classes, durable ETag metadata, retry-backoff timing,
 concurrent refresh, HTTPS, provider-aware routing and overrides remain
 unclaimed.
+
+Phase 5C2h makes provider deadlines generation-aware. A deadline is retained
+only while the provider's interval, URL, cache path and cache timestamp remain
+the same. The differential proves that a fresh cache configured for 600 seconds
+does not fetch, a SIGHUP change to one second refreshes and routes through the
+new member, and a later URL/path change with a stale valid cache immediately
+fetches, persists and publishes the replacement source.
+
+```sh
+PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_http_provider_reload.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-runtime --all-features
+```
+
+Zero-interval retirement races are deliberately not claimed: the oracle may
+allow one already-retiring provider request to update shared cache bytes.
+Retry-backoff timing, concurrent refresh, HTTPS, provider-aware routing,
+durable ETag metadata and overrides also remain unclaimed.
 
 Phase 5C1c composes flat selectors from explicit proxies, named file providers,
 all top-level proxies, all providers or both. Provider filters use the oracle's

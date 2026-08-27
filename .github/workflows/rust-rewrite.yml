@@ -30,6 +30,7 @@ env:
   PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-contract-target
   PHASE5CHTTPPROVIDERCACHE_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-cache-target
   PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-stale-target
+  PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-reload-target
 
 jobs:
   rust-quality:
@@ -236,6 +237,7 @@ jobs:
           compat/scripts/phase5c_http_provider_contract.py \
           compat/scripts/phase5c_http_provider_cache.py \
           compat/scripts/phase5c_http_provider_stale.py \
+          compat/scripts/phase5c_http_provider_reload.py \
           compat/scripts/phase5c_exclude_type.py \
           compat/scripts/phase5c_nested_selector.py \
           compat/scripts/phase5c_group_filters.py \
