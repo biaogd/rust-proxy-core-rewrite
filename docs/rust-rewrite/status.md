@@ -88,6 +88,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B2b source IPv4 suffix routing | Complete in declared loopback-source/local-TCP scope; RULE-05 remains partial | `SRC-IP-SUFFIX` and `IP-SUFFIX,...,src` aliases, source hit/miss, mixed HTTP CONNECT DIRECT/REJECT outcomes pass |
 | Phase 5B2c default DSCP routing | Complete in declared local-mixed-TCP/default-metadata scope; RULE-06 remains partial | DSCP zero/nonzero, slash and reversed ranges, wildcard, invalid 64, and DIRECT/REJECT outcomes pass |
 | Phase 5B2d live TCP port/network routing | Complete in declared mixed-TCP scope; RULE-06 remains partial | Real destination/inbound port and TCP network metadata produce matching DIRECT and nonmatching REJECT outcomes |
+| Phase 5B2e live source-port routing | Complete in declared mixed-TCP scope; RULE-06 remains partial | Pre-bound client sockets prove real source-port hit and miss after an independent provider-readiness barrier |
 | Phase 5B3a inbound-type routing | Complete in declared current-local-TCP scope; RULE-08 remains partial | HTTP absolute-form vs HTTPS CONNECT, SOCKS4/5, slash lists and `SOCKS` alias route through distinct DIRECT/REJECT outcomes |
 | Phase 5B3b inbound-user routing | Complete in declared authenticated-local-TCP scope; RULE-08 remains partial | HTTP Basic, SOCKS5 username/password and SOCKS4 USERID populate case-sensitive metadata and drive exact/slash-list DIRECT/REJECT routes |
 | Phase 5B3c inbound-name routing | Complete in declared fixed-local-TCP scope; RULE-08 remains partial | `DEFAULT-HTTP`, `DEFAULT-SOCKS` and `DEFAULT-MIXED` metadata plus slash-list matching drive distinct DIRECT/REJECT outcomes |
@@ -3093,6 +3094,28 @@ cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-fea
 
 Live `SRC-PORT`, UDP ingress metadata and nonzero DSCP capture remain pending,
 so aggregate RULE-06 remains partial.
+
+## Phase 5B2e deliverables and evidence
+
+Phase 5B2e completes live port metadata for the current TCP inbound by proving
+`SRC-PORT`. The fixture binds two client sockets before proxy startup, retaining
+their exact ephemeral ports without a reserve/close race. A separate localhost
+DIRECT probe waits for Go's provider publication before either source socket is
+connected, so the rule result cannot be confused with startup defaults.
+
+`compat/scripts/phase5b2e.py` places one bound port in the rule. That client
+receives a DIRECT echo, while the other simultaneously reserved source port
+falls through to REJECT. Both outcomes match the pinned Go oracle.
+
+Local evidence on 2026-08-27:
+
+```sh
+PHASE5B2E_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5b2e.py
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+```
+
+UDP ingress metadata and capture of nonzero DSCP remain pending, so aggregate
+RULE-06 remains partial.
 
 ## Phase 5B3a deliverables and evidence
 

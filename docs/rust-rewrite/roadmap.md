@@ -937,6 +937,14 @@ and adjacent miss outcomes; the same TCP connection must match TCP and reject
 UDP. Source-port binding, UDP ingress and nonzero DSCP capture remain separate
 RULE-06 gates.
 
+### Phase 5B2e accepted scope
+
+Phase 5B2e accepts live source-port metadata on the local mixed TCP path. Two
+clients must hold distinct pre-bound source ports across startup; after an
+independent provider-readiness probe, the configured port must reach DIRECT
+and the other must reach REJECT in both products. UDP source ports and nonzero
+DSCP remain later RULE-06 gates.
+
 ### Phase 5B3a accepted scope
 
 Phase 5B3a accepts `IN-TYPE` for the current mixed TCP input set. HTTP

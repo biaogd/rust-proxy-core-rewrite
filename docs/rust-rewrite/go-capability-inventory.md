@@ -113,7 +113,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | RULE-03 | DOMAIN-REGEX and DOMAIN-WILDCARD | Partial (declared 5B1a/5B1b corpus) | 5B1 exhaustive exit gate |
 | RULE-04 | IP-CIDR/IP-CIDR6/SRC-IP-CIDR and lazy/no-resolve semantics | Partial | 5B2 |
 | RULE-05 | IP-SUFFIX/SRC-IP-SUFFIX, address unmapping and family behavior | Partial (destination/source IPv4 literal 5B2a/5B2b) | 5B2 |
-| RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial (default DSCP 5B2c; live DST/IN/NETWORK TCP 5B2d) | 5B2 completion |
+| RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial (default DSCP 5B2c; live TCP metadata 5B2d–5B2e) | UDP/nonzero-DSCP completion |
 | RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | Not started | 5B3 plus platform gates |
 | RULE-08 | IN-TYPE, IN-USER and IN-NAME | Partial (current fixed local TCP set 5B3a–5B3c) | 5B3 plus inbound gates |
 | RULE-09 | GEOIP, GEOSITE, IP-ASN and source variants | Not started | 5B4 |
