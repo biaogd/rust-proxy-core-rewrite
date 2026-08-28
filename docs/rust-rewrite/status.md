@@ -1,6 +1,6 @@
 # Rust rewrite status
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
@@ -28,6 +28,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 4E3 multiple verified-DoT roots | Complete in declared scope | Issuing/decoy root order, cache and untrusted-chain SERVFAIL differential suite passed |
 | Phase 4E4 verified-DoT reuse | Complete in declared scope | Persistent cross-client reuse, cache separation and stale pooled-connection reconnect differential suite passed |
 | Phase 4E5 verified HTTPS DoH GET | Complete in declared scope | HTTP/1.1 GET wire contract, custom-root/name validation, response ID restoration and cache differential suite passed |
+| Phase 5E shared services | Partial in declared scope | Direct SNTP adjusted-clock contract; all controller client-auth modes; UI auto/manual archive update; current DNS GeoIP/GeoSite/MMDB scheduling and REST rollback. ECH, NTP proxy/system clock, ASN/general Geo rules and clock propagation to every TLS consumer remain open |
 | Phase 4E6 HTTP/1.1 DoH reuse | Complete in declared scope | Persistent cross-client reuse, cache separation and stale pooled-connection recovery differential suite passed |
 | Phase 4E7 custom DoH path | Complete in declared scope | Safe custom-path config acceptance, exact GET target and cache differential suite passed |
 | Phase 4E8 encoded DoH path bytes | Complete in declared scope | Encoded-unreserved config acceptance, canonical GET target and cache differential suite passed |
@@ -4290,10 +4291,37 @@ pass. The full Linux regression and Windows pipe differential run in GitHub
 Actions and are not claimed before their results arrive.
 
 Phase 5D is therefore closed at the controller boundary for currently
-executable Rust services. This does not claim `/configs/geo`, core/UI/Geo
-download updates, global TLS ECH/all client-auth modes, Go pprof/expvar data,
-privileged nonzero Linux `SO_MARK`, or stress/backpressure. Those require the
-documented Phase 5E service and Phase 5F platform/release gates.
+executable Rust services. Its acceptance did not itself claim update services,
+global TLS/ECH, Go pprof/expvar data, privileged nonzero Linux `SO_MARK`, or
+stress/backpressure; those remain coupled to Phase 5E and Phase 5F evidence.
+
+Phase 5E now accepts its first broad service slice. `rewrite-services` owns a
+bounded SNTP exchange and adjusted clock, safe library-backed UI archive
+updates, and validated atomic geodata updates. Runtime managers follow config
+reload for NTP, UI auto-download and scheduled Geo updates. The controller
+exposes `/upgrade/ui`, `/upgrade/geo` and `/configs/geo`; all four Go client
+certificate modes are implemented at a narrow rustls boundary. Existing
+Go-compatible fake-IP/group/storage bbolt persistence remains the 5E3 format.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+cargo test -p rewrite-services -p rewrite-config --all-features
+PHASE5ESERVICES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5e_services.py
+PHASE5ETLSAUTH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5e_tls_client_auth.py
+```
+
+The UI/Geo differential covers automatic and manual success, both Geo route
+aliases, exact success status/body, invalid archive/data rejection and file
+rollback. The TLS differential generates independent trusted and untrusted
+client credentials and matches request/require/verify behavior for every
+mode. Direct local SNTP offset calculation is a deterministic contract test.
+
+Phase 5E remains partial: NTP through a named UDP proxy, writing the platform
+clock, server ECH, adjusted-clock propagation through every DNS/client TLS
+stack, ASN updates, general GEOIP/GEOSITE rules and exhaustive loader/matcher
+variants are not claimed. The default Linux differential shard includes both
+new scripts, but its result remains pending.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

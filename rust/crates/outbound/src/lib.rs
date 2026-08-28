@@ -189,10 +189,11 @@ pub async fn connect_http(
     credentials: Option<(&str, &str)>,
     headers: &BTreeMap<String, String>,
     tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect(server, allow_ipv6).await?;
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
-        let config = http_tls_config(tls, &[])?;
+        let config = http_tls_config(tls, &[], clock)?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
             .map_err(|_| HttpProxyError::TlsConfiguration("invalid server name".to_owned()))?;
         let stream = tokio::time::timeout(
@@ -248,12 +249,13 @@ pub async fn wrap_client_tls(
     server_name: &str,
     skip_certificate_verification: bool,
     custom_roots: &[String],
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let tls = HttpProxyTls {
         server_name,
         skip_certificate_verification,
     };
-    let config = http_tls_config(tls, custom_roots)?;
+    let config = http_tls_config(tls, custom_roots, clock)?;
     let server_name = ServerName::try_from(server_name.to_owned())
         .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
     let stream = TlsConnector::from(Arc::new(config))
@@ -266,16 +268,17 @@ pub async fn wrap_client_tls(
 fn http_tls_config(
     tls: HttpProxyTls<'_>,
     custom_roots: &[String],
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<ClientConfig, HttpProxyError> {
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
     if tls.skip_certificate_verification {
-        return Ok(ClientConfig::builder_with_provider(Arc::new(
-            tokio_rustls::rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
-        .with_no_client_auth());
+        return Ok(ClientConfig::builder_with_details(provider, clock)
+            .with_safe_default_protocol_versions()
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+            .with_no_client_auth());
     }
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
@@ -304,13 +307,11 @@ fn http_tls_config(
                 .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
         }
     }
-    Ok(ClientConfig::builder_with_provider(Arc::new(
-        tokio_rustls::rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-    .with_root_certificates(roots)
-    .with_no_client_auth())
+    Ok(ClientConfig::builder_with_details(provider, clock)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
 }
 
 /// Opens a TCP stream through a SOCKS5 proxy using remote target addressing.

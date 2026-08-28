@@ -45,6 +45,63 @@ use tower_http::services::ServeDir;
 
 const MAX_DNS_MESSAGE: usize = 65_535;
 
+#[derive(Debug)]
+struct AcceptAnyClientCertificate {
+    mandatory: bool,
+    signatures: Arc<dyn tokio_rustls::rustls::server::danger::ClientCertVerifier>,
+    hints: Vec<tokio_rustls::rustls::DistinguishedName>,
+}
+
+impl tokio_rustls::rustls::server::danger::ClientCertVerifier for AcceptAnyClientCertificate {
+    fn client_auth_mandatory(&self) -> bool {
+        self.mandatory
+    }
+
+    fn root_hint_subjects(&self) -> &[tokio_rustls::rustls::DistinguishedName] {
+        &self.hints
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::server::danger::ClientCertVerified, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        self.signatures
+            .verify_tls12_signature(message, cert, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        signature: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        self.signatures
+            .verify_tls13_signature(message, cert, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        self.signatures.supported_verify_schemes()
+    }
+}
+
 #[derive(Clone)]
 struct ControllerState {
     dns_service: Arc<DnsService>,
@@ -312,10 +369,11 @@ where
 ///
 /// # Errors
 ///
-/// Returns an I/O error for unreadable or invalid PEM material and unsupported
-/// client-auth/ECH modes whose shared TLS service is not implemented yet.
+/// Returns an I/O error for unreadable or invalid PEM material and ECH, whose
+/// server-side support is not exposed by the selected TLS library.
 pub fn prepare_tls_config(
     config: &rewrite_config::ControllerTls,
+    clock: Arc<rewrite_services::AdjustedClock>,
 ) -> std::io::Result<tokio_rustls::rustls::ServerConfig> {
     if !config.ech_key.is_empty() {
         return Err(std::io::Error::new(
@@ -331,15 +389,10 @@ pub fn prepare_tls_config(
         .ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "private key not found")
     })?;
-    let client_auth = if config.client_auth_type.is_empty() && config.client_auth_cert.is_empty() {
-        None
-    } else {
-        if matches!(config.client_auth_type.as_str(), "request" | "require-any") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "request and require-any client auth await Phase 5E2",
-            ));
-        }
+    let client_auth: Option<Arc<dyn tokio_rustls::rustls::server::danger::ClientCertVerifier>> = if matches!(
+        config.client_auth_type.as_str(),
+        "verify-if-given" | "require-and-verify"
+    ) {
         let client_ca = load_pem_or_path(&config.client_auth_cert)?;
         let mut roots = tokio_rustls::rustls::RootCertStore::empty();
         let client_certificates =
@@ -358,8 +411,40 @@ pub fn prepare_tls_config(
             verifier = verifier.allow_unauthenticated();
         }
         Some(verifier.build().map_err(std::io::Error::other)?)
+    } else if matches!(config.client_auth_type.as_str(), "request" | "require-any") {
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        let signature_roots = if config.client_auth_cert.is_empty() {
+            certificates.clone()
+        } else {
+            let client_ca = load_pem_or_path(&config.client_auth_cert)?;
+            rustls_pemfile::certs(&mut BufReader::new(Cursor::new(client_ca)))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let (accepted, _) = roots.add_parsable_certificates(signature_roots);
+        if accepted == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "client signature verifier roots are empty",
+            ));
+        }
+        let signatures = tokio_rustls::rustls::server::WebPkiClientVerifier::builder(roots.into())
+            .allow_unauthenticated()
+            .build()
+            .map_err(std::io::Error::other)?;
+        Some(Arc::new(AcceptAnyClientCertificate {
+            mandatory: config.client_auth_type == "require-any",
+            signatures,
+            hints: Vec::new(),
+        }))
+    } else {
+        None
     };
-    let builder = tokio_rustls::rustls::ServerConfig::builder();
+    let builder = tokio_rustls::rustls::ServerConfig::builder_with_details(
+        Arc::new(tokio_rustls::rustls::crypto::ring::default_provider()),
+        clock,
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(std::io::Error::other)?;
     let mut server = match client_auth {
         Some(verifier) => builder.with_client_cert_verifier(verifier),
         None => builder.with_no_client_auth(),
@@ -607,6 +692,9 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/cache/dns/flush", any(flush_dns_cache))
         .route("/cache/fakeip/flush", any(flush_fake_ip_cache))
         .route("/dns/query", any(dns_query))
+        .route("/upgrade/ui", axum::routing::post(update_ui))
+        .route("/upgrade/geo", axum::routing::post(update_geo))
+        .route("/configs/geo", axum::routing::post(update_geo))
         .route("/restart", axum::routing::post(restart))
         .route("/restart/", axum::routing::post(restart))
         .route("/debug/gc", axum::routing::put(debug_gc))
@@ -1173,6 +1261,7 @@ async fn measure_http_delay(
                         credentials,
                         &proxy.headers,
                         tls,
+                        None,
                     )
                     .await
                     .map_err(|_| ())?
@@ -1188,9 +1277,15 @@ async fn measure_http_delay(
             }
         };
     if url.scheme() == "https" {
-        stream = rewrite_outbound::wrap_client_tls(stream, host, false, &config.trust_certificates)
-            .await
-            .map_err(|_| ())?;
+        stream = rewrite_outbound::wrap_client_tls(
+            stream,
+            host,
+            false,
+            &config.trust_certificates,
+            None,
+        )
+        .await
+        .map_err(|_| ())?;
     }
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
@@ -2095,6 +2190,26 @@ async fn restart(State(state): State<ControllerState>) -> Response {
         }
     });
     json_response(StatusCode::OK, &json!({"status": "ok"}))
+}
+
+async fn update_ui(State(state): State<ControllerState>) -> Response {
+    match rewrite_services::update_ui(&state.current_config()).await {
+        Ok(()) => json_response(StatusCode::OK, &json!({"status": "ok"})),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": error.to_string()}),
+        ),
+    }
+}
+
+async fn update_geo(State(state): State<ControllerState>) -> Response {
+    match rewrite_services::update_geodata(&state.current_config()).await {
+        Ok(()) => empty_response(StatusCode::NO_CONTENT),
+        Err(error) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": error.to_string()}),
+        ),
+    }
 }
 
 async fn debug_gc(State(state): State<ControllerState>) -> Response {

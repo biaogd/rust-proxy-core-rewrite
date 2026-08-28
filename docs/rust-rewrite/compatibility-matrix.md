@@ -75,9 +75,9 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 3 local authentication records | Oracle | **Parity** | HTTP Basic, SOCKS4 USERID and SOCKS5 username/password accept/reject cases |
 | LAN allow/deny and skip-auth prefixes | Oracle | Not started | Parser plus remote-address connection decisions |
 | Phase 3 controller TCP address and secret | Oracle | **Parity** | Live loopback TCP controller and Bearer authorization observations after a confirmed tunnel payload round-trip makes tracker registration deterministic |
-| Controller TLS/Unix/pipe | Oracle | Not started | Per-platform live controller fixtures |
+| Controller TLS/Unix/pipe | Oracle | **Parity in declared scope** | Phase 5D live TCP/TLS/Unix fixture plus Phase 5E all four client-auth mode handshake differential; native Windows pipe remains its own CI gate |
 | `external-controller-cors` defaults/config/reload | Oracle | **Parity** | Allow-all defaults/empty list, exact/single-wildcard origins, Private Network, denied method/header, auth ordering and hot reload in `compat/scripts/phase5d_cors.py` |
-| UI paths/download settings and safe-path checks | Oracle | Not started | Path traversal and normalization cases |
+| UI paths/download settings and safe-path checks | Oracle | Partial | Phase 5D path serving/reload plus Phase 5E automatic/manual bounded archive download, single-root extraction and invalid-archive rollback; exhaustive safe-path aliases remain open |
 | Proxies and built-in proxy insertion | Oracle | Not started | Normalized inventory/error corpus |
 | Proxy groups and cycle/order validation | Oracle | Partial | Phase 5C completes configured select/fallback/URL-test/load-balance, cycles, ordered name/type filtering, include-all, empty fallback and current-adapter health/lifecycle gates; future adapter types and their protocol-specific validation remain |
 | Proxy providers and health checks | Oracle | Partial | Phase 5C completes inline/file/HTTP/HTTPS vehicles, current HTTP/SOCKS5 parsing, filters/name transforms, real provider health, manual/interval/file-watch refresh, digest-bound ETag restart, caches, SIGHUP and concurrent rollback. Named download proxies, general override expressions, encrypted payloads and later adapter types remain unclaimed |
@@ -87,12 +87,12 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | DNS and fake-IP configuration | Oracle | Partial | Phase 4A/4B classic/hosts, Phase 4C fake settings, Phase 4D1 policy, Phase 4D2 fallback and Phase 4D3A single local direct resolver; general fallback, proxy-server/respect-rules and encrypted DNS remain unclaimed |
 | TUN and route settings | Oracle | Not started | Per-OS parse/apply fixtures |
 | Static tunnels and proxy validation | Oracle | Not started | TCP/UDP target fixtures |
-| NTP | Oracle | Not started | Local NTP server and ordering tests |
+| NTP | Oracle | Partial | Direct SNTP config/defaults, bounded exchange, adjusted process clock and reload/disable/shutdown reset have deterministic Rust contracts; Go/Rust lifecycle/log differential, named UDP dialer proxy and system-clock writes remain open |
 | iptables | Oracle | Not started | Linux namespace integration tests |
-| TLS/custom CA/client auth/ECH | Oracle | Not started | Certificate and handshake fixtures |
+| TLS/custom CA/client auth/ECH | Oracle | Partial | Existing custom roots plus generated-certificate `request`/`require-any`/`verify-if-given`/`require-and-verify` controller differential pass; adjusted clock reaches controller/configured HTTP-proxy TLS. Server ECH and every DNS/client TLS consumer remain open |
 | Profile persistence | Oracle | Partial | Fake-IP state plus selector and fixed-fallback choices persist in the shared Go-compatible bbolt `cache.db`; bidirectional Go/Rust group interchange and `store-selected: false` pass. Corruption recovery and other profile state remain unclaimed |
 | Sniffer | Oracle | Not started | HTTP/TLS/QUIC payload fixtures |
-| Geodata URLs/loaders/matchers/updates | Oracle | Not started | Pinned local data files, no public latest |
+| Geodata URLs/loaders/matchers/updates | Oracle | Partial | Exact defaults/overrides, current DNS GeoIP.dat/GeoSite.dat and MMDB validation, automatic schedule, REST aliases, atomic replace and malformed rollback use pinned local fixtures; ASN, general GEO rules and full loader/matcher variants remain open |
 | Experimental and build-feature settings | Oracle | Not started | Feature-profile parser/runtime tests |
 | Deprecated/removed configuration behavior | Oracle | Not started | Accepted aliases, warnings and Go-compatible rejection corpus, including removed relay groups |
 
@@ -248,14 +248,14 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Secret auth, WebSocket token and CORS | Oracle | **Parity** | Bearer/query-token acceptance/rejection, TCP/TLS enforcement, Unix/pipe bypass, public UI/DoH/debug ordering, and default/configured/reloaded CORS contracts pass in the Phase 5D differentials |
 | `/`, `/version`, `/memory`, `/traffic` | Oracle | **Parity in declared local scope** | `phase5d_streams.py` compares HTTP/WS shapes, zero first memory frame, positive process RSS, bounded sustained cadence and monotonic traffic totals; stress/backpressure remains a RUN-09 release gate |
 | `/logs` WebSocket/stream | Oracle | **Parity in declared local scope** | Plain and structured formats, filtering shape, real TCP event and WebSocket cadence pass; lag/backpressure stress remains a RUN-09 release gate |
-| `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | `phase5d_configs.py` plus `phase5d_config_paths.py` prove the executable snapshot/PATCH subset, transactional listener/rule replacement, inline YAML, safe absolute/default path loading, exact unsafe-path errors and rollback; fields whose runtimes do not exist and `/configs/geo` remain 5E/feature gates |
+| `/configs` GET/PUT/PATCH and `/configs/geo` | Oracle | Partial | Phase 5D proves executable config transactions and path rollback; Phase 5E adds exact `POST /configs/geo` 204, replacement and malformed-data rollback for current DNS geodata consumers. Unimplemented config runtimes and broader geodata consumers remain feature gates |
 | `/proxies`, `/group`, delay and selection | Oracle | **Parity for current executable adapters/groups** | Phase 5C and `phase5d_proxies.py` prove all built-ins, configured groups/providers, selection/reload/persistence and HTTP health; `phase5d_https_health.py` adds custom-root/hosts/SNI HTTPS HEAD and expected-status behavior. Future protocol views remain coupled to those protocol gates |
 | `/rules` and disable operation | Oracle | Partial | `phase5d_rules.py` proves ordered DomainSuffix/MATCH inventory fields, shared hit/miss counters and timestamps, disable/enable routing side effects, ignored indexes and malformed-body behavior; exhaustive rule payload rendering, GeoIP/GeoSite size and reload-state behavior remain unclaimed |
 | `/connections` stream/list/delete | Oracle | **Parity** | Current local TCP tracking, totals, query-token/Bearer WebSocket snapshots and interval plus DELETE one/missing/all with live tunnel closure pass in Phase 3 and `phase5d_streams.py`/`phase5d_connections.py` |
 | Proxy and rule provider APIs | Oracle | Partial | Phase 5C proves proxy/rule list/detail where declared, PUT, provider health, inline/file/HTTP/HTTPS vehicles, interval/file-watch refresh, durable ETag restart, concurrent transactional rollback and SIGHUP removal. Named download proxies, general override expressions, encrypted payloads and future adapters remain unclaimed |
 | Cache, DNS and storage APIs | Oracle | **Parity in declared scope** | Phase 4F15 completes DNS/query/cache routes; `phase5d_storage.py` and `phase5d_storage_persistence.py` prove exact JSON lifecycle, 1 MiB/64-byte bounds, deterministic LRU, restart/delete persistence and bidirectional Go bbolt/MessagePack interchange |
-| Restart and upgrade APIs | Oracle | Partial | `phase5d_restart.py` proves method/body, live same-PID Unix re-exec and post-restart readiness; core/UI/Geo update routes depend on 5E download/update services and are not claimed |
-| External UI and DoH mount | Oracle | **Parity in declared serving scope** | Phase 4F15 proves public DoH; `phase5d_transports.py` proves public UI redirect/index/assets, MIME and hot path replacement across controller recreation |
+| Restart and upgrade APIs | Oracle | Partial | Phase 5D proves same-PID restart; Phase 5E proves `/upgrade/ui` success/error/rollback and `/upgrade/geo` success/error/rollback. Signed/versioned core `/upgrade` remains deliberately unimplemented |
+| External UI and DoH mount | Oracle | **Parity in declared serving/update scope** | Phase 4F15 proves public DoH; Phase 5D proves UI serving/reload; `phase5e_services.py` proves empty-directory auto-download, manual update and rollback |
 | Debug routes | Oracle when debug | Partial | Public unauthenticated `PUT /debug/gc`, debug-only exposure and exact empty success pass; Go pprof/expvar payloads and allocator-release semantics remain unclaimed |
 | Exact route-wide error/stream/concurrency contracts | Oracle | Partial | Exactness and sustained cadence pass for every accepted Phase 5D route; profiler/update-service semantics and RUN-09 stress/backpressure remain explicit gaps |
 
@@ -334,6 +334,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, bounded startup readiness, stable shutdown-hook invocation and failure differential passed, 2026-08-27 |
 | Darwin arm64 — Phase 5D controller boundary | Oracle | **Parity in declared rows** | Native TCP/TLS/Unix transport and UI reload, auth/CORS, sustained observability, config safe paths, connection deletion, HTTPS health, bbolt storage interchange and same-PID restart passed, 2026-08-28 |
+| Darwin arm64 — Phase 5E services | Oracle | **Partial** | Native UI/Geo REST/update rollback and all controller client-auth mode differentials passed, plus deterministic local SNTP contract, 2026-08-28; documented global TLS/NTP proxy/system-clock/ASN/general-Geo gaps remain |
 | Darwin arm64 — Phase 6B1b HTTP TLS outbound | Oracle | **Parity in declared scope** | Native TLS authority differential passed with SNI, skip/untrusted handling, authenticated CONNECT relay and 502 rejection, 2026-08-28 |
 | Darwin arm64 — Phase 6B1c HTTP CONNECT contract | Oracle | **Parity in declared scope** | Native unauthenticated/authenticated relay, default/custom header and exact-200 response matrix differential passed, 2026-08-28 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
@@ -385,6 +386,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A8a lifecycle hooks | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5B aggregate local rules | Oracle | Pending | Default aggregate rule differentials are configured; no result is claimed before completion |
 | Linux amd64 — Phase 5D controller boundary | Oracle | Pending | Default CI now includes all Phase 5D differentials; TCP/TLS/Unix, streams, config paths, persistence, restart and HTTPS health remain unclaimed until the run completes; nonzero routing mark needs a privileged gate |
+| Linux amd64 — Phase 5E services | Oracle | Pending | Default parallel differential shard includes UI/Geo update and TLS client-auth scripts; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |

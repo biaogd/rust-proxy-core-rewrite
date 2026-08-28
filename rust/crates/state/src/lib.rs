@@ -157,6 +157,7 @@ pub struct RuntimeState {
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
+    clock: Arc<rewrite_services::AdjustedClock>,
 }
 
 #[derive(Clone, Debug)]
@@ -236,11 +237,18 @@ impl Default for RuntimeState {
             proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
+            clock: Arc::new(rewrite_services::AdjustedClock::default()),
         }
     }
 }
 
 impl RuntimeState {
+    /// Returns the process-wide clock adjusted by the configured NTP service.
+    #[must_use]
+    pub fn clock(&self) -> Arc<rewrite_services::AdjustedClock> {
+        Arc::clone(&self.clock)
+    }
+
     #[must_use]
     pub fn register(
         self: &Arc<Self>,

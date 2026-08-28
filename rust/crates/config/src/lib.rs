@@ -51,6 +51,11 @@ pub struct ConfigSpec {
     pub log_level: LogLevel,
     pub ipv6: bool,
     pub geodata_mode: bool,
+    pub geodata_loader: String,
+    pub geosite_matcher: String,
+    pub geo_auto_update: bool,
+    pub geo_update_interval: i64,
+    pub geox_url: GeoXUrls,
     pub interface_name: String,
     pub routing_mark: i64,
     pub tcp_concurrent: bool,
@@ -71,6 +76,7 @@ pub struct ConfigSpec {
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
+    pub ntp: NtpConfig,
     pub trust_certificates: Vec<String>,
     pub controller_tls: ControllerTls,
     pub dns: Option<DnsConfig>,
@@ -88,6 +94,9 @@ pub struct ConfigSpec {
     home_directory: Option<PathBuf>,
 }
 
+// This is the normalized executable view of the same external schema; each
+// boolean retains an independent observable configuration meaning.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: i64,
@@ -97,6 +106,11 @@ pub struct Config {
     pub log_level: LogLevel,
     pub ipv6: bool,
     pub geodata_mode: bool,
+    pub geodata_loader: String,
+    pub geosite_matcher: String,
+    pub geo_auto_update: bool,
+    pub geo_update_interval: i64,
+    pub geox_url: GeoXUrls,
     pub etag_support: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
@@ -111,6 +125,7 @@ pub struct Config {
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
+    pub ntp: NtpConfig,
     pub trust_certificates: Vec<String>,
     pub controller_tls: ControllerTls,
     pub dns: Option<DnsConfig>,
@@ -137,6 +152,24 @@ pub enum ProxyKind {
 pub struct ProfileConfig {
     pub store_fake_ip: bool,
     pub store_selected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NtpConfig {
+    pub enable: bool,
+    pub server: String,
+    pub port: i64,
+    pub interval: i64,
+    pub dialer_proxy: String,
+    pub write_to_system: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeoXUrls {
+    pub geo_ip: String,
+    pub mmdb: String,
+    pub asn: String,
+    pub geo_site: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -659,6 +692,11 @@ struct RawConfig {
     log_level: Option<String>,
     ipv6: Option<bool>,
     geodata_mode: Option<bool>,
+    geodata_loader: Option<String>,
+    geosite_matcher: Option<String>,
+    geo_auto_update: Option<bool>,
+    geo_update_interval: Option<i64>,
+    geox_url: Option<RawGeoXUrls>,
     interface_name: Option<String>,
     routing_mark: Option<i64>,
     tcp_concurrent: Option<bool>,
@@ -679,6 +717,7 @@ struct RawConfig {
     secret: Option<String>,
     external_controller_cors: Option<RawControllerCors>,
     profile: Option<RawProfile>,
+    ntp: Option<RawNtp>,
     tls: Option<RawTls>,
     dns: Option<RawDns>,
     hosts: Option<BTreeMap<String, RawHostValue>>,
@@ -688,6 +727,32 @@ struct RawConfig {
     proxy_providers: Option<BTreeMap<String, RawProxyProvider>>,
     proxy_groups: Option<Vec<RawProxyGroup>>,
     rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawNtp {
+    enable: Option<bool>,
+    server: Option<String>,
+    port: Option<i64>,
+    interval: Option<i64>,
+    dialer_proxy: Option<String>,
+    write_to_system: Option<bool>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawGeoXUrls {
+    #[serde(rename = "geoip")]
+    geo_ip: Option<String>,
+    mmdb: Option<String>,
+    asn: Option<String>,
+    #[serde(rename = "geosite")]
+    geo_site: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1073,6 +1138,8 @@ impl ConfigSpec {
             &provider_definitions,
         )?;
         let profile = parse_profile(raw.profile)?;
+        let ntp = parse_ntp(raw.ntp)?;
+        let geox_url = parse_geox_urls(raw.geox_url)?;
         let (controller_tls, trust_certificates) = parse_tls(raw.tls, provider_directory)?;
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let controller_cors = parse_controller_cors(raw.external_controller_cors);
@@ -1080,7 +1147,7 @@ impl ConfigSpec {
             raw.dns,
             &trust_certificates,
             &rule_providers,
-            config_directory,
+            provider_directory.or(config_directory),
             geodata_mode,
         )?;
         let external_ui = raw.external_ui.unwrap_or_default();
@@ -1100,6 +1167,13 @@ impl ConfigSpec {
             log_level,
             ipv6: raw.ipv6.unwrap_or(true),
             geodata_mode,
+            geodata_loader: raw
+                .geodata_loader
+                .unwrap_or_else(|| "memconservative".to_owned()),
+            geosite_matcher: normalize_geosite_matcher(raw.geosite_matcher.as_deref()),
+            geo_auto_update: raw.geo_auto_update.unwrap_or(false),
+            geo_update_interval: raw.geo_update_interval.unwrap_or(24),
+            geox_url,
             interface_name: raw.interface_name.unwrap_or_default(),
             routing_mark: raw.routing_mark.unwrap_or(0),
             tcp_concurrent: raw.tcp_concurrent.unwrap_or(false),
@@ -1124,6 +1198,7 @@ impl ConfigSpec {
             secret: raw.secret.unwrap_or_default(),
             controller_cors,
             profile,
+            ntp,
             trust_certificates,
             controller_tls,
             dns,
@@ -1259,6 +1334,11 @@ impl TryFrom<ConfigSpec> for Config {
             log_level: spec.log_level,
             ipv6: spec.ipv6,
             geodata_mode: spec.geodata_mode,
+            geodata_loader: spec.geodata_loader,
+            geosite_matcher: spec.geosite_matcher,
+            geo_auto_update: spec.geo_auto_update,
+            geo_update_interval: spec.geo_update_interval,
+            geox_url: spec.geox_url,
             etag_support: spec.etag_support,
             authentication: spec.authentication,
             external_controller: spec.external_controller,
@@ -1273,6 +1353,7 @@ impl TryFrom<ConfigSpec> for Config {
             secret: spec.secret,
             controller_cors: spec.controller_cors,
             profile: spec.profile,
+            ntp: spec.ntp,
             trust_certificates: spec.trust_certificates,
             controller_tls: spec.controller_tls,
             dns: spec.dns,
@@ -1806,6 +1887,54 @@ fn parse_profile(raw: Option<RawProfile>) -> Result<ProfileConfig, ConfigError> 
         store_fake_ip: raw.store_fake_ip.unwrap_or(false),
         store_selected: raw.store_selected.unwrap_or(true),
     })
+}
+
+fn parse_ntp(raw: Option<RawNtp>) -> Result<NtpConfig, ConfigError> {
+    let raw = raw.unwrap_or_default();
+    if let Some(key) = raw.extra.into_keys().next() {
+        return Err(ConfigError::UnsupportedKey(format!("ntp.{key}")));
+    }
+    Ok(NtpConfig {
+        enable: raw.enable.unwrap_or(false),
+        server: raw.server.unwrap_or_else(|| "time.apple.com".to_owned()),
+        port: raw.port.unwrap_or(123),
+        interval: raw.interval.unwrap_or(30),
+        dialer_proxy: raw.dialer_proxy.unwrap_or_default(),
+        write_to_system: raw.write_to_system.unwrap_or(false),
+    })
+}
+
+fn parse_geox_urls(raw: Option<RawGeoXUrls>) -> Result<GeoXUrls, ConfigError> {
+    let raw = raw.unwrap_or_default();
+    if let Some(key) = raw.extra.into_keys().next() {
+        return Err(ConfigError::UnsupportedKey(format!("geox-url.{key}")));
+    }
+    Ok(GeoXUrls {
+        geo_ip: raw.geo_ip.unwrap_or_else(|| {
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat"
+                .to_owned()
+        }),
+        mmdb: raw.mmdb.unwrap_or_else(|| {
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
+                .to_owned()
+        }),
+        asn: raw.asn.unwrap_or_else(|| {
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
+                .to_owned()
+        }),
+        geo_site: raw.geo_site.unwrap_or_else(|| {
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+                .to_owned()
+        }),
+    })
+}
+
+fn normalize_geosite_matcher(raw: Option<&str>) -> String {
+    match raw.unwrap_or_default() {
+        "mph" | "hybrid" => "mph",
+        _ => "succinct",
+    }
+    .to_owned()
 }
 
 fn parse_tls(
@@ -6181,5 +6310,35 @@ dns:
             "{MINIMAL}\nproxy-groups:\n  - name: cycle-a\n    type: select\n    proxies: [cycle-b]\n  - name: cycle-b\n    type: select\n    proxies: [cycle-a]\n"
         ));
         assert!(matches!(cycle, Err(ConfigError::UnsupportedProxy(_))));
+    }
+
+    #[test]
+    fn parses_phase5e_service_defaults_and_overrides() {
+        let defaults = Config::from_yaml(MINIMAL).expect("service defaults");
+        assert_eq!(defaults.ntp.server, "time.apple.com");
+        assert_eq!(defaults.ntp.port, 123);
+        assert_eq!(defaults.ntp.interval, 30);
+        assert!(!defaults.ntp.enable);
+        assert!(!defaults.geo_auto_update);
+        assert_eq!(defaults.geo_update_interval, 24);
+        assert_eq!(defaults.geodata_loader, "memconservative");
+        assert_eq!(defaults.geosite_matcher, "succinct");
+
+        let configured = Config::from_yaml(&format!(
+            "{MINIMAL}\ngeodata-loader: standard\ngeosite-matcher: mph\ngeo-auto-update: true\ngeo-update-interval: 12\ngeox-url:\n  geoip: http://geo.test/ip\n  mmdb: http://geo.test/mmdb\n  asn: http://geo.test/asn\n  geosite: http://geo.test/site\nntp:\n  enable: true\n  server: ntp.test\n  port: 10123\n  interval: 9\n  dialer-proxy: DIRECT\n  write-to-system: true\n"
+        ))
+        .expect("configured Phase 5E services");
+        assert!(configured.ntp.enable);
+        assert_eq!(configured.ntp.server, "ntp.test");
+        assert_eq!(configured.ntp.port, 10123);
+        assert_eq!(configured.ntp.interval, 9);
+        assert_eq!(configured.ntp.dialer_proxy, "DIRECT");
+        assert!(configured.ntp.write_to_system);
+        assert!(configured.geo_auto_update);
+        assert_eq!(configured.geo_update_interval, 12);
+        assert_eq!(configured.geodata_loader, "standard");
+        assert_eq!(configured.geosite_matcher, "mph");
+        assert_eq!(configured.geox_url.geo_ip, "http://geo.test/ip");
+        assert_eq!(configured.geox_url.geo_site, "http://geo.test/site");
     }
 }

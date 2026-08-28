@@ -17,6 +17,7 @@ rewrite-net = { path = "../net" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-platform = { path = "../platform" }
 rewrite-rules = { path = "../rules" }
+rewrite-services = { path = "../services" }
 rewrite-state = { path = "../state" }
 rand.workspace = true
 reqwest.workspace = true

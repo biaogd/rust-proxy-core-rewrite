@@ -95,7 +95,7 @@ impl LifecycleSignals {
 /// listener cannot be bound.
 pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), RuntimeError> {
     let (_reload_sender, reloads) = mpsc::channel(1);
-    run_with_reload(config, reloads, shutdown).await
+    Box::pin(run_with_reload(config, reloads, shutdown)).await
 }
 
 /// Runs transactional local listener generations and applies validated reloads.
@@ -172,6 +172,9 @@ async fn run_with_reload_inner(
     let provider_files =
         start_file_provider_watcher(config_receiver.clone(), controller_update_sender.clone())
             .await;
+    let ntp = start_ntp_service(config_receiver.clone(), Arc::clone(&state));
+    let ui_updater = start_ui_updater(config_receiver.clone(), Arc::clone(&state));
+    let geo_updater = start_geo_updater(config_receiver.clone(), Arc::clone(&state));
     let shutdown_barrier = lifecycle.map(
         |LifecycleSignals {
              ready,
@@ -250,6 +253,9 @@ async fn run_with_reload_inner(
     stop_task(provider_health).await;
     stop_task(providers).await;
     stop_task(provider_files).await;
+    stop_task(ntp).await;
+    stop_task(ui_updater).await;
+    stop_task(geo_updater).await;
     if restart_requested {
         restart_current_process();
     }
@@ -372,6 +378,150 @@ fn start_provider_health_scheduler(
     let child_shutdown = shutdown.clone();
     let handle = tokio::spawn(run_provider_health_scheduler(config, state, child_shutdown));
     RuntimeTask { shutdown, handle }
+}
+
+fn start_ntp_service(
+    config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+) -> RuntimeTask {
+    let shutdown = CancellationToken::new();
+    let child_shutdown = shutdown.clone();
+    let handle = tokio::spawn(run_ntp_service(config, state, child_shutdown));
+    RuntimeTask { shutdown, handle }
+}
+
+fn start_ui_updater(config: watch::Receiver<Arc<Config>>, state: Arc<RuntimeState>) -> RuntimeTask {
+    let shutdown = CancellationToken::new();
+    let child_shutdown = shutdown.clone();
+    let handle = tokio::spawn(run_ui_updater(config, state, child_shutdown));
+    RuntimeTask { shutdown, handle }
+}
+
+async fn run_ui_updater(
+    mut config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let current = Arc::clone(&config.borrow_and_update());
+        match rewrite_services::auto_update_ui(&current).await {
+            Ok(true) => state.log("info", "external UI downloaded"),
+            Ok(false) => {}
+            Err(error) => state.log("error", format!("external UI download failed: {error}")),
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = config.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn start_geo_updater(
+    config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+) -> RuntimeTask {
+    let shutdown = CancellationToken::new();
+    let child_shutdown = shutdown.clone();
+    let handle = tokio::spawn(run_geo_updater(config, state, child_shutdown));
+    RuntimeTask { shutdown, handle }
+}
+
+async fn run_geo_updater(
+    mut config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let current = Arc::clone(&config.borrow_and_update());
+        if current.geo_auto_update {
+            match rewrite_services::geodata_update_due(&current) {
+                Ok(true) => match rewrite_services::update_geodata(&current).await {
+                    Ok(()) => state.log("info", "geodata updated"),
+                    Err(error) => state.log("error", format!("geodata update failed: {error}")),
+                },
+                Ok(false) => {}
+                Err(error) => state.log("error", format!("geodata schedule failed: {error}")),
+            }
+        }
+        let hours = u64::try_from(current.geo_update_interval.max(1)).unwrap_or(1);
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = config.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_secs(hours.saturating_mul(60 * 60))), if current.geo_auto_update => {}
+        }
+    }
+}
+
+async fn run_ntp_service(
+    mut config: watch::Receiver<Arc<Config>>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) {
+    'configuration: loop {
+        state.clock().set_offset_micros(0);
+        let ntp = config.borrow_and_update().ntp.clone();
+        if !ntp.enable {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                changed = config.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ntp.write_to_system {
+            state.log(
+                "warning",
+                "NTP write-to-system is unavailable in the safe Rust platform boundary",
+            );
+        }
+        for attempt in 0..3 {
+            let clock = state.clock();
+            let exchange = rewrite_services::update_ntp(&ntp, &clock);
+            tokio::select! {
+                () = shutdown.cancelled() => break 'configuration,
+                changed = config.changed() => {
+                    if changed.is_err() {
+                        break 'configuration;
+                    }
+                    continue 'configuration;
+                }
+                result = exchange => match result {
+                    Ok(offset) => {
+                        state.log("info", format!("NTP clock offset updated: {offset}us"));
+                        break;
+                    }
+                    Err(error) if attempt < 2 => {
+                        state.log("warning", format!("NTP update attempt failed: {error}"));
+                    }
+                    Err(error) => {
+                        state.log("error", format!("NTP update failed: {error}"));
+                    }
+                }
+            }
+        }
+        let interval = u64::try_from(ntp.interval.max(1)).unwrap_or(1);
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            changed = config.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+            () = tokio::time::sleep(Duration::from_secs(interval.saturating_mul(60))) => {}
+        }
+    }
+    state.clock().set_offset_micros(0);
 }
 
 fn start_http_provider_scheduler(
@@ -1151,9 +1301,12 @@ async fn apply_generation(
             stop_task(task).await;
             cleanup_controller_key(&replaced);
         }
-        match prepare_controller(key.clone()) {
+        match prepare_controller(key.clone(), state.clock()) {
             Ok(prepared) => prepared_controllers.push(prepared),
-            Err(error) => state.log("error", format!("controller listen failed: {error}")),
+            Err(error) => {
+                state.log("error", format!("controller listen failed: {error}"));
+                eprintln!("controller listen failed: {error}");
+            }
         }
     }
     let prepared_dns = if desired_dns
@@ -1270,7 +1423,10 @@ fn same_controller_kind(left: &ControllerKey, right: &ControllerKey) -> bool {
     }
 }
 
-fn prepare_controller(key: ControllerKey) -> Result<PreparedController, RuntimeError> {
+fn prepare_controller(
+    key: ControllerKey,
+    clock: Arc<rewrite_services::AdjustedClock>,
+) -> Result<PreparedController, RuntimeError> {
     match key {
         ControllerKey::Tcp(address, mark, ui_path) => {
             let key = ControllerKey::Tcp(address, mark, ui_path);
@@ -1281,7 +1437,7 @@ fn prepare_controller(key: ControllerKey) -> Result<PreparedController, RuntimeE
             ))
         }
         ControllerKey::Tls(address, mark, tls, ui_path) => {
-            let prepared_tls = rewrite_controller::prepare_tls_config(&tls)?;
+            let prepared_tls = rewrite_controller::prepare_tls_config(&tls, clock)?;
             let listener =
                 TcpListener::from_std(rewrite_platform::bind_marked_tcp_listener(address, mark)?)?;
             Ok(PreparedController::Tls(
@@ -1849,7 +2005,12 @@ async fn connect_tcp_outbound(
             .find(|proxy| proxy.name == outbound_target)?;
         let result = tokio::select! {
             () = shutdown.cancelled() => return None,
-            result = connect_configured_proxy(proxy, &metadata.destination, config.ipv6) => result,
+            result = connect_configured_proxy(
+                proxy,
+                &metadata.destination,
+                config.ipv6,
+                state.clock(),
+            ) => result,
         };
         match result {
             Ok(remote) => return Some(remote),
@@ -1873,6 +2034,7 @@ async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
     allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let server = Destination {
         host: proxy
@@ -1895,6 +2057,7 @@ async fn connect_configured_proxy(
                 credentials,
                 &proxy.headers,
                 tls,
+                Some(clock),
             )
             .await
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))

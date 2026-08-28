@@ -116,8 +116,8 @@ jobs:
             regex: 'phase5b(_[a-z]+|[0-9a-z]+)\.py$'
           - shard: groups-providers
             regex: 'phase5c_[a-z0-9_]+\.py$'
-          - shard: controller-outbound
-            regex: 'phase(5d|6b)_[a-z0-9_]+\.py$'
+          - shard: controller-services-outbound
+            regex: 'phase(5d|5e|6b)_[a-z0-9_]+\.py$'
     env:
       SHARD_REGEX: ${{ matrix.regex }}
       PHASE1_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -205,6 +205,8 @@ jobs:
       PHASE5DSTORAGEPERSIST_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DRESTART_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DHTTPSHEALTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE5ESERVICES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE5ETLSAUTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -284,6 +286,8 @@ jobs:
             compat/scripts/phase5d_storage_persistence.py \
             compat/scripts/phase5d_restart.py \
             compat/scripts/phase5d_https_health.py \
+            compat/scripts/phase5e_services.py \
+            compat/scripts/phase5e_tls_client_auth.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \

@@ -1,0 +1,24 @@
+[package]
+name = "rewrite-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+flate2.workspace = true
+futures-util.workspace = true
+maxminddb.workspace = true
+prost.workspace = true
+reqwest.workspace = true
+rewrite-config = { path = "../config" }
+sntpc.workspace = true
+sntpc-net-tokio.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+zip.workspace = true
+
+[lints]
+workspace = true

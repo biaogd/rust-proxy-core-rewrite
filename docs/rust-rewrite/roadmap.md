@@ -1170,6 +1170,35 @@ later protocols. The order is `5E1` NTP, `5E2` global TLS/client-auth/ECH,
 and `5E5` external UI download/update. Each service must include startup,
 reload, failure rollback, shutdown and its REST side effects where applicable.
 
+### Phase 5E accepted slices
+
+- `5E1`: configuration/defaults and a bounded direct SNTP exchange update the
+  process clock, retry three times, follow reload/disable/shutdown and reset the
+  offset. A deterministic UDP contract covers offset calculation. Named
+  `dialer-proxy` UDP routing and privileged `write-to-system` remain explicit
+  platform/outbound gaps.
+- `5E2`: the adjusted clock is shared by controller and configured HTTP-proxy
+  TLS. Controller `request`, `require-any`, `verify-if-given` and
+  `require-and-verify` modes have a generated-certificate Go/Rust handshake
+  differential. Server ECH and propagation of the adjusted clock through every
+  DNS TLS client remain open, so the global TLS row remains partial.
+- `5E3`: current fake-IP, selector/fixed-fallback and controller storage state
+  retain the Go-compatible bbolt/MessagePack formats and existing bidirectional
+  interchange gates. No incompatible replacement database was introduced.
+- `5E4`: `geox-url`, automatic scheduling, safe validation and atomic update
+  cover GeoIP.dat/GeoSite.dat and MMDB for currently executable DNS consumers;
+  both Geo REST aliases and invalid-payload rollback pass. ASN, general
+  GEOIP/GEOSITE rules and broader loader/matcher variants remain open.
+- `5E5`: explicitly configured external UI directories auto-download when
+  empty; authenticated manual updates use bounded `reqwest` downloads and the
+  `zip`/`tar` libraries with traversal/link rejection, single-root flattening
+  and failure rollback. `/upgrade/ui` passes against the oracle.
+
+`compat/scripts/phase5e_services.py` and
+`compat/scripts/phase5e_tls_client_auth.py` are the Phase 5E differential
+entrypoints. Phase 5E is not globally closed until the listed 5E1/5E2/5E4 gaps
+are accepted rather than normalized away.
+
 ## Phase 5F — local runtime and platform completion
 
 Phase 5F closes local listener/runtime/platform behavior before broader remote
