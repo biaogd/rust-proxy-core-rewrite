@@ -648,6 +648,14 @@ re-enters evaluation with cycle protection. Group resolution occurs before this
 dispatch, so selecting a simple adapter directly or through a group produces
 the same data-plane behavior and controller capability view.
 
+The Rust SOCKS5 TCP adapter uses `fast-socks5` for standardized target-address
+encoding and response-address parsing. A narrow wrapper owns authentication
+method negotiation and CONNECT result policy because the pinned Go client has
+observable behavior that the library intentionally tightens: credentials are
+enabled only by a nonempty username, no-auth downgrade is accepted, and a
+nonzero CONNECT reply with a valid bind address is treated as established.
+Runtime owns the outer retry, cancellation and group-health policy.
+
 ## REST controller
 
 The controller can listen simultaneously on plain TCP, TLS and a platform-local

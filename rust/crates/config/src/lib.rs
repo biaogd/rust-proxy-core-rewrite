@@ -208,6 +208,19 @@ pub struct ProxyConfig {
     pub headers: BTreeMap<String, String>,
 }
 
+impl ProxyConfig {
+    /// Mirrors the Go SOCKS5 adapter's credential activation rule: a nonempty
+    /// username enables RFC 1929, while an absent password becomes empty.
+    #[must_use]
+    pub fn socks5_credentials(&self) -> Option<(&str, &str)> {
+        let username = self
+            .username
+            .as_deref()
+            .filter(|username| !username.is_empty())?;
+        Some((username, self.password.as_deref().unwrap_or_default()))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyGroupConfig {
     pub name: String,
@@ -4415,7 +4428,7 @@ fn parse_proxies(
                     proxy.tls.is_some() || proxy.sni.is_some() || proxy.skip_cert_verify.is_some();
                 if proxy.target_rematch_name.is_some()
                     || proxy.target_sub_rule.is_some()
-                    || proxy.username.is_some() != proxy.password.is_some()
+                    || (kind == "http" && proxy.username.is_some() != proxy.password.is_some())
                     || ((kind != "http" || !allow_http_tls) && has_tls_options)
                     || (kind != "http" && proxy.headers.is_some())
                     || !proxy.extra.is_empty()
@@ -6672,6 +6685,17 @@ dns:
             Config::from_yaml(&socks),
             Err(ConfigError::UnsupportedProxy(_))
         ));
+    }
+
+    #[test]
+    fn mirrors_socks5_credential_activation_boundaries() {
+        let config = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - {{name: noauth, type: socks5, server: proxy.test, port: 1080}}\n  - {{name: user-only, type: socks5, server: proxy.test, port: 1080, username: user}}\n  - {{name: password-only, type: socks5, server: proxy.test, port: 1080, password: ignored}}\n"
+        ))
+        .expect("Go-compatible SOCKS5 credential shapes");
+        assert_eq!(config.proxies[0].socks5_credentials(), None);
+        assert_eq!(config.proxies[1].socks5_credentials(), Some(("user", "")));
+        assert_eq!(config.proxies[2].socks5_credentials(), None);
     }
 
     #[test]

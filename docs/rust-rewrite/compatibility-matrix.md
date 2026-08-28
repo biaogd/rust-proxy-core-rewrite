@@ -157,7 +157,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | COMPATIBLE / PASS / PASS-RULE | Oracle | **Parity in current rule/control scope** | Phase 5B proves PASS/PASS-RULE scanning; `phase6a_builtins.py` proves PASS continuing into COMPATIBLE's DIRECT TCP path and exact built-in controller views |
 | Configured DNS / REMATCH adapters | Oracle | **Parity in declared current-listener scope** | `phase6a_simple_adapters.py` proves validation, exact views, framed DNS TCP, DNS-message UDP and direct/group-selected REMATCH rescan; later listener families, rich per-adapter socket/dialer options and resolver configurations outside existing DNS rows remain separate gates |
 | HTTP | Oracle | Partial | `phase6b_http.py` proves plaintext CONNECT; `phase6b_http_tls.py` proves TLS wrapping, explicit SNI, skip verification, Basic authentication, exact CONNECT authority/Host, bidirectional mixed-TCP relay and untrusted/SNI/502 rejection. Positive system/custom-root verification, name override, client certificates/fingerprints/headers, unauthenticated and exhaustive error/timeout matrices, UDP and chaining remain unclaimed |
-| SOCKS5 | Oracle | Partial | `phase6b_socks5.py` proves configured username/password, strict auth-method offer, CONNECT address bytes, exact adapter JSON and bidirectional mixed-TCP relay with a rejecting fallback; unauthenticated/failure matrices, domain-resolution policy, TLS, UDP/UoT and chaining remain unclaimed |
+| SOCKS5 | Oracle | Partial | `phase6b_socks5.py` proves authenticated relay/view; `phase6b_socks5_contract.py` proves no-auth and partial credentials, method negotiation, domain/IPv4/IPv6 wire bytes, ten-attempt terminal failures and the pinned well-formed nonzero-reply acceptance. TLS, UDP/UoT, overlength credentials and chaining remain unclaimed |
 | Shadowsocks (`ss`) | Oracle | Not started | Cipher/plugin/UoT interop |
 | ShadowsocksR (`ssr`) | Oracle | Not started | Cipher/protocol/obfs interop |
 | VMess | Oracle | Not started | Security/early-data/transport interop |
@@ -342,6 +342,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 6A2 simple adapters | Oracle | **Parity in declared scope** | Native configured DIRECT/REJECT/DNS/REMATCH validation, GLOBAL/group/controller views and deterministic TCP/UDP data-plane differential passed, 2026-08-28 |
 | Darwin arm64 — Phase 6B1b HTTP TLS outbound | Oracle | **Parity in declared scope** | Native TLS authority differential passed with SNI, skip/untrusted handling, authenticated CONNECT relay and 502 rejection, 2026-08-28 |
 | Darwin arm64 — Phase 6B1c HTTP CONNECT contract | Oracle | **Parity in declared scope** | Native unauthenticated/authenticated relay, default/custom header and exact-200 response matrix differential passed, 2026-08-28 |
+| Darwin arm64 — Phase 6B2b SOCKS5 TCP contract | Oracle | **Parity in declared scope** | Native no-auth/credential boundary, method failures/retries, domain/IPv4/IPv6 request and nonzero-reply lifecycle differential passed, 2026-08-28 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -371,6 +372,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 6A2 simple adapters | Oracle | Pending | Default built-ins shard runs the configured DIRECT/REJECT/DNS/REMATCH TCP/UDP differential; no native result is claimed before completion |
 | Linux amd64 — Phase 6B1b HTTP TLS outbound | Oracle | Pending | Default controller-outbound differential shard is configured; no result is claimed before completion |
 | Linux amd64 — Phase 6B1c HTTP CONNECT contract | Oracle | Pending | Default controller-outbound differential shard is configured; no result is claimed before completion |
+| Linux amd64 — Phase 6B2b SOCKS5 TCP contract | Oracle | Pending | Default controller-outbound differential shard is configured; no native result is claimed before completion |
 | Linux amd64 — Phase 5A4a X25519 encrypted config | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4b X25519 age convert | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4c X25519 age encrypt/decrypt | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

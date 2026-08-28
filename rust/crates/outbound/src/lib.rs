@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use fast_socks5::util::target_addr::ToTargetAddr;
+use fast_socks5::util::target_addr::{ToTargetAddr, read_address};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use http_body_util::Empty;
 use hyper::client::conn::http1;
@@ -136,10 +136,16 @@ pub enum Socks5ProxyError {
     Direct(#[from] DirectError),
     #[error(transparent)]
     Socks(#[from] fast_socks5::SocksError),
-    #[error("SOCKS5 username/password length must be between 1 and 255 bytes")]
+    #[error("SOCKS5 username must be 1 to 255 bytes and password at most 255 bytes")]
     InvalidCredentials,
-    #[error("SOCKS5 proxy did not accept username/password authentication")]
+    #[error("SOCKS5 proxy rejected the offered authentication method")]
     AuthenticationRejected,
+    #[error("SOCKS5 proxy selected an unsupported protocol version")]
+    UnsupportedVersion,
+    #[error("SOCKS5 proxy returned an invalid address: {0}")]
+    InvalidAddress(String),
+    #[error("SOCKS5 proxy handshake timed out")]
+    HandshakeTimeout,
 }
 
 /// Opens a direct TCP connection with the Phase 1 timeout and IPv6 policy.
@@ -435,37 +441,69 @@ pub async fn connect_socks5_with_options(
     credentials: Option<(&str, &str)>,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, Socks5ProxyError> {
-    let target = destination.host.to_string();
-    let mut config = fast_socks5::client::Config::default();
-    config.set_connect_timeout(Duration::from_secs(5));
     let mut socket = connect_with_options(server, allow_ipv6, options).await?;
-    let stream = if let Some((username, password)) = credentials {
-        strict_password_auth(&mut socket, username, password).await?;
-        config.set_skip_auth(true);
-        let mut stream =
-            fast_socks5::client::Socks5Stream::use_stream(socket, None, config).await?;
-        let address = (target.as_str(), destination.port)
-            .to_target_addr()
-            .map_err(DirectError::Io)?;
-        stream
-            .request(fast_socks5::Socks5Command::TCPConnect, address)
-            .await?;
-        stream
-    } else {
-        let mut stream =
-            fast_socks5::client::Socks5Stream::use_stream(socket, None, config).await?;
-        let address = (target.as_str(), destination.port)
-            .to_target_addr()
-            .map_err(DirectError::Io)?;
-        stream
-            .request(fast_socks5::Socks5Command::TCPConnect, address)
-            .await?;
-        stream
-    };
-    Ok(Box::new(stream))
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        socks5_tcp_handshake(&mut socket, destination, credentials),
+    )
+    .await
+    .map_err(|_| Socks5ProxyError::HandshakeTimeout)??;
+    Ok(Box::new(socket))
 }
 
-async fn strict_password_auth(
+async fn socks5_tcp_handshake(
+    stream: &mut TcpStream,
+    destination: &Destination,
+    credentials: Option<(&str, &str)>,
+) -> Result<(), Socks5ProxyError> {
+    let method = if credentials.is_some() { 2 } else { 0 };
+    stream
+        .write_all(&[5, 1, method])
+        .await
+        .map_err(DirectError::Io)?;
+    let mut selection = [0_u8; 2];
+    stream
+        .read_exact(&mut selection)
+        .await
+        .map_err(DirectError::Io)?;
+    if selection[0] != 5 {
+        return Err(Socks5ProxyError::UnsupportedVersion);
+    }
+    if selection[1] == 2 {
+        let Some((username, password)) = credentials else {
+            return Err(Socks5ProxyError::AuthenticationRejected);
+        };
+        password_auth(stream, username, password).await?;
+    } else if selection[1] != 0 {
+        return Err(Socks5ProxyError::AuthenticationRejected);
+    }
+
+    let target = destination.host.to_string();
+    let address = (target.as_str(), destination.port)
+        .to_target_addr()
+        .map_err(DirectError::Io)?;
+    let address = address
+        .to_be_bytes()
+        .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
+    let mut request = Vec::with_capacity(address.len() + 3);
+    request.extend_from_slice(&[5, 1, 0]);
+    request.extend_from_slice(&address);
+    stream.write_all(&request).await.map_err(DirectError::Io)?;
+
+    // The pinned Go client intentionally ignores VER, REP and RSV here and
+    // accepts the tunnel when the returned bind address is well-formed.
+    let mut response = [0_u8; 4];
+    stream
+        .read_exact(&mut response)
+        .await
+        .map_err(DirectError::Io)?;
+    read_address(stream, response[3])
+        .await
+        .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
+    Ok(())
+}
+
+async fn password_auth(
     stream: &mut TcpStream,
     username: &str,
     password: &str,
@@ -474,22 +512,8 @@ async fn strict_password_auth(
         .ok()
         .filter(|length| *length != 0)
         .ok_or(Socks5ProxyError::InvalidCredentials)?;
-    let password_length = u8::try_from(password.len())
-        .ok()
-        .filter(|length| *length != 0)
-        .ok_or(Socks5ProxyError::InvalidCredentials)?;
-    stream
-        .write_all(&[5, 1, 2])
-        .await
-        .map_err(DirectError::Io)?;
-    let mut selection = [0_u8; 2];
-    stream
-        .read_exact(&mut selection)
-        .await
-        .map_err(DirectError::Io)?;
-    if selection != [5, 2] {
-        return Err(Socks5ProxyError::AuthenticationRejected);
-    }
+    let password_length =
+        u8::try_from(password.len()).map_err(|_| Socks5ProxyError::InvalidCredentials)?;
     let mut request = Vec::with_capacity(3 + username.len() + password.len());
     request.extend_from_slice(&[1, username_length]);
     request.extend_from_slice(username.as_bytes());
@@ -501,7 +525,7 @@ async fn strict_password_auth(
         .read_exact(&mut response)
         .await
         .map_err(DirectError::Io)?;
-    if response != [1, 0] {
+    if response[1] != 0 {
         return Err(Socks5ProxyError::AuthenticationRejected);
     }
     Ok(())

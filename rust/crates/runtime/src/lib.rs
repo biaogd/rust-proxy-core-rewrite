@@ -2470,7 +2470,7 @@ async fn connect_tcp_outbound(
             }
         };
     }
-    let attempts = if traversed_groups.is_empty() { 1 } else { 10 };
+    let attempts = configured_tcp_attempts(config, &outbound_target, &traversed_groups);
     let mut initial_resolution = Some((outbound_target, traversed_groups));
     for attempt in 0..attempts {
         let (outbound_target, traversed_groups) = initial_resolution
@@ -2563,7 +2563,6 @@ async fn connect_configured_proxy(
             .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
         port: proxy.port,
     };
-    let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -2572,6 +2571,7 @@ async fn connect_configured_proxy(
                 .map_err(|error| format!("DIRECT connection failed: {error}"))
         }
         ProxyKind::Http => {
+            let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
             let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                 server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                 skip_certificate_verification: proxy.skip_cert_verify,
@@ -2593,7 +2593,7 @@ async fn connect_configured_proxy(
             &server,
             destination,
             allow_ipv6,
-            credentials,
+            proxy.socks5_credentials(),
             socket_options,
         )
         .await
@@ -2607,6 +2607,16 @@ async fn connect_configured_proxy(
 fn group_retry_delay(attempt: usize) -> Duration {
     let multiplier = 1_u64 << u32::try_from(attempt.min(7)).unwrap_or(7);
     Duration::from_millis(10_u64.saturating_mul(multiplier).min(1000))
+}
+
+fn configured_tcp_attempts(config: &Config, target: &str, traversed_groups: &[String]) -> usize {
+    if !traversed_groups.is_empty()
+        || configured_proxy(config, target).is_some_and(|proxy| proxy.kind == ProxyKind::Socks5)
+    {
+        10
+    } else {
+        1
+    }
 }
 
 fn configured_proxy<'a>(config: &'a Config, name: &str) -> Option<&'a rewrite_config::ProxyConfig> {

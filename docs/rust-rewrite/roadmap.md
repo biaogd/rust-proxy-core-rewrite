@@ -1408,11 +1408,31 @@ The first SOCKS5 outbound slice accepts a configured server/port plus a complete
 username/password pair as a TCP rule target. `fast-socks5` owns target address
 encoding, CONNECT reply parsing and the upgraded async stream. A narrow auth
 adapter offers only username/password when credentials are configured, matching
-the oracle and preventing a server from silently downgrading to no-auth.
+the oracle's greeting bytes. The oracle's acceptance of a server-selected
+no-auth method is covered separately by Phase 6B2b.
 `compat/scripts/phase6b_socks5.py` observes greeting/auth/request bytes at a
 deterministic local SOCKS5 server, compares the configured adapter view and
 proves relay plus an independent REJECT route. No-auth, domain-resolution
 policy, TLS, errors/timeouts, UDP/UoT and dialer chains remain later gates.
+
+### Phase 6B2b accepted scope
+
+The SOCKS5 TCP handshake contract now covers no-authentication and the pinned
+Go credential boundary: a nonempty username enables RFC 1929, a missing
+password becomes empty, and a password without a username leaves no-auth active.
+It preserves the oracle's method-selection behavior, including accepting a
+server-selected no-auth method after offering password authentication and
+rejecting password selection when no username is configured.
+
+Domain, IPv4 and IPv6 destinations retain their exact SOCKS address type and
+bytes. The narrow compatibility adapter also preserves the pinned client's
+CONNECT-reply behavior: version/method negotiation errors retry ten times, but
+a well-formed bind address completes CONNECT even when the reply status is
+nonzero. `fast-socks5` remains responsible for standardized target encoding and
+reply-address parsing; only the oracle-specific negotiation and status policy
+is custom. `compat/scripts/phase6b_socks5_contract.py` compares wire bytes,
+success/failure lifecycle, retry count and process survival. TLS, UDP, UoT,
+credential lengths above 255 bytes and dialer chains remain later OUT-04 gates.
 
 ### Phase 5C1b accepted scope
 

@@ -136,9 +136,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C5 provider transactions/lifecycle | Complete in declared process/runtime scope; PROV-03 retains native-platform stress gates | Concurrent valid/invalid PUT bursts serialize transactionally; SIGHUP removal clears API/health/schedules and watcher tasks cancel cleanly |
 | Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
+| Phase 6B2b SOCKS5 TCP handshake contract | Complete in declared TCP wire/lifecycle scope; OUT-04 remains partial | No-auth and partial credential shapes, method selection, domain/IPv4/IPv6 bytes, ten-attempt failures and the pinned nonzero-reply behavior pass the Go/Rust differential |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 137 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | All 138 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3797,8 +3798,9 @@ stream boundaries as HTTP. `fast-socks5` 1.0.0 supplies Tokio target-address
 encoding, CONNECT processing and stream I/O under the MIT license. Its default
 password client also advertises no-auth, whereas the pinned Go oracle advertises
 only password when credentials exist; the local compatibility adapter therefore
-performs that small strict negotiation before handing the socket back to the
-library for the command/reply state machine.
+emits the oracle greeting before handing the remaining standardized fields to
+the library boundary. Phase 6B2b records that the oracle nevertheless accepts
+a server-selected no-auth method.
 
 Local focused evidence:
 
@@ -3809,6 +3811,29 @@ cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound
 
 No-auth, resolution-policy permutations, TLS, complete failures/timeouts,
 SOCKS5 UDP/UoT and dialer chains remain outside this gate.
+
+Phase 6B2b closes the current plaintext SOCKS5 TCP handshake contract. The
+pinned Go adapter enables RFC 1929 only when the username is nonempty, permits
+an empty or absent password, ignores a password-only configuration, accepts a
+server-selected no-auth downgrade, and retries terminal method/version failures
+ten times. It also sends domain, IPv4 and IPv6 targets without local conversion.
+The oracle accepts a CONNECT response with a nonzero reply status when its bind
+address is structurally valid; Rust preserves that observable behavior rather
+than silently adopting the library's stricter status policy.
+
+`fast-socks5` still owns target-address encoding and response-address parsing.
+The custom boundary is limited to the method exchange, RFC 1929 bytes, the
+oracle's CONNECT status policy and the five-second handshake deadline.
+
+Local focused evidence:
+
+```sh
+PHASE6BSOCKSCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_socks5_contract.py
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound -p rewrite-controller -p rewrite-runtime --all-features
+```
+
+TLS, UDP/UDP ASSOCIATE, UoT, credential lengths above 255 bytes and dialer
+chains remain separate OUT-04 gates.
 
 Phase 5C1b adds selector reconciliation to the transactional generation publish
 barrier. It distinguishes initial `default-selected` from reload recovery: an

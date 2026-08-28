@@ -1265,7 +1265,6 @@ async fn measure_http_delay(
                     .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
                 port: proxy.port,
             };
-            let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
             match proxy.kind {
                 rewrite_config::ProxyKind::Direct => rewrite_outbound::connect_with_options(
                     &destination,
@@ -1276,6 +1275,7 @@ async fn measure_http_delay(
                 .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
                 .map_err(|_| ())?,
                 rewrite_config::ProxyKind::Http => {
+                    let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
                     let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                         server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                         skip_certificate_verification: proxy.skip_cert_verify,
@@ -1297,7 +1297,7 @@ async fn measure_http_delay(
                     &server,
                     &destination,
                     config.ipv6,
-                    credentials,
+                    proxy.socks5_credentials(),
                     controller_socket_options(config),
                 )
                 .await
