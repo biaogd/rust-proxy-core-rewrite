@@ -4353,6 +4353,24 @@ does not yet claim timeout-expiry timing, multi-destination fan-out, IPv6,
 control-association ownership, remote UDP adapters/UoT or stress capacity. A
 dedicated Linux CI shard runs this gate in parallel; its result is pending.
 
+Phase 5F1a also accepts the fixed-listener IPv4 LAN-policy boundary. Runtime
+configuration now retains `allow-lan`, `bind-address`, allowed/disallowed
+prefixes and skip-auth prefixes; fixed HTTP, SOCKS and mixed TCP use those
+values for bind and per-peer admission before protocol authentication. The
+controller returns the active values instead of hard-coded defaults.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+PHASE5FLANPOLICY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5f_lan_policy.py
+```
+
+The differential proves unauthenticated loopback access through all three
+listener kinds when explicitly skipped, allowed-list miss, disallowed-list
+precedence, and `allow-lan: false` forcing loopback even with a nonlocal bind
+address. IPv6 wildcard/dual-stack behavior, native non-loopback reachability,
+same-port bind-address hot rebind, TFO and MPTCP remain unclaimed.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/

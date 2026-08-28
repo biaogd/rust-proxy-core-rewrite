@@ -1215,6 +1215,15 @@ successful host cross-build is never sufficient for a native behavior claim.
 
 ### Phase 5F accepted slices
 
+- `5F1a`: fixed HTTP, SOCKS and mixed TCP accept `allow-lan`, IPv4 literal or
+  wildcard `bind-address`, `lan-allowed-ips`, `lan-disallowed-ips` and
+  `skip-auth-prefixes`. Allowed prefixes are evaluated before disallowed
+  prefixes, and skip-auth selects the existing unauthenticated protocol path
+  without mutating configured users. `allow-lan: false` retains the oracle's
+  loopback-only override regardless of `bind-address`. The differential proves
+  all three fixed listener families plus `/configs` rendering. IPv6 wildcard
+  binding, same-port bind-address reload, TFO/MPTCP and native non-loopback
+  reachability remain later `5F1` gates.
 - `5F2a`: fixed SOCKS and mixed UDP now use a bounded 64-packet NAT session
   keyed by the client socket address instead of creating one outbound socket
   per packet. The DIRECT session keeps one outbound socket, relays multiple

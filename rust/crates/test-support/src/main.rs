@@ -208,6 +208,7 @@ fn classify_config_error(error: &ConfigError) -> &'static str {
         | ConfigError::UnsafeConfigPath { .. }
         | ConfigError::InvalidDns(_)
         | ConfigError::InvalidHosts(_)
+        | ConfigError::InvalidInbound(_)
         | ConfigError::UnsupportedRuntime(_) => "other",
     }
 }

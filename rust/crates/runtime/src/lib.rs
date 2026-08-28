@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::pending;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1277,7 +1277,7 @@ async fn apply_generation(
         if listeners.contains_key(&(kind, port)) {
             continue;
         }
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let address = next.listener_address(port)?;
         let listener = TcpListener::bind(address).await?;
         let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
             Some(Arc::new(UdpSocket::bind(address).await?))
@@ -1994,16 +1994,27 @@ async fn serve_connection(
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
 ) {
+    let Ok(peer) = client.peer_addr() else {
+        return;
+    };
+    if !config.permits_inbound(peer.ip()) {
+        return;
+    }
     let protocol = match kind {
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
     };
+    let authentication = if config.skips_inbound_auth(peer.ip()) {
+        &[]
+    } else {
+        config.authentication.as_slice()
+    };
     let accepted = tokio::select! {
         () = shutdown.cancelled() => return,
         result = tokio::time::timeout(
             Duration::from_secs(10),
-            rewrite_inbound::accept(client, protocol, &config.authentication),
+            rewrite_inbound::accept(client, protocol, authentication),
         ) => {
             match result {
                 Ok(Ok(accepted)) => accepted,

@@ -2790,6 +2790,21 @@ fn config_snapshot(config: &Config) -> serde_json::Value {
         .iter()
         .map(|user| format!("{}:{}", user.username, user.password))
         .collect();
+    let skip_auth_prefixes: Vec<_> = config
+        .skip_auth_prefixes
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let lan_allowed_ips: Vec<_> = config
+        .lan_allowed_ips
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let lan_disallowed_ips: Vec<_> = config
+        .lan_disallowed_ips
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     json!({
         "port": config.port,
         "socks-port": config.socks_port,
@@ -2797,8 +2812,11 @@ fn config_snapshot(config: &Config) -> serde_json::Value {
         "tproxy-port": 0,
         "mixed-port": config.mixed_port,
         "authentication": authentication,
-        "allow-lan": false,
-        "bind-address": "*",
+        "allow-lan": config.allow_lan,
+        "bind-address": config.bind_address,
+        "skip-auth-prefixes": skip_auth_prefixes,
+        "lan-allowed-ips": lan_allowed_ips,
+        "lan-disallowed-ips": lan_disallowed_ips,
         "mode": config.mode,
         "log-level": config.log_level,
         "ipv6": config.ipv6,

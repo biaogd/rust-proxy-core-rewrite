@@ -46,6 +46,9 @@ pub struct ConfigSpec {
     pub mixed_port: i64,
     pub allow_lan: bool,
     pub bind_address: String,
+    pub skip_auth_prefixes: Vec<IpNet>,
+    pub lan_allowed_ips: Vec<IpNet>,
+    pub lan_disallowed_ips: Vec<IpNet>,
     pub mode: Mode,
     pub unified_delay: bool,
     pub log_level: LogLevel,
@@ -102,6 +105,11 @@ pub struct Config {
     pub port: i64,
     pub socks_port: i64,
     pub mixed_port: i64,
+    pub allow_lan: bool,
+    pub bind_address: String,
+    pub skip_auth_prefixes: Vec<IpNet>,
+    pub lan_allowed_ips: Vec<IpNet>,
+    pub lan_disallowed_ips: Vec<IpNet>,
     pub mode: Mode,
     pub log_level: LogLevel,
     pub ipv6: bool,
@@ -687,6 +695,9 @@ struct RawConfig {
     mixed_port: Option<i64>,
     allow_lan: Option<bool>,
     bind_address: Option<String>,
+    skip_auth_prefixes: Option<Vec<String>>,
+    lan_allowed_ips: Option<Vec<String>>,
+    lan_disallowed_ips: Option<Vec<String>>,
     mode: Option<String>,
     unified_delay: Option<bool>,
     log_level: Option<String>,
@@ -1010,6 +1021,8 @@ pub enum ConfigError {
     InvalidDns(String),
     #[error("invalid Phase 4B hosts configuration: {0}")]
     InvalidHosts(String),
+    #[error("invalid local inbound configuration: {0}")]
+    InvalidInbound(String),
     #[error("configuration is parsed but not executable in the current rewrite runtime: {0}")]
     UnsupportedRuntime(String),
 }
@@ -1161,6 +1174,20 @@ impl ConfigSpec {
         let external_ui_name = raw.external_ui_name.unwrap_or_default();
         validate_external_ui(&external_ui, &external_ui_name, provider_directory)?;
 
+        let skip_auth_prefixes = parse_inbound_prefixes(
+            raw.skip_auth_prefixes.unwrap_or_default(),
+            "skip-auth-prefixes",
+        )?;
+        let lan_allowed_ips = parse_inbound_prefixes(
+            raw.lan_allowed_ips
+                .unwrap_or_else(|| vec!["0.0.0.0/0".to_owned(), "::/0".to_owned()]),
+            "lan-allowed-ips",
+        )?;
+        let lan_disallowed_ips = parse_inbound_prefixes(
+            raw.lan_disallowed_ips.unwrap_or_default(),
+            "lan-disallowed-ips",
+        )?;
+
         Ok(Self {
             port: raw.port.unwrap_or(0),
             socks_port: raw.socks_port.unwrap_or(0),
@@ -1169,6 +1196,9 @@ impl ConfigSpec {
             mixed_port: raw.mixed_port.unwrap_or(0),
             allow_lan: raw.allow_lan.unwrap_or(false),
             bind_address: raw.bind_address.unwrap_or_else(|| "*".to_owned()),
+            skip_auth_prefixes,
+            lan_allowed_ips,
+            lan_disallowed_ips,
             mode,
             unified_delay: raw.unified_delay.unwrap_or(false),
             log_level,
@@ -1315,8 +1345,6 @@ impl TryFrom<ConfigSpec> for Config {
         let unsupported = [
             (spec.redir_port != 0, "redir-port"),
             (spec.tproxy_port != 0, "tproxy-port"),
-            (spec.allow_lan, "allow-lan"),
-            (spec.bind_address != "*", "bind-address"),
             (spec.unified_delay, "unified-delay"),
             (!spec.interface_name.is_empty(), "interface-name"),
             (spec.routing_mark != 0, "routing-mark"),
@@ -1337,6 +1365,11 @@ impl TryFrom<ConfigSpec> for Config {
             port: spec.port,
             socks_port: spec.socks_port,
             mixed_port: spec.mixed_port,
+            allow_lan: spec.allow_lan,
+            bind_address: spec.bind_address,
+            skip_auth_prefixes: spec.skip_auth_prefixes,
+            lan_allowed_ips: spec.lan_allowed_ips,
+            lan_disallowed_ips: spec.lan_disallowed_ips,
             mode: spec.mode,
             log_level: spec.log_level,
             ipv6: spec.ipv6,
@@ -1687,6 +1720,47 @@ impl Config {
         Ok(listeners)
     }
 
+    /// Resolves the fixed local listener bind address for one configured port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInbound`] for a non-IP explicit address.
+    pub fn listener_address(&self, port: u16) -> Result<SocketAddr, ConfigError> {
+        if !self.allow_lan {
+            return Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        }
+        if self.bind_address == "*" {
+            return Ok(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)));
+        }
+        self.bind_address
+            .parse::<IpAddr>()
+            .map(|address| SocketAddr::new(address, port))
+            .map_err(|_| {
+                ConfigError::InvalidInbound(format!(
+                    "bind-address is not an IP address: {}",
+                    self.bind_address
+                ))
+            })
+    }
+
+    #[must_use]
+    pub fn permits_inbound(&self, address: IpAddr) -> bool {
+        self.lan_allowed_ips
+            .iter()
+            .any(|network| network.contains(&address))
+            && !self
+                .lan_disallowed_ips
+                .iter()
+                .any(|network| network.contains(&address))
+    }
+
+    #[must_use]
+    pub fn skips_inbound_auth(&self, address: IpAddr) -> bool {
+        self.skip_auth_prefixes
+            .iter()
+            .any(|network| network.contains(&address))
+    }
+
     /// Parses the optional Phase 3B TCP controller address.
     ///
     /// # Errors
@@ -1879,6 +1953,17 @@ fn parse_authentication(records: Vec<String>) -> Vec<AuthUser> {
             Some(AuthUser {
                 username: username.to_owned(),
                 password: password.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_inbound_prefixes(records: Vec<String>, field: &str) -> Result<Vec<IpNet>, ConfigError> {
+    records
+        .into_iter()
+        .map(|record| {
+            record.parse::<IpNet>().map_err(|_| {
+                ConfigError::InvalidInbound(format!("{field} contains invalid prefix {record}"))
             })
         })
         .collect()
@@ -6508,5 +6593,27 @@ dns:
         );
         assert_eq!(config.rules.evaluate(&address).target, "DIRECT");
         std::fs::remove_dir_all(home).expect("remove geodata fixture");
+    }
+
+    #[test]
+    fn parses_fixed_listener_lan_policy() {
+        let source = MINIMAL.replace(
+            "mixed-port: 7890",
+            "mixed-port: 7890\nallow-lan: true\nbind-address: 0.0.0.0\nskip-auth-prefixes: [127.0.0.0/8]\nlan-allowed-ips: [0.0.0.0/0]\nlan-disallowed-ips: [192.0.2.0/24]",
+        );
+        let config = Config::from_yaml(&source).expect("LAN policy");
+        assert_eq!(
+            config.listener_address(7890).expect("listener address"),
+            "0.0.0.0:7890".parse().expect("socket address")
+        );
+        assert!(config.skips_inbound_auth(Ipv4Addr::LOCALHOST.into()));
+        assert!(config.permits_inbound(Ipv4Addr::LOCALHOST.into()));
+        assert!(!config.permits_inbound("192.0.2.1".parse().expect("denied IP")));
+
+        let invalid = source.replace("127.0.0.0/8", "not-a-prefix");
+        assert!(matches!(
+            Config::from_yaml(&invalid),
+            Err(ConfigError::InvalidInbound(_))
+        ));
     }
 }

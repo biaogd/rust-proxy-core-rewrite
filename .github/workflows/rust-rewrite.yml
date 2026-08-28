@@ -211,6 +211,7 @@ jobs:
       PHASE5ETLSAUTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5EGEORULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5FUDPNAT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -294,6 +295,7 @@ jobs:
             compat/scripts/phase5e_tls_client_auth.py \
             compat/scripts/phase5e_geo_rules.py \
             compat/scripts/phase5f_udp_nat.py \
+            compat/scripts/phase5f_lan_policy.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
