@@ -10,8 +10,10 @@ bbolt-rs.workspace = true
 ipnet.workspace = true
 lru.workspace = true
 rewrite-model = { path = "../model" }
+rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
 time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

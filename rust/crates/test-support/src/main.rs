@@ -204,6 +204,8 @@ fn classify_config_error(error: &ConfigError) -> &'static str {
         | ConfigError::UnsupportedKey(_)
         | ConfigError::InvalidRuntimePort(_)
         | ConfigError::InvalidControllerAddress(_)
+        | ConfigError::InvalidConfigPath
+        | ConfigError::UnsafeConfigPath { .. }
         | ConfigError::InvalidDns(_)
         | ConfigError::InvalidHosts(_)
         | ConfigError::UnsupportedRuntime(_) => "other",

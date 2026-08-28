@@ -8,6 +8,7 @@ import hashlib
 import http.client
 import json
 import pathlib
+import re
 import socket
 import tempfile
 import threading
@@ -20,9 +21,9 @@ from phase1 import (
     ROOT,
     connect_proxy,
     recv_exact,
-    recv_until,
     reserve_port,
     start_server,
+    wait_ready,
 )
 from phase3 import http_request, launch, status, stop
 from phase5b1a import build_binaries, debug_files
@@ -71,7 +72,13 @@ def websocket_open(
             f"{auth}\r\n"
         ).encode()
     )
-    head = recv_until(stream, b"\r\n\r\n")
+    head_buffer = bytearray()
+    while not head_buffer.endswith(b"\r\n\r\n"):
+        byte = stream.recv(1)
+        if not byte:
+            raise EOFError("websocket response closed before headers")
+        head_buffer.extend(byte)
+    head = bytes(head_buffer)
     lines = head.decode("iso-8859-1").split("\r\n")
     code = int(lines[0].split()[1])
     headers = {
@@ -110,14 +117,17 @@ def websocket_json(stream: socket.socket) -> dict[str, Any]:
     return json.loads(payload)
 
 
-def http_stream_json(port: int, path: str) -> tuple[int, dict[str, Any]]:
+def http_stream_json(port: int, path: str) -> tuple[int, list[dict[str, Any]], float]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=IO_DEADLINE)
     connection.request(
         "GET", path, headers={"Authorization": f"Bearer {SECRET}"}
     )
     response = connection.getresponse()
     try:
-        return response.status, json.loads(response.readline())
+        first = json.loads(response.readline())
+        started = time.monotonic()
+        second = json.loads(response.readline())
+        return response.status, [first, second], time.monotonic() - started
     finally:
         response.close()
         connection.close()
@@ -153,6 +163,7 @@ rules:
     process, stdout, stderr = launch(binary, config, scratch)
     streams: list[socket.socket] = []
     try:
+        wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
 
         rejected, rejected_status, rejected_headers = websocket_open(
@@ -160,25 +171,35 @@ rules:
         )
         streams.append(rejected)
 
-        memory_status, memory_http = http_stream_json(controller_port, "/memory")
+        memory_status, memory_http, memory_cadence = http_stream_json(controller_port, "/memory")
 
         traffic, traffic_status, traffic_headers = websocket_open(
             controller_port, f"/traffic?token={SECRET}"
         )
         streams.append(traffic)
         traffic_frame = websocket_json(traffic)
+        traffic_started = time.monotonic()
+        traffic_second = websocket_json(traffic)
+        traffic_cadence = time.monotonic() - traffic_started
+        traffic.close()
+        streams.remove(traffic)
 
         memory, memory_ws_status, memory_headers = websocket_open(
             controller_port, f"/memory?token={SECRET}"
         )
         streams.append(memory)
         memory_frame = websocket_json(memory)
+        memory_second = websocket_json(memory)
+        memory.close()
+        streams.remove(memory)
 
         connections, connections_status, connections_headers = websocket_open(
             controller_port, f"/connections?interval=25&token={SECRET}"
         )
         streams.append(connections)
         connection_frame = websocket_json(connections)
+        connections.close()
+        streams.remove(connections)
 
         bearer, bearer_status, bearer_headers = websocket_open(
             controller_port, "/connections", authorization=True
@@ -201,6 +222,21 @@ rules:
         delivered.set()
         trigger.join(timeout=IO_DEADLINE)
 
+        structured, structured_status, structured_headers = websocket_open(
+            controller_port, f"/logs?level=info&format=structured&token={SECRET}"
+        )
+        streams.append(structured)
+        structured_delivered = threading.Event()
+        structured_trigger = threading.Thread(
+            target=trigger_tcp_log,
+            args=(mixed_port, echo.port, structured_delivered),
+            daemon=True,
+        )
+        structured_trigger.start()
+        structured_frame = websocket_json(structured)
+        structured_delivered.set()
+        structured_trigger.join(timeout=IO_DEADLINE)
+
         return {
             "invalid-query-token": {
                 "status": rejected_status,
@@ -210,19 +246,28 @@ rules:
             },
             "memory-http": {
                 "status": memory_status,
-                "keys": sorted(memory_http),
-                "first-zero": memory_http == {"inuse": 0, "oslimit": 0},
+                "keys": sorted(memory_http[0]),
+                "first-zero": memory_http[0] == {"inuse": 0, "oslimit": 0},
+                "second-rss-positive": memory_http[1]["inuse"] > 0,
+                "second-oslimit-zero": memory_http[1]["oslimit"] == 0,
+                "cadence-bounded": 0.5 <= memory_cadence <= 1.8,
             },
             "traffic-websocket": {
                 "status": traffic_status,
                 "upgrade": traffic_headers.get("upgrade", "").lower(),
                 "keys": sorted(traffic_frame),
+                "second-keys": sorted(traffic_second),
+                "totals-monotonic": traffic_second["upTotal"] >= traffic_frame["upTotal"]
+                and traffic_second["downTotal"] >= traffic_frame["downTotal"],
+                "cadence-bounded": 0.5 <= traffic_cadence <= 1.8,
             },
             "memory-websocket": {
                 "status": memory_ws_status,
                 "upgrade": memory_headers.get("upgrade", "").lower(),
                 "keys": sorted(memory_frame),
                 "first-zero": memory_frame == {"inuse": 0, "oslimit": 0},
+                "second-rss-positive": memory_second["inuse"] > 0,
+                "second-oslimit-zero": memory_second["oslimit"] == 0,
             },
             "connections-websocket": {
                 "status": connections_status,
@@ -242,6 +287,15 @@ rules:
                 "keys": sorted(log_frame),
                 "type": log_frame.get("type"),
                 "tcp-event": "[TCP]" in log_frame.get("payload", ""),
+            },
+            "logs-structured-websocket": {
+                "status": structured_status,
+                "upgrade": structured_headers.get("upgrade", "").lower(),
+                "keys": sorted(structured_frame),
+                "level": structured_frame.get("level"),
+                "time-shape": bool(re.fullmatch(r"\d\d:\d\d:\d\d", structured_frame.get("time", ""))),
+                "empty-fields": structured_frame.get("fields") == [],
+                "tcp-event": "[TCP]" in structured_frame.get("message", ""),
             },
         }
     finally:

@@ -12,6 +12,7 @@ futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+rustls-pemfile.workspace = true
 rewrite-config = { path = "../config" }
 rewrite-dns = { path = "../dns" }
 rewrite-model = { path = "../model" }
@@ -20,6 +21,7 @@ rewrite-state = { path = "../state" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
 tower-http.workspace = true

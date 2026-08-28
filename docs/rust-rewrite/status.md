@@ -98,7 +98,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B3g live REMATCH routing | Complete in declared mutation/rescan scope; RULE-12 remains partial | REMATCH updates `rematch-name` or switches `special-rules`, then rescans into distinct DIRECT/REJECT outcomes |
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
-| Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
+| Phase 5D controller completion boundary | Complete for every currently executable Rust service; API-04/API-11/API-12 retain only explicit 5E/5F service/platform dependencies | TCP/TLS/Unix and native-pipe CI, streams, safe config paths, current proxy/rule/provider surfaces, persistent Go-compatible storage, restart and public UI/DoH/debug are covered |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
 | Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
@@ -4242,9 +4242,60 @@ Exact timeout-window differential evidence, delayed-handshake success reset,
 exhaustive SOCKS5 auth/CONNECT status behavior, concurrent reload races,
 SOCKS5 URL-test/load-balance evidence and UDP/UoT remain unclaimed.
 
-Rust controller behavior stops at the Phase 5D TCP auth/CORS, observability and
-connections boundary, while other workstreams stop at their latest
-independently accepted rows above.
+## Phase 5D completion deliverables and evidence
+
+The controller now binds simultaneous plain TCP, TLS and Unix-domain listeners
+from one runtime generation. Linux/Android controller sockets apply a
+configured routing mark before bind; Unix sockets use mode `0666`, remove stale
+paths and bypass the controller secret like Go. The same Hyper/Axum application
+serves HTTP/1 or HTTP/2, and TLS is delegated to `tokio-rustls`. Native Windows
+named-pipe serving is compiled behind `cfg(windows)` and has a dedicated
+GitHub Actions differential rather than a host-only claim.
+
+Controller-visible configuration now retains source/home context and supports
+inline YAML, the current default config, or an absolute path under home. Unsafe
+and relative paths preserve the oracle error classes, and every replacement is
+validated and bound before publication. UI path changes recreate controller
+applications so static service roots do not remain stale after SIGHUP.
+
+Observability uses real process RSS after the oracle's initial zero frame.
+Traffic and memory HTTP/WebSocket streams sustain their cadence, totals remain
+monotonic, and log streams support both plain and structured records. The
+fixture reads the WebSocket handshake byte-precisely so the first frame cannot
+be lost to TCP coalescing.
+
+`/storage/{key}` is no longer process-local. `rewrite-state` reads and writes
+the Go `storage` bbolt bucket in `cache.db`, preserves the MessagePack `Data`
+and timestamp fields, enforces the 64-byte key/1 MiB total bounds, and evicts
+deterministically by timestamp and key. The differential performs restart,
+deletion persistence, LRU pressure and Go→Rust→Go interchange. `/restart`
+returns the Go response before re-exec; Unix retains the PID and restores
+controller readiness.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+PHASE5DTRANSPORT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_transports.py
+PHASE5DSTREAMS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_streams.py
+PHASE5DCONFIGPATH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_config_paths.py
+PHASE5DSTORAGEPERSIST_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_storage_persistence.py
+PHASE5DRESTART_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_restart.py
+PHASE5DHTTPSHEALTH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5d_https_health.py
+```
+
+The pre-existing Phase 5D provider, mode, proxy, storage, rules, configs, CORS
+and connections differentials also re-pass after these changes. Local
+formatting, workspace Clippy with `-D warnings`, and all-feature workspace tests
+pass. The full Linux regression and Windows pipe differential run in GitHub
+Actions and are not claimed before their results arrive.
+
+Phase 5D is therefore closed at the controller boundary for currently
+executable Rust services. This does not claim `/configs/geo`, core/UI/Geo
+download updates, global TLS ECH/all client-auth modes, Go pprof/expvar data,
+privileged nonzero Linux `SO_MARK`, or stress/backpressure. Those require the
+documented Phase 5E service and Phase 5F platform/release gates.
+
+Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
 provider/inbound integration gaps above.

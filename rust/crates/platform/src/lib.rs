@@ -8,12 +8,44 @@ pub use dhcp::{
     parse_dhcp_offer, resolve_dns_from_dhcp,
 };
 
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 /// Number of missed refreshes retained by the Go system resolver.
 pub const SYSTEM_DNS_DELETE_TIMES: u32 = 12;
+
+/// Binds a nonblocking TCP listener and applies the Linux/Android socket mark
+/// before bind, matching the controller listen boundary.
+///
+/// # Errors
+///
+/// Returns the socket option, bind, listen or nonblocking error.
+pub fn bind_marked_tcp_listener(
+    address: SocketAddr,
+    routing_mark: i64,
+) -> io::Result<std::net::TcpListener> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    if routing_mark != 0 {
+        socket.set_mark(u32::try_from(routing_mark).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
+        })?)?;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    let _ = routing_mark;
+    socket.bind(&SockAddr::from(address))?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
 
 /// A platform-neutral Windows adapter observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -258,6 +290,15 @@ mod tests {
         assert_eq!(injected.servers(), &[server]);
         injected.update(Vec::new());
         assert!(injected.servers().is_empty());
+    }
+
+    #[test]
+    fn marked_listener_boundary_binds_with_zero_mark() {
+        let listener =
+            bind_marked_tcp_listener("127.0.0.1:0".parse().expect("loopback socket address"), 0)
+                .expect("controller listener");
+        assert!(listener.local_addr().expect("bound address").port() > 0);
+        assert!(listener.accept().is_err(), "listener must be nonblocking");
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

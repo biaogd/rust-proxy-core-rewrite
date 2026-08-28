@@ -38,7 +38,8 @@ def build_binaries(
     default_target_name: str = "phase5b1a",
 ) -> dict[str, pathlib.Path]:
     assert_go_oracle_baseline()
-    go_binary = output / "go-oracle"
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    go_binary = output / f"go-oracle{executable_suffix}"
     subprocess.run(
         ["go", "build", "-trimpath", "-o", str(go_binary), "."],
         cwd=ROOT,
@@ -50,7 +51,10 @@ def build_binaries(
         cwd=RUST_ROOT,
         check=True,
     )
-    return {"go": go_binary, "rust": target / "debug" / "rewrite-core"}
+    return {
+        "go": go_binary,
+        "rust": target / "debug" / f"rewrite-core{executable_suffix}",
+    }
 
 
 def connect_domain(proxy_port: int, host: str, destination_port: int) -> socket.socket:

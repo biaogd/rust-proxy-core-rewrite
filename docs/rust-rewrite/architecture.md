@@ -252,6 +252,13 @@ Go's stored-offset guard and clears that family bucket. The controller invokes
 the same pool flush through `POST /cache/fakeip/flush`; current TCP and UDP
 inbounds both consume the reverse map before rule evaluation.
 
+Phase 5D reuses that narrow database boundary for controller storage. The
+`storage` bucket stores submitted JSON bytes in the Go-compatible MessagePack
+record with its timestamp; controller code never handles bbolt pages or record
+codecs. `rewrite-state` enforces key/total bounds, deterministic timestamp/key
+LRU, corruption removal and restart persistence, allowing the same `cache.db`
+to move Go→Rust→Go without a sidecar database or migration process.
+
 Phase 4D1's original single-classic-upstream policy remains compatibility
 evidence but its implementation is subsumed by the Phase 4F8 ordered
 multi-resolver policy stream. The selected resolver-set identity is part of the
@@ -632,9 +639,13 @@ not share routing or retry policy.
 
 ## REST controller
 
-The controller can listen on plain TCP, TLS, Unix sockets and Windows named
-pipes. It supports bearer/token authentication, CORS, an external UI, optional
-debug routes, WebSockets and an optional DoH mount.
+The controller can listen simultaneously on plain TCP, TLS and a platform-local
+Unix socket or Windows named pipe. Runtime binds every replacement before
+publishing a generation; controller applications are recreated when their
+transport, TLS material or static UI root changes. TCP/TLS use bearer or
+WebSocket query-token authentication, while Unix/pipe deliberately bypass the
+secret like the oracle. CORS wraps all routes; UI, configured DoH and debug
+diagnostics are mounted before authentication.
 
 Top-level resources are `/logs`, `/traffic`, `/memory`, `/version`, `/configs`,
 `/proxies`, `/group`, `/rules`, `/connections`, `/providers/proxies`,
@@ -672,16 +683,18 @@ controller exposes only the flush operation. Phase 4F15 keeps resolution in
 `rewrite-dns` and the HTTP boundary in `rewrite-controller`. After Phase 4F15,
 the controller's hand-written HTTP/1 parser, chunk decoder, router and response
 writer were replaced by Axum 0.8 over Hyper 1.1. Axum owns route/method
-dispatch and Hyper owns HTTP framing, connection reuse and graceful listener
-shutdown; controller response helpers still explicitly preserve the oracle's
-status, content-type and empty-body classes. One outer middleware evaluates
-the runtime-configured DoH mount before Bearer authentication like the oracle,
-then applies authentication to every REST route. Streaming traffic/log bodies
-observe the same cancellation token as listener shutdown. `hickory-proto` is confined to DNS RR
+dispatch and Hyper owns HTTP/1/HTTP/2 framing, connection reuse and graceful
+listener shutdown; `tokio-rustls` owns the TLS record boundary and `tower-http`
+owns static UI files. Controller response helpers still explicitly preserve
+the oracle's status, content-type and empty-body classes. Outer middleware
+evaluates the runtime-configured DoH, UI and debug mounts before Bearer
+authentication like the oracle, then authenticates the remaining REST routes.
+Streaming traffic/log bodies observe the same cancellation token as listener
+shutdown. `hickory-proto` is confined to DNS RR
 wire decoding and zone-text rendering for the controller JSON boundary; it is
 not used to replace the existing resolver/cache/transport implementation.
-`rewrite-platform`
-is still not a general TUN/routing implementation.
+`rewrite-platform` also owns the small controller socket-mark-before-bind
+boundary; it is still not a general TUN/routing implementation.
 Crates marked “later phase” remain design boundaries and do not exist yet:
 
 ```text

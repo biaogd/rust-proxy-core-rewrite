@@ -60,11 +60,19 @@ pub struct ConfigSpec {
     pub etag_support: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
+    pub external_controller_tls: String,
+    pub external_controller_unix: String,
+    pub external_controller_pipe: String,
+    pub external_controller_routing_mark: i64,
+    pub external_ui: String,
+    pub external_ui_url: String,
+    pub external_ui_name: String,
     pub external_doh_server: String,
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
     pub trust_certificates: Vec<String>,
+    pub controller_tls: ControllerTls,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub raw_rules: Vec<String>,
@@ -76,6 +84,8 @@ pub struct ConfigSpec {
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     unsupported_keys: Vec<String>,
+    source_path: Option<PathBuf>,
+    home_directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,11 +100,19 @@ pub struct Config {
     pub etag_support: bool,
     pub authentication: Vec<AuthUser>,
     pub external_controller: String,
+    pub external_controller_tls: String,
+    pub external_controller_unix: String,
+    pub external_controller_pipe: String,
+    pub external_controller_routing_mark: i64,
+    pub external_ui: String,
+    pub external_ui_url: String,
+    pub external_ui_name: String,
     pub external_doh_server: String,
     pub secret: String,
     pub controller_cors: ControllerCors,
     pub profile: ProfileConfig,
     pub trust_certificates: Vec<String>,
+    pub controller_tls: ControllerTls,
     pub dns: Option<DnsConfig>,
     pub hosts: HostTable,
     pub proxies: Vec<ProxyConfig>,
@@ -105,6 +123,8 @@ pub struct Config {
     raw_rules: Vec<String>,
     raw_sub_rules: BTreeMap<String, Vec<String>>,
     rematches: Vec<RematchSpec>,
+    source_path: Option<PathBuf>,
+    home_directory: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,6 +276,15 @@ pub enum RuleProviderFormat {
 pub struct ControllerCors {
     pub allow_origins: Vec<String>,
     pub allow_private_network: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ControllerTls {
+    pub certificate: String,
+    pub private_key: String,
+    pub client_auth_type: String,
+    pub client_auth_cert: String,
+    pub ech_key: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -639,6 +668,13 @@ struct RawConfig {
     etag_support: Option<bool>,
     authentication: Option<Vec<String>>,
     external_controller: Option<String>,
+    external_controller_tls: Option<String>,
+    external_controller_unix: Option<String>,
+    external_controller_pipe: Option<String>,
+    external_controller_routing_mark: Option<i64>,
+    external_ui: Option<String>,
+    external_ui_url: Option<String>,
+    external_ui_name: Option<String>,
     external_doh_server: Option<String>,
     secret: Option<String>,
     external_controller_cors: Option<RawControllerCors>,
@@ -666,6 +702,11 @@ struct RawControllerCors {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawTls {
+    certificate: Option<String>,
+    private_key: Option<String>,
+    client_auth_type: Option<String>,
+    client_auth_cert: Option<String>,
+    ech_key: Option<String>,
     custom_certifactes: Option<Vec<String>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -894,6 +935,12 @@ pub enum ConfigError {
     InvalidRuntimePort(i64),
     #[error("invalid external-controller address: {0}")]
     InvalidControllerAddress(String),
+    #[error("path is not a absolute path")]
+    InvalidConfigPath,
+    #[error(
+        "path is not subpath of home directory or SAFE_PATHS: {path} \n allowed paths: [{home}]"
+    )]
+    UnsafeConfigPath { path: PathBuf, home: PathBuf },
     #[error("invalid Phase 4A DNS configuration: {0}")]
     InvalidDns(String),
     #[error("invalid Phase 4B hosts configuration: {0}")]
@@ -950,7 +997,9 @@ impl ConfigSpec {
         path: &Path,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(source, path.parent(), path.parent(), geodata_mode)
+        let mut parsed = Self::from_source(source, path.parent(), path.parent(), geodata_mode)?;
+        parsed.source_path = Some(path.to_path_buf());
+        Ok(parsed)
     }
 
     /// Parses YAML with separate configuration-resource and provider-home directories.
@@ -964,14 +1013,17 @@ impl ConfigSpec {
         provider_directory: &Path,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(
+        let mut parsed = Self::from_source(
             source,
             path.parent(),
             Some(provider_directory),
             geodata_mode,
-        )
+        )?;
+        parsed.source_path = Some(path.to_path_buf());
+        Ok(parsed)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn from_source(
         source: &str,
         config_directory: Option<&Path>,
@@ -1021,7 +1073,7 @@ impl ConfigSpec {
             &provider_definitions,
         )?;
         let profile = parse_profile(raw.profile)?;
-        let trust_certificates = parse_tls(raw.tls)?;
+        let (controller_tls, trust_certificates) = parse_tls(raw.tls, provider_directory)?;
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let controller_cors = parse_controller_cors(raw.external_controller_cors);
         let dns = parse_dns(
@@ -1031,6 +1083,9 @@ impl ConfigSpec {
             config_directory,
             geodata_mode,
         )?;
+        let external_ui = raw.external_ui.unwrap_or_default();
+        let external_ui_name = raw.external_ui_name.unwrap_or_default();
+        validate_external_ui(&external_ui, &external_ui_name, provider_directory)?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -1054,11 +1109,23 @@ impl ConfigSpec {
             etag_support: raw.etag_support.unwrap_or(true),
             authentication: parse_authentication(raw.authentication.unwrap_or_default()),
             external_controller: raw.external_controller.unwrap_or_default(),
+            external_controller_tls: raw.external_controller_tls.unwrap_or_default(),
+            external_controller_unix: raw.external_controller_unix.unwrap_or_default(),
+            external_controller_pipe: raw.external_controller_pipe.unwrap_or_default(),
+            external_controller_routing_mark: raw
+                .external_controller_routing_mark
+                .unwrap_or_default(),
+            external_ui,
+            external_ui_url: raw.external_ui_url.unwrap_or_else(|| {
+                "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip".to_owned()
+            }),
+            external_ui_name,
             external_doh_server: raw.external_doh_server.unwrap_or_default(),
             secret: raw.secret.unwrap_or_default(),
             controller_cors,
             profile,
             trust_certificates,
+            controller_tls,
             dns,
             hosts: parse_hosts(raw.hosts.unwrap_or_default())?,
             raw_rules,
@@ -1070,6 +1137,8 @@ impl ConfigSpec {
             proxy_groups,
             rules,
             unsupported_keys: raw.extra.into_keys().collect(),
+            source_path: None,
+            home_directory: provider_directory.map(Path::to_path_buf),
         })
     }
 
@@ -1079,12 +1148,14 @@ impl ConfigSpec {
     ///
     /// Returns [`ConfigError`] for file I/O or specification errors.
     pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
-        Self::from_source(
+        let mut parsed = Self::from_source(
             &std::fs::read_to_string(path)?,
             path.parent(),
             path.parent(),
             false,
-        )
+        )?;
+        parsed.source_path = Some(path.to_path_buf());
+        Ok(parsed)
     }
 
     /// Reads YAML with the process-level geodata-mode default selected by the
@@ -1097,12 +1168,14 @@ impl ConfigSpec {
         path: &Path,
         geodata_mode: bool,
     ) -> Result<Self, ConfigError> {
-        Self::from_source(
+        let mut parsed = Self::from_source(
             &std::fs::read_to_string(path)?,
             path.parent(),
             path.parent(),
             geodata_mode,
-        )
+        )?;
+        parsed.source_path = Some(path.to_path_buf());
+        Ok(parsed)
     }
 
     /// Ensures no top-level feature outside the declared Phase 2 parser surface
@@ -1189,11 +1262,19 @@ impl TryFrom<ConfigSpec> for Config {
             etag_support: spec.etag_support,
             authentication: spec.authentication,
             external_controller: spec.external_controller,
+            external_controller_tls: spec.external_controller_tls,
+            external_controller_unix: spec.external_controller_unix,
+            external_controller_pipe: spec.external_controller_pipe,
+            external_controller_routing_mark: spec.external_controller_routing_mark,
+            external_ui: spec.external_ui,
+            external_ui_url: spec.external_ui_url,
+            external_ui_name: spec.external_ui_name,
             external_doh_server: spec.external_doh_server,
             secret: spec.secret,
             controller_cors: spec.controller_cors,
             profile: spec.profile,
             trust_certificates: spec.trust_certificates,
+            controller_tls: spec.controller_tls,
             dns: spec.dns,
             hosts: spec.hosts,
             proxies: spec.proxies,
@@ -1204,6 +1285,8 @@ impl TryFrom<ConfigSpec> for Config {
             raw_rules: spec.raw_rules,
             raw_sub_rules: spec.raw_sub_rules,
             rematches: spec.rematches,
+            source_path: spec.source_path,
+            home_directory: spec.home_directory,
         })
     }
 }
@@ -1531,6 +1614,134 @@ impl Config {
             .map(Some)
             .map_err(|_| ConfigError::InvalidControllerAddress(self.external_controller.clone()))
     }
+
+    /// Parses every network controller endpoint declared by the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidControllerAddress`] for an invalid TCP/TLS address.
+    pub fn controller_tcp_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
+        self.controller_addr()
+    }
+
+    /// Parses the optional TLS controller address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidControllerAddress`] for an invalid address.
+    pub fn controller_tls_addr(&self) -> Result<Option<SocketAddr>, ConfigError> {
+        if self.external_controller_tls.is_empty() {
+            return Ok(None);
+        }
+        self.external_controller_tls.parse().map(Some).map_err(|_| {
+            ConfigError::InvalidControllerAddress(self.external_controller_tls.clone())
+        })
+    }
+
+    #[must_use]
+    pub fn controller_unix_path(&self) -> Option<PathBuf> {
+        (!self.external_controller_unix.is_empty()).then(|| {
+            let path = PathBuf::from(&self.external_controller_unix);
+            if path.is_absolute() {
+                path
+            } else {
+                self.home_directory
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(path)
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn external_ui_path(&self) -> Option<PathBuf> {
+        (!self.external_ui.is_empty()).then(|| {
+            let path = PathBuf::from(&self.external_ui);
+            let base = self
+                .home_directory
+                .as_deref()
+                .unwrap_or_else(|| Path::new("."));
+            let path = if path.is_absolute() {
+                path
+            } else {
+                base.join(path)
+            };
+            if self.external_ui_name.is_empty() {
+                path
+            } else {
+                path.join(&self.external_ui_name)
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    #[must_use]
+    pub fn home_directory(&self) -> Option<&Path> {
+        self.home_directory.as_deref()
+    }
+
+    /// Parses an inline controller replacement using the original resource roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ordinary configuration parse/runtime errors.
+    pub fn replacement_from_yaml(&self, source: &str) -> Result<Self, ConfigError> {
+        let home = self
+            .home_directory
+            .as_deref()
+            .unwrap_or_else(|| Path::new("."));
+        let source_path = self
+            .source_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("config.yaml"));
+        Self::from_yaml_at_path_with_provider_directory(
+            source,
+            source_path,
+            home,
+            self.geodata_mode,
+        )
+    }
+
+    /// Loads an absolute path contained by the configured home directory.
+    ///
+    /// # Errors
+    ///
+    /// Rejects relative/out-of-root paths and propagates parse/I/O errors.
+    pub fn replacement_from_safe_path(
+        &self,
+        requested: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
+        let explicitly_requested = requested.is_some();
+        let path = requested.or(self.source_path.as_deref()).ok_or_else(|| {
+            ConfigError::UnsupportedRuntime("default config path unavailable".to_owned())
+        })?;
+        if !path.is_absolute() {
+            return Err(ConfigError::InvalidConfigPath);
+        }
+        let home = self.home_directory.as_deref().ok_or_else(|| {
+            ConfigError::UnsupportedRuntime("configuration safe root unavailable".to_owned())
+        })?;
+        let normalized_home = std::path::absolute(home)?;
+        let normalized_path = std::path::absolute(path)?;
+        if explicitly_requested && !normalized_path.starts_with(&normalized_home) {
+            return Err(ConfigError::UnsafeConfigPath {
+                path: normalized_path,
+                home: normalized_home,
+            });
+        }
+        let mut replacement = Self::from_yaml_at_path_with_provider_directory(
+            &std::fs::read_to_string(&normalized_path)?,
+            &normalized_path,
+            home,
+            self.geodata_mode,
+        )?;
+        replacement.source_path.clone_from(&self.source_path);
+        Ok(replacement)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1597,9 +1808,12 @@ fn parse_profile(raw: Option<RawProfile>) -> Result<ProfileConfig, ConfigError> 
     })
 }
 
-fn parse_tls(raw: Option<RawTls>) -> Result<Vec<String>, ConfigError> {
+fn parse_tls(
+    raw: Option<RawTls>,
+    home_directory: Option<&Path>,
+) -> Result<(ControllerTls, Vec<String>), ConfigError> {
     let Some(raw) = raw else {
-        return Ok(Vec::new());
+        return Ok((ControllerTls::default(), Vec::new()));
     };
     if let Some(key) = raw.extra.into_keys().next() {
         return Err(ConfigError::UnsupportedKey(format!("tls.{key}")));
@@ -1613,7 +1827,84 @@ fn parse_tls(raw: Option<RawTls>) -> Result<Vec<String>, ConfigError> {
             "Phase 4E accepts only inline tls.custom-certifactes PEM roots".to_owned(),
         ));
     }
-    Ok(certificates)
+    Ok((
+        ControllerTls {
+            certificate: resolve_controller_pem(
+                raw.certificate.unwrap_or_default(),
+                home_directory,
+            )?,
+            private_key: resolve_controller_pem(
+                raw.private_key.unwrap_or_default(),
+                home_directory,
+            )?,
+            client_auth_type: raw.client_auth_type.unwrap_or_default(),
+            client_auth_cert: resolve_controller_pem(
+                raw.client_auth_cert.unwrap_or_default(),
+                home_directory,
+            )?,
+            ech_key: resolve_controller_pem(raw.ech_key.unwrap_or_default(), home_directory)?,
+        },
+        certificates,
+    ))
+}
+
+fn resolve_controller_pem(
+    value: String,
+    home_directory: Option<&Path>,
+) -> Result<String, ConfigError> {
+    if value.is_empty() || value.contains("-----BEGIN") {
+        return Ok(value);
+    }
+    let path = PathBuf::from(&value);
+    let path = if path.is_absolute() {
+        path
+    } else if let Some(home) = home_directory {
+        home.join(path)
+    } else {
+        return Ok(value);
+    };
+    if let Some(home) = home_directory {
+        let normalized_home = std::path::absolute(home)?;
+        let normalized_path = std::path::absolute(&path)?;
+        if !normalized_path.starts_with(&normalized_home) {
+            return Err(ConfigError::UnsafeConfigPath {
+                path: normalized_path,
+                home: normalized_home,
+            });
+        }
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+fn validate_external_ui(
+    external_ui: &str,
+    external_ui_name: &str,
+    home_directory: Option<&Path>,
+) -> Result<(), ConfigError> {
+    if !external_ui_name.is_empty()
+        && (Path::new(external_ui_name).is_absolute()
+            || Path::new(external_ui_name)
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir)))
+    {
+        return Err(ConfigError::UnsupportedRuntime(
+            "external-ui-name is not a local path".to_owned(),
+        ));
+    }
+    if !external_ui.is_empty()
+        && let Some(home) = home_directory
+        && Path::new(external_ui).is_absolute()
+    {
+        let normalized_home = std::path::absolute(home)?;
+        let normalized_path = std::path::absolute(external_ui)?;
+        if !normalized_path.starts_with(&normalized_home) {
+            return Err(ConfigError::UnsafeConfigPath {
+                path: normalized_path,
+                home: normalized_home,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_dns(

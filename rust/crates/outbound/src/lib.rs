@@ -192,7 +192,7 @@ pub async fn connect_http(
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect(server, allow_ipv6).await?;
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
-        let config = http_tls_config(tls)?;
+        let config = http_tls_config(tls, &[])?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
             .map_err(|_| HttpProxyError::TlsConfiguration("invalid server name".to_owned()))?;
         let stream = tokio::time::timeout(
@@ -238,7 +238,35 @@ pub async fn connect_http(
     Ok(Box::new(TokioIo::new(upgraded)))
 }
 
-fn http_tls_config(tls: HttpProxyTls<'_>) -> Result<ClientConfig, HttpProxyError> {
+/// Wraps an established outbound stream in client TLS for HTTPS health checks.
+///
+/// # Errors
+///
+/// Returns configuration, server-name or TLS handshake failures.
+pub async fn wrap_client_tls(
+    stream: BoxedOutboundStream,
+    server_name: &str,
+    skip_certificate_verification: bool,
+    custom_roots: &[String],
+) -> Result<BoxedOutboundStream, HttpProxyError> {
+    let tls = HttpProxyTls {
+        server_name,
+        skip_certificate_verification,
+    };
+    let config = http_tls_config(tls, custom_roots)?;
+    let server_name = ServerName::try_from(server_name.to_owned())
+        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    let stream = TlsConnector::from(Arc::new(config))
+        .connect(server_name, stream)
+        .await
+        .map_err(HttpProxyError::TlsHandshake)?;
+    Ok(Box::new(stream))
+}
+
+fn http_tls_config(
+    tls: HttpProxyTls<'_>,
+    custom_roots: &[String],
+) -> Result<ClientConfig, HttpProxyError> {
     if tls.skip_certificate_verification {
         return Ok(ClientConfig::builder_with_provider(Arc::new(
             tokio_rustls::rustls::crypto::ring::default_provider(),
@@ -265,6 +293,16 @@ fn http_tls_config(tls: HttpProxyTls<'_>) -> Result<ClientConfig, HttpProxyError
         roots
             .add(certificate)
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    }
+    for pem in custom_roots {
+        let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        for certificate in certificates {
+            roots
+                .add(certificate)
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        }
     }
     Ok(ClientConfig::builder_with_provider(Arc::new(
         tokio_rustls::rustls::crypto::ring::default_provider(),

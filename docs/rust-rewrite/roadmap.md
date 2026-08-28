@@ -1121,11 +1121,63 @@ and negative paths. Configured file/HTTP vehicles, refresh scheduling, real
 health state, rule-provider resources and persistence remain the later 5C/5D
 integration gate.
 
-TLS/Unix/pipe controller transports, real process-memory accounting,
-structured logs, exhaustive level/cadence/backpressure behavior, remaining
-PATCH fields, safe-root/default configuration path loading, `/configs/geo`,
-persistent controller storage and other mutation families remain later 5D
-gates.
+That initial aggregate intentionally left TLS/Unix/pipe transports, real
+process-memory accounting, structured logs, path loading and persistent
+storage to the completion boundary below. Service-backed routes such as
+`/configs/geo` remain owned by their service gate.
+
+### Phase 5D completion boundary
+
+Phase 5D is complete when the controller is a transport-neutral front end for
+every service that already exists in the Rust runtime. It does **not** make an
+unimplemented service compatible merely by registering its future route.
+Accepted work is grouped into independently reproducible differentials:
+
+- `5D1–5D3`: simultaneous TCP/TLS/Unix controllers, native Windows named
+  pipe, local-transport secret bypass, TLS validation, public UI/DoH/debug
+  ordering, routing-mark socket boundary, CORS/auth and hot replacement;
+- `5D4`: real process RSS, repeated memory/traffic WebSocket frames,
+  monotonic totals, plain and structured live logs;
+- `5D5`: executable GET/PATCH/PUT configuration transactions plus inline,
+  default-current and safe absolute path loading with rollback;
+- `5D6–5D10`: the DNS/cache, proxy/group, rules, connections and provider
+  surfaces for all currently executable Rust implementations;
+- `5D11`: bounded persistent `/storage` state using the Go `cache.db` bbolt
+  bucket and MessagePack record layout, including restart and bidirectional
+  Go/Rust interchange;
+- `5D12`: authenticated process restart/re-exec with the observable Go method,
+  body, PID and readiness contract;
+- `5D13`: public external UI serving/reload, external DoH and debug GC route,
+  with exact status/header/body evidence.
+
+Darwin acceptance is recorded by `phase5d_*.py`. Linux runs the same set in
+the default differential matrix. Windows named-pipe behavior has its own
+native job because a cross-build cannot validate pipe lifecycle. Nonzero
+Linux `SO_MARK`, Go pprof/expvar payloads, allocator-specific memory release,
+and stress/backpressure retain explicit Phase 5F platform/release gates.
+
+The following controller paths remain dependent rather than unfinished 5D
+plumbing: `/configs/geo` and `/upgrade/geo` require `SVC-04`; `/upgrade/ui`
+requires `SVC-05`; core `/upgrade` requires a signed/versioned executable
+update policy. They are accepted only with the service in Phase 5E, never as
+stub routes.
+
+## Phase 5E — shared services and durable resources
+
+Phase 5E follows the controller boundary and supplies services used by several
+later protocols. The order is `5E1` NTP, `5E2` global TLS/client-auth/ECH,
+`5E3` remaining profile persistence, `5E4` geodata/MMDB/MRS loading and update,
+and `5E5` external UI download/update. Each service must include startup,
+reload, failure rollback, shutdown and its REST side effects where applicable.
+
+## Phase 5F — local runtime and platform completion
+
+Phase 5F closes local listener/runtime/platform behavior before broader remote
+protocol coverage is considered release-ready. `5F1` completes fixed local
+HTTP/SOCKS/mixed semantics and socket options, `5F2` completes UDP NAT/session
+lifecycle, and later 5F gates cover routing marks, native process/platform
+behavior, diagnostics, backpressure/stress and build-profile evidence. A
+successful host cross-build is never sufficient for a native behavior claim.
 
 ## Phase 6 — established remote protocols
 

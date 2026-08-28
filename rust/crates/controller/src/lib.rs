@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::io::{BufReader, Cursor};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +19,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::{StreamExt, future::join_all, stream};
 use http_body_util::Empty;
 use hyper::client::conn::http1;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use hyper_util::service::TowerToHyperService;
 use rewrite_config::Config;
 use rewrite_dns::DnsService;
 use rewrite_model::{Destination, Host};
@@ -26,11 +30,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 
 const MAX_DNS_MESSAGE: usize = 65_535;
 
@@ -41,6 +52,7 @@ struct ControllerState {
     runtime: Arc<RuntimeState>,
     shutdown: CancellationToken,
     config_updates: mpsc::Sender<ConfigUpdate>,
+    require_auth: bool,
 }
 
 /// Transactional runtime configuration request initiated by the controller.
@@ -53,6 +65,7 @@ pub enum ConfigUpdateKind {
     Replace(Box<Config>),
     RefreshProxyProvider(String),
     RefreshRuleProvider(String),
+    Restart,
 }
 
 impl ControllerState {
@@ -70,24 +83,303 @@ pub async fn serve(
     config_updates: mpsc::Sender<ConfigUpdate>,
     shutdown: CancellationToken,
 ) {
+    serve_tcp(
+        listener,
+        dns_service,
+        config,
+        runtime,
+        config_updates,
+        shutdown,
+        true,
+    )
+    .await;
+}
+
+/// Serves one already-bound plain TCP controller.
+pub async fn serve_tcp(
+    listener: TcpListener,
+    dns_service: Arc<DnsService>,
+    config: watch::Receiver<Arc<Config>>,
+    runtime: Arc<RuntimeState>,
+    config_updates: mpsc::Sender<ConfigUpdate>,
+    shutdown: CancellationToken,
+    require_auth: bool,
+) {
     let state = ControllerState {
         dns_service,
         config,
         runtime: Arc::clone(&runtime),
         shutdown: shutdown.clone(),
         config_updates,
+        require_auth,
     };
-    let app = controller_router(state.clone())
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            authenticate_or_serve_doh,
+    serve_accept_loop(listener, controller_app(state), runtime, shutdown).await;
+}
+
+/// Serves one already-bound TLS controller.
+pub async fn serve_tls(
+    listener: TcpListener,
+    dns_service: Arc<DnsService>,
+    config: watch::Receiver<Arc<Config>>,
+    runtime: Arc<RuntimeState>,
+    config_updates: mpsc::Sender<ConfigUpdate>,
+    shutdown: CancellationToken,
+    tls: tokio_rustls::rustls::ServerConfig,
+) {
+    let tls = Arc::new(tls);
+    let state = ControllerState {
+        dns_service,
+        config,
+        runtime: Arc::clone(&runtime),
+        shutdown: shutdown.clone(),
+        config_updates,
+        require_auth: true,
+    };
+    let app = controller_app(state);
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    let acceptor = acceptor.clone();
+                    let app = app.clone();
+                    let connection_shutdown = shutdown.clone();
+                    connections.spawn(async move {
+                        if let Ok(stream) = acceptor.accept(stream).await {
+                            serve_io(stream, app, connection_shutdown).await;
+                        }
+                    });
+                }
+                Err(error) => {
+                    runtime.log("error", format!("controller TLS accept failed: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+    while connections.join_next().await.is_some() {}
+}
+
+#[cfg(unix)]
+/// Serves one already-bound Unix-domain controller without secret auth.
+pub async fn serve_unix(
+    listener: UnixListener,
+    dns_service: Arc<DnsService>,
+    config: watch::Receiver<Arc<Config>>,
+    runtime: Arc<RuntimeState>,
+    config_updates: mpsc::Sender<ConfigUpdate>,
+    shutdown: CancellationToken,
+) {
+    let state = ControllerState {
+        dns_service,
+        config,
+        runtime: Arc::clone(&runtime),
+        shutdown: shutdown.clone(),
+        config_updates,
+        require_auth: false,
+    };
+    let app = controller_app(state);
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(serve_io(stream, app.clone(), shutdown.clone()));
+                }
+                Err(error) => {
+                    runtime.log("error", format!("controller Unix accept failed: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+    while connections.join_next().await.is_some() {}
+}
+
+#[cfg(windows)]
+/// Creates the first Windows named-pipe server instance as a bind barrier.
+pub fn prepare_named_pipe(name: &str) -> std::io::Result<NamedPipeServer> {
+    if !name.starts_with(r"\\.\pipe\") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            r#"windows namedpipe must start with "\\.\pipe\""#,
+        ));
+    }
+    ServerOptions::new().first_pipe_instance(true).create(name)
+}
+
+#[cfg(windows)]
+/// Serves a Windows named-pipe controller without secret auth.
+pub async fn serve_named_pipe(
+    mut listener: NamedPipeServer,
+    name: String,
+    dns_service: Arc<DnsService>,
+    config: watch::Receiver<Arc<Config>>,
+    runtime: Arc<RuntimeState>,
+    config_updates: mpsc::Sender<ConfigUpdate>,
+    shutdown: CancellationToken,
+) {
+    let state = ControllerState {
+        dns_service,
+        config,
+        runtime: Arc::clone(&runtime),
+        shutdown: shutdown.clone(),
+        config_updates,
+        require_auth: false,
+    };
+    let app = controller_app(state);
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            connected = listener.connect() => match connected {
+                Ok(()) => {
+                    let next = match ServerOptions::new().create(&name) {
+                        Ok(next) => next,
+                        Err(error) => {
+                            runtime.log("error", format!("controller pipe accept failed: {error}"));
+                            break;
+                        }
+                    };
+                    connections.spawn(serve_io(listener, app.clone(), shutdown.clone()));
+                    listener = next;
+                }
+                Err(error) => {
+                    runtime.log("error", format!("controller pipe connect failed: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+    while connections.join_next().await.is_some() {}
+}
+
+fn controller_app(state: ControllerState) -> Router {
+    let ui_path = state.current_config().external_ui_path();
+    let mut app = controller_router(state.clone());
+    if let Some(path) = ui_path {
+        app = app.nest_service("/ui", ServeDir::new(path));
+    }
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_or_serve_public,
+    ))
+    .layer(middleware::from_fn_with_state(state, apply_dynamic_cors))
+}
+
+async fn serve_accept_loop(
+    listener: TcpListener,
+    app: Router,
+    runtime: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(serve_io(stream, app.clone(), shutdown.clone()));
+                }
+                Err(error) => {
+                    runtime.log("error", format!("controller accept failed: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+    while connections.join_next().await.is_some() {}
+}
+
+async fn serve_io<I>(stream: I, app: Router, shutdown: CancellationToken)
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = TowerToHyperService::new(app);
+    let builder = ConnectionBuilder::new(TokioExecutor::new());
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = &mut connection => {}
+        () = shutdown.cancelled() => connection.as_mut().graceful_shutdown(),
+    }
+}
+
+/// Validates controller TLS material before a runtime generation is published.
+///
+/// # Errors
+///
+/// Returns an I/O error for unreadable or invalid PEM material and unsupported
+/// client-auth/ECH modes whose shared TLS service is not implemented yet.
+pub fn prepare_tls_config(
+    config: &rewrite_config::ControllerTls,
+) -> std::io::Result<tokio_rustls::rustls::ServerConfig> {
+    if !config.ech_key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "controller TLS ECH awaits Phase 5E2",
+        ));
+    }
+    let certificate = load_pem_or_path(&config.certificate)?;
+    let private_key = load_pem_or_path(&config.private_key)?;
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(certificate)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let private_key = rustls_pemfile::private_key(&mut BufReader::new(Cursor::new(private_key)))?
+        .ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "private key not found")
+    })?;
+    let client_auth = if config.client_auth_type.is_empty() && config.client_auth_cert.is_empty() {
+        None
+    } else {
+        if matches!(config.client_auth_type.as_str(), "request" | "require-any") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "request and require-any client auth await Phase 5E2",
+            ));
+        }
+        let client_ca = load_pem_or_path(&config.client_auth_cert)?;
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        let client_certificates =
+            rustls_pemfile::certs(&mut BufReader::new(Cursor::new(client_ca)))
+                .collect::<Result<Vec<_>, _>>()?;
+        let (accepted, _) = roots.add_parsable_certificates(client_certificates);
+        if accepted == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "client CA certificate not found",
+            ));
+        }
+        let mut verifier =
+            tokio_rustls::rustls::server::WebPkiClientVerifier::builder(roots.into());
+        if config.client_auth_type == "verify-if-given" {
+            verifier = verifier.allow_unauthenticated();
+        }
+        Some(verifier.build().map_err(std::io::Error::other)?)
+    };
+    let builder = tokio_rustls::rustls::ServerConfig::builder();
+    let mut server = match client_auth {
+        Some(verifier) => builder.with_client_cert_verifier(verifier),
+        None => builder.with_no_client_auth(),
+    }
+    .with_single_cert(certificates, private_key)
+    .map_err(std::io::Error::other)?;
+    server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(server)
+}
+
+fn load_pem_or_path(value: &str) -> std::io::Result<Vec<u8>> {
+    if value.contains("-----BEGIN") {
+        Ok(value.as_bytes().to_vec())
+    } else if value.is_empty() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TLS PEM value is empty",
         ))
-        .layer(middleware::from_fn_with_state(state, apply_dynamic_cors));
-    if let Err(error) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await
-    {
-        runtime.log("error", format!("controller server failed: {error}"));
+    } else {
+        std::fs::read(FsPath::new(value))
     }
 }
 
@@ -315,12 +607,15 @@ fn controller_router(state: ControllerState) -> Router {
         .route("/cache/dns/flush", any(flush_dns_cache))
         .route("/cache/fakeip/flush", any(flush_fake_ip_cache))
         .route("/dns/query", any(dns_query))
+        .route("/restart", axum::routing::post(restart))
+        .route("/restart/", axum::routing::post(restart))
+        .route("/debug/gc", axum::routing::put(debug_gc))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
         .with_state(state)
 }
 
-async fn authenticate_or_serve_doh(
+async fn authenticate_or_serve_public(
     State(state): State<ControllerState>,
     request: Request,
     next: Next,
@@ -329,7 +624,38 @@ async fn authenticate_or_serve_doh(
     if is_doh_path(request.uri().path(), &config.external_doh_server) {
         return handle_doh(request, &state, &config).await;
     }
-    if !config.secret.is_empty() && !is_authorized(&request, &config.secret) {
+    if config.external_ui_path().is_some()
+        && (request.uri().path() == "/ui" || request.uri().path().starts_with("/ui/"))
+    {
+        if request.uri().path() == "/ui" {
+            let mut response = typed_response(
+                StatusCode::TEMPORARY_REDIRECT,
+                "text/html; charset=utf-8",
+                Body::from("<a href=\"/ui/\">Temporary Redirect</a>.\n\n"),
+            );
+            response
+                .headers_mut()
+                .insert(header::LOCATION, HeaderValue::from_static("/ui/"));
+            return response;
+        }
+        let mut response = next.run(request).await;
+        if let Some(content_type) = response.headers().get(header::CONTENT_TYPE)
+            && let Ok(value) = content_type.to_str()
+            && value.starts_with("text/")
+            && !value.contains("charset=")
+            && let Ok(value) = HeaderValue::from_str(&format!("{value}; charset=utf-8"))
+        {
+            response.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
+        return response;
+    }
+    // Mihomo mounts diagnostics outside the authenticated controller group.
+    // Keep that ordering even when debug is disabled, so a missing debug route
+    // is a public 404 rather than an authentication challenge.
+    if request.uri().path() == "/debug" || request.uri().path().starts_with("/debug/") {
+        return next.run(request).await;
+    }
+    if state.require_auth && !config.secret.is_empty() && !is_authorized(&request, &config.secret) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             &json!({"message": "Unauthorized"}),
@@ -518,7 +844,7 @@ async fn set_storage(
             &json!({"message": "payload exceeds 1MB limit"}),
         );
     }
-    state.runtime.storage_set(key, value.to_vec());
+    state.runtime.storage_set(&key, value.to_vec());
     empty_response(StatusCode::NO_CONTENT)
 }
 
@@ -646,9 +972,11 @@ async fn proxy_delay(
     )
     .await;
     match result {
-        Ok(Ok(delay)) if delay > 0 => {
-            state.runtime.record_proxy_delay(&name, url, delay, true);
-            json_response(StatusCode::OK, &json!({"delay": delay}))
+        Ok(Ok(measurement)) if measurement.delay > 0 => {
+            state
+                .runtime
+                .record_proxy_delay(&name, url, measurement.delay, measurement.satisfied);
+            json_response(StatusCode::OK, &json!({"delay": measurement.delay}))
         }
         Err(_) => {
             state.runtime.record_proxy_delay(&name, url, 0, false);
@@ -664,6 +992,7 @@ async fn proxy_delay(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn group_delay(
     State(state): State<ControllerState>,
     Path(name): Path<String>,
@@ -726,9 +1055,14 @@ async fn group_delay(
         let mut delays = BTreeMap::new();
         for (member, result) in results {
             match result {
-                Ok(Ok(delay)) if delay > 0 => {
-                    state.runtime.record_proxy_delay(member, url, delay, true);
-                    delays.insert(member.clone(), delay);
+                Ok(Ok(measurement)) if measurement.delay > 0 => {
+                    state.runtime.record_proxy_delay(
+                        member,
+                        url,
+                        measurement.delay,
+                        measurement.satisfied,
+                    );
+                    delays.insert(member.clone(), measurement.delay);
                 }
                 _ => state.runtime.record_proxy_delay(member, url, 0, false),
             }
@@ -748,10 +1082,15 @@ async fn group_delay(
     )
     .await;
     match result {
-        Ok(Ok(delay)) if delay > 0 => {
-            state.runtime.record_proxy_delay("DIRECT", url, delay, true);
+        Ok(Ok(measurement)) if measurement.delay > 0 => {
+            state.runtime.record_proxy_delay(
+                "DIRECT",
+                url,
+                measurement.delay,
+                measurement.satisfied,
+            );
             state.runtime.record_proxy_delay("REJECT", url, 0, false);
-            json_response(StatusCode::OK, &json!({"DIRECT": delay}))
+            json_response(StatusCode::OK, &json!({"DIRECT": measurement.delay}))
         }
         _ => json_response(
             StatusCode::GATEWAY_TIMEOUT,
@@ -760,75 +1099,99 @@ async fn group_delay(
     }
 }
 
+#[derive(Clone, Copy)]
+struct DelayMeasurement {
+    delay: u16,
+    satisfied: bool,
+}
+
+#[allow(clippy::too_many_lines)]
 async fn measure_http_delay(
     name: &str,
     raw_url: &str,
     expected: &[(u16, u16)],
     config: &Config,
-) -> Result<u16, ()> {
+) -> Result<DelayMeasurement, ()> {
     let url = url::Url::parse(raw_url).map_err(|_| ())?;
-    if url.scheme() != "http" {
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(());
     }
     let host = url.host_str().ok_or(())?;
     let port = url.port_or_known_default().ok_or(())?;
+    let destination_host = host.parse().map_or_else(
+        |_| match config.hosts.resolve(host) {
+            Some(rewrite_config::HostEntry::Addresses(addresses)) => addresses
+                .into_iter()
+                .next()
+                .map_or_else(|| Host::Domain(host.to_owned()), Host::Ip),
+            _ => Host::Domain(host.to_owned()),
+        },
+        Host::Ip,
+    );
     let destination = Destination {
-        host: host
-            .parse()
-            .map_or_else(|_| Host::Domain(host.to_owned()), Host::Ip),
+        host: destination_host,
         port,
     };
     let started = tokio::time::Instant::now();
-    let stream: rewrite_outbound::BoxedOutboundStream = if matches!(name, "DIRECT" | "COMPATIBLE") {
-        Box::new(
-            rewrite_outbound::connect(&destination, config.ipv6)
-                .await
-                .map_err(|_| ())?,
-        )
-    } else {
-        let proxy = config
-            .proxies
-            .iter()
-            .chain(
-                config
-                    .proxy_providers
-                    .iter()
-                    .flat_map(|provider| provider.proxies.iter()),
+    let mut stream: rewrite_outbound::BoxedOutboundStream =
+        if matches!(name, "DIRECT" | "COMPATIBLE") {
+            Box::new(
+                rewrite_outbound::connect(&destination, config.ipv6)
+                    .await
+                    .map_err(|_| ())?,
             )
-            .find(|proxy| proxy.name == name)
-            .ok_or(())?;
-        let server = Destination {
-            host: proxy
-                .server
-                .parse()
-                .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-            port: proxy.port,
-        };
-        let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
-        match proxy.kind {
-            rewrite_config::ProxyKind::Http => {
-                let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
-                    server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
-                    skip_certificate_verification: proxy.skip_cert_verify,
-                });
-                rewrite_outbound::connect_http(
+        } else {
+            let proxy = config
+                .proxies
+                .iter()
+                .chain(
+                    config
+                        .proxy_providers
+                        .iter()
+                        .flat_map(|provider| provider.proxies.iter()),
+                )
+                .find(|proxy| proxy.name == name)
+                .ok_or(())?;
+            let server = Destination {
+                host: proxy
+                    .server
+                    .parse()
+                    .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+                port: proxy.port,
+            };
+            let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
+            match proxy.kind {
+                rewrite_config::ProxyKind::Http => {
+                    let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
+                        server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                        skip_certificate_verification: proxy.skip_cert_verify,
+                    });
+                    rewrite_outbound::connect_http(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        credentials,
+                        &proxy.headers,
+                        tls,
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
+                rewrite_config::ProxyKind::Socks5 => rewrite_outbound::connect_socks5(
                     &server,
                     &destination,
                     config.ipv6,
                     credentials,
-                    &proxy.headers,
-                    tls,
                 )
                 .await
-                .map_err(|_| ())?
+                .map_err(|_| ())?,
             }
-            rewrite_config::ProxyKind::Socks5 => {
-                rewrite_outbound::connect_socks5(&server, &destination, config.ipv6, credentials)
-                    .await
-                    .map_err(|_| ())?
-            }
-        }
-    };
+        };
+    if url.scheme() == "https" {
+        stream = rewrite_outbound::wrap_client_tls(stream, host, false, &config.trust_certificates)
+            .await
+            .map_err(|_| ())?;
+    }
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|_| ())?;
@@ -854,14 +1217,14 @@ async fn measure_http_delay(
         .map_err(|_| ())?;
     let response = sender.send_request(request).await.map_err(|_| ())?;
     let status = response.status().as_u16();
-    if !expected.is_empty()
-        && !expected
+    let satisfied = expected.is_empty()
+        || expected
             .iter()
-            .any(|(start, end)| (*start..=*end).contains(&status))
-    {
-        return Err(());
-    }
-    u16::try_from(started.elapsed().as_millis()).map_err(|_| ())
+            .any(|(start, end)| (*start..=*end).contains(&status));
+    Ok(DelayMeasurement {
+        delay: u16::try_from(started.elapsed().as_millis()).map_err(|_| ())?,
+        satisfied,
+    })
 }
 
 fn parse_status_ranges(value: &str) -> Option<Vec<(u16, u16)>> {
@@ -1324,8 +1687,13 @@ pub async fn healthcheck_proxy_provider_config(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(delay)) if delay > 0 => {
-                state.record_proxy_delay(member, &provider.health_check.url, delay, true);
+            Ok(Ok(measurement)) if measurement.delay > 0 => {
+                state.record_proxy_delay(
+                    member,
+                    &provider.health_check.url,
+                    measurement.delay,
+                    measurement.satisfied,
+                );
             }
             _ => state.record_proxy_delay(member, &provider.health_check.url, 0, false),
         }
@@ -1354,8 +1722,13 @@ pub async fn healthcheck_proxy_group(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(delay)) if delay > 0 => {
-                state.record_proxy_delay(member, &group.test_url, delay, true);
+            Ok(Ok(measurement)) if measurement.delay > 0 => {
+                state.record_proxy_delay(
+                    member,
+                    &group.test_url,
+                    measurement.delay,
+                    measurement.satisfied,
+                );
             }
             _ => state.record_proxy_delay(member, &group.test_url, 0, false),
         }
@@ -1651,17 +2024,13 @@ async fn update_configs(State(state): State<ControllerState>, request: Request) 
     let Ok(replacement) = decode_json_body::<ConfigReplacement>(request).await else {
         return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
     };
-    if replacement.payload.is_empty() {
-        let message = if replacement.path.is_empty() {
-            "path-based controller reload is not available for this input source".to_owned()
-        } else if !std::path::Path::new(&replacement.path).is_absolute() {
-            "path is not a absolute path".to_owned()
-        } else {
-            "path-based controller reload requires a declared safe root".to_owned()
-        };
-        return json_response(StatusCode::BAD_REQUEST, &json!({"message": message}));
-    }
-    let mut config = match Config::from_yaml(&replacement.payload) {
+    let current = state.current_config();
+    let mut config = match if replacement.payload.is_empty() {
+        let path = (!replacement.path.is_empty()).then(|| std::path::Path::new(&replacement.path));
+        current.replacement_from_safe_path(path)
+    } else {
+        current.replacement_from_yaml(&replacement.payload)
+    } {
         Ok(config) => config,
         Err(error) => {
             return json_response(
@@ -1672,16 +2041,70 @@ async fn update_configs(State(state): State<ControllerState>, request: Request) 
     };
     // Go ApplyConfig intentionally excludes the external controller. A PUT
     // updates the data plane without moving or re-keying the request's server.
-    let current = state.current_config();
+    preserve_controller_configuration(&mut config, &current);
+    apply_config_update(&state, config).await
+}
+
+fn preserve_controller_configuration(config: &mut Config, current: &Config) {
     config
         .external_controller
         .clone_from(&current.external_controller);
+    config
+        .external_controller_tls
+        .clone_from(&current.external_controller_tls);
+    config
+        .external_controller_unix
+        .clone_from(&current.external_controller_unix);
+    config
+        .external_controller_pipe
+        .clone_from(&current.external_controller_pipe);
+    config.external_controller_routing_mark = current.external_controller_routing_mark;
+    config.external_ui.clone_from(&current.external_ui);
+    config.external_ui_url.clone_from(&current.external_ui_url);
+    config
+        .external_ui_name
+        .clone_from(&current.external_ui_name);
     config
         .external_doh_server
         .clone_from(&current.external_doh_server);
     config.secret.clone_from(&current.secret);
     config.controller_cors.clone_from(&current.controller_cors);
-    apply_config_update(&state, config).await
+    config.controller_tls.clone_from(&current.controller_tls);
+}
+
+async fn restart(State(state): State<ControllerState>) -> Response {
+    if let Err(error) = std::env::current_exe() {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"message": format!("getting path: {error}")}),
+        );
+    }
+    let updates = state.config_updates.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (completion, result) = oneshot::channel();
+        if updates
+            .send(ConfigUpdate {
+                kind: ConfigUpdateKind::Restart,
+                completion,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = result.await;
+        }
+    });
+    json_response(StatusCode::OK, &json!({"status": "ok"}))
+}
+
+async fn debug_gc(State(state): State<ControllerState>) -> Response {
+    if state.current_config().log_level != rewrite_config::LogLevel::Debug {
+        return json_response(StatusCode::NOT_FOUND, &json!({"message": "Not Found"}));
+    }
+    // Rust allocators do not expose a portable equivalent of Go's
+    // debug.FreeOSMemory. The route and lifecycle contract are preserved; the
+    // allocator-specific release semantic remains explicitly tracked in 5E.
+    empty_response(StatusCode::OK)
 }
 
 async fn decode_json_body<T: for<'de> Deserialize<'de>>(request: Request) -> Result<T, ()> {
@@ -1857,14 +2280,16 @@ async fn memory(
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.tick().await;
     let shutdown = state.shutdown.clone();
+    let runtime = Arc::clone(&state.runtime);
     let body = Body::from_stream(stream::unfold(
-        (interval, shutdown),
-        |(mut interval, shutdown)| async move {
+        (interval, shutdown, runtime, true),
+        |(mut interval, shutdown, runtime, first)| async move {
             tokio::select! {
                 () = shutdown.cancelled() => None,
                 _ = interval.tick() => {
-                    let line = json_line(&MemorySnapshot { inuse: 0, oslimit: 0 });
-                    Some((Ok::<Bytes, Infallible>(line), (interval, shutdown)))
+                    let inuse = if first { 0 } else { runtime.process_memory() };
+                    let line = json_line(&MemorySnapshot { inuse, oslimit: 0 });
+                    Some((Ok::<Bytes, Infallible>(line), (interval, shutdown, runtime, false)))
                 }
             }
         },
@@ -1882,8 +2307,9 @@ async fn logs(
     else {
         return json_response(StatusCode::BAD_REQUEST, &json!({"message": "Body invalid"}));
     };
+    let format = LogFormat::parse(parameters.get("format").map_or("", String::as_str));
     if let Ok(websocket) = websocket {
-        return websocket.on_upgrade(move |socket| logs_websocket(socket, state, level));
+        return websocket.on_upgrade(move |socket| logs_websocket(socket, state, level, format));
     }
     let receiver = state.runtime.subscribe_logs();
     let shutdown = state.shutdown.clone();
@@ -1895,7 +2321,7 @@ async fn logs(
                     () = shutdown.cancelled() => return None,
                     result = receiver.recv() => match result {
                         Ok(event) if level.includes(&event.level) => {
-                            let line = json_line(&event);
+                            let line = json_line(&render_log_event(&event, format));
                             return Some((Ok::<Bytes, Infallible>(line), (receiver, shutdown)));
                         }
                         Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -1921,6 +2347,42 @@ enum LogFilter {
     Warning,
     Error,
     Silent,
+}
+
+#[derive(Clone, Copy)]
+enum LogFormat {
+    Simple,
+    Structured,
+}
+
+impl LogFormat {
+    fn parse(value: &str) -> Self {
+        if value == "structured" {
+            Self::Structured
+        } else {
+            Self::Simple
+        }
+    }
+}
+
+fn render_log_event(event: &rewrite_state::LogEvent, format: LogFormat) -> serde_json::Value {
+    match format {
+        LogFormat::Simple => json!({"type": event.level, "payload": event.payload}),
+        LogFormat::Structured => {
+            let now = OffsetDateTime::now_utc();
+            let level = if event.level == "warning" {
+                "warn"
+            } else {
+                &event.level
+            };
+            json!({
+                "time": format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second()),
+                "level": level,
+                "message": event.payload,
+                "fields": [],
+            })
+        }
+    }
 }
 
 impl LogFilter {
@@ -1990,18 +2452,26 @@ async fn traffic_websocket(mut socket: WebSocket, state: ControllerState) {
 async fn memory_websocket(mut socket: WebSocket, state: ControllerState) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.tick().await;
+    let mut first = true;
     loop {
         tokio::select! {
             () = state.shutdown.cancelled() => break,
             message = socket.recv() => if websocket_closed(message.as_ref()) { break },
             _ = interval.tick() => {
-                if send_json_message(&mut socket, &MemorySnapshot { inuse: 0, oslimit: 0 }).await.is_err() { break }
+                let inuse = if first { 0 } else { state.runtime.process_memory() };
+                first = false;
+                if send_json_message(&mut socket, &MemorySnapshot { inuse, oslimit: 0 }).await.is_err() { break }
             },
         }
     }
 }
 
-async fn logs_websocket(mut socket: WebSocket, state: ControllerState, level: LogFilter) {
+async fn logs_websocket(
+    mut socket: WebSocket,
+    state: ControllerState,
+    level: LogFilter,
+    format: LogFormat,
+) {
     let mut receiver = state.runtime.subscribe_logs();
     loop {
         tokio::select! {
@@ -2009,7 +2479,7 @@ async fn logs_websocket(mut socket: WebSocket, state: ControllerState, level: Lo
             message = socket.recv() => if websocket_closed(message.as_ref()) { break },
             result = receiver.recv() => match result {
                 Ok(event) if level.includes(&event.level) => {
-                    if send_json_message(&mut socket, &event).await.is_err() { break }
+                    if send_json_message(&mut socket, &render_log_event(&event, format)).await.is_err() { break }
                 }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2064,7 +2534,10 @@ fn json_line<T: Serialize>(value: &T) -> Bytes {
 
 fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     match serde_json::to_vec(value) {
-        Ok(body) => typed_response(status, "application/json", Body::from(body)),
+        Ok(mut body) => {
+            body.push(b'\n');
+            typed_response(status, "application/json", Body::from(body))
+        }
         Err(error) => plain_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }

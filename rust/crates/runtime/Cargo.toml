@@ -15,6 +15,7 @@ rewrite-inbound = { path = "../inbound" }
 rewrite-model = { path = "../model" }
 rewrite-net = { path = "../net" }
 rewrite-outbound = { path = "../outbound" }
+rewrite-platform = { path = "../platform" }
 rewrite-rules = { path = "../rules" }
 rewrite-state = { path = "../state" }
 rand.workspace = true

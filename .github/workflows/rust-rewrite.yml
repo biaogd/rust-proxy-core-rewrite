@@ -120,90 +120,95 @@ jobs:
             regex: 'phase(5d|6b)_[a-z0-9_]+\.py$'
     env:
       SHARD_REGEX: ${{ matrix.regex }}
-      PHASE1_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE2_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE3_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE4_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A1_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A2A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A2B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A3A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A4A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A4B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A4C_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A4D_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5C_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5D_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5E_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A5F_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6C_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6D_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6E_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6F_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A6G_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A7A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A7B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5A8A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B1A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B1B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B2A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B2B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B2C_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B2D_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B2E_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3A_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3B_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3C_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3D_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3E_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3F_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5B3G_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5BUDP_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5BCORE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DSTREAMS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DCONNECTIONS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DCORS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CSELECTOR_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CSELECTORRELOAD_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CFILEPROVIDER_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CGROUPFILTERS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CNESTED_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CEXCLUDETYPE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CPROVIDERREFRESH_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CSELECTORPERSIST_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CFALLBACK_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CFALLBACKCONTROL_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CFALLBACKDELAY_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CURLTEST_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CLOADBALANCE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CLOADBALANCEHASH_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHEALTHSCHEDULE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CDIALFAILURE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CSOCKSHEALTH_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDER_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDERREFRESH_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDERCACHE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CRULEPROVIDER_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CPROVIDERFEATURES_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CPROVIDERHTTPS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5CPROVIDERCONCURRENCY_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DCONFIGS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DPROXIES_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/rust/target
-      PHASE6BSOCKS_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE1_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE2_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE3_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE4_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A1_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A2A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A2B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A3A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A4A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A4B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A4C_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A4D_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5C_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5D_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5E_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A5F_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6C_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6D_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6E_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6F_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A6G_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A7A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A7B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5A8A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B1A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B1B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B2A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B2B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B2C_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B2D_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B2E_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3A_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3B_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3C_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3D_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3E_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3F_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5B3G_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5BUDP_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5BCORE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DSTREAMS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DCONNECTIONS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DCORS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CSELECTOR_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CSELECTORRELOAD_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CFILEPROVIDER_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CGROUPFILTERS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CNESTED_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CEXCLUDETYPE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CPROVIDERREFRESH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CSELECTORPERSIST_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CFALLBACK_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CFALLBACKCONTROL_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CFALLBACKDELAY_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CURLTEST_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CLOADBALANCE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CLOADBALANCEHASH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHEALTHSCHEDULE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CDIALFAILURE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CSOCKSHEALTH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDER_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDERREFRESH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDERCACHE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CRULEPROVIDER_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CPROVIDERFEATURES_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CPROVIDERHTTPS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5CPROVIDERCONCURRENCY_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DCONFIGS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DMODES_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DPROVIDERS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DPROXIES_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DRULES_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DSTORAGE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DTRANSPORT_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DCONFIGPATH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DSTORAGEPERSIST_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DRESTART_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE5DHTTPSHEALTH_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE6BHTTP_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE6BHTTPTLS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+      PHASE6BSOCKS_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -274,6 +279,11 @@ jobs:
             compat/scripts/phase5d_cors.py \
             compat/scripts/phase5d_connections.py \
             compat/scripts/phase5d_streams.py \
+            compat/scripts/phase5d_transports.py \
+            compat/scripts/phase5d_config_paths.py \
+            compat/scripts/phase5d_storage_persistence.py \
+            compat/scripts/phase5d_restart.py \
+            compat/scripts/phase5d_https_health.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
@@ -392,3 +402,38 @@ jobs:
 
       - name: Run native system resolver contracts
         run: cargo test --manifest-path rust/Cargo.toml -p rewrite-platform --all-features
+
+  windows-controller-pipe:
+    name: Windows controller named-pipe differential
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PHASE5DPIPE_CARGO_TARGET: ${{ runner.temp }}/mihomo-rust-target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Run native named-pipe differential
+        run: python compat/scripts/phase5d_windows_pipe.py
+
+      - name: Upload named-pipe failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase5d-windows-pipe-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

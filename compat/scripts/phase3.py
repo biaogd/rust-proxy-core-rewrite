@@ -89,11 +89,17 @@ def launch(binary: pathlib.Path, config: pathlib.Path, scratch: pathlib.Path) ->
 
 def stop(process: subprocess.Popen[bytes]) -> int:
     if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
     try:
         return process.wait(timeout=IO_DEADLINE)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
         return process.wait(timeout=IO_DEADLINE)
 
 

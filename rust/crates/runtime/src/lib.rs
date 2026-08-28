@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::future::pending;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -9,8 +11,8 @@ use futures_util::StreamExt;
 use notify::{RecursiveMode, Watcher};
 use rand::RngExt;
 use rewrite_config::{
-    Config, ConfigError, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy, Mode,
-    ProxyGroupKind, ProxyKind, ProxyProviderVehicle,
+    Config, ConfigError, ControllerTls, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy,
+    Mode, ProxyGroupKind, ProxyKind, ProxyProviderVehicle,
 };
 use rewrite_inbound::{InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
@@ -34,6 +36,32 @@ pub enum RuntimeError {
 struct RuntimeTask {
     shutdown: CancellationToken,
     handle: JoinHandle<()>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ControllerKey {
+    Tcp(SocketAddr, i64, Option<PathBuf>),
+    Tls(SocketAddr, i64, ControllerTls, Option<PathBuf>),
+    #[cfg(unix)]
+    Unix(PathBuf, Option<PathBuf>),
+    #[cfg(windows)]
+    Pipe(String, Option<PathBuf>),
+}
+
+enum PreparedController {
+    Tcp(ControllerKey, TcpListener),
+    Tls(
+        ControllerKey,
+        TcpListener,
+        Box<tokio_rustls::rustls::ServerConfig>,
+    ),
+    #[cfg(unix)]
+    Unix(ControllerKey, tokio::net::UnixListener),
+    #[cfg(windows)]
+    Pipe(
+        ControllerKey,
+        tokio::net::windows::named_pipe::NamedPipeServer,
+    ),
 }
 
 /// One-shot process lifecycle barriers used by synchronous shell hooks.
@@ -116,11 +144,12 @@ async fn run_with_reload_inner(
     lifecycle: Option<LifecycleSignals>,
 ) -> Result<(), RuntimeError> {
     let state = Arc::new(RuntimeState::default());
+    state.enable_storage_persistence();
     let dns_service = Arc::new(rewrite_dns::DnsService::new());
     let (config_sender, config_receiver) = watch::channel(Arc::new(initial.clone()));
     let (controller_update_sender, mut controller_updates) = mpsc::channel(4);
     let mut listeners = BTreeMap::new();
-    let mut controller: Option<(SocketAddr, RuntimeTask)> = None;
+    let mut controllers = BTreeMap::new();
     let mut dns: Option<(SocketAddr, RuntimeTask)> = None;
 
     apply_generation(
@@ -131,7 +160,7 @@ async fn run_with_reload_inner(
         &dns_service,
         &controller_update_sender,
         &mut listeners,
-        &mut controller,
+        &mut controllers,
         &mut dns,
     )
     .await?;
@@ -153,6 +182,7 @@ async fn run_with_reload_inner(
             (shutdown_hook_ready, continue_shutdown)
         },
     );
+    let mut restart_requested = false;
 
     loop {
         tokio::select! {
@@ -170,7 +200,7 @@ async fn run_with_reload_inner(
                     &dns_service,
                     &controller_update_sender,
                     &mut listeners,
-                    &mut controller,
+                    &mut controllers,
                     &mut dns,
                 ).await {
                     state.log("error", format!("configuration reload failed: {error}"));
@@ -183,7 +213,7 @@ async fn run_with_reload_inner(
                 let Some(update) = update else {
                     continue;
                 };
-                apply_controller_update(
+                if apply_controller_update(
                     update,
                     &config_sender,
                     &config_receiver,
@@ -191,9 +221,12 @@ async fn run_with_reload_inner(
                     &dns_service,
                     &controller_update_sender,
                     &mut listeners,
-                    &mut controller,
+                    &mut controllers,
                     &mut dns,
-                ).await;
+                ).await {
+                    restart_requested = true;
+                    break;
+                }
             }
         }
     }
@@ -206,8 +239,9 @@ async fn run_with_reload_inner(
     for (_, task) in listeners {
         stop_task(task).await;
     }
-    if let Some((_, task)) = controller {
+    for (key, task) in controllers {
         stop_task(task).await;
+        cleanup_controller_key(&key);
     }
     if let Some((_, task)) = dns {
         stop_task(task).await;
@@ -216,6 +250,9 @@ async fn run_with_reload_inner(
     stop_task(provider_health).await;
     stop_task(providers).await;
     stop_task(provider_files).await;
+    if restart_requested {
+        restart_current_process();
+    }
     Ok(())
 }
 
@@ -228,9 +265,13 @@ async fn apply_controller_update(
     dns_service: &Arc<rewrite_dns::DnsService>,
     controller_update_sender: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
     listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
-    controller: &mut Option<(SocketAddr, RuntimeTask)>,
+    controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
-) {
+) -> bool {
+    if matches!(&update.kind, rewrite_controller::ConfigUpdateKind::Restart) {
+        let _ = update.completion.send(Ok(()));
+        return true;
+    }
     let next = match update.kind {
         rewrite_controller::ConfigUpdateKind::Replace(config) => Ok(*config),
         rewrite_controller::ConfigUpdateKind::RefreshProxyProvider(name) => {
@@ -255,6 +296,7 @@ async fn apply_controller_update(
                 .await
                 .map(|()| config)
         }
+        rewrite_controller::ConfigUpdateKind::Restart => unreachable!("handled above"),
     };
     let result = match next {
         Ok(next) => apply_generation(
@@ -265,7 +307,7 @@ async fn apply_controller_update(
             dns_service,
             controller_update_sender,
             listeners,
-            controller,
+            controllers,
             dns,
         )
         .await
@@ -281,7 +323,36 @@ async fn apply_controller_update(
         state.log("info", "controller configuration updated");
     }
     let _ = update.completion.send(result);
+    false
 }
+
+#[cfg(unix)]
+fn restart_current_process() {
+    use std::os::unix::process::CommandExt;
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let error = std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    eprintln!("restarting: {error}");
+}
+
+#[cfg(windows)]
+fn restart_current_process() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    if let Err(error) = std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+    {
+        eprintln!("restarting: {error}");
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn restart_current_process() {}
 
 fn start_group_health_scheduler(
     config: watch::Receiver<Arc<Config>>,
@@ -1034,6 +1105,7 @@ fn persist_http_proxy_provider(path: &Path, payload: &[u8]) -> std::io::Result<(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn apply_generation(
     mut next: Config,
     config_sender: &watch::Sender<Arc<Config>>,
@@ -1042,12 +1114,12 @@ async fn apply_generation(
     dns_service: &Arc<rewrite_dns::DnsService>,
     controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
     listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
-    controller: &mut Option<(SocketAddr, RuntimeTask)>,
+    controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
     hydrate_http_proxy_providers(&mut next, state).await;
     let desired_listeners = next.listener_ports()?;
-    let desired_controller = next.controller_addr()?;
+    let desired_controllers = controller_keys(&next)?;
     let desired_dns = next.dns.as_ref().map(|config| config.listen);
 
     let mut prepared_listeners = Vec::new();
@@ -1064,16 +1136,26 @@ async fn apply_generation(
         };
         prepared_listeners.push((kind, port, listener, udp));
     }
-    let prepared_controller = if desired_controller.is_some_and(|address| {
-        controller
-            .as_ref()
-            .is_none_or(|(current, _)| *current != address)
-    }) {
-        let address = desired_controller.expect("checked as present");
-        Some((address, TcpListener::bind(address).await?))
-    } else {
-        None
-    };
+    let mut prepared_controllers = Vec::new();
+    for key in &desired_controllers {
+        if controllers.contains_key(key) {
+            continue;
+        }
+        let replaced = controllers
+            .keys()
+            .find(|current| same_controller_kind(current, key))
+            .cloned();
+        if let Some(replaced) = replaced
+            && let Some(task) = controllers.remove(&replaced)
+        {
+            stop_task(task).await;
+            cleanup_controller_key(&replaced);
+        }
+        match prepare_controller(key.clone()) {
+            Ok(prepared) => prepared_controllers.push(prepared),
+            Err(error) => state.log("error", format!("controller listen failed: {error}")),
+        }
+    }
     let prepared_dns = if desired_dns
         .is_some_and(|address| dns.as_ref().is_none_or(|(current, _)| *current != address))
     {
@@ -1109,14 +1191,14 @@ async fn apply_generation(
         );
     }
 
-    apply_controller_task(
-        prepared_controller,
-        desired_controller,
+    apply_controller_tasks(
+        prepared_controllers,
+        &desired_controllers,
         config_receiver,
         state,
         dns_service,
         controller_updates,
-        controller,
+        controllers,
     )
     .await;
 
@@ -1142,6 +1224,98 @@ async fn apply_generation(
         }
     }
     Ok(())
+}
+
+fn controller_keys(config: &Config) -> Result<Vec<ControllerKey>, ConfigError> {
+    let mut keys = Vec::new();
+    let ui_path = config.external_ui_path();
+    if let Some(address) = config.controller_tcp_addr()? {
+        keys.push(ControllerKey::Tcp(
+            address,
+            config.external_controller_routing_mark,
+            ui_path.clone(),
+        ));
+    }
+    if let Some(address) = config.controller_tls_addr()? {
+        keys.push(ControllerKey::Tls(
+            address,
+            config.external_controller_routing_mark,
+            config.controller_tls.clone(),
+            ui_path.clone(),
+        ));
+    }
+    #[cfg(unix)]
+    if let Some(path) = config.controller_unix_path() {
+        keys.push(ControllerKey::Unix(path, ui_path.clone()));
+    }
+    #[cfg(windows)]
+    if !config.external_controller_pipe.is_empty() {
+        keys.push(ControllerKey::Pipe(
+            config.external_controller_pipe.clone(),
+            ui_path,
+        ));
+    }
+    Ok(keys)
+}
+
+fn same_controller_kind(left: &ControllerKey, right: &ControllerKey) -> bool {
+    match (left, right) {
+        (ControllerKey::Tcp(..), ControllerKey::Tcp(..))
+        | (ControllerKey::Tls(..), ControllerKey::Tls(..)) => true,
+        #[cfg(unix)]
+        (ControllerKey::Unix(..), ControllerKey::Unix(..)) => true,
+        #[cfg(windows)]
+        (ControllerKey::Pipe(..), ControllerKey::Pipe(..)) => true,
+        _ => false,
+    }
+}
+
+fn prepare_controller(key: ControllerKey) -> Result<PreparedController, RuntimeError> {
+    match key {
+        ControllerKey::Tcp(address, mark, ui_path) => {
+            let key = ControllerKey::Tcp(address, mark, ui_path);
+            let listener = rewrite_platform::bind_marked_tcp_listener(address, mark)?;
+            Ok(PreparedController::Tcp(
+                key,
+                TcpListener::from_std(listener)?,
+            ))
+        }
+        ControllerKey::Tls(address, mark, tls, ui_path) => {
+            let prepared_tls = rewrite_controller::prepare_tls_config(&tls)?;
+            let listener =
+                TcpListener::from_std(rewrite_platform::bind_marked_tcp_listener(address, mark)?)?;
+            Ok(PreparedController::Tls(
+                ControllerKey::Tls(address, mark, tls, ui_path),
+                listener,
+                Box::new(prepared_tls),
+            ))
+        }
+        #[cfg(unix)]
+        ControllerKey::Unix(path, ui_path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+            Ok(PreparedController::Unix(
+                ControllerKey::Unix(path, ui_path),
+                listener,
+            ))
+        }
+        #[cfg(windows)]
+        ControllerKey::Pipe(name, ui_path) => {
+            let listener = rewrite_controller::prepare_named_pipe(&name)?;
+            Ok(PreparedController::Pipe(
+                ControllerKey::Pipe(name, ui_path),
+                listener,
+            ))
+        }
+    }
 }
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
@@ -1173,47 +1347,101 @@ fn sync_selector_state(state: &RuntimeState, config: &Config) {
     state.retain_proxy_health(health_names);
 }
 
-async fn apply_controller_task(
-    prepared: Option<(SocketAddr, TcpListener)>,
-    desired: Option<SocketAddr>,
+async fn apply_controller_tasks(
+    prepared: Vec<PreparedController>,
+    desired: &[ControllerKey],
     config: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
     config_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
-    current: &mut Option<(SocketAddr, RuntimeTask)>,
+    current: &mut BTreeMap<ControllerKey, RuntimeTask>,
 ) {
-    if let Some((address, listener)) = prepared {
-        if let Some((_, previous)) = current.take() {
-            stop_task(previous).await;
-        }
+    for prepared in prepared {
         let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config.clone();
         let task_state = Arc::clone(state);
         let task_dns_service = Arc::clone(dns_service);
         let task_config_updates = config_updates.clone();
-        let handle = tokio::spawn(async move {
-            rewrite_controller::serve(
-                listener,
-                task_dns_service,
-                task_config,
-                task_state,
-                task_config_updates,
-                child_shutdown,
-            )
-            .await;
-        });
-        *current = Some((
-            address,
+        let (key, handle) = match prepared {
+            PreparedController::Tcp(key, listener) => {
+                let handle = tokio::spawn(rewrite_controller::serve_tcp(
+                    listener,
+                    task_dns_service,
+                    task_config,
+                    task_state,
+                    task_config_updates,
+                    child_shutdown,
+                    true,
+                ));
+                (key, handle)
+            }
+            PreparedController::Tls(key, listener, tls) => {
+                let handle = tokio::spawn(rewrite_controller::serve_tls(
+                    listener,
+                    task_dns_service,
+                    task_config,
+                    task_state,
+                    task_config_updates,
+                    child_shutdown,
+                    *tls,
+                ));
+                (key, handle)
+            }
+            #[cfg(unix)]
+            PreparedController::Unix(key, listener) => {
+                let handle = tokio::spawn(rewrite_controller::serve_unix(
+                    listener,
+                    task_dns_service,
+                    task_config,
+                    task_state,
+                    task_config_updates,
+                    child_shutdown,
+                ));
+                (key, handle)
+            }
+            #[cfg(windows)]
+            PreparedController::Pipe(key, listener) => {
+                let ControllerKey::Pipe(name, ..) = &key else {
+                    unreachable!("pipe preparation has a pipe key")
+                };
+                let handle = tokio::spawn(rewrite_controller::serve_named_pipe(
+                    listener,
+                    name.clone(),
+                    task_dns_service,
+                    task_config,
+                    task_state,
+                    task_config_updates,
+                    child_shutdown,
+                ));
+                (key, handle)
+            }
+        };
+        current.insert(
+            key,
             RuntimeTask {
                 shutdown: task_shutdown,
                 handle,
             },
-        ));
-    } else if desired.is_none()
-        && let Some((_, previous)) = current.take()
-    {
-        stop_task(previous).await;
+        );
+    }
+    let obsolete = current
+        .keys()
+        .filter(|key| !desired.contains(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in obsolete {
+        if let Some(previous) = current.remove(&key) {
+            stop_task(previous).await;
+            cleanup_controller_key(&key);
+        }
+    }
+}
+
+fn cleanup_controller_key(key: &ControllerKey) {
+    #[cfg(unix)]
+    if let ControllerKey::Unix(path, ..) = key {
+        let _ = std::fs::remove_file(path);
     }
 }
 

@@ -60,7 +60,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | CFG-01 | General ports, bind/LAN/auth, mode, logging, IPv6, interface, routing mark, TFO, MPTCP, TCP concurrency and keepalive | Partial | 5A9 plus listener/platform gates |
-| CFG-02 | Controller TCP/TLS/Unix/Windows pipe, routing mark, CORS, secret, external UI/URL/name and external DoH mount | Partial | 5D1–5D3 |
+| CFG-02 | Controller TCP/TLS/Unix/Windows pipe, routing mark, CORS, secret, external UI/URL/name and external DoH mount | Partial: TCP/TLS/Unix, public UI/DoH, auth/CORS, hot replacement and native pipe CI are implemented; nonzero Linux mark and full TLS client-auth/ECH retain platform/service gates | 5D complete boundary; 5E2/5F platform evidence remain |
 | CFG-03 | Proxies, reserved built-ins, duplicate/reserved-name checks and dependency ordering | Not started | 6A0 |
 | CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: Phase 5C current-adapter group strategies/composition/health complete | Later adapter-specific validation gates |
 | CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: Phase 5C current-adapter vehicles/health/lifecycle plus rule providers complete | Named download proxy, override-expression, encryption and later adapter gates |
@@ -213,7 +213,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
 | RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Not started | Platform gates |
-| RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Partial HTTP/WebSocket local subset | 5D4 |
+| RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
 | RUN-08 | Power/network change handling and resolver/connection reset | Not started | 8F |
 | RUN-09 | Bounded queues, backpressure, concurrency limits, cancellation and leak/stress behavior | Partial | Every release/protocol gate |
@@ -225,19 +225,19 @@ the mounted route files below [`hub/route`](../../hub/route).
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| API-01 | TCP/TLS/Unix/Windows-pipe controller listeners, routing mark and replacement | Partial TCP only | 5D1 plus platform gates |
-| API-02 | Bearer/query/WebSocket authentication and CORS | Complete on current TCP controller surface | 5D2 |
-| API-03 | `/`, `/version`, `/memory`, `/traffic`, `/logs` HTTP/WebSocket contracts | Partial: ordinary JSON and observability streams | 5D3–5D4 |
-| API-04 | `/configs` GET/PUT/PATCH and `/configs/geo` | Partial GET subset | 5D5 |
-| API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Partial: current built-ins/GLOBAL plus local-HTTP delay | 5D7 |
-| API-06 | `/rules` list/statistics and disable mutation | Partial: current top-level executable rules | 5D8 |
+| API-01 | TCP/TLS/Unix/Windows-pipe controller listeners, routing mark and replacement | Complete in 5D transport scope on Darwin; Windows pipe and Linux behavior are native CI gates, while nonzero mark remains a privileged platform claim | 5D complete boundary plus 5F platform evidence |
+| API-02 | Bearer/query/WebSocket authentication and CORS | Complete across current TCP/TLS surface; local Unix/pipe deliberately bypass secret like Go | 5D complete boundary |
+| API-03 | `/`, `/version`, `/memory`, `/traffic`, `/logs` HTTP/WebSocket contracts | Complete in declared HTTP/WS cadence/shape/filter scope; lag/backpressure stress remains RUN-09 | 5D complete boundary |
+| API-04 | `/configs` GET/PUT/PATCH and `/configs/geo` | Partial: executable fields, inline/default/safe absolute replacement and rollback pass; unimplemented runtime fields and Geo service remain dependent gates | 5D complete boundary; 5E4/feature gates remain |
+| API-05 | `/proxies` list/detail/delay/select/delete and `/group` list/detail/delay | Complete for every currently executable built-in/configured adapter and group, including HTTPS/custom-root health; future protocol views follow their adapter gates | 5D complete boundary plus protocol gates |
+| API-06 | `/rules` list/statistics and disable mutation | Complete for the currently executable rule program; future rule kinds follow their rule/geodata gates | 5D complete boundary plus 5B4 |
 | API-07 | `/connections` list/WebSocket/delete-one/delete-all | Complete on current local TCP controller surface | 5D9 |
-| API-08 | Proxy/rule provider list/detail/update/health endpoints | Partial: implicit default proxy provider and empty rule-provider registry | 5D10 external vehicle/runtime gate |
+| API-08 | Proxy/rule provider list/detail/update/health endpoints | Complete for current inline/file/HTTP/HTTPS proxy and rule-provider vehicles, refresh, health and persistence scope; future adapters/overrides remain their own gates | 5C plus 5D complete boundary |
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
-| API-10 | `/storage/{key}` GET/PUT/DELETE | Partial: complete process-local JSON lifecycle | 5D11 persistence gate |
-| API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Not started | 5D12 |
-| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: external DoH mount passes Phase 4F15; UI and debug/GC remain | 5D13 |
-| API-13 | Exact JSON fields, headers, status/error bodies, stream cadence and concurrent behavior across all routes | Partial | Required in each API gate |
+| API-10 | `/storage/{key}` GET/PUT/DELETE | Complete: exact JSON lifecycle, bounded LRU, restart persistence and Go bbolt MessagePack interchange pass | 5D complete boundary |
+| API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Partial: authenticated restart/re-exec is compatible; core/UI/Geo downloads require SVC-04/SVC-05 and remain 5E | 5D restart boundary; 5E4–5E5 update services |
+| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: UI redirect/files/reload, public DoH and public debug GC pass; Go pprof/expvar payload semantics remain a platform diagnostics gate | 5D complete boundary plus 5F diagnostics |
+| API-13 | Exact JSON fields, headers, status/error bodies, stream cadence and concurrent behavior across all routes | Partial by design: exactness passes for every accepted 5D route; routes owned by unimplemented services remain unclaimed | Required in every later API/service gate |
 
 ## Supporting services and persistence
 
@@ -245,7 +245,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | --- | --- | --- | --- |
 | SVC-01 | NTP polling, proxy dialing, clock write and reload/shutdown | Not started | 5E1 |
 | SVC-02 | Global TLS CA/client certificates and ECH | Not started | 5E2 |
-| SVC-03 | Profile/cache database selected-group, fake-IP and storage state, corruption/migration/interchange | Partial Rust-only fake-IP JSON | 5E3 |
+| SVC-03 | Profile/cache database selected-group, fake-IP and storage state, corruption/migration/interchange | Partial: fake-IP and controller storage use Go-compatible bbolt records; selected-group and remaining migration/concurrency cases remain | 5E3 |
 | SVC-04 | Geodata/MMDB/MRS loading, matching, download/update, ETag and failure rollback | Not started | 5E4 |
 | SVC-05 | External UI download/update and safe path handling | Not started | 5E5 |
 | SVC-06 | Memory accounting, buffer pools and low-memory behavior | Not started | 8E |
