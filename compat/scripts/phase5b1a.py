@@ -18,6 +18,7 @@ from phase1 import (
     ROOT,
     RUST_ROOT,
     assert_go_oracle_baseline,
+    cargo_target_path,
     connect_proxy,
     recv_exact,
     recv_until,
@@ -43,11 +44,7 @@ def build_binaries(
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        os.environ.get(
-            cargo_target_variable, ROOT / "target" / "compat" / default_target_name
-        )
-    )
+    target = cargo_target_path(cargo_target_variable, default_target_name)
     subprocess.run(
         ["cargo", "build", "--workspace", "--target-dir", str(target)],
         cwd=RUST_ROOT,

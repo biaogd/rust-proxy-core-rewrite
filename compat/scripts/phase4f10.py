@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import socket
 import socketserver
@@ -18,6 +17,7 @@ from phase1 import (
     EchoHandler,
     IO_DEADLINE,
     ROOT,
+    cargo_target_path,
     recv_exact,
     reserve_port,
     socks_connect,
@@ -178,9 +178,7 @@ def build_helpers(root: pathlib.Path) -> dict[str, pathlib.Path]:
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        os.environ.get("PHASE4_CARGO_TARGET", ROOT / "target" / "compat" / "phase4-rust")
-    )
+    target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
     return {
         "go-product": products["go"],
         "rust-product": products["rust"],

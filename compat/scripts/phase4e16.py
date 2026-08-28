@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import subprocess
 import tempfile
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port
+from phase1 import IO_DEADLINE, ROOT, cargo_target_path, reserve_port
 from phase4 import build_binaries, dns_query, launch, observe_response, stop, wait_dns_ready
 from phase4e2 import ROOT_CERTIFICATE, SERVER_CERTIFICATE, SERVER_KEY
 from phase4e5 import encrypted_udp_query
@@ -22,11 +21,7 @@ SERVER_NAME = "dot.phase4.test"
 
 
 def authority_binary() -> pathlib.Path:
-    target = pathlib.Path(
-        os.environ.get(
-            "PHASE4_CARGO_TARGET", ROOT / "target" / "compat" / "phase4-rust"
-        )
-    )
+    target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
     return target / "debug" / "phase4e16-h3-authority"
 
 

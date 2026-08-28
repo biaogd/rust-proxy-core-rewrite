@@ -12,7 +12,7 @@ import subprocess
 import sys
 from typing import Any
 
-from phase1 import assert_go_oracle_baseline
+from phase1 import assert_go_oracle_baseline, cargo_target_path
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -26,14 +26,11 @@ DEFAULT_SEED = 0xC0E43EBE
 def build_binaries() -> dict[str, pathlib.Path]:
     assert_go_oracle_baseline()
 
-    build_root = ROOT / "target" / "compat" / "phase2"
-    build_root.mkdir(parents=True, exist_ok=True)
+    rust_target = cargo_target_path("PHASE2_CARGO_TARGET", "phase2-rust")
+    rust_target.mkdir(parents=True, exist_ok=True)
     go_override = os.environ.get("PHASE2_GO_ORACLE")
     rust_override = os.environ.get("PHASE2_RUST_ORACLE")
-    go_binary = pathlib.Path(go_override) if go_override else build_root / "go-oracle"
-    rust_target = pathlib.Path(
-        os.environ.get("PHASE2_CARGO_TARGET", build_root / "rust-target")
-    )
+    go_binary = pathlib.Path(go_override) if go_override else rust_target / "go-oracle"
     rust_binary = (
         pathlib.Path(rust_override)
         if rust_override

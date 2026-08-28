@@ -19,6 +19,7 @@ from phase1 import (
     ROOT,
     RUST_ROOT,
     assert_go_oracle_baseline,
+    cargo_target_path,
     reserve_port,
     wait_for_linux_signal_handlers,
     wait_ready,
@@ -38,11 +39,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        os.environ.get(
-            "PHASE5A8A_CARGO_TARGET", ROOT / "target" / "compat" / "phase5a8a-rust"
-        )
-    )
+    target = cargo_target_path("PHASE5A8A_CARGO_TARGET", "phase5a8a-rust")
     subprocess.run(
         ["cargo", "build", "-p", "rewrite-cli", "--target-dir", str(target)],
         cwd=RUST_ROOT,

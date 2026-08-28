@@ -15,7 +15,14 @@ import threading
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, RUST_ROOT, assert_go_oracle_baseline, reserve_port
+from phase1 import (
+    IO_DEADLINE,
+    ROOT,
+    RUST_ROOT,
+    assert_go_oracle_baseline,
+    cargo_target_path,
+    reserve_port,
+)
 
 
 FIXTURE = ROOT / "compat" / "fixtures" / "phase4" / "dns.yaml.tmpl"
@@ -200,9 +207,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        os.environ.get("PHASE4_CARGO_TARGET", ROOT / "target" / "compat" / "phase4-rust")
-    )
+    target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
     subprocess.run(
         ["cargo", "build", "--workspace", "--target-dir", str(target)],
         cwd=RUST_ROOT,

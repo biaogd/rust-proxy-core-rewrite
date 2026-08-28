@@ -4,13 +4,12 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import subprocess
 import tempfile
 from typing import Any
 
-from phase1 import ROOT, RUST_ROOT, reserve_port
+from phase1 import ROOT, RUST_ROOT, cargo_target_path, reserve_port
 from phase4 import build_binaries
 
 
@@ -66,9 +65,7 @@ def wire_observation(scratch: pathlib.Path) -> dict[str, Any]:
         check=True,
     )
     go = json.loads(subprocess.check_output([str(go_contract)], text=True))
-    target = pathlib.Path(
-        os.environ.get("PHASE4_CARGO_TARGET", ROOT / "target" / "compat" / "phase4-rust")
-    )
+    target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
     subprocess.run(
         [
             "cargo",

@@ -10,7 +10,13 @@ import subprocess
 import tempfile
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, RUST_ROOT, assert_go_oracle_baseline
+from phase1 import (
+    IO_DEADLINE,
+    ROOT,
+    RUST_ROOT,
+    assert_go_oracle_baseline,
+    cargo_target_path,
+)
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5a5a-diff.json"
@@ -24,11 +30,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        os.environ.get(
-            "PHASE5A5A_CARGO_TARGET", ROOT / "target" / "compat" / "phase5a5a-rust"
-        )
-    )
+    target = cargo_target_path("PHASE5A5A_CARGO_TARGET", "phase5a5a-rust")
     subprocess.run(
         ["cargo", "build", "-p", "rewrite-cli", "--target-dir", str(target)],
         cwd=RUST_ROOT,

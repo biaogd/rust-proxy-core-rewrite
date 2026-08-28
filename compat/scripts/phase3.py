@@ -24,6 +24,7 @@ from phase1 import (
     ROOT,
     RUST_ROOT,
     assert_go_oracle_baseline,
+    cargo_target_path,
     connect_proxy,
     recv_all,
     recv_exact,
@@ -49,9 +50,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
             cwd=ROOT,
             check=True,
         )
-    rust_target = pathlib.Path(
-        os.environ.get("PHASE3_CARGO_TARGET", ROOT / "target" / "compat" / "phase3-rust")
-    )
+    rust_target = cargo_target_path("PHASE3_CARGO_TARGET", "phase3-rust")
     rust_override = os.environ.get("PHASE3_RUST_BINARY")
     rust_binary = (
         pathlib.Path(rust_override)

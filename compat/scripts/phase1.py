@@ -97,6 +97,21 @@ def run_checked(command: list[str], *, cwd: pathlib.Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+def cargo_target_path(environment: str, name: str) -> pathlib.Path:
+    """Resolve a test target without falling back inside the repository."""
+    override = os.environ.get(environment)
+    if override:
+        return pathlib.Path(override)
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--format-version=1", "--no-deps"],
+            cwd=RUST_ROOT,
+            text=True,
+        )
+    )
+    return pathlib.Path(metadata["target_directory"]) / "compat" / name
+
+
 def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
     assert_go_oracle_baseline()
 
@@ -104,11 +119,7 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
     go_binary = pathlib.Path(go_override) if go_override else output / "go-oracle"
     if not go_override:
         run_checked(["go", "build", "-trimpath", "-o", str(go_binary), "."], cwd=ROOT)
-    rust_target = pathlib.Path(
-        os.environ.get(
-            "PHASE1_CARGO_TARGET", ROOT / "target" / "compat" / "rust-target"
-        )
-    )
+    rust_target = cargo_target_path("PHASE1_CARGO_TARGET", "rust-target")
     rust_override = os.environ.get("PHASE1_RUST_BINARY")
     rust_binary = (
         pathlib.Path(rust_override)

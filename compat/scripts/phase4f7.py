@@ -10,7 +10,7 @@ import tempfile
 import time
 from typing import Any
 
-from phase1 import ROOT, reserve_port
+from phase1 import ROOT, cargo_target_path, reserve_port
 from phase4 import build_binaries
 from phase4f2 import LocalAuthority
 
@@ -71,11 +71,7 @@ def build_helpers(root: pathlib.Path) -> dict[str, pathlib.Path]:
         cwd=ROOT,
         check=True,
     )
-    target = pathlib.Path(
-        __import__("os").environ.get(
-            "PHASE4_CARGO_TARGET", ROOT / "target" / "compat" / "phase4-rust"
-        )
-    )
+    target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
     return {
         "go-product": binaries["go"],
         "rust-product": binaries["rust"],
