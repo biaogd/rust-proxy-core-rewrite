@@ -86,8 +86,6 @@ jobs:
             os: macos-latest
             expected_runner_arch: ARM64
             expected_uname_arch: arm64
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/mihomo-rust-native-target
     defaults:
       run:
         shell: bash
@@ -124,6 +122,8 @@ jobs:
             native-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
 
       - name: Build full Rust workspace natively
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mihomo-rust-native-target
         run: cargo build --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked
 
   go-baseline:
