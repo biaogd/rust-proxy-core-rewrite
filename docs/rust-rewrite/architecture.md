@@ -443,6 +443,14 @@ subcommands before normal startup. `-v` prints build/runtime information. `-t`
 parses and validates configuration without applying it. Normal startup installs
 SIGINT/SIGTERM shutdown and SIGHUP reload handling.
 
+The post-6B behavior-neutral `rewrite-ruleset` split keeps those conversion
+entry points behind a small crate facade. Public errors and source-format types
+live in `model`; text and streaming-YAML extraction in `source`; IP range and
+succinct-domain-set construction in `encode`; and zstd/MRS validation, trie
+walking and canonical text rendering in `decode`. Unit fixtures are isolated in
+`tests`. The CLI and provider consumers continue to use the same six public
+symbols from the crate root.
+
 Configuration input precedence is observable and must be preserved:
 
 1. `-config` / `CLASH_CONFIG_STRING` supplies base64-encoded bytes.

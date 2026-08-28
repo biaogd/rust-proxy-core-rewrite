@@ -4704,6 +4704,42 @@ enable/disable controller boundary. Existing Phase 2, Phase 4D3A, Phase 5A2,
 Phase 5A3, Phase 5B and Phase 5D rule/routing matrix claims remain unchanged;
 this refactor adds no feature or platform compatibility claim.
 
+## Ruleset conversion module refactor
+
+The behavior-neutral post-6B structure pass replaces the 700-line ruleset
+crate root with a 12-line facade. Public errors and source formats live in
+`model`; text and streaming-YAML input extraction in `source`; IP range and
+succinct-domain-set construction in `encode`; MRS validation, trie traversal
+and canonical text rendering in `decode`; and unit fixtures in `tests`. The two
+public types and four conversion functions remain available under the same
+crate-root names and signatures.
+
+Every module uses explicit imports; the ruleset source tree contains no
+`use super` or wildcard module imports. Focused local acceptance on Darwin
+arm64, 2026-08-28:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+python3 compat/scripts/phase5a5a.py
+python3 compat/scripts/phase5a5b.py
+python3 compat/scripts/phase5a5c.py
+python3 compat/scripts/phase5a5d.py
+python3 compat/scripts/phase5a5e.py
+python3 compat/scripts/phase5a5f.py
+```
+
+The workspace gates and all six differential assertion sets pass. The local
+differential run reused one external Cargo target and raised only its in-memory
+per-process deadline from 5 to 30 seconds: immediately after a complete cold
+build, the unchanged five-second harness twice timed out starting the Rust CLI,
+while direct pre/post-split conversion of the same Go-produced frame completed
+in 0.01–0.05 seconds with identical bytes. No fixture deadline was changed in
+the repository; the unmodified Actions jobs remain the default-timeout gate.
+Existing Phase 5A5a–5A5f and CLI-08 matrix claims remain unchanged; this
+refactor adds no ruleset behavior or platform support claim.
+
 ## Native Windows and Apple Silicon build gates
 
 The default Rust workflow now has a separate native build matrix for
