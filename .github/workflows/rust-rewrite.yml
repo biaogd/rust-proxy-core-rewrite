@@ -70,6 +70,62 @@ jobs:
       - name: Build release binary
         run: cargo build --manifest-path rust/Cargo.toml --package rewrite-cli --all-features --release
 
+  native-rust-build:
+    name: Native Rust build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            expected_runner_arch: X64
+            expected_uname_arch: x86_64
+          - name: macos-arm64
+            os: macos-latest
+            expected_runner_arch: ARM64
+            expected_uname_arch: arm64
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/mihomo-rust-native-target
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Verify native runner architecture
+        env:
+          EXPECTED_RUNNER_ARCH: ${{ matrix.expected_runner_arch }}
+          EXPECTED_UNAME_ARCH: ${{ matrix.expected_uname_arch }}
+          ACTUAL_RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          actual_uname_arch="$(uname -m)"
+          echo "runner.os=${RUNNER_OS} runner.arch=${ACTUAL_RUNNER_ARCH} uname=${actual_uname_arch}"
+          test "$ACTUAL_RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH"
+          test "$actual_uname_arch" = "$EXPECTED_UNAME_ARCH"
+          rustc -vV
+          cargo -vV
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: native-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            native-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
+
+      - name: Build full Rust workspace natively
+        run: cargo build --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked
+
   go-baseline:
     name: Go oracle baseline
     runs-on: ubuntu-latest

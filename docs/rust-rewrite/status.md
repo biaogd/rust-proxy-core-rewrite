@@ -4608,6 +4608,17 @@ unit tests, workspace fmt/clippy/test, the Phase 2 generated config/rule oracle
 suite and the Phase 6A simple-adapter differential pass after the move. This
 changes no compatibility-matrix support claim.
 
+## Native Windows and Apple Silicon build gates
+
+The default Rust workflow now has a separate native build matrix for
+`windows-latest` X64 and `macos-latest` ARM64. Each leg verifies the Actions
+runner architecture and the host architecture before building the locked Cargo
+workspace with all targets and all features. The target directory is explicitly
+placed under `runner.temp`, overriding the developer-machine Cargo target path.
+macOS additionally requires `uname -m=arm64`, so an Intel runner cannot satisfy
+the Apple Silicon build gate. These rows remain pending until Actions reports a
+successful run; compilation alone does not claim platform runtime parity.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
