@@ -23,11 +23,12 @@ FAILURE_ARTIFACT = ROOT / "compat/artifacts/phase5d-windows-pipe-diff.json"
 
 
 POWERSHELL_CLIENT = r"""
+$pipeName = $env:MIHOMO_PIPE_NAME
+$request = [Convert]::FromBase64String($env:MIHOMO_PIPE_REQUEST)
 $client = [System.IO.Pipes.NamedPipeClientStream]::new(
-  ".", $args[0], [System.IO.Pipes.PipeDirection]::InOut,
+  ".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut,
   [System.IO.Pipes.PipeOptions]::None)
-$client.Connect(5000)
-$request = [System.Text.Encoding]::ASCII.GetBytes($args[1])
+$client.Connect(1000)
 $client.Write($request, 0, $request.Length)
 $client.Flush()
 $buffer = New-Object byte[] 4096
@@ -47,26 +48,32 @@ def pipe_request(pipe_name: str, secret: str) -> tuple[int, dict[str, str], byte
         f"Authorization: Bearer {secret}\r\n"
         "Connection: close\r\n\r\n"
     )
+    environment = os.environ.copy()
+    environment["MIHOMO_PIPE_NAME"] = pipe_name
+    environment["MIHOMO_PIPE_REQUEST"] = base64.b64encode(request.encode()).decode()
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", POWERSHELL_CLIENT, pipe_name, request],
+        ["powershell", "-NoProfile", "-Command", POWERSHELL_CLIENT],
         capture_output=True,
         text=True,
-        timeout=IO_DEADLINE * 2,
+        timeout=min(3, IO_DEADLINE),
         check=True,
+        env=environment,
     )
     return parse_http(base64.b64decode(completed.stdout.strip()))
 
 
 def wait_pipe(process: Any, pipe_name: str) -> tuple[int, dict[str, str], bytes]:
-    deadline = time.monotonic() + IO_DEADLINE * 2
+    deadline = time.monotonic() + IO_DEADLINE * 3
+    last_error: BaseException | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"controller exited during pipe readiness: {process.returncode}")
         try:
             return pipe_request(pipe_name, "wrong-secret")
-        except (OSError, subprocess.SubprocessError, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            last_error = error
             time.sleep(0.05)
-    raise TimeoutError("Windows named-pipe controller did not become ready")
+    raise TimeoutError("Windows named-pipe controller did not become ready") from last_error
 
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:

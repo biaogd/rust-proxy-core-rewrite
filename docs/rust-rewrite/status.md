@@ -4616,8 +4616,21 @@ runner architecture and the host architecture before building the locked Cargo
 workspace with all targets and all features. The target directory is explicitly
 placed under `runner.temp`, overriding the developer-machine Cargo target path.
 macOS additionally requires `uname -m=arm64`, so an Intel runner cannot satisfy
-the Apple Silicon build gate. These rows remain pending until Actions reports a
-successful run; compilation alone does not claim platform runtime parity.
+the Apple Silicon build gate. Both native build legs passed in Actions run
+`33158824630`; compilation alone does not claim platform runtime parity.
+
+The first matrix run exposed a separate Linux reload race: runtime sockets
+could become externally reachable before the CLI task had registered SIGHUP.
+The CLI now waits for successful signal-handler registration before starting
+the runtime, so port readiness also implies reload-signal readiness. This is a
+product lifecycle ordering fix rather than an added fixture delay.
+
+That run also showed the Windows oracle logging a live named pipe while the
+PowerShell readiness client timed out. The client now passes the pipe name and
+request through explicit environment variables instead of PowerShell
+`-Command` positional argument parsing, uses bounded one-second connection
+attempts inside the overall readiness window and preserves the last exception
+as the timeout cause.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

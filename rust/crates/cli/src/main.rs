@@ -394,6 +394,17 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error +
     let (ready_sender, ready_receiver) = oneshot::channel();
     let (shutdown_hook_ready_sender, shutdown_hook_ready_receiver) = oneshot::channel();
     let (continue_shutdown_sender, continue_shutdown_receiver) = oneshot::channel();
+    let signals_ready = install_signals(
+        shutdown.clone(),
+        input,
+        arguments.geodata_mode,
+        age_secret_key,
+        overrides,
+        reload_sender,
+    );
+    if signals_ready.await.is_err() {
+        return Err(std::io::Error::other("process signal handlers failed to initialize").into());
+    }
     let runtime_shutdown = shutdown.clone();
     let runtime = tokio::spawn(rewrite_runtime::run_with_reload_lifecycle(
         config,
@@ -419,14 +430,6 @@ async fn execute(arguments: Arguments) -> Result<(), Box<dyn std::error::Error +
         runtime.await??;
         return Err(std::io::Error::other(format!("post-up script error: {error}")).into());
     }
-    install_signals(
-        shutdown.clone(),
-        input,
-        arguments.geodata_mode,
-        age_secret_key,
-        overrides,
-        reload_sender,
-    );
     if shutdown_hook_ready_receiver.await.is_err() {
         return match runtime.await? {
             Ok(()) => Err(std::io::Error::other(
@@ -768,7 +771,8 @@ fn install_signals(
     age_secret_key: String,
     overrides: RuntimeOverrides,
     reload_sender: mpsc::Sender<Config>,
-) {
+) -> oneshot::Receiver<()> {
+    let (ready_sender, ready_receiver) = oneshot::channel();
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -790,6 +794,7 @@ fn install_signals(
                         return;
                     }
                 };
+            let _ = ready_sender.send(());
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
             loop {
@@ -821,11 +826,24 @@ fn install_signals(
             }
         }
         #[cfg(not(unix))]
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            eprintln!("Ctrl-C handler failed: {error}");
+        {
+            let _ = (
+                input,
+                geodata_mode,
+                age_secret_key,
+                overrides,
+                reload_sender,
+            );
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
+            let _ = ready_sender.send(());
+            if let Err(error) = ctrl_c.await {
+                eprintln!("Ctrl-C handler failed: {error}");
+            }
         }
         shutdown.cancel();
     });
+    ready_receiver
 }
 
 #[cfg(test)]
