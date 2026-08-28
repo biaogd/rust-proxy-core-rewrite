@@ -1369,9 +1369,9 @@ terminating the product. rustls uses the workspace's explicit ring provider,
 while Hyper continues to own CONNECT framing and upgrades.
 
 Positive system/custom-root verification, `name-cert-verify`, client
-certificates, fingerprints, arbitrary proxy headers, unauthenticated and
-exhaustive status/timeout matrices, UDP and chaining remain later OUT-03
-gates.
+certificates, fingerprints, partial credential shapes, malformed/delayed
+response handling and the protocol's lack of UDP are closed by Phase 6B3.
+Dialer chains remain the cross-cutting OUT-21 gate.
 
 ### Phase 6B1c accepted scope
 
@@ -1385,9 +1385,10 @@ matching the oracle rather than treating every 2xx status as success.
 headers, credential precedence, bidirectional echo, and rejection of 204,
 301, 400, 405, 407 and 500 while the product remains alive.
 
-Positive trust-store verification, `name-cert-verify`, client certificates,
-fingerprints, malformed/slow response boundaries, UDP and dialer chains remain
-later OUT-03 gates.
+The remaining TLS identity, client-certificate, malformed/delayed response and
+partial-credential combinations are closed by Phase 6B3. HTTP remains a TCP
+CONNECT adapter and does not advertise UDP or UoT. Dialer chains remain the
+cross-cutting OUT-21 gate.
 
 ### Phase 5C1a accepted scope
 
@@ -1431,8 +1432,36 @@ a well-formed bind address completes CONNECT even when the reply status is
 nonzero. `fast-socks5` remains responsible for standardized target encoding and
 reply-address parsing; only the oracle-specific negotiation and status policy
 is custom. `compat/scripts/phase6b_socks5_contract.py` compares wire bytes,
-success/failure lifecycle, retry count and process survival. TLS, UDP, UoT,
-credential lengths above 255 bytes and dialer chains remain later OUT-04 gates.
+success/failure lifecycle, retry count and process survival. TLS, UDP and
+overlength credential behavior are closed by Phase 6B3. The native SOCKS5
+adapter does not advertise UoT; dialer chains remain the cross-cutting OUT-21
+gate.
+
+### Phase 6B3 completion scope
+
+Phase 6B3 closes the native HTTP and SOCKS5 adapter boundary rather than
+starting another protocol. Both adapters accept verified TLS with the global
+custom root pool, an independent `name-cert-verify`, SHA-256 certificate
+pinning and optional client certificate/private-key authentication. HTTP keeps
+its configured SNI distinct from the verification name, and partial HTTP
+credentials emit no Basic header exactly like the oracle. Its CONNECT parser
+accepts a delayed valid response and rejects EOF, malformed framing and every
+representative non-200 status without terminating the process.
+
+SOCKS5 now composes the same TLS policy with CONNECT and UDP ASSOCIATE. A
+single inbound UDP session retains its TCP control connection, replaces an
+unspecified relay address with the proxy address, carries multiple resolved
+destinations over one association, validates relay packets and reports
+`udp: true`, `uot: false`. The username/password encoder deliberately preserves
+the pinned oracle's uint8 length wrap while writing the full overlength bytes.
+
+`compat/scripts/phase6b_tls_identity.py`,
+`compat/scripts/phase6b_socks5_udp.py`, the expanded HTTP contract and the
+expanded SOCKS5 contract compare all of those external outcomes. Phase 6B is
+complete for native HTTP/SOCKS5 configuration, controller views and the
+current mixed TCP/UDP data plane. Common `dialer-proxy` composition, richer
+per-adapter platform combinations and later provider override expressions are
+owned by OUT-21/Phase 7T and are not relabeled as Phase 6B protocol gaps.
 
 ### Phase 5C1b accepted scope
 

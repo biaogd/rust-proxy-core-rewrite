@@ -6,23 +6,25 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use fast_socks5::util::target_addr::{ToTargetAddr, read_address};
+use fast_socks5::util::target_addr::{TargetAddr, ToTargetAddr, read_address};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use http_body_util::Empty;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use rewrite_model::{Destination, Host};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
 use tokio_rustls::rustls::crypto::{
     WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
 };
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
 };
@@ -32,6 +34,65 @@ pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> OutboundStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 pub type BoxedOutboundStream = Box<dyn OutboundStream>;
+
+pub struct Socks5UdpAssociation {
+    _control: tokio::sync::Mutex<BoxedOutboundStream>,
+    socket: UdpSocket,
+    relay: std::net::SocketAddr,
+}
+
+impl Socks5UdpAssociation {
+    /// Sends one UDP payload through the negotiated SOCKS5 relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an address-encoding or socket error when the relay datagram
+    /// cannot be constructed or sent.
+    pub async fn send(
+        &self,
+        destination: &Destination,
+        payload: &[u8],
+    ) -> Result<(), Socks5ProxyError> {
+        let target = destination.host.to_string();
+        let address = (target.as_str(), destination.port)
+            .to_target_addr()
+            .map_err(DirectError::Io)?
+            .to_be_bytes()
+            .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
+        let mut packet = Vec::with_capacity(address.len() + payload.len() + 3);
+        packet.extend_from_slice(&[0, 0, 0]);
+        packet.extend_from_slice(&address);
+        packet.extend_from_slice(payload);
+        self.socket
+            .send_to(&packet, self.relay)
+            .await
+            .map_err(DirectError::Io)?;
+        Ok(())
+    }
+
+    /// Receives and decodes one UDP payload from the negotiated SOCKS5 relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a socket or framing error for packets that do not come from the
+    /// negotiated relay or do not contain a valid SOCKS5 UDP address.
+    pub async fn recv(&self) -> Result<(Destination, Vec<u8>), Socks5ProxyError> {
+        let mut packet = vec![0_u8; 65_535];
+        let (length, source) = self
+            .socket
+            .recv_from(&mut packet)
+            .await
+            .map_err(DirectError::Io)?;
+        if source != self.relay || length < 4 || packet[..3] != [0, 0, 0] {
+            return Err(Socks5ProxyError::InvalidAddress(
+                "invalid SOCKS5 UDP relay packet".to_owned(),
+            ));
+        }
+        packet.truncate(length);
+        let (destination, payload_offset) = decode_socks5_udp_address(&packet[3..])?;
+        Ok((destination, packet[(payload_offset + 3)..].to_vec()))
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum DirectError {
@@ -68,7 +129,12 @@ pub enum HttpProxyError {
 #[derive(Clone, Copy, Debug)]
 pub struct HttpProxyTls<'a> {
     pub server_name: &'a str,
+    pub verification_name: Option<&'a str>,
     pub skip_certificate_verification: bool,
+    pub fingerprint: Option<&'a str>,
+    pub certificate: Option<&'a str>,
+    pub private_key: Option<&'a str>,
+    pub custom_roots: &'a [String],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -130,14 +196,127 @@ impl ServerCertVerifier for NoCertificateVerification {
     }
 }
 
+#[derive(Debug)]
+struct NameOverrideVerification {
+    verifier: Arc<WebPkiServerVerifier>,
+    verification_name: ServerName<'static>,
+}
+
+impl ServerCertVerifier for NameOverrideVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        self.verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            &self.verification_name,
+            ocsp_response,
+            now,
+        )
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        self.verifier
+            .verify_tls12_signature(message, certificate, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        self.verifier
+            .verify_tls13_signature(message, certificate, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.verifier.supported_verify_schemes()
+    }
+}
+
+#[derive(Debug)]
+struct FingerprintVerification {
+    fingerprint: [u8; 32],
+    verification_name: Option<ServerName<'static>>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for FingerprintVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        if Sha256::digest(end_entity.as_ref()).as_slice() == self.fingerprint {
+            return Ok(ServerCertVerified::assertion());
+        }
+        for (index, certificate) in intermediates.iter().enumerate() {
+            if Sha256::digest(certificate.as_ref()).as_slice() != self.fingerprint {
+                continue;
+            }
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(certificate.clone())
+                .map_err(|error| TlsError::General(error.to_string()))?;
+            let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
+                .build()
+                .map_err(|error| TlsError::General(error.to_string()))?;
+            return verifier.verify_server_cert(
+                end_entity,
+                &intermediates[..index],
+                self.verification_name.as_ref().unwrap_or(server_name),
+                ocsp_response,
+                now,
+            );
+        }
+        Err(TlsError::General(
+            "certificate fingerprint does not match".to_owned(),
+        ))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Socks5ProxyError {
     #[error(transparent)]
     Direct(#[from] DirectError),
     #[error(transparent)]
     Socks(#[from] fast_socks5::SocksError),
-    #[error("SOCKS5 username must be 1 to 255 bytes and password at most 255 bytes")]
-    InvalidCredentials,
     #[error("SOCKS5 proxy rejected the offered authentication method")]
     AuthenticationRejected,
     #[error("SOCKS5 proxy selected an unsupported protocol version")]
@@ -146,6 +325,8 @@ pub enum Socks5ProxyError {
     InvalidAddress(String),
     #[error("SOCKS5 proxy handshake timed out")]
     HandshakeTimeout,
+    #[error("SOCKS5 proxy TLS failed: {0}")]
+    Tls(String),
 }
 
 /// Opens a direct TCP connection with the Phase 1 timeout and IPv6 policy.
@@ -286,7 +467,7 @@ pub async fn connect_http_with_options(
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect_with_options(server, allow_ipv6, options).await?;
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
-        let config = http_tls_config(tls, &[], clock)?;
+        let config = http_tls_config(tls, clock)?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
             .map_err(|_| HttpProxyError::TlsConfiguration("invalid server name".to_owned()))?;
         let stream = tokio::time::timeout(
@@ -346,9 +527,14 @@ pub async fn wrap_client_tls(
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let tls = HttpProxyTls {
         server_name,
+        verification_name: None,
         skip_certificate_verification,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        custom_roots,
     };
-    let config = http_tls_config(tls, custom_roots, clock)?;
+    let config = http_tls_config(tls, clock)?;
     let server_name = ServerName::try_from(server_name.to_owned())
         .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
     let stream = TlsConnector::from(Arc::new(config))
@@ -360,19 +546,10 @@ pub async fn wrap_client_tls(
 
 fn http_tls_config(
     tls: HttpProxyTls<'_>,
-    custom_roots: &[String],
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<ClientConfig, HttpProxyError> {
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
     let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
-    if tls.skip_certificate_verification {
-        return Ok(ClientConfig::builder_with_details(provider, clock)
-            .with_safe_default_protocol_versions()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
-            .with_no_client_auth());
-    }
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     for certificate in native.certs {
@@ -390,7 +567,7 @@ fn http_tls_config(
             .add(certificate)
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
     }
-    for pem in custom_roots {
+    for pem in tls.custom_roots {
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
@@ -400,11 +577,92 @@ fn http_tls_config(
                 .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
         }
     }
-    Ok(ClientConfig::builder_with_details(provider, clock)
+    let builder = ClientConfig::builder_with_details(provider, clock)
         .with_safe_default_protocol_versions()
+        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    let builder = if let Some(fingerprint) = tls.fingerprint {
+        let normalized = fingerprint.trim().replace(':', "");
+        let fingerprint = hex::decode(normalized)
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        let fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| {
+            HttpProxyError::TlsConfiguration(
+                "certificate fingerprint must contain 32 bytes".to_owned(),
+            )
+        })?;
+        let verification_name = tls
+            .verification_name
+            .map(str::to_owned)
+            .map(ServerName::try_from)
+            .transpose()
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
+                fingerprint,
+                verification_name,
+                algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+                    .signature_verification_algorithms,
+            }))
+    } else if let Some(verification_name) = tls.verification_name {
+        let verification_name = ServerName::try_from(verification_name.to_owned())
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NameOverrideVerification {
+                verifier,
+                verification_name,
+            }))
+    } else if tls.skip_certificate_verification {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+    } else {
+        builder.with_root_certificates(roots)
+    };
+    match (tls.certificate, tls.private_key) {
+        (Some(certificate), Some(private_key)) => {
+            let certificates = load_certificates(certificate)?;
+            let private_key = load_private_key(private_key)?;
+            builder
+                .with_client_auth_cert(certificates, private_key)
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+        }
+        (None, None) => Ok(builder.with_no_client_auth()),
+        _ => Err(HttpProxyError::TlsConfiguration(
+            "client certificate and private key must be configured together".to_owned(),
+        )),
+    }
+}
+
+fn load_pem_or_path(value: &str) -> Result<Vec<u8>, HttpProxyError> {
+    if value.contains("-----BEGIN") {
+        Ok(value.as_bytes().to_vec())
+    } else {
+        std::fs::read(value).map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+    }
+}
+
+fn load_certificates(value: &str) -> Result<Vec<CertificateDer<'static>>, HttpProxyError> {
+    let bytes = load_pem_or_path(value)?;
+    let certificates = rustls_pemfile::certs(&mut Cursor::new(bytes))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    if certificates.is_empty() {
+        return Err(HttpProxyError::TlsConfiguration(
+            "client certificate contains no certificate".to_owned(),
+        ));
+    }
+    Ok(certificates)
+}
+
+fn load_private_key(value: &str) -> Result<PrivateKeyDer<'static>, HttpProxyError> {
+    let bytes = load_pem_or_path(value)?;
+    rustls_pemfile::private_key(&mut Cursor::new(bytes))
         .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+        .ok_or_else(|| HttpProxyError::TlsConfiguration("client private key is missing".to_owned()))
 }
 
 /// Opens a TCP stream through a SOCKS5 proxy using remote target addressing.
@@ -424,6 +682,8 @@ pub async fn connect_socks5(
         destination,
         allow_ipv6,
         credentials,
+        None,
+        None,
         DirectTcpOptions::default(),
     )
     .await
@@ -439,23 +699,97 @@ pub async fn connect_socks5_with_options(
     destination: &Destination,
     allow_ipv6: bool,
     credentials: Option<(&str, &str)>,
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, Socks5ProxyError> {
-    let mut socket = connect_with_options(server, allow_ipv6, options).await?;
+    let mut stream = connect_socks5_control(server, allow_ipv6, tls, clock, options).await?;
     tokio::time::timeout(
         Duration::from_secs(5),
-        socks5_tcp_handshake(&mut socket, destination, credentials),
+        socks5_command_handshake(&mut stream, destination, 1, credentials),
     )
     .await
     .map_err(|_| Socks5ProxyError::HandshakeTimeout)??;
-    Ok(Box::new(socket))
+    Ok(stream)
 }
 
-async fn socks5_tcp_handshake(
-    stream: &mut TcpStream,
-    destination: &Destination,
+/// Opens one RFC 1928 UDP ASSOCIATE session through a configured SOCKS5 proxy.
+///
+/// # Errors
+///
+/// Returns a TCP/TLS, authentication, UDP bind or SOCKS5 framing error when
+/// the association cannot be established.
+#[allow(clippy::too_many_arguments)]
+pub async fn associate_socks5_udp_with_options(
+    server: &Destination,
+    allow_ipv6: bool,
     credentials: Option<(&str, &str)>,
-) -> Result<(), Socks5ProxyError> {
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+    options: DirectTcpOptions<'_>,
+) -> Result<Socks5UdpAssociation, Socks5ProxyError> {
+    let mut control = connect_socks5_control(server, allow_ipv6, tls, clock, options).await?;
+    let request = Destination {
+        host: Host::Ip(std::net::Ipv4Addr::UNSPECIFIED.into()),
+        port: 0,
+    };
+    let relay = tokio::time::timeout(
+        Duration::from_secs(5),
+        socks5_command_handshake(&mut control, &request, 3, credentials),
+    )
+    .await
+    .map_err(|_| Socks5ProxyError::HandshakeTimeout)??;
+    let relay = resolve_socks5_relay(relay, server, allow_ipv6).await?;
+    let bind = if relay.is_ipv4() {
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        std::net::SocketAddr::from(([0_u16; 8], 0))
+    };
+    let socket = rewrite_platform::bind_outbound_udp(bind, options.interface, options.routing_mark)
+        .and_then(UdpSocket::from_std)
+        .map_err(DirectError::Io)?;
+    Ok(Socks5UdpAssociation {
+        _control: tokio::sync::Mutex::new(control),
+        socket,
+        relay,
+    })
+}
+
+async fn connect_socks5_control(
+    server: &Destination,
+    allow_ipv6: bool,
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+    options: DirectTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, Socks5ProxyError> {
+    let socket = connect_with_options(server, allow_ipv6, options).await?;
+    if let Some(tls) = tls {
+        let config = http_tls_config(tls, clock)
+            .map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        let server_name = ServerName::try_from(tls.server_name.to_owned())
+            .map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(config)).connect(server_name, socket),
+        )
+        .await
+        .map_err(|_| Socks5ProxyError::HandshakeTimeout)?
+        .map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        Ok(Box::new(stream))
+    } else {
+        Ok(Box::new(socket))
+    }
+}
+
+async fn socks5_command_handshake<S>(
+    stream: &mut S,
+    destination: &Destination,
+    command: u8,
+    credentials: Option<(&str, &str)>,
+) -> Result<TargetAddr, Socks5ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let method = if credentials.is_some() { 2 } else { 0 };
     stream
         .write_all(&[5, 1, method])
@@ -486,7 +820,7 @@ async fn socks5_tcp_handshake(
         .to_be_bytes()
         .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
     let mut request = Vec::with_capacity(address.len() + 3);
-    request.extend_from_slice(&[5, 1, 0]);
+    request.extend_from_slice(&[5, command, 0]);
     request.extend_from_slice(&address);
     stream.write_all(&request).await.map_err(DirectError::Io)?;
 
@@ -497,23 +831,26 @@ async fn socks5_tcp_handshake(
         .read_exact(&mut response)
         .await
         .map_err(DirectError::Io)?;
-    read_address(stream, response[3])
+    let address = read_address(stream, response[3])
         .await
         .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
-    Ok(())
+    Ok(address)
 }
 
-async fn password_auth(
-    stream: &mut TcpStream,
+async fn password_auth<S>(
+    stream: &mut S,
     username: &str,
     password: &str,
-) -> Result<(), Socks5ProxyError> {
-    let username_length = u8::try_from(username.len())
-        .ok()
-        .filter(|length| *length != 0)
-        .ok_or(Socks5ProxyError::InvalidCredentials)?;
+) -> Result<(), Socks5ProxyError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // The pinned Go oracle casts the byte lengths to uint8 but still writes the
+    // complete credential bytes. Preserve that unusual overlength wire shape.
+    let username_length =
+        u8::try_from(username.len() % 256).expect("a byte length modulo 256 always fits in u8");
     let password_length =
-        u8::try_from(password.len()).map_err(|_| Socks5ProxyError::InvalidCredentials)?;
+        u8::try_from(password.len() % 256).expect("a byte length modulo 256 always fits in u8");
     let mut request = Vec::with_capacity(3 + username.len() + password.len());
     request.extend_from_slice(&[1, username_length]);
     request.extend_from_slice(username.as_bytes());
@@ -529,4 +866,59 @@ async fn password_auth(
         return Err(Socks5ProxyError::AuthenticationRejected);
     }
     Ok(())
+}
+
+async fn resolve_socks5_relay(
+    relay: TargetAddr,
+    server: &Destination,
+    allow_ipv6: bool,
+) -> Result<std::net::SocketAddr, Socks5ProxyError> {
+    let (host, port) = relay.into_string_and_port();
+    let lookup_host = match host.parse::<std::net::IpAddr>() {
+        Ok(address) if !address.is_unspecified() => {
+            return Ok(std::net::SocketAddr::new(address, port));
+        }
+        Ok(_) => server.host.to_string(),
+        Err(_) => host,
+    };
+    let mut addresses = tokio::net::lookup_host((lookup_host.as_str(), port))
+        .await
+        .map_err(DirectError::Io)?;
+    addresses
+        .find(|address| allow_ipv6 || address.is_ipv4())
+        .ok_or_else(|| {
+            Socks5ProxyError::InvalidAddress(
+                "SOCKS5 UDP relay resolved to no permitted address".to_owned(),
+            )
+        })
+}
+
+fn decode_socks5_udp_address(packet: &[u8]) -> Result<(Destination, usize), Socks5ProxyError> {
+    let invalid = || Socks5ProxyError::InvalidAddress("truncated SOCKS5 UDP address".to_owned());
+    let (host, port_offset) = match packet.first().copied() {
+        Some(1) if packet.len() >= 7 => (
+            Host::Ip(std::net::Ipv4Addr::new(packet[1], packet[2], packet[3], packet[4]).into()),
+            5,
+        ),
+        Some(4) if packet.len() >= 19 => {
+            let octets: [u8; 16] = packet[1..17].try_into().map_err(|_| invalid())?;
+            (Host::Ip(std::net::Ipv6Addr::from(octets).into()), 17)
+        }
+        Some(3) if packet.len() >= 2 => {
+            let length = usize::from(packet[1]);
+            if packet.len() < length + 4 {
+                return Err(invalid());
+            }
+            let host = std::str::from_utf8(&packet[2..(2 + length)])
+                .map_err(|error| Socks5ProxyError::InvalidAddress(error.to_string()))?;
+            (Host::Domain(host.to_owned()), length + 2)
+        }
+        _ => return Err(invalid()),
+    };
+    let port = u16::from_be_bytes(
+        packet[port_offset..(port_offset + 2)]
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    Ok((Destination { host, port }, port_offset + 2))
 }

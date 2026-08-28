@@ -60,6 +60,13 @@ class ConnectHandler(socketserver.BaseRequestHandler):
                 "x-phase": headers.get("x-phase"),
             }
         )
+        if self.server.response_mode == "close":
+            return
+        if self.server.response_mode == "malformed":
+            self.request.sendall(b"not-an-http-response\r\n\r\n")
+            return
+        if self.server.response_mode == "delayed":
+            time.sleep(0.25)
         status = self.server.status
         if status != 200:
             self.request.sendall(
@@ -76,8 +83,9 @@ class ConnectServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, response_mode: str = "status") -> None:
         self.status = status
+        self.response_mode = response_mode
         self.observations: list[dict[str, Any]] = []
         super().__init__(("127.0.0.1", 0), ConnectHandler)
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
@@ -113,12 +121,17 @@ def render_config(
     *,
     mixed_port: int,
     proxy_port: int,
-    authenticated: bool,
+    credentials: str,
     custom_headers: bool,
 ) -> None:
-    credentials = ""
-    if authenticated:
+    if credentials == "both":
         credentials = "    username: proxy-user\n    password: proxy-pass\n"
+    elif credentials == "user":
+        credentials = "    username: proxy-user\n"
+    elif credentials == "password":
+        credentials = "    password: proxy-pass\n"
+    else:
+        credentials = ""
     headers = ""
     if custom_headers:
         headers = """    headers:
@@ -187,24 +200,25 @@ def exercise_case(
     scratch: pathlib.Path,
     *,
     status: int,
-    authenticated: bool = False,
+    credentials: str = "none",
     custom_headers: bool = False,
+    response_mode: str = "status",
 ) -> dict[str, Any]:
     echo = start_server(EchoHandler)
-    proxy = ConnectServer(status)
+    proxy = ConnectServer(status, response_mode)
     mixed_port = reserve_port()
     config = scratch / "config.yaml"
     render_config(
         config,
         mixed_port=mixed_port,
         proxy_port=proxy.port,
-        authenticated=authenticated,
+        credentials=credentials,
         custom_headers=custom_headers,
     )
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
-        if status == 200:
+        if status == 200 and response_mode in ("status", "delayed"):
             wait_route(process, mixed_port, echo.port)
             proxy.observations.clear()
         routed = try_route(mixed_port, echo.port)
@@ -224,25 +238,31 @@ def exercise_case(
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     cases = {
-        "no-auth-defaults": (200, False, False),
-        "custom-headers": (200, True, True),
-        "status-204": (204, False, False),
-        "status-301": (301, False, False),
-        "status-400": (400, False, False),
-        "status-405": (405, False, False),
-        "status-407": (407, False, False),
-        "status-500": (500, False, False),
+        "no-auth-defaults": (200, "none", False, "status"),
+        "user-only": (200, "user", False, "status"),
+        "password-only": (200, "password", False, "status"),
+        "custom-headers": (200, "both", True, "status"),
+        "delayed-response": (200, "none", False, "delayed"),
+        "closed-response": (200, "none", False, "close"),
+        "malformed-response": (200, "none", False, "malformed"),
+        "status-204": (204, "none", False, "status"),
+        "status-301": (301, "none", False, "status"),
+        "status-400": (400, "none", False, "status"),
+        "status-405": (405, "none", False, "status"),
+        "status-407": (407, "none", False, "status"),
+        "status-500": (500, "none", False, "status"),
     }
     observations = {}
-    for name, (status, authenticated, custom_headers) in cases.items():
+    for name, (status, credentials, custom_headers, response_mode) in cases.items():
         case = scratch / name
         case.mkdir(parents=True)
         observations[name] = exercise_case(
             binary,
             case,
             status=status,
-            authenticated=authenticated,
+            credentials=credentials,
             custom_headers=custom_headers,
+            response_mode=response_mode,
         )
     return observations
 
@@ -277,6 +297,17 @@ def satisfies_contract(observation: dict[str, Any]) -> bool:
                 "x-phase": "contract",
             }
         ]
+        and all(
+            observation[name]["routed"] is True
+            and observation[name]["connect"][0]["authorization"] is None
+            for name in ("user-only", "password-only")
+        )
+        and observation["delayed-response"]["routed"] is True
+        and all(
+            observation[name]["routed"] is False
+            and len(observation[name]["connect"]) == 1
+            for name in ("closed-response", "malformed-response")
+        )
         and all(
             observation[name]["routed"] is False
             and len(observation[name]["connect"]) == 1

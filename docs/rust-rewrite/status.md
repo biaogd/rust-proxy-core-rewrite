@@ -105,9 +105,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI builds the all-feature release binary; a root-only Linux job writes and reads back nonzero `SO_MARK` through the production socket helper |
 | Phase 6A1 built-ins and GLOBAL | Implementation complete in declared fast mixed-TCP/control scope; exact expiry evidence pending | COMPATIBLE/PASS/REJECT/REJECT-DROP behavior, dynamic/default and custom GLOBAL data-plane selection, controller views and name-collision validation pass the Go/Rust differential |
 | Phase 6A2 configured simple adapters | Implementation complete in declared current-listener TCP/UDP scope | Configured DIRECT/REJECT/DNS/REMATCH, inline-provider DIRECT, group-contained REMATCH, GLOBAL order, controller views, framed DNS TCP and SOCKS5 DNS/direct/reject UDP pass the Go/Rust differential |
-| Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
-| Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
-| Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
+| Phase 6B1 HTTP outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, SNI versus verification identity, roots, pinning, client certificates, credential shapes, headers, exact status and malformed/delayed response behavior pass |
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
 | Phase 5C1b selector reload lifecycle | Complete in declared SIGHUP scope; GRP-01/PROV-03 remain partial | Valid choices survive, malformed config rolls back, and removed choices fall back to the first new member exactly like Go |
 | Phase 5C2a local file proxy provider | Complete in declared initial-load HTTP/SOCKS5 TCP scope; PROV-01/GRP-03 remain partial | YAML members, `use` composition, exact File/Compatible provider REST views and selected HTTP routing pass |
@@ -135,11 +133,11 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C4 rule providers | Complete in declared current rule/runtime scope; PROV-02 retains later-consumer/dialer gaps | Inline/file/HTTP/HTTPS, YAML/text/MRS, domain/IP/classical RULE-SET, REST, interval/file-watch refresh, cache and rollback pass |
 | Phase 5C5 provider transactions/lifecycle | Complete in declared process/runtime scope; PROV-03 retains native-platform stress gates | Concurrent valid/invalid PUT bursts serialize transactionally; SIGHUP removal clears API/health/schedules and watcher tasks cancel cleanly |
 | Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
-| Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
-| Phase 6B2b SOCKS5 TCP handshake contract | Complete in declared TCP wire/lifecycle scope; OUT-04 remains partial | No-auth and partial credential shapes, method selection, domain/IPv4/IPv6 bytes, ten-attempt failures and the pinned nonzero-reply behavior pass the Go/Rust differential |
+| Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
+| Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 138 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | All 140 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -3772,8 +3770,9 @@ cargo fmt --manifest-path rust/Cargo.toml --all --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
 ```
 
-TLS, partial credentials, full failure/timeout behavior, controller rendering,
-proxy groups/providers and UDP remain explicitly outside this gate.
+TLS, partial credentials, full failure behavior, controller rendering, proxy
+groups/providers and UDP were explicitly outside this first gate; the native
+HTTP items are closed by the Phase 6B completion gate below.
 
 The Phase 5C1a selector gate adds flat configured selectors without claiming
 the automatic group families. Runtime state retains each valid selection while
@@ -3809,8 +3808,9 @@ PHASE6BSOCKS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scri
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-No-auth, resolution-policy permutations, TLS, complete failures/timeouts,
-SOCKS5 UDP/UoT and dialer chains remain outside this gate.
+No-auth, resolution-policy permutations, TLS, complete failures and SOCKS5 UDP
+were outside this first gate and are closed by later Phase 6B gates. Native UoT
+is false; dialer chains remain OUT-21.
 
 Phase 6B2b closes the current plaintext SOCKS5 TCP handshake contract. The
 pinned Go adapter enables RFC 1929 only when the username is nonempty, permits
@@ -3832,8 +3832,8 @@ PHASE6BSOCKSCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 com
 cargo test --manifest-path rust/Cargo.toml -p rewrite-config -p rewrite-outbound -p rewrite-controller -p rewrite-runtime --all-features
 ```
 
-TLS, UDP/UDP ASSOCIATE, UoT, credential lengths above 255 bytes and dialer
-chains remain separate OUT-04 gates.
+TLS, UDP ASSOCIATE and credential lengths above 255 bytes are closed by Phase
+6B3. Native UoT is false; dialer chains remain the separate OUT-21 gate.
 
 Phase 5C1b adds selector reconciliation to the transactional generation publish
 barrier. It distinguishes initial `default-selected` from reload recovery: an
@@ -4233,9 +4233,9 @@ PHASE6BHTTP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scrip
 PHASE4_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase4e19.py
 ```
 
-Positive system/custom-root verification, `name-cert-verify`, client
-certificate/fingerprint behavior, malformed/slow response boundaries, UDP and
-dialer chains remain OUT-03 gaps.
+Positive custom-root verification, `name-cert-verify`, client
+certificate/fingerprint behavior and malformed/delayed response boundaries are
+closed by Phase 6B3. HTTP has no UDP path; dialer chains remain OUT-21.
 
 ## Phase 6B1c deliverables and evidence
 
@@ -4266,12 +4266,13 @@ PHASE6BHTTPTLS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/sc
 ```
 
 Positive trust-store verification, `name-cert-verify`, client certificates,
-fingerprints, malformed/slow response boundaries, UDP and dialer chains remain
-OUT-03 gaps.
+fingerprints and malformed/delayed response boundaries are closed by Phase
+6B3. HTTP has no UDP path; dialer chains remain OUT-21.
 
-Exact timeout-window differential evidence, delayed-handshake success reset,
-exhaustive SOCKS5 auth/CONNECT status behavior, concurrent reload races,
-SOCKS5 URL-test/load-balance evidence and UDP/UoT remain unclaimed.
+The pinned HTTP adapter does not own a separate CONNECT-response timeout; its
+deadline comes from the caller context. Exact outer timeout windows,
+concurrent reload stress and later group/provider/platform combinations remain
+cross-cutting gates rather than native Phase 6B protocol gaps.
 
 ## Phase 5D completion deliverables and evidence
 
@@ -4499,6 +4500,48 @@ DNS and rematch outcomes. Both Phase 6A scripts pass locally. Rich per-adapter
 socket/dialer options remain OUT-01 or protocol-composition work; the Linux
 60-second REJECT-DROP result remains pending CI evidence rather than a Phase 6A
 implementation gap.
+
+## Phase 6B completion deliverables and evidence
+
+Phase 6B is complete for the native HTTP and SOCKS5 adapters on the current
+mixed data plane. The shared rustls boundary now supports the oracle's global
+custom trust roots, separate SNI and verification identities, SHA-256 leaf or
+chain pinning, skip verification and file/inline client certificate/key
+loading. The TLS identity differential proves successful mutual TLS and
+pinning plus missing-client-certificate and bad-pin rejection for both
+protocols. It also records that SOCKS5 uses its IP server identity and therefore
+does not emit an SNI name in this fixture.
+
+The HTTP contract additionally proves that Basic auth is active only when both
+credential fields are nonempty, configured credentials retain precedence over
+a custom authorization header, delayed valid framing succeeds, and EOF,
+malformed responses plus 204/301/400/405/407/500 fail without killing the
+process. The SOCKS5 contract preserves the pinned uint8 credential-length wrap
+and full-byte write for credentials above 255 bytes. Its UDP association keeps
+the authenticated TCP control stream alive, handles plaintext and TLS control
+channels, replaces `0.0.0.0` relay replies with the proxy address, resolves and
+relays multiple destinations through one source session, and exposes the
+oracle's `udp: true`, `uot: false` controller fields.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+PHASE6BHTTP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http.py
+PHASE6BHTTPTLS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http_tls.py
+PHASE6BHTTPCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http_contract.py
+PHASE6BSOCKS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_socks5.py
+PHASE6BSOCKSCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_socks5_contract.py
+PHASE6BSOCKSUDP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_socks5_udp.py
+PHASE6BTLSIDENTITY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_tls_identity.py
+```
+
+The two new completion scripts and both expanded contract scripts pass locally;
+the original HTTP/TLS/SOCKS5 gates are rerun in the final focused gate below.
+GitHub Actions assigns all seven scripts to the parallel
+`controller-services-outbound` shard. Linux results remain pending until that
+run completes. Common `dialer-proxy` chaining belongs to OUT-21/Phase 7T, and
+later protocol/provider override combinations must provide their own evidence;
+neither is an unfinished native Phase 6B behavior.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

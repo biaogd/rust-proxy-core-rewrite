@@ -205,10 +205,28 @@ pub struct ProxyConfig {
     pub tls: bool,
     pub sni: Option<String>,
     pub skip_cert_verify: bool,
+    pub name_cert_verify: Option<String>,
+    pub fingerprint: Option<String>,
+    pub certificate: Option<String>,
+    pub private_key: Option<String>,
+    pub udp: bool,
     pub headers: BTreeMap<String, String>,
 }
 
 impl ProxyConfig {
+    #[must_use]
+    pub fn http_credentials(&self) -> Option<(&str, &str)> {
+        let username = self
+            .username
+            .as_deref()
+            .filter(|username| !username.is_empty())?;
+        let password = self
+            .password
+            .as_deref()
+            .filter(|password| !password.is_empty())?;
+        Some((username, password))
+    }
+
     /// Mirrors the Go SOCKS5 adapter's credential activation rule: a nonempty
     /// username enables RFC 1929, while an absent password becomes empty.
     #[must_use]
@@ -915,8 +933,13 @@ struct RawProxy {
     username: Option<String>,
     password: Option<String>,
     tls: Option<bool>,
+    udp: Option<bool>,
     sni: Option<String>,
     skip_cert_verify: Option<bool>,
+    name_cert_verify: Option<String>,
+    fingerprint: Option<String>,
+    certificate: Option<String>,
+    private_key: Option<String>,
     headers: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -1143,7 +1166,8 @@ impl ConfigSpec {
         let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
-        let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default(), true)?;
+        let (rematches, proxies) =
+            parse_proxies(raw.proxies.unwrap_or_default(), true, provider_directory)?;
         let proxy_providers = parse_proxy_providers(
             raw.proxy_providers.unwrap_or_default(),
             provider_directory,
@@ -1551,8 +1575,12 @@ impl Config {
             .position(|provider| provider.name == name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
         let path = self.proxy_providers[index].path.clone();
-        let proxies =
-            load_proxy_provider_file(name, &path, &self.proxy_providers[index].transform)?;
+        let proxies = load_proxy_provider_file(
+            name,
+            &path,
+            &self.proxy_providers[index].transform,
+            self.home_directory.as_deref(),
+        )?;
         self.replace_proxy_provider(index, proxies)
     }
 
@@ -1572,8 +1600,12 @@ impl Config {
             .iter()
             .position(|provider| provider.name == name)
             .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-        let proxies =
-            parse_proxy_provider_source(name, source, &self.proxy_providers[index].transform)?;
+        let proxies = parse_proxy_provider_source(
+            name,
+            source,
+            &self.proxy_providers[index].transform,
+            self.home_directory.as_deref(),
+        )?;
         self.replace_proxy_provider(index, proxies)
     }
 
@@ -4367,14 +4399,16 @@ fn parse_dns_socket_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigE
 fn parse_proxies(
     proxies: Vec<RawProxy>,
     allow_http_tls: bool,
+    home_directory: Option<&Path>,
 ) -> Result<(Vec<RematchSpec>, Vec<ProxyConfig>), ConfigError> {
     let mut rematches = Vec::new();
     let mut outbounds = Vec::new();
     let mut names = BTreeSet::new();
-    for proxy in proxies {
+    for mut proxy in proxies {
         let has_transport_fields = proxy_has_transport_fields(&proxy);
         let name = proxy
             .name
+            .take()
             .filter(|name| !name.is_empty())
             .ok_or_else(|| ConfigError::UnsupportedProxy("missing name".to_owned()))?;
         if !names.insert(name.clone())
@@ -4424,47 +4458,94 @@ fn parse_proxies(
                 outbounds.push(simple_proxy(name, kind));
             }
             Some(kind @ ("http" | "socks5")) => {
-                let has_tls_options =
-                    proxy.tls.is_some() || proxy.sni.is_some() || proxy.skip_cert_verify.is_some();
-                if proxy.target_rematch_name.is_some()
-                    || proxy.target_sub_rule.is_some()
-                    || (kind == "http" && proxy.username.is_some() != proxy.password.is_some())
-                    || ((kind != "http" || !allow_http_tls) && has_tls_options)
-                    || (kind != "http" && proxy.headers.is_some())
-                    || !proxy.extra.is_empty()
-                {
-                    return Err(ConfigError::UnsupportedProxy(name));
-                }
-                let server = proxy
-                    .server
-                    .filter(|server| !server.is_empty())
-                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-                let port = proxy
-                    .port
-                    .and_then(|port| u16::try_from(port).ok())
-                    .filter(|port| *port != 0)
-                    .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-                outbounds.push(ProxyConfig {
+                let kind = if kind == "http" {
+                    ProxyKind::Http
+                } else {
+                    ProxyKind::Socks5
+                };
+                outbounds.push(parse_remote_proxy(
                     name,
-                    kind: if kind == "http" {
-                        ProxyKind::Http
-                    } else {
-                        ProxyKind::Socks5
-                    },
-                    server,
-                    port,
-                    username: proxy.username,
-                    password: proxy.password,
-                    tls: proxy.tls.unwrap_or(false),
-                    sni: proxy.sni.filter(|sni| !sni.is_empty()),
-                    skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
-                    headers: proxy.headers.unwrap_or_default(),
-                });
+                    kind,
+                    proxy,
+                    allow_http_tls,
+                    home_directory,
+                )?);
             }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
     Ok((rematches, outbounds))
+}
+
+fn parse_remote_proxy(
+    name: String,
+    kind: ProxyKind,
+    proxy: RawProxy,
+    allow_tls: bool,
+    home_directory: Option<&Path>,
+) -> Result<ProxyConfig, ConfigError> {
+    let is_http = kind == ProxyKind::Http;
+    let has_tls_options = proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some();
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || (!allow_tls && has_tls_options)
+        || (!is_http && proxy.sni.is_some())
+        || (!is_http && proxy.headers.is_some())
+        || (is_http && proxy.udp.is_some())
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let tls = proxy.tls.unwrap_or(false);
+    if tls
+        && (proxy.certificate.is_some() != proxy.private_key.is_some()
+            || proxy.fingerprint.as_deref().is_some_and(|fingerprint| {
+                let normalized = fingerprint.trim().replace(':', "");
+                normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    Ok(ProxyConfig {
+        name,
+        kind,
+        server,
+        port,
+        username: proxy.username,
+        password: proxy.password,
+        tls,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|name| !name.is_empty()),
+        fingerprint: proxy.fingerprint.filter(|value| !value.is_empty()),
+        certificate: proxy
+            .certificate
+            .filter(|value| !value.is_empty())
+            .map(|value| resolve_controller_pem(value, home_directory))
+            .transpose()?,
+        private_key: proxy
+            .private_key
+            .filter(|value| !value.is_empty())
+            .map(|value| resolve_controller_pem(value, home_directory))
+            .transpose()?,
+        udp: proxy.udp.unwrap_or(false),
+        headers: proxy.headers.unwrap_or_default(),
+    })
 }
 
 fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
@@ -4473,8 +4554,13 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.username.is_some()
         || proxy.password.is_some()
         || proxy.tls.is_some()
+        || proxy.udp.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
         || proxy.headers.is_some()
 }
 
@@ -4489,6 +4575,11 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         tls: false,
         sni: None,
         skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        udp: true,
         headers: BTreeMap::new(),
     }
 }
@@ -4956,6 +5047,7 @@ fn parse_proxy_providers(
                     &name,
                     provider.payload.clone().unwrap_or_default(),
                     &transform,
+                    config_directory,
                 )?,
             ),
             Some("file") if provider.url.is_none() => {
@@ -4972,7 +5064,7 @@ fn parse_proxy_providers(
                     path.clone(),
                     None,
                     None,
-                    load_proxy_provider_file(&name, &path, &transform)?,
+                    load_proxy_provider_file(&name, &path, &transform, config_directory)?,
                 )
             }
             Some("http") => {
@@ -4998,7 +5090,7 @@ fn parse_proxy_providers(
                     |path| directory.join(path),
                 );
                 let (cache_modified, etag, cached) =
-                    load_proxy_provider_file(&name, &path, &transform)
+                    load_proxy_provider_file(&name, &path, &transform, config_directory)
                         .map(|proxies| {
                             let modified = std::fs::metadata(&path)
                                 .and_then(|metadata| metadata.modified())
@@ -5046,9 +5138,10 @@ fn load_proxy_provider_file(
     name: &str,
     path: &Path,
     transform: &ProxyProviderTransform,
+    home_directory: Option<&Path>,
 ) -> Result<Vec<ProxyConfig>, ConfigError> {
     let source = std::fs::read_to_string(path)?;
-    parse_proxy_provider_source(name, &source, transform)
+    parse_proxy_provider_source(name, &source, transform, home_directory)
 }
 
 fn load_provider_etag(path: &Path, url: &str) -> Option<String> {
@@ -5099,18 +5192,25 @@ fn parse_proxy_provider_source(
     name: &str,
     source: &str,
     transform: &ProxyProviderTransform,
+    home_directory: Option<&Path>,
 ) -> Result<Vec<ProxyConfig>, ConfigError> {
     let file = serde_yaml_ng::from_str::<RawProxyProviderFile>(source)?;
     if !file.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
-    parse_proxy_provider_records(name, file.proxies.unwrap_or_default(), transform)
+    parse_proxy_provider_records(
+        name,
+        file.proxies.unwrap_or_default(),
+        transform,
+        home_directory,
+    )
 }
 
 fn parse_proxy_provider_records(
     name: &str,
     mut records: Vec<RawProxy>,
     transform: &ProxyProviderTransform,
+    home_directory: Option<&Path>,
 ) -> Result<Vec<ProxyConfig>, ConfigError> {
     let filters = transform
         .filters
@@ -5162,7 +5262,7 @@ fn parse_proxy_provider_records(
         );
         record.name = Some(member_name);
     }
-    let (rematches, proxies) = parse_proxies(records, false)?;
+    let (rematches, proxies) = parse_proxies(records, true, home_directory)?;
     if !rematches.is_empty() || proxies.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -6513,6 +6613,11 @@ dns:
                     tls: false,
                     sni: None,
                     skip_cert_verify: false,
+                    name_cert_verify: None,
+                    fingerprint: None,
+                    certificate: None,
+                    private_key: None,
+                    udp: false,
                     headers: BTreeMap::new(),
                 })
                 .collect(),
@@ -6580,6 +6685,11 @@ dns:
                 tls: false,
                 sni: None,
                 skip_cert_verify: false,
+                name_cert_verify: None,
+                fingerprint: None,
+                certificate: None,
+                private_key: None,
+                udp: false,
                 headers: BTreeMap::new(),
             }],
         };
@@ -6669,22 +6779,68 @@ dns:
     }
 
     #[test]
-    fn parses_http_proxy_tls_options_without_broadening_socks5() {
+    fn parses_phase6b_http_and_socks5_tls_options() {
+        let fingerprint = "11".repeat(32);
         let source = format!(
-            "{MINIMAL}\nproxies:\n  - name: secure-http\n    type: http\n    server: proxy.test\n    port: 8443\n    username: user\n    password: pass\n    tls: true\n    sni: front.test\n    skip-cert-verify: true\n    headers:\n      X-Phase: 6b1c\n"
+            "{MINIMAL}\nproxies:\n  - name: secure-http\n    type: http\n    server: proxy.test\n    port: 8443\n    username: user\n    password: pass\n    tls: true\n    sni: front.test\n    skip-cert-verify: true\n    name-cert-verify: verify.test\n    fingerprint: '{fingerprint}'\n    certificate: client.pem\n    private-key: client.key\n    headers:\n      X-Phase: 6b\n"
         );
         let config = Config::from_yaml(&source).expect("HTTP TLS config");
         let proxy = &config.proxies[0];
         assert!(proxy.tls);
         assert_eq!(proxy.sni.as_deref(), Some("front.test"));
         assert!(proxy.skip_cert_verify);
-        assert_eq!(proxy.headers["X-Phase"], "6b1c");
+        assert_eq!(proxy.name_cert_verify.as_deref(), Some("verify.test"));
+        assert_eq!(proxy.fingerprint.as_deref(), Some(fingerprint.as_str()));
+        assert_eq!(proxy.certificate.as_deref(), Some("client.pem"));
+        assert_eq!(proxy.private_key.as_deref(), Some("client.key"));
+        assert_eq!(proxy.headers["X-Phase"], "6b");
+
+        let home = std::env::temp_dir().join("mihomo-phase6b-proxy-home");
+        let resolved = Config::from_yaml_with_provider_directory(&source, &home, false)
+            .expect("relative proxy client keypair paths");
+        assert_eq!(
+            resolved.proxies[0].certificate.as_deref(),
+            Some(home.join("client.pem").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            resolved.proxies[0].private_key.as_deref(),
+            Some(home.join("client.key").to_string_lossy().as_ref())
+        );
 
         let socks = source.replace("type: http", "type: socks5");
         assert!(matches!(
             Config::from_yaml(&socks),
             Err(ConfigError::UnsupportedProxy(_))
         ));
+
+        let socks = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - name: secure-socks\n    type: socks5\n    server: proxy.test\n    port: 1080\n    tls: true\n    udp: true\n    name-cert-verify: verify.test\n    fingerprint: '{fingerprint}'\n    certificate: client.pem\n    private-key: client.key\n"
+        ))
+        .expect("SOCKS5 TLS/UDP config");
+        assert!(socks.proxies[0].tls);
+        assert!(socks.proxies[0].udp);
+        assert_eq!(
+            socks.proxies[0].name_cert_verify.as_deref(),
+            Some("verify.test")
+        );
+
+        let invalid_pair = source.replace("    private-key: client.key\n", "");
+        assert!(matches!(
+            Config::from_yaml(&invalid_pair),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+
+    #[test]
+    fn mirrors_http_credential_activation_boundaries() {
+        let config = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - {{name: noauth, type: http, server: proxy.test, port: 8080}}\n  - {{name: user-only, type: http, server: proxy.test, port: 8080, username: user}}\n  - {{name: password-only, type: http, server: proxy.test, port: 8080, password: ignored}}\n  - {{name: both, type: http, server: proxy.test, port: 8080, username: user, password: pass}}\n"
+        ))
+        .expect("Go-compatible HTTP credential shapes");
+        assert_eq!(config.proxies[0].http_credentials(), None);
+        assert_eq!(config.proxies[1].http_credentials(), None);
+        assert_eq!(config.proxies[2].http_credentials(), None);
+        assert_eq!(config.proxies[3].http_credentials(), Some(("user", "pass")));
     }
 
     #[test]

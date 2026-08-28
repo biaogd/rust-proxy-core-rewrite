@@ -1844,10 +1844,11 @@ struct UdpSessionContext {
     shutdown: CancellationToken,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum UdpSessionMode {
     Direct,
     Dns,
+    Socks5(String),
 }
 
 #[derive(Default)]
@@ -1956,6 +1957,7 @@ fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessionMode> {
     match proxy.kind {
         ProxyKind::Direct => Some(UdpSessionMode::Direct),
         ProxyKind::Dns => Some(UdpSessionMode::Dns),
+        ProxyKind::Socks5 if proxy.udp => Some(UdpSessionMode::Socks5(target.to_owned())),
         ProxyKind::Http | ProxyKind::Socks5 | ProxyKind::Reject | ProxyKind::Rematch => None,
     }
 }
@@ -2030,6 +2032,12 @@ async fn run_udp_session(
                 dns_service,
                 decision,
                 shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Socks5(proxy) => {
+            run_socks5_udp_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
@@ -2186,6 +2194,127 @@ fn dns_adapter_response_addr(metadata: &Metadata) -> SocketAddr {
         Host::Domain(_) => "127.0.0.2".parse().expect("static DNS adapter address"),
     };
     SocketAddr::new(address, metadata.destination.port)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_socks5_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
+        server_name: &proxy.server,
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: proxy.fingerprint.as_deref(),
+        certificate: proxy.certificate.as_deref(),
+        private_key: proxy.private_key.as_deref(),
+        custom_roots: &config.trust_certificates,
+    });
+    let association = match rewrite_outbound::associate_socks5_udp_with_options(
+        &server,
+        config.ipv6,
+        proxy.socks5_credentials(),
+        tls,
+        Some(state.clock()),
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log("error", format!("SOCKS5 UDP association failed: {error}"));
+            return;
+        }
+    };
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination =
+                match resolve_udp_target(&request.metadata, request.fake_host.as_deref(), &config)
+                    .await
+                {
+                    Ok(destination) => Destination {
+                        host: Host::Ip(destination.ip()),
+                        port: destination.port(),
+                    },
+                    Err(_) => break,
+                };
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+async fn resolve_udp_response_source(
+    destination: &Destination,
+    allow_ipv6: bool,
+) -> Option<SocketAddr> {
+    match destination.host {
+        Host::Ip(address) => Some(SocketAddr::new(address, destination.port)),
+        Host::Domain(ref host) => tokio::net::lookup_host((host.as_str(), destination.port))
+            .await
+            .ok()?
+            .find(|address| allow_ipv6 || address.is_ipv4()),
+    }
 }
 
 async fn resolve_udp_target(
@@ -2517,6 +2646,7 @@ async fn connect_tcp_outbound(
                 &metadata.destination,
                 config.ipv6,
                 state.clock(),
+                &config.trust_certificates,
                 direct_tcp_options(config),
             ) => result,
         };
@@ -2554,6 +2684,7 @@ async fn connect_configured_proxy(
     destination: &Destination,
     allow_ipv6: bool,
     clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let server = Destination {
@@ -2571,10 +2702,15 @@ async fn connect_configured_proxy(
                 .map_err(|error| format!("DIRECT connection failed: {error}"))
         }
         ProxyKind::Http => {
-            let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
+            let credentials = proxy.http_credentials();
             let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                 server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                verification_name: proxy.name_cert_verify.as_deref(),
                 skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
             });
             rewrite_outbound::connect_http_with_options(
                 &server,
@@ -2589,15 +2725,28 @@ async fn connect_configured_proxy(
             .await
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }
-        ProxyKind::Socks5 => rewrite_outbound::connect_socks5_with_options(
-            &server,
-            destination,
-            allow_ipv6,
-            proxy.socks5_credentials(),
-            socket_options,
-        )
-        .await
-        .map_err(|error| format!("SOCKS5 proxy connection failed: {error}")),
+        ProxyKind::Socks5 => {
+            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
+                server_name: &proxy.server,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+            });
+            rewrite_outbound::connect_socks5_with_options(
+                &server,
+                destination,
+                allow_ipv6,
+                proxy.socks5_credentials(),
+                tls,
+                Some(clock),
+                socket_options,
+            )
+            .await
+            .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }

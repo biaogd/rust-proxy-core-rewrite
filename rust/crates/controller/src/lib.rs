@@ -1275,10 +1275,15 @@ async fn measure_http_delay(
                 .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
                 .map_err(|_| ())?,
                 rewrite_config::ProxyKind::Http => {
-                    let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
+                    let credentials = proxy.http_credentials();
                     let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                         server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                        verification_name: proxy.name_cert_verify.as_deref(),
                         skip_certificate_verification: proxy.skip_cert_verify,
+                        fingerprint: proxy.fingerprint.as_deref(),
+                        certificate: proxy.certificate.as_deref(),
+                        private_key: proxy.private_key.as_deref(),
+                        custom_roots: &config.trust_certificates,
                     });
                     rewrite_outbound::connect_http_with_options(
                         &server,
@@ -1293,15 +1298,28 @@ async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
-                rewrite_config::ProxyKind::Socks5 => rewrite_outbound::connect_socks5_with_options(
-                    &server,
-                    &destination,
-                    config.ipv6,
-                    proxy.socks5_credentials(),
-                    controller_socket_options(config),
-                )
-                .await
-                .map_err(|_| ())?,
+                rewrite_config::ProxyKind::Socks5 => {
+                    let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
+                        server_name: &proxy.server,
+                        verification_name: proxy.name_cert_verify.as_deref(),
+                        skip_certificate_verification: proxy.skip_cert_verify,
+                        fingerprint: proxy.fingerprint.as_deref(),
+                        certificate: proxy.certificate.as_deref(),
+                        private_key: proxy.private_key.as_deref(),
+                        custom_roots: &config.trust_certificates,
+                    });
+                    rewrite_outbound::connect_socks5_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        proxy.socks5_credentials(),
+                        tls,
+                        None,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -1534,13 +1552,14 @@ fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Dns => "Dns",
         rewrite_config::ProxyKind::Rematch => "Rematch",
     };
-    let udp = matches!(
-        proxy.kind,
+    let udp = match proxy.kind {
+        rewrite_config::ProxyKind::Socks5 => proxy.udp,
         rewrite_config::ProxyKind::Direct
-            | rewrite_config::ProxyKind::Reject
-            | rewrite_config::ProxyKind::Dns
-            | rewrite_config::ProxyKind::Rematch
-    );
+        | rewrite_config::ProxyKind::Reject
+        | rewrite_config::ProxyKind::Dns
+        | rewrite_config::ProxyKind::Rematch => true,
+        rewrite_config::ProxyKind::Http => false,
+    };
     json!({
         "alive": health.alive,
         "dialer-proxy": "",
@@ -1678,13 +1697,14 @@ fn selector_supports_udp(
         )
         .find(|proxy| proxy.name == selected)
     {
-        return matches!(
-            proxy.kind,
+        return match proxy.kind {
+            rewrite_config::ProxyKind::Socks5 => proxy.udp,
             rewrite_config::ProxyKind::Direct
-                | rewrite_config::ProxyKind::Reject
-                | rewrite_config::ProxyKind::Dns
-                | rewrite_config::ProxyKind::Rematch
-        );
+            | rewrite_config::ProxyKind::Reject
+            | rewrite_config::ProxyKind::Dns
+            | rewrite_config::ProxyKind::Rematch => true,
+            rewrite_config::ProxyKind::Http => false,
+        };
     }
     let Some(group) = config
         .proxy_groups

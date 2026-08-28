@@ -183,6 +183,7 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
         "unexpected-auth": ContractServer(echo_address, method=2),
         "no-method": ContractServer(echo_address, method=0xFF),
         "bad-version": ContractServer(echo_address, selection_version=4),
+        "overlength": ContractServer(echo_address, method=2),
         "reply-five": ContractServer(echo_address, reply=5),
         "wire": ContractServer(echo_address),
     }
@@ -201,6 +202,8 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
             credentials = "\n    password: ignored-password"
         elif name == "downgrade":
             credentials = "\n    username: downgrade-user\n    password: downgrade-pass"
+        elif name == "overlength":
+            credentials = f"\n    username: {'u' * 256}\n    password: overlength-pass"
         proxy_lines.append(
             f"  - name: {name}\n    type: socks5\n    server: 127.0.0.1\n"
             f"    port: {server.port}{credentials}"

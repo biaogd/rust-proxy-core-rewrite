@@ -765,6 +765,24 @@ cancellation-owned tasks schedule group health, provider health, remote
 refresh and file watching; generation changes re-key their inventories and
 shutdown joins each task with a bounded abort fallback.
 
+Phase 6B keeps HTTP and SOCKS5 product policy in `runtime`/`config` and confines
+wire mechanics to `outbound`. HTTP uses Hyper's client handshake, CONNECT
+request/response framing and upgrade stream. Both adapters pass a single TLS
+policy object to the rustls boundary, which builds system + embedded + configured
+roots, selects ordinary/name-override/skip/fingerprint verification and loads
+an optional client keypair. This avoids duplicating certificate policy between
+data-plane dials and controller health checks.
+
+SOCKS5 UDP is session-oriented in `runtime`: the mixed listener keys a bounded
+queue by inbound source, evaluates rules once for the session and creates one
+`Socks5UdpAssociation`. `outbound` owns RFC 1928 greeting/auth/UDP ASSOCIATE
+framing, keeps the boxed plaintext-or-TLS control stream alive, binds the local
+UDP socket through `rewrite-platform`, and encodes/decodes relay datagrams. The
+runtime resolves each destination with the existing UDP policy, validates the
+relay source, writes SOCKS5 UDP responses back to the original client, and ends
+the task on cancellation or the existing one-minute idle deadline. HTTP has no
+packet path; SOCKS5 reports UDP only when its configured `udp` flag is true.
+
 ## Architectural risks to track
 
 1. Upstream drift: the Alpha branch changes frequently and uses many MetaCubeX

@@ -227,6 +227,8 @@ jobs:
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BSOCKS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BSOCKSCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6BSOCKSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6BTLSIDENTITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -287,6 +289,8 @@ jobs:
             compat/scripts/phase6a_simple_adapters.py \
             compat/scripts/phase6b_socks5.py \
             compat/scripts/phase6b_socks5_contract.py \
+            compat/scripts/phase6b_socks5_udp.py \
+            compat/scripts/phase6b_tls_identity.py \
             compat/scripts/phase5c_selector.py \
             compat/scripts/phase6b_http.py \
             compat/scripts/phase6b_http_tls.py \
