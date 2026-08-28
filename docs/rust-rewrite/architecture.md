@@ -783,6 +783,13 @@ relay source, writes SOCKS5 UDP responses back to the original client, and ends
 the task on cancellation or the existing one-minute idle deadline. HTTP has no
 packet path; SOCKS5 reports UDP only when its configured `udp` flag is true.
 
+The outbound crate exposes that boundary through a small facade rather than a
+monolithic implementation file. `direct` owns platform-aware TCP dialing,
+`http` owns Hyper CONNECT and its public errors, `tls` owns rustls verification
+and client identity construction, while `socks5` separates common control/TLS,
+TCP command framing, UDP association and RFC 1929 authentication. Only the
+facade re-exports are public; cross-file helpers remain crate- or module-local.
+
 ## Architectural risks to track
 
 1. Upstream drift: the Alpha branch changes frequently and uses many MetaCubeX

@@ -135,6 +135,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
 | Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
+| Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | All 140 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
@@ -4542,6 +4543,17 @@ GitHub Actions assigns all seven scripts to the parallel
 run completes. Common `dialer-proxy` chaining belongs to OUT-21/Phase 7T, and
 later protocol/provider override combinations must provide their own evidence;
 neither is an unfinished native Phase 6B behavior.
+
+## Outbound module refactor
+
+The behavior-neutral post-6B refactor replaces the monolithic outbound
+`lib.rs` with a 20-line public facade. DIRECT dialing lives in `direct.rs`,
+Hyper CONNECT in `http.rs`, rustls policy in `tls.rs`, and SOCKS5 is split into
+`socks5/{mod,tcp,udp,auth}.rs`. Existing public names and signatures remain
+re-exported from the crate root, so controller/runtime callers do not depend on
+the internal file layout. Workspace warnings-denied clippy and all seven Phase
+6B Go/Rust differentials pass after the move. No compatibility row changes and
+no new protocol behavior are claimed.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
