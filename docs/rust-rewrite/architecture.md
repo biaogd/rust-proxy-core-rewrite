@@ -673,6 +673,21 @@ the configured UI/DoH paths. Compatibility includes routes, methods, status
 codes, JSON shapes, streaming/WebSocket framing, authentication and side
 effects—not only successful JSON responses.
 
+The post-Phase-6B structure pass keeps the controller crate root as a narrow
+state/API facade. `server` owns TCP/TLS/local transport accept loops, `tls` owns
+certificate policy, `cors` owns dynamic middleware, `routes` owns routing,
+authentication and DoH mounting, and the remaining endpoint families are split
+between `proxy`, `config_api`, `observability` and `response`. These modules use
+explicit imports, so transport, policy and serialization dependencies remain
+visible rather than flowing through a crate-wide prelude.
+
+The runtime crate follows the same boundary: `lifecycle` coordinates initial
+startup, reload and shutdown; `services` owns provider, health, NTP, UI and GEO
+background work; `generation` owns transactional listener/controller/DNS task
+replacement; `listener` owns inbound and UDP sessions; and `tcp` owns TCP rule,
+adapter and relay flow. The crate root contains only shared task/key types and
+re-exports the three existing run entry points.
+
 ## Cargo workspace boundary
 
 Phase 1 introduced the smallest workspace needed by the first vertical slice;
