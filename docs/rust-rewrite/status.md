@@ -4664,9 +4664,8 @@ python3 compat/scripts/phase5d_storage_persistence.py
 
 All four gates pass, including bidirectional Go/Rust `cache.db` interchange.
 This does not yet establish native Windows product restart compatibility. The
-dependency repository is private at the time of this change, so public-repo
-Actions also require the dependency to become public or an explicit read-only
-credential; no credential is embedded in this repository.
+dependency repository is public, so the public product repository's Actions
+can fetch the pinned revision without an additional credential.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
