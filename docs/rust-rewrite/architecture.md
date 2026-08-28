@@ -242,7 +242,10 @@ allocation and routing code free of database types. The dependency is
 `bbolt-rs` 1.3.10 with its explicit Go-compatibility feature; it is MIT
 licensed, supports the declared Darwin/Linux architectures, and is used only
 because the gate reads and commits the pinned Go oracle's real files in both
-directions.
+directions. The dependency is target-gated away on Windows because its mmap
+implementation does not compile there. Windows currently retains profile state
+in memory; a durable Windows backend needs its own format and compatibility
+decision before persistence can be claimed.
 
 Phase 4F14 also moves fake-IP filtering from an exact string list to owned
 domain/GeoSite/rule-set matchers and ordered rule actions. DNS evaluates those
@@ -673,20 +676,24 @@ the configured UI/DoH paths. Compatibility includes routes, methods, status
 codes, JSON shapes, streaming/WebSocket framing, authentication and side
 effects—not only successful JSON responses.
 
-The post-Phase-6B structure pass keeps the controller crate root as a narrow
-state/API facade. `server` owns TCP/TLS/local transport accept loops, `tls` owns
+The post-Phase-6B structure pass keeps the controller crate root as a narrow API
+facade. Shared controller state and update messages live in `context`; `server`
+owns TCP/TLS/local transport accept loops, `tls` owns
 certificate policy, `cors` owns dynamic middleware, `routes` owns routing,
 authentication and DoH mounting, and the remaining endpoint families are split
 between `proxy`, `config_api`, `observability` and `response`. These modules use
 explicit imports, so transport, policy and serialization dependencies remain
 visible rather than flowing through a crate-wide prelude.
 
-The runtime crate follows the same boundary: `lifecycle` coordinates initial
+The runtime crate follows the same boundary: shared task/controller-key types
+live in `types`; `lifecycle` coordinates initial
 startup, reload and shutdown; `services` owns provider, health, NTP, UI and GEO
 background work; `generation` owns transactional listener/controller/DNS task
 replacement; `listener` owns inbound and UDP sessions; and `tcp` owns TCP rule,
-adapter and relay flow. The crate root contains only shared task/key types and
-re-exports the three existing run entry points.
+adapter and relay flow. The crate root only declares modules and re-exports the
+three existing run entry points. Production modules import their external
+crates directly and use explicit `crate::module` paths internally; neither
+crate uses its parent module as a dependency prelude.
 
 ## Cargo workspace boundary
 

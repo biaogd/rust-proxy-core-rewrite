@@ -221,6 +221,14 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
                 )
             timeout_result = "expired-and-recreated"
 
+        # Keep the fixed-listener session demonstrably active immediately
+        # before reload. Under a contended CI host, the mixed-listener pressure
+        # loop can otherwise consume the 60-second NAT idle lifetime and turn
+        # this into a new-session REJECT test instead of a generation-retention
+        # test.
+        round_trip(
+            fixed_client, socks_port, authority.port, b"fixed-before-reload"
+        )
         write_config(config, socks_port, mixed_port, "REJECT")
         os.kill(process.pid, signal.SIGHUP)
         wait_route(process, mixed_port, tcp_echo.port, "reject")

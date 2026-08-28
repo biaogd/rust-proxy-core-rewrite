@@ -1,15 +1,39 @@
-use super::{
-    BTreeMap, Body, Config, ControllerState, Engine, HeaderValue, MAX_DNS_MESSAGE, Method, Next,
-    OffsetDateTime, Path, Request, Response, Rfc3339, Router, State, StatusCode, StreamExt,
-    URL_SAFE_NO_PAD, any, close_all_connections, close_connection, config_snapshot, connections,
-    debug_gc, decode_json_body, delete, dns_message_response, dns_query, empty_response,
-    flush_dns_cache, flush_fake_ip_cache, get, group, group_delay, groups, header,
-    healthcheck_proxy_provider, json, json_response, logs, memory, method_not_allowed, not_found,
-    patch_configs, plain_response, proxies, proxy, proxy_delay, proxy_provider,
-    proxy_provider_member, proxy_providers, query_parameters, restart, rule_providers,
-    select_proxy, traffic, typed_response, unfix_proxy, update_configs, update_geo,
-    update_proxy_provider, update_rule_provider, update_ui,
+use std::collections::BTreeMap;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::Response;
+use axum::routing::{any, delete, get};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures_util::StreamExt;
+use rewrite_config::Config;
+use serde_json::json;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::config_api::{
+    debug_gc, decode_json_body, patch_configs, restart, update_configs, update_geo, update_ui,
 };
+use crate::context::ControllerState;
+use crate::observability::{
+    close_all_connections, close_connection, connections, dns_query, flush_dns_cache,
+    flush_fake_ip_cache, logs, memory, traffic,
+};
+use crate::proxy::{
+    group, group_delay, groups, healthcheck_proxy_provider, proxies, proxy, proxy_delay,
+    proxy_provider, proxy_provider_member, proxy_providers, rule_providers, select_proxy,
+    unfix_proxy, update_proxy_provider, update_rule_provider,
+};
+use crate::response::{
+    config_snapshot, dns_message_response, empty_response, json_response, method_not_allowed,
+    not_found, plain_response, query_parameters, typed_response,
+};
+
+const MAX_DNS_MESSAGE: usize = 65_535;
 
 pub(super) fn controller_router(state: ControllerState) -> Router {
     Router::new()

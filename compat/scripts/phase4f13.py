@@ -194,7 +194,10 @@ def wait_tcp_echo(
     destination_port: int,
     marker: str,
 ) -> str:
-    deadline = time.monotonic() + IO_DEADLINE
+    # Reload runs compete with the other differential shards on shared CI
+    # hosts. Keep the per-attempt socket deadline bounded, but allow two full
+    # scheduling windows for the replacement generation to publish.
+    deadline = time.monotonic() + (2 * IO_DEADLINE) + 1
     last_error: BaseException | None = None
     payload = marker.encode()
     while time.monotonic() < deadline:
@@ -384,7 +387,11 @@ def reload_case(
     udp_query(dns_port, make_query(name, 1, 0x4D20))
     tcp_port = int(servers.tcp_echo.server_address[1])
     before = expect_tcp_rejected(mixed_port, address, tcp_port)
-    config.write_text(config.read_text().replace(f"DOMAIN,{name},REJECT", f"DOMAIN,{name},DIRECT"))
+    updated = config.with_suffix(".yaml.reload")
+    updated.write_text(
+        config.read_text().replace(f"DOMAIN,{name},REJECT", f"DOMAIN,{name},DIRECT")
+    )
+    updated.replace(config)
     os.kill(process.pid, signal.SIGHUP)
     after = wait_tcp_echo(socks5_connect, mixed_port, address, tcp_port, "reloaded")
     return {"before": before, "after": after}

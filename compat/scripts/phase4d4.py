@@ -84,7 +84,9 @@ def request(
 
 
 def wait_rest_controller(process: subprocess.Popen[bytes], port: int) -> None:
-    deadline = time.monotonic() + IO_DEADLINE
+    # Keep request timeouts strict while allowing a contended candidate two
+    # scheduling windows to publish its controller listener.
+    deadline = time.monotonic() + (2 * IO_DEADLINE) + 1
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"candidate exited during controller startup: {process.returncode}")

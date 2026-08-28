@@ -1,9 +1,23 @@
-use super::{
-    Arc, BTreeMap, CancellationToken, Config, Destination, Duration, Host, JoinSet, ListenerKind,
-    LocalTcpListener, Metadata, ProxyKind, Route, RuntimeState, SocketAddr, UdpSocket,
-    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision, mpsc, pending,
-    resolve_rematch_target, serve_connection, watch,
+use std::collections::BTreeMap;
+use std::future::pending;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rewrite_config::{Config, ListenerKind, ProxyKind};
+use rewrite_model::{Destination, Host, Metadata};
+use rewrite_rules::Route;
+use rewrite_state::RuntimeState;
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
+use crate::tcp::{
+    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
+    resolve_rematch_target, serve_connection,
 };
+use crate::types::LocalTcpListener;
 
 pub(super) async fn run_listener(
     kind: ListenerKind,

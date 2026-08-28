@@ -1,7 +1,14 @@
-use super::{
-    AllowHeaders, AllowMethods, AllowOrigin, ControllerState, CorsLayer, Duration, HeaderValue,
-    Layer, Method, Next, Request, Response, Service, State, StatusCode, empty_response, header,
-};
+use std::time::Duration;
+
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::Response;
+use tower::{Layer, Service};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+
+use crate::context::ControllerState;
+use crate::response::empty_response;
 
 pub(super) async fn apply_dynamic_cors(
     State(state): State<ControllerState>,

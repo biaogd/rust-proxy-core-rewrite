@@ -1,13 +1,27 @@
+use std::sync::Arc;
+
+use axum::Router;
+use axum::middleware;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use hyper_util::service::TowerToHyperService;
+use rewrite_config::Config;
+use rewrite_dns::DnsService;
+use rewrite_state::RuntimeState;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 #[cfg(unix)]
-use super::UnixListener;
-use super::{
-    Arc, AsyncRead, AsyncWrite, CancellationToken, Config, ConfigUpdate, ConnectionBuilder,
-    ControllerState, DnsService, JoinSet, Router, RuntimeState, ServeDir, TcpListener,
-    TokioExecutor, TokioIo, TowerToHyperService, apply_dynamic_cors, authenticate_or_serve_public,
-    controller_router, middleware, mpsc, watch,
-};
+use tokio::net::UnixListener;
 #[cfg(windows)]
-use super::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tower_http::services::ServeDir;
+
+use crate::context::{ConfigUpdate, ControllerState};
+use crate::cors::apply_dynamic_cors;
+use crate::routes::{authenticate_or_serve_public, controller_router};
 
 /// Serves the declared REST subset and Phase 4F15 DNS control surface.
 pub async fn serve(

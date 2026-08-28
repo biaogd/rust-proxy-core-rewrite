@@ -1,14 +1,17 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
+#[cfg(not(windows))]
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
+#[cfg(not(windows))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(not(windows))]
 use bbolt_rs::{
     Bolt, BucketApi, BucketRwApi, CursorApi, DbApi, DbRwAPI, Error as BoltError, TxApi, TxRwRefApi,
 };
@@ -178,6 +181,7 @@ struct StorageEntry {
     timestamp: i128,
 }
 
+#[cfg(not(windows))]
 const STORAGE_BUCKET: &[u8] = b"storage";
 const STORAGE_SIZE_LIMIT: usize = 1024 * 1024;
 const STORAGE_KEY_SIZE_LIMIT: usize = 64;
@@ -1162,6 +1166,7 @@ impl FakeIpPool {
         }
     }
 
+    #[cfg(not(windows))]
     fn restore(&mut self) {
         if !self.persistent {
             return;
@@ -1241,6 +1246,10 @@ impl FakeIpPool {
         }
     }
 
+    #[cfg(windows)]
+    fn restore(&mut self) {}
+
+    #[cfg(not(windows))]
     fn persist(&self) {
         if !self.persistent {
             return;
@@ -1282,6 +1291,10 @@ impl FakeIpPool {
         });
     }
 
+    #[cfg(windows)]
+    fn persist(&self) {}
+
+    #[cfg(not(windows))]
     fn store_state(&mut self) {
         if !self.persistent {
             return;
@@ -1307,16 +1320,23 @@ impl FakeIpPool {
             Ok(())
         });
     }
+
+    #[cfg(windows)]
+    fn store_state(&mut self) {}
 }
 
+#[cfg(not(windows))]
 const FAKE_IP_OFFSET_KEY: &[u8] = b"key-offset-fake-ip";
+#[cfg(not(windows))]
 const FAKE_IP_CYCLE_KEY: &[u8] = b"key-cycle-fake-ip";
+#[cfg(not(windows))]
 const SELECTED_BUCKET: &[u8] = b"selected";
 
 fn current_unix_nanos() -> i128 {
     OffsetDateTime::now_utc().unix_timestamp_nanos()
 }
 
+#[cfg(not(windows))]
 fn load_storage_state() -> BTreeMap<String, StorageEntry> {
     let path = fake_ip_state_path();
     if !path.exists() {
@@ -1354,6 +1374,12 @@ fn load_storage_state() -> BTreeMap<String, StorageEntry> {
     storage
 }
 
+#[cfg(windows)]
+fn load_storage_state() -> BTreeMap<String, StorageEntry> {
+    BTreeMap::new()
+}
+
+#[cfg(not(windows))]
 fn decode_storage_entry(payload: &[u8]) -> Option<StorageEntry> {
     let value = rmpv::decode::read_value(&mut Cursor::new(payload)).ok()?;
     let rmpv::Value::Map(fields) = value else {
@@ -1377,6 +1403,7 @@ fn decode_storage_entry(payload: &[u8]) -> Option<StorageEntry> {
     })
 }
 
+#[cfg(not(windows))]
 fn decode_timestamp(value: rmpv::Value) -> Option<i128> {
     let rmpv::Value::Ext(-1, bytes) = value else {
         return None;
@@ -1402,6 +1429,7 @@ fn decode_timestamp(value: rmpv::Value) -> Option<i128> {
     }
 }
 
+#[cfg(not(windows))]
 fn encode_storage_entry(entry: &StorageEntry) -> Option<Vec<u8>> {
     let seconds = entry.timestamp.div_euclid(1_000_000_000);
     let nanos = u32::try_from(entry.timestamp.rem_euclid(1_000_000_000)).ok()?;
@@ -1431,6 +1459,7 @@ fn encode_storage_entry(entry: &StorageEntry) -> Option<Vec<u8>> {
     Some(payload)
 }
 
+#[cfg(not(windows))]
 fn persist_storage(storage: &BTreeMap<String, StorageEntry>, _updated: Option<&str>) {
     let path = fake_ip_state_path();
     let Some(parent) = path.parent() else {
@@ -1456,6 +1485,10 @@ fn persist_storage(storage: &BTreeMap<String, StorageEntry>, _updated: Option<&s
     });
 }
 
+#[cfg(windows)]
+fn persist_storage(_storage: &BTreeMap<String, StorageEntry>, _updated: Option<&str>) {}
+
+#[cfg(not(windows))]
 fn delete_persistent_storage(key: &str) {
     let path = fake_ip_state_path();
     if !path.exists() {
@@ -1472,6 +1505,10 @@ fn delete_persistent_storage(key: &str) {
     });
 }
 
+#[cfg(windows)]
+fn delete_persistent_storage(_key: &str) {}
+
+#[cfg(not(windows))]
 fn delete_corrupted_storage(keys: &[Vec<u8>]) {
     let path = fake_ip_state_path();
     let Ok(mut database) = Bolt::open(path) else {
@@ -1488,6 +1525,7 @@ fn delete_corrupted_storage(keys: &[Vec<u8>]) {
     });
 }
 
+#[cfg(not(windows))]
 fn load_selected_state() -> BTreeMap<String, String> {
     let path = fake_ip_state_path();
     if !path.exists() {
@@ -1514,6 +1552,12 @@ fn load_selected_state() -> BTreeMap<String, String> {
     selected
 }
 
+#[cfg(windows)]
+fn load_selected_state() -> BTreeMap<String, String> {
+    BTreeMap::new()
+}
+
+#[cfg(not(windows))]
 fn store_selected_state(group: &str, selected: &str) {
     let path = fake_ip_state_path();
     let Some(parent) = path.parent() else {
@@ -1532,11 +1576,16 @@ fn store_selected_state(group: &str, selected: &str) {
     });
 }
 
+#[cfg(windows)]
+fn store_selected_state(_group: &str, _selected: &str) {}
+
+#[cfg(not(windows))]
 fn fake_ip_state_path() -> PathBuf {
     let home = std::env::var_os("HOME").map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
     home.join(".config").join("mihomo").join("cache.db")
 }
 
+#[cfg(not(windows))]
 fn fake_ip_bucket(network: IpNet) -> &'static [u8] {
     if network.addr().is_ipv4() {
         b"fakeip"
@@ -1545,6 +1594,7 @@ fn fake_ip_bucket(network: IpNet) -> &'static [u8] {
     }
 }
 
+#[cfg(not(windows))]
 fn flush_fake_ip_bucket(network: IpNet) {
     let path = fake_ip_state_path();
     if !path.exists() {
@@ -1561,6 +1611,9 @@ fn flush_fake_ip_bucket(network: IpNet) {
         Ok(())
     });
 }
+
+#[cfg(windows)]
+fn flush_fake_ip_bucket(_network: IpNet) {}
 
 fn ip_bytes(address: IpAddr) -> Vec<u8> {
     match address {

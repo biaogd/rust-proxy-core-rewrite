@@ -136,7 +136,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
-| Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 170 and 130 lines; explicit modules own server/TLS/CORS/routes/API responses and lifecycle/services/generation/TCP/UDP data planes; Phase 3 differential, workspace clippy and tests pass |
+| Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
+| CI portability/fixture hardening | Implemented; remote confirmation pending | Windows excludes unsupported `bbolt-rs`, Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; focused 4F13/5F tests pass locally |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | All 140 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
@@ -4559,18 +4560,21 @@ no new protocol behavior are claimed.
 ## Controller and runtime module refactor
 
 The behavior-neutral post-6B structure pass replaces the 3,033-line controller
-crate root with a 170-line facade and eight focused modules: server lifecycle,
-TLS material, dynamic CORS, route/auth/DoH handling, proxy/provider APIs,
+crate root with 77 lines including focused tests and nine focused modules:
+shared context, server lifecycle, TLS material, dynamic CORS, route/auth/DoH
+handling, proxy/provider APIs,
 configuration mutation, observability streams and response serialization. The
 public serving, TLS preparation and provider-health entry points remain
 re-exported with their existing names and signatures.
 
-The 3,077-line runtime crate root is likewise reduced to 130 lines. Process and
-reload orchestration, background provider/service scheduling, transactional
+The 3,077-line runtime crate root is likewise reduced to a 9-line facade.
+Shared task and controller-key types live in `types`. Process and reload
+orchestration, background provider/service scheduling, transactional
 generation replacement, listener/UDP sessions and TCP routing/relay now live
-in separate modules with explicit imports. The crate root retains shared task
-and controller-key state plus the existing public lifecycle API. No protocol,
-configuration or REST support row changes as a result of the move.
+in separate modules with explicit imports. Every production module imports
+external crates directly and names sibling dependencies through `crate::...`;
+there are no `use super` imports in controller/runtime production code. No
+protocol, configuration or REST support row changes as a result of the move.
 
 Focused local acceptance on Darwin arm64, 2026-08-28:
 
@@ -4579,13 +4583,17 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 python3 compat/scripts/phase3.py
+python3 compat/scripts/phase4f13.py
+python3 compat/scripts/phase5f_udp_nat.py
 ```
 
-All commands above pass. A direct Rust Phase 4D4 DNS REST/cache exercise also
-passes; two complete local Phase 4D4 differential attempts timed out while the
-Go candidate controller was starting, before comparison. The normal parallel
-CI differential shards remain the authoritative full regression for this
-structure-only change.
+All commands above pass after the dependency cleanup. The two focused fixture
+scripts also reproduce and resolve the completed Actions failures: Phase 4F13
+uses atomic reload input and a bounded two-window startup/reload allowance;
+Phase 5F refreshes the fixed UDP NAT entry immediately before generation
+replacement. Windows omits unsupported `bbolt-rs`; the native Actions gate is
+required before named-pipe parity is claimed, and durable Windows profile state
+remains explicitly unsupported.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

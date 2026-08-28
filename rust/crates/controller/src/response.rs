@@ -1,7 +1,11 @@
-use super::{
-    BTreeMap, Body, Bytes, Config, HeaderValue, Method, Response, Serialize, StatusCode, Uri,
-    header, json,
-};
+use std::collections::BTreeMap;
+
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::response::Response;
+use rewrite_config::Config;
+use serde::Serialize;
+use serde_json::json;
 
 pub(super) async fn method_not_allowed() -> Response {
     json_response(
