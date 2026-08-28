@@ -1,20 +1,15 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::BuildHasher;
-#[cfg(not(windows))]
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
-#[cfg(not(windows))]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(not(windows))]
-use bbolt_rs::{
-    Bolt, BucketApi, BucketRwApi, CursorApi, DbApi, DbRwAPI, Error as BoltError, TxApi, TxRwRefApi,
-};
+use bbolt::{Db, Error as BoltError};
 use ipnet::IpNet;
 use lru::LruCache;
 use rewrite_model::{Host, InboundProtocol, Metadata, Network};
@@ -181,7 +176,6 @@ struct StorageEntry {
     timestamp: i128,
 }
 
-#[cfg(not(windows))]
 const STORAGE_BUCKET: &[u8] = b"storage";
 const STORAGE_SIZE_LIMIT: usize = 1024 * 1024;
 const STORAGE_KEY_SIZE_LIMIT: usize = 64;
@@ -1166,19 +1160,18 @@ impl FakeIpPool {
         }
     }
 
-    #[cfg(not(windows))]
     fn restore(&mut self) {
         if !self.persistent {
             return;
         }
         let path = fake_ip_state_path();
-        let database = match Bolt::open(&path) {
+        let database = match Db::open(&path, 0o600, None) {
             Ok(database) => database,
             Err(
-                BoltError::InvalidDatabase(_)
-                | BoltError::ChecksumMismatch
+                BoltError::Invalid
+                | BoltError::Checksum
                 | BoltError::VersionMismatch
-                | BoltError::FileSizeTooSmall(_),
+                | BoltError::Corrupt(_),
             ) => {
                 let _ = std::fs::remove_file(path);
                 return;
@@ -1192,7 +1185,7 @@ impl FakeIpPool {
                 return Ok(());
             };
             if let Some(bytes) = bucket.get(FAKE_IP_OFFSET_KEY) {
-                if let Some(address) = address_from_bytes(bytes) {
+                if let Some(address) = address_from_bytes(&bytes) {
                     let number = ip_to_number(address);
                     if self.network.contains(&address) && number >= self.first && number < self.last
                     {
@@ -1202,13 +1195,13 @@ impl FakeIpPool {
                         incompatible = true;
                     }
                 } else if bucket
-                    .get(ip_bytes(number_to_ip(self.first, self.network)))
+                    .get(&ip_bytes(number_to_ip(self.first, self.network)))
                     .is_some()
                 {
                     incompatible = true;
                 }
             } else if bucket
-                .get(ip_bytes(number_to_ip(self.first, self.network)))
+                .get(&ip_bytes(number_to_ip(self.first, self.network)))
                 .is_some()
             {
                 incompatible = true;
@@ -1217,13 +1210,13 @@ impl FakeIpPool {
                 return Ok(());
             }
             let mut cursor = bucket.cursor();
-            let mut item = cursor.first();
-            while let Some((key, Some(value))) = item {
-                if key != FAKE_IP_OFFSET_KEY
-                    && key != FAKE_IP_CYCLE_KEY
-                    && address_from_bytes(key).is_none()
-                    && let Ok(host) = std::str::from_utf8(key)
-                    && let Some(address) = address_from_bytes(value)
+            let mut item = cursor.first()?;
+            while let (Some(key), Some(value)) = item {
+                if key.as_slice() != FAKE_IP_OFFSET_KEY
+                    && key.as_slice() != FAKE_IP_CYCLE_KEY
+                    && address_from_bytes(&key).is_none()
+                    && let Ok(host) = std::str::from_utf8(&key)
+                    && let Some(address) = address_from_bytes(&value)
                 {
                     let host = host.to_owned();
                     self.tick = self.tick.wrapping_add(1);
@@ -1236,7 +1229,7 @@ impl FakeIpPool {
                         },
                     );
                 }
-                item = cursor.next();
+                item = cursor.next()?;
             }
             Ok(())
         });
@@ -1246,10 +1239,6 @@ impl FakeIpPool {
         }
     }
 
-    #[cfg(windows)]
-    fn restore(&mut self) {}
-
-    #[cfg(not(windows))]
     fn persist(&self) {
         if !self.persistent {
             return;
@@ -1261,40 +1250,36 @@ impl FakeIpPool {
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
-        let Ok(mut database) = Bolt::open(path) else {
+        let Ok(database) = Db::open(path, 0o600, None) else {
             return;
         };
         let bucket_name = fake_ip_bucket(self.network);
-        let _ = database.update(|mut transaction| {
+        let _ = database.update(|transaction| {
             let saved_offset = transaction
                 .bucket(bucket_name)
-                .and_then(|bucket| bucket.get(FAKE_IP_OFFSET_KEY).map(<[u8]>::to_vec));
+                .and_then(|bucket| bucket.get(FAKE_IP_OFFSET_KEY));
             let saved_cycle = transaction
                 .bucket(bucket_name)
-                .and_then(|bucket| bucket.get(FAKE_IP_CYCLE_KEY).map(<[u8]>::to_vec));
+                .and_then(|bucket| bucket.get(FAKE_IP_CYCLE_KEY));
             if transaction.bucket(bucket_name).is_some() {
                 transaction.delete_bucket(bucket_name)?;
             }
-            let mut bucket = transaction.create_bucket(bucket_name)?;
+            let bucket = transaction.create_bucket(bucket_name)?;
             for (host, entry) in &self.by_host {
                 let address = ip_bytes(entry.address);
                 bucket.put(host.as_bytes(), &address)?;
                 bucket.put(&address, host.as_bytes())?;
             }
             if let Some(offset) = saved_offset {
-                bucket.put(FAKE_IP_OFFSET_KEY, offset)?;
+                bucket.put(FAKE_IP_OFFSET_KEY, &offset)?;
             }
             if let Some(cycle) = saved_cycle {
-                bucket.put(FAKE_IP_CYCLE_KEY, cycle)?;
+                bucket.put(FAKE_IP_CYCLE_KEY, &cycle)?;
             }
             Ok(())
         });
     }
 
-    #[cfg(windows)]
-    fn persist(&self) {}
-
-    #[cfg(not(windows))]
     fn store_state(&mut self) {
         if !self.persistent {
             return;
@@ -1306,13 +1291,13 @@ impl FakeIpPool {
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
-        let Ok(mut database) = Bolt::open(path) else {
+        let Ok(database) = Db::open(path, 0o600, None) else {
             return;
         };
         let bucket_name = fake_ip_bucket(self.network);
         let offset = ip_bytes(number_to_ip(self.offset, self.network));
-        let _ = database.update(|mut transaction| {
-            let mut bucket = transaction.create_bucket_if_not_exists(bucket_name)?;
+        let _ = database.update(|transaction| {
+            let bucket = transaction.create_bucket_if_not_exists(bucket_name)?;
             bucket.put(FAKE_IP_OFFSET_KEY, &offset)?;
             if self.cycle {
                 bucket.put(FAKE_IP_CYCLE_KEY, &offset)?;
@@ -1320,29 +1305,22 @@ impl FakeIpPool {
             Ok(())
         });
     }
-
-    #[cfg(windows)]
-    fn store_state(&mut self) {}
 }
 
-#[cfg(not(windows))]
 const FAKE_IP_OFFSET_KEY: &[u8] = b"key-offset-fake-ip";
-#[cfg(not(windows))]
 const FAKE_IP_CYCLE_KEY: &[u8] = b"key-cycle-fake-ip";
-#[cfg(not(windows))]
 const SELECTED_BUCKET: &[u8] = b"selected";
 
 fn current_unix_nanos() -> i128 {
     OffsetDateTime::now_utc().unix_timestamp_nanos()
 }
 
-#[cfg(not(windows))]
 fn load_storage_state() -> BTreeMap<String, StorageEntry> {
     let path = fake_ip_state_path();
     if !path.exists() {
         return BTreeMap::new();
     }
-    let Ok(database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return BTreeMap::new();
     };
     let mut storage = BTreeMap::new();
@@ -1352,18 +1330,18 @@ fn load_storage_state() -> BTreeMap<String, StorageEntry> {
             return Ok(());
         };
         let mut cursor = bucket.cursor();
-        let mut item = cursor.first();
-        while let Some((key, Some(value))) = item {
-            match std::str::from_utf8(key)
+        let mut item = cursor.first()?;
+        while let (Some(key), Some(value)) = item {
+            match std::str::from_utf8(&key)
                 .ok()
-                .zip(decode_storage_entry(value))
+                .zip(decode_storage_entry(&value))
             {
                 Some((key, entry)) => {
                     storage.insert(key.to_owned(), entry);
                 }
-                None => corrupted.push(key.to_vec()),
+                None => corrupted.push(key),
             }
-            item = cursor.next();
+            item = cursor.next()?;
         }
         Ok(())
     });
@@ -1374,12 +1352,6 @@ fn load_storage_state() -> BTreeMap<String, StorageEntry> {
     storage
 }
 
-#[cfg(windows)]
-fn load_storage_state() -> BTreeMap<String, StorageEntry> {
-    BTreeMap::new()
-}
-
-#[cfg(not(windows))]
 fn decode_storage_entry(payload: &[u8]) -> Option<StorageEntry> {
     let value = rmpv::decode::read_value(&mut Cursor::new(payload)).ok()?;
     let rmpv::Value::Map(fields) = value else {
@@ -1403,7 +1375,6 @@ fn decode_storage_entry(payload: &[u8]) -> Option<StorageEntry> {
     })
 }
 
-#[cfg(not(windows))]
 fn decode_timestamp(value: rmpv::Value) -> Option<i128> {
     let rmpv::Value::Ext(-1, bytes) = value else {
         return None;
@@ -1429,7 +1400,6 @@ fn decode_timestamp(value: rmpv::Value) -> Option<i128> {
     }
 }
 
-#[cfg(not(windows))]
 fn encode_storage_entry(entry: &StorageEntry) -> Option<Vec<u8>> {
     let seconds = entry.timestamp.div_euclid(1_000_000_000);
     let nanos = u32::try_from(entry.timestamp.rem_euclid(1_000_000_000)).ok()?;
@@ -1459,7 +1429,6 @@ fn encode_storage_entry(entry: &StorageEntry) -> Option<Vec<u8>> {
     Some(payload)
 }
 
-#[cfg(not(windows))]
 fn persist_storage(storage: &BTreeMap<String, StorageEntry>, _updated: Option<&str>) {
     let path = fake_ip_state_path();
     let Some(parent) = path.parent() else {
@@ -1468,14 +1437,14 @@ fn persist_storage(storage: &BTreeMap<String, StorageEntry>, _updated: Option<&s
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let Ok(mut database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return;
     };
-    let _ = database.update(|mut transaction| {
+    let _ = database.update(|transaction| {
         if transaction.bucket(STORAGE_BUCKET).is_some() {
             transaction.delete_bucket(STORAGE_BUCKET)?;
         }
-        let mut bucket = transaction.create_bucket(STORAGE_BUCKET)?;
+        let bucket = transaction.create_bucket(STORAGE_BUCKET)?;
         for (key, entry) in storage {
             if let Some(payload) = encode_storage_entry(entry) {
                 bucket.put(key.as_bytes(), &payload)?;
@@ -1485,37 +1454,29 @@ fn persist_storage(storage: &BTreeMap<String, StorageEntry>, _updated: Option<&s
     });
 }
 
-#[cfg(windows)]
-fn persist_storage(_storage: &BTreeMap<String, StorageEntry>, _updated: Option<&str>) {}
-
-#[cfg(not(windows))]
 fn delete_persistent_storage(key: &str) {
     let path = fake_ip_state_path();
     if !path.exists() {
         return;
     }
-    let Ok(mut database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return;
     };
-    let _ = database.update(|mut transaction| {
-        let Some(mut bucket) = transaction.bucket_mut(STORAGE_BUCKET) else {
+    let _ = database.update(|transaction| {
+        let Some(bucket) = transaction.bucket(STORAGE_BUCKET) else {
             return Ok(());
         };
         bucket.delete(key.as_bytes())
     });
 }
 
-#[cfg(windows)]
-fn delete_persistent_storage(_key: &str) {}
-
-#[cfg(not(windows))]
 fn delete_corrupted_storage(keys: &[Vec<u8>]) {
     let path = fake_ip_state_path();
-    let Ok(mut database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return;
     };
-    let _ = database.update(|mut transaction| {
-        let Some(mut bucket) = transaction.bucket_mut(STORAGE_BUCKET) else {
+    let _ = database.update(|transaction| {
+        let Some(bucket) = transaction.bucket(STORAGE_BUCKET) else {
             return Ok(());
         };
         for key in keys {
@@ -1525,13 +1486,12 @@ fn delete_corrupted_storage(keys: &[Vec<u8>]) {
     });
 }
 
-#[cfg(not(windows))]
 fn load_selected_state() -> BTreeMap<String, String> {
     let path = fake_ip_state_path();
     if !path.exists() {
         return BTreeMap::new();
     }
-    let Ok(database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return BTreeMap::new();
     };
     let mut selected = BTreeMap::new();
@@ -1540,24 +1500,19 @@ fn load_selected_state() -> BTreeMap<String, String> {
             return Ok(());
         };
         let mut cursor = bucket.cursor();
-        let mut item = cursor.first();
-        while let Some((key, Some(value))) = item {
-            if let (Ok(group), Ok(proxy)) = (std::str::from_utf8(key), std::str::from_utf8(value)) {
+        let mut item = cursor.first()?;
+        while let (Some(key), Some(value)) = item {
+            if let (Ok(group), Ok(proxy)) = (std::str::from_utf8(&key), std::str::from_utf8(&value))
+            {
                 selected.insert(group.to_owned(), proxy.to_owned());
             }
-            item = cursor.next();
+            item = cursor.next()?;
         }
         Ok(())
     });
     selected
 }
 
-#[cfg(windows)]
-fn load_selected_state() -> BTreeMap<String, String> {
-    BTreeMap::new()
-}
-
-#[cfg(not(windows))]
 fn store_selected_state(group: &str, selected: &str) {
     let path = fake_ip_state_path();
     let Some(parent) = path.parent() else {
@@ -1566,26 +1521,23 @@ fn store_selected_state(group: &str, selected: &str) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let Ok(mut database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return;
     };
-    let _ = database.update(|mut transaction| {
-        let mut bucket = transaction.create_bucket_if_not_exists(SELECTED_BUCKET)?;
+    let _ = database.update(|transaction| {
+        let bucket = transaction.create_bucket_if_not_exists(SELECTED_BUCKET)?;
         bucket.put(group.as_bytes(), selected.as_bytes())?;
         Ok(())
     });
 }
 
-#[cfg(windows)]
-fn store_selected_state(_group: &str, _selected: &str) {}
-
-#[cfg(not(windows))]
 fn fake_ip_state_path() -> PathBuf {
-    let home = std::env::var_os("HOME").map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(|| Path::new(".").to_path_buf(), PathBuf::from);
     home.join(".config").join("mihomo").join("cache.db")
 }
 
-#[cfg(not(windows))]
 fn fake_ip_bucket(network: IpNet) -> &'static [u8] {
     if network.addr().is_ipv4() {
         b"fakeip"
@@ -1594,26 +1546,22 @@ fn fake_ip_bucket(network: IpNet) -> &'static [u8] {
     }
 }
 
-#[cfg(not(windows))]
 fn flush_fake_ip_bucket(network: IpNet) {
     let path = fake_ip_state_path();
     if !path.exists() {
         return;
     }
-    let Ok(mut database) = Bolt::open(path) else {
+    let Ok(database) = Db::open(path, 0o600, None) else {
         return;
     };
     let bucket_name = fake_ip_bucket(network);
-    let _ = database.update(|mut transaction| {
+    let _ = database.update(|transaction| {
         if transaction.bucket(bucket_name).is_some() {
             transaction.delete_bucket(bucket_name)?;
         }
         Ok(())
     });
 }
-
-#[cfg(windows)]
-fn flush_fake_ip_bucket(_network: IpNet) {}
 
 fn ip_bytes(address: IpAddr) -> Vec<u8> {
     match address {

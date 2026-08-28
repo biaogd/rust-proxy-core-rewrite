@@ -238,14 +238,14 @@ files in the Phase 4C slice. Phase 4F14 replaces those sidecars with the Go
 profile layout: one bbolt `cache.db`, `fakeip`/`fakeip6` buckets,
 bidirectional host/address keys and the oracle's offset/cycle keys. The state
 crate opens the database only at the persistence boundary and keeps filtering,
-allocation and routing code free of database types. The dependency is
-`bbolt-rs` 1.3.10 with its explicit Go-compatibility feature; it is MIT
-licensed, supports the declared Darwin/Linux architectures, and is used only
-because the gate reads and commits the pinned Go oracle's real files in both
-directions. The dependency is target-gated away on Windows because its mmap
-implementation does not compile there. Windows currently retains profile state
-in memory; a durable Windows backend needs its own format and compatibility
-decision before persistence can be claimed.
+allocation and routing code free of database types. The dependency is the
+MIT-licensed `bbolt` package from `biaogd/bbolt-rs`, pinned to revision
+`83d3900849e5c41273798e0951b110d6375c925f`. It is used because the gate reads
+and commits the pinned Go oracle's real files in both directions. Its platform
+module provides native Unix and Windows mmap/file-lock implementations, so the
+state crate now uses one database boundary on every target. Native Windows
+product restart/interchange remains a compatibility gate rather than an
+architecture exception.
 
 Phase 4F14 also moves fake-IP filtering from an exact string list to owned
 domain/GeoSite/rule-set matchers and ordered rule actions. DNS evaluates those
@@ -728,7 +728,7 @@ selection; it also adds no crate. Phase 4F13 replaces the reverse mapping's
 nominal TTL eviction with the oracle's size-only access-order LRU and extends
 its differential coverage across existing local listener types without adding
 a crate. Phase 4F14 keeps those crate boundaries and adds the reviewed
-`bbolt-rs` persistence dependency to `rewrite-state`: config owns fake-IP
+`bbolt` persistence dependency to `rewrite-state`: config owns fake-IP
 matcher data, DNS owns filter evaluation, state owns pools/profile storage and
 controller exposes only the flush operation. Phase 4F15 keeps resolution in
 `rewrite-dns` and the HTTP boundary in `rewrite-controller`. After Phase 4F15,

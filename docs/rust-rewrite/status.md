@@ -137,7 +137,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
-| CI portability/fixture hardening | Implemented; remote confirmation pending | Windows excludes unsupported `bbolt-rs`, Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; focused 4F13/5F tests pass locally |
+| CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented | All 140 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
@@ -2813,9 +2813,10 @@ Phase 4C Rust JSON sidecars. IPv4 and IPv6 retain separate `fakeip` and
 `fakeip6` buckets with the same bidirectional keys and allocation state keys.
 The gate starts Go, continues both families in Rust, then continues Rust's
 new mappings in Go. It also replaces a malformed cache file through the same
-observable recovery path. `bbolt-rs` 1.3.10 is enabled with its explicit Go
-compatibility feature; its MIT license is compatible with this GPL-3.0-only
-workspace, and no database type escapes `rewrite-state`.
+observable recovery path. The backend is pinned to revision
+`83d3900849e5c41273798e0951b110d6375c925f` of `biaogd/bbolt-rs`; its MIT
+license is compatible with this GPL-3.0-only workspace, and no database type
+escapes `rewrite-state`.
 
 On SIGHUP, nonpersistent pools clone their mappings into the replacement
 family even when the prefix changes, preserving the pinned Go pool's
@@ -4591,9 +4592,9 @@ All commands above pass after the dependency cleanup. The two focused fixture
 scripts also reproduce and resolve the completed Actions failures: Phase 4F13
 uses atomic reload input and a bounded two-window startup/reload allowance;
 Phase 5F refreshes the fixed UDP NAT entry immediately before generation
-replacement. Windows omits unsupported `bbolt-rs`; the native Actions gate is
-required before named-pipe parity is claimed, and durable Windows profile state
-remains explicitly unsupported.
+replacement. The later storage migration removes the Windows-only persistence
+no-ops; native Windows product restart/interchange evidence is still required
+before durable profile compatibility is claimed there.
 
 ## Configuration module refactor
 
@@ -4640,6 +4641,32 @@ looked for `GeoIP.dat` under the runner's default home. The fixture now supplies
 the same `-d` input to both products and guarantees its released mixed/DNS port
 numbers are distinct. The complete Phase 4F9 differential passes locally after
 the correction; a subsequent Actions run remains the acceptance authority.
+
+## Cross-platform bbolt backend migration
+
+The state crate now uses the `bbolt` package from `biaogd/bbolt-rs`, pinned to
+revision `83d3900849e5c41273798e0951b110d6375c925f`. The dependency's native
+Windows `cargo test` passed in upstream Actions run `33158755650`. Its database
+API is contained inside `rewrite-state`; fake-IP mappings/allocation state,
+selector choices and controller storage all use the same implementation on
+Windows, Darwin and Linux. The previous Windows restore/persist/store no-ops
+and target-specific dependency exclusion have been removed. `USERPROFILE` is
+used as the Windows home fallback when `HOME` is absent.
+
+Focused Darwin arm64 acceptance after the migration:
+
+```sh
+cargo test -p rewrite-state --all-features
+python3 compat/scripts/phase4f14.py
+python3 compat/scripts/phase5c_selector_persistence.py
+python3 compat/scripts/phase5d_storage_persistence.py
+```
+
+All four gates pass, including bidirectional Go/Rust `cache.db` interchange.
+This does not yet establish native Windows product restart compatibility. The
+dependency repository is private at the time of this change, so public-repo
+Actions also require the dependency to become public or an explicit read-only
+credential; no credential is embedded in this repository.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
