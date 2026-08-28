@@ -639,6 +639,15 @@ credentials last; only status 200 upgrades to a tunnel. DNS, provider
 downloads and HTTP outbounds share the ring rustls provider selection but do
 not share routing or retry policy.
 
+Phase 6A keeps the simple configured adapters inside the same explicit runtime
+boundary. Configured DIRECT selects the existing TCP/UDP socket-policy path;
+configured REJECT maps to immediate TCP closure or silent UDP drop; configured
+DNS feeds two-byte framed TCP queries or individual UDP messages into the one
+runtime-owned `DnsService`; and configured REMATCH mutates rule metadata and
+re-enters evaluation with cycle protection. Group resolution occurs before this
+dispatch, so selecting a simple adapter directly or through a group produces
+the same data-plane behavior and controller capability view.
+
 ## REST controller
 
 The controller can listen simultaneously on plain TCP, TLS and a platform-local

@@ -19,7 +19,7 @@ use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
 use rewrite_state::{ConnectionGuard, RuntimeState};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -1393,8 +1393,18 @@ async fn apply_generation(
         let child_shutdown = task_shutdown.clone();
         let task_config = config_receiver.clone();
         let task_state = Arc::clone(state);
+        let task_dns_service = Arc::clone(dns_service);
         let handle = tokio::spawn(async move {
-            run_listener(kind, listener, udp, task_config, task_state, child_shutdown).await;
+            run_listener(
+                kind,
+                listener,
+                udp,
+                task_config,
+                task_state,
+                task_dns_service,
+                child_shutdown,
+            )
+            .await;
         });
         listeners.insert(
             (kind, port, address),
@@ -1726,6 +1736,7 @@ async fn run_listener(
     udp: Option<Arc<UdpSocket>>,
     config: watch::Receiver<Arc<Config>>,
     state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
 ) {
     let mut connections = JoinSet::new();
@@ -1739,6 +1750,7 @@ async fn run_listener(
                     Ok((client, _)) => {
                         let connection_config = Arc::clone(&config.borrow());
                         let connection_state = Arc::clone(&state);
+                        let connection_dns_service = Arc::clone(&dns_service);
                         let connection_shutdown = shutdown.child_token();
                         connections.spawn(async move {
                             serve_connection(
@@ -1746,6 +1758,7 @@ async fn run_listener(
                                 kind,
                                 &connection_config,
                                 &connection_state,
+                                &connection_dns_service,
                                 &connection_shutdown,
                             ).await;
                         });
@@ -1779,12 +1792,15 @@ async fn run_listener(
                         continue;
                     };
                     udp_sessions.dispatch(
-                        Arc::clone(socket),
                         source,
                         request,
-                        connection_config,
-                        Arc::clone(&state),
-                        shutdown.child_token(),
+                        UdpSessionContext {
+                            listener: Arc::clone(socket),
+                            config: connection_config,
+                            state: Arc::clone(&state),
+                            dns_service: Arc::clone(&dns_service),
+                            shutdown: shutdown.child_token(),
+                        },
                     );
                 }
             }
@@ -1819,6 +1835,21 @@ struct UdpSessionPacket {
     payload: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct UdpSessionContext {
+    listener: Arc<UdpSocket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    shutdown: CancellationToken,
+}
+
+#[derive(Clone, Copy)]
+enum UdpSessionMode {
+    Direct,
+    Dns,
+}
+
 #[derive(Default)]
 struct UdpSessions {
     tasks: JoinSet<(SocketAddr, u64)>,
@@ -1840,51 +1871,64 @@ impl UdpSessions {
 
     fn dispatch(
         &mut self,
-        listener: Arc<UdpSocket>,
         source: SocketAddr,
         request: UdpSessionPacket,
-        config: Arc<Config>,
-        state: Arc<RuntimeState>,
-        shutdown: CancellationToken,
+        context: UdpSessionContext,
     ) {
         if let Some((_, sender)) = self.entries.get(&source) {
             match sender.try_send(request) {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    state.log("error", "SOCKS5 UDP session queue is full");
+                    context
+                        .state
+                        .log("error", "SOCKS5 UDP session queue is full");
                     return;
                 }
                 Err(mpsc::error::TrySendError::Closed(request)) => {
                     self.entries.remove(&source);
-                    self.start(listener, source, request, config, state, shutdown);
+                    self.start(source, request, context);
                     return;
                 }
             }
         }
-        self.start(listener, source, request, config, state, shutdown);
+        self.start(source, request, context);
     }
 
     fn start(
         &mut self,
-        listener: Arc<UdpSocket>,
         source: SocketAddr,
-        request: UdpSessionPacket,
-        config: Arc<Config>,
-        state: Arc<RuntimeState>,
-        shutdown: CancellationToken,
+        mut request: UdpSessionPacket,
+        context: UdpSessionContext,
     ) {
-        let decision = mode_decision(&config, &state)
-            .unwrap_or_else(|| config.rules.evaluate(&request.metadata));
-        if decision.route() != Route::Direct {
+        let decision = mode_decision(&context.config, &context.state)
+            .unwrap_or_else(|| context.config.rules.evaluate(&request.metadata));
+        let Some((decision, target, _)) = resolve_rematch_target(
+            decision,
+            &mut request.metadata,
+            &context.config,
+            &context.state,
+        ) else {
             return;
-        }
+        };
+        let Some(mode) = udp_session_mode(&target, &context.config) else {
+            return;
+        };
         let session_id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let (sender, receiver) = mpsc::channel(64);
         self.entries.insert(source, (session_id, sender));
         self.tasks.spawn(async move {
             run_udp_session(
-                listener, source, request, receiver, config, state, decision, shutdown,
+                context.listener,
+                source,
+                request,
+                receiver,
+                context.config,
+                context.state,
+                context.dns_service,
+                decision,
+                mode,
+                context.shutdown,
             )
             .await;
             (source, session_id)
@@ -1901,6 +1945,31 @@ impl UdpSessions {
                 );
             }
         }
+    }
+}
+
+fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessionMode> {
+    if matches!(target, "DIRECT" | "COMPATIBLE") {
+        return Some(UdpSessionMode::Direct);
+    }
+    let proxy = configured_proxy(config, target)?;
+    match proxy.kind {
+        ProxyKind::Direct => Some(UdpSessionMode::Direct),
+        ProxyKind::Dns => Some(UdpSessionMode::Dns),
+        ProxyKind::Http | ProxyKind::Socks5 | ProxyKind::Reject | ProxyKind::Rematch => None,
+    }
+}
+
+fn resolved_route(target: &str, config: &Config) -> Route {
+    match target {
+        "DIRECT" | "COMPATIBLE" => Route::Direct,
+        "REJECT" => Route::Reject,
+        "REJECT-DROP" => Route::RejectDrop,
+        _ => match configured_proxy(config, target).map(|proxy| proxy.kind) {
+            Some(ProxyKind::Direct) => Route::Direct,
+            Some(ProxyKind::Reject) => Route::Reject,
+            _ => Route::Unsupported,
+        },
     }
 }
 
@@ -1932,6 +2001,43 @@ fn prepare_udp_request(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    decision: rewrite_rules::Decision,
+    mode: UdpSessionMode,
+    shutdown: CancellationToken,
+) {
+    match mode {
+        UdpSessionMode::Direct => {
+            run_direct_udp_session(
+                listener, source, first, requests, config, state, decision, shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Dns => {
+            run_dns_udp_session(
+                listener,
+                source,
+                first,
+                requests,
+                config,
+                state,
+                dns_service,
+                decision,
+                shutdown,
+            )
+            .await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_direct_udp_session(
     listener: Arc<UdpSocket>,
     source: SocketAddr,
     first: UdpSessionPacket,
@@ -2020,6 +2126,68 @@ async fn run_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_dns_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            if let Ok(response) = dns_service
+                .relay_query(&config, &state, &request.payload)
+                .await
+            {
+                let remote = dns_adapter_response_addr(&request.metadata);
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &response);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(response.len() as u64);
+            }
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+fn dns_adapter_response_addr(metadata: &Metadata) -> SocketAddr {
+    let address = match metadata.destination.host {
+        Host::Ip(address) => address,
+        Host::Domain(_) => "127.0.0.2".parse().expect("static DNS adapter address"),
+    };
+    SocketAddr::new(address, metadata.destination.port)
+}
+
 async fn resolve_udp_target(
     metadata: &Metadata,
     fake_host: Option<&str>,
@@ -2057,11 +2225,13 @@ async fn resolve_udp_target(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve_connection(
     client: BoxedInboundStream,
     kind: ListenerKind,
     config: &Config,
     state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
 ) {
     let Ok(peer) = client.peer_addr() else {
@@ -2119,7 +2289,12 @@ async fn serve_connection(
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
     let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
-    let route = decision.route();
+    let Some((decision, outbound_target, traversed_groups)) =
+        resolve_rematch_target(decision, &mut metadata, config, state)
+    else {
+        return;
+    };
+    let route = resolved_route(&outbound_target, config);
     state.log(
         "info",
         format!(
@@ -2146,11 +2321,11 @@ async fn serve_connection(
         }
         return;
     }
-    let Some(mut remote) = connect_tcp_outbound(
+    let Some(remote) = connect_tcp_outbound(
         &metadata,
         fake_host.as_deref(),
         &decision.target,
-        route,
+        (outbound_target, traversed_groups),
         config,
         state,
         shutdown,
@@ -2160,6 +2335,22 @@ async fn serve_connection(
         return;
     };
     let client = accepted.client;
+    if matches!(remote, TcpOutbound::Dns) {
+        relay_dns_tcp(
+            client,
+            &accepted.preface,
+            config,
+            state,
+            dns_service,
+            tracker,
+            shutdown,
+        )
+        .await;
+        return;
+    }
+    let TcpOutbound::Stream(mut remote) = remote else {
+        unreachable!("DNS outbound was handled")
+    };
     if !accepted.preface.is_empty() && remote.write_all(&accepted.preface).await.is_err() {
         return;
     }
@@ -2167,17 +2358,91 @@ async fn serve_connection(
     relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
 }
 
+enum TcpOutbound {
+    Stream(rewrite_outbound::BoxedOutboundStream),
+    Dns,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_dns_tcp(
+    mut client: BoxedInboundStream,
+    preface: &[u8],
+    config: &Config,
+    state: &RuntimeState,
+    dns_service: &rewrite_dns::DnsService,
+    tracker: ConnectionGuard,
+    shutdown: &CancellationToken,
+) {
+    let mut pending = preface.to_vec();
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    loop {
+        let mut length = [0_u8; 2];
+        let read = read_prefixed_exact(&mut client, &mut pending, &mut length);
+        if !tokio::select! {
+            () = shutdown.cancelled() => false,
+            () = tracker.cancelled() => false,
+            result = read => result.is_ok(),
+        } {
+            break;
+        }
+        let length = usize::from(u16::from_be_bytes(length));
+        if length == 0 {
+            break;
+        }
+        let mut query = vec![0_u8; length];
+        if read_prefixed_exact(&mut client, &mut pending, &mut query)
+            .await
+            .is_err()
+        {
+            break;
+        }
+        uploaded = uploaded.saturating_add((length + 2) as u64);
+        let response = match dns_service.relay_query(config, state, &query).await {
+            Ok(response) => response,
+            Err(error) => {
+                state.log("error", format!("DNS adapter TCP relay failed: {error}"));
+                break;
+            }
+        };
+        let Ok(response_length) = u16::try_from(response.len()) else {
+            break;
+        };
+        if client
+            .write_all(&response_length.to_be_bytes())
+            .await
+            .is_err()
+            || client.write_all(&response).await.is_err()
+        {
+            break;
+        }
+        downloaded = downloaded.saturating_add((response.len() + 2) as u64);
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+async fn read_prefixed_exact(
+    client: &mut BoxedInboundStream,
+    pending: &mut Vec<u8>,
+    output: &mut [u8],
+) -> std::io::Result<()> {
+    let copied = pending.len().min(output.len());
+    output[..copied].copy_from_slice(&pending[..copied]);
+    pending.drain(..copied);
+    client.read_exact(&mut output[copied..]).await.map(|_| ())
+}
+
 async fn connect_tcp_outbound(
     metadata: &Metadata,
     fake_host: Option<&str>,
     target: &str,
-    route: Route,
+    resolved: (String, Vec<String>),
     config: &Config,
     state: &RuntimeState,
     shutdown: &CancellationToken,
-) -> Option<rewrite_outbound::BoxedOutboundStream> {
-    let (outbound_target, traversed_groups) =
-        resolve_selector_target(target, metadata, config, state)?;
+) -> Option<TcpOutbound> {
+    let (outbound_target, traversed_groups) = resolved;
+    let route = resolved_route(&outbound_target, config);
     if matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
         return None;
     }
@@ -2197,7 +2462,7 @@ async fn connect_tcp_outbound(
                 config.ipv6,
                 direct_tcp_options(config),
             ) => match result {
-                Ok(remote) => Some(Box::new(remote)),
+                Ok(remote) => Some(TcpOutbound::Stream(Box::new(remote))),
                 Err(error) => {
                     state.log("error", format!("DIRECT connection failed: {error}"));
                     None
@@ -2230,7 +2495,7 @@ async fn connect_tcp_outbound(
                     config.ipv6,
                     direct_tcp_options(config),
                 ) => match result {
-                    Ok(remote) => Some(Box::new(remote)),
+                    Ok(remote) => Some(TcpOutbound::Stream(Box::new(remote))),
                     Err(error) => {
                         state.log("error", format!("DIRECT connection failed: {error}"));
                         None
@@ -2238,16 +2503,13 @@ async fn connect_tcp_outbound(
                 }
             };
         }
-        let proxy = config
-            .proxies
-            .iter()
-            .chain(
-                config
-                    .proxy_providers
-                    .iter()
-                    .flat_map(|provider| provider.proxies.iter()),
-            )
-            .find(|proxy| proxy.name == outbound_target)?;
+        let proxy = configured_proxy(config, &outbound_target)?;
+        if proxy.kind == ProxyKind::Reject {
+            return None;
+        }
+        if proxy.kind == ProxyKind::Dns {
+            return Some(TcpOutbound::Dns);
+        }
         let result = tokio::select! {
             () = shutdown.cancelled() => return None,
             result = connect_configured_proxy(
@@ -2259,7 +2521,7 @@ async fn connect_tcp_outbound(
             ) => result,
         };
         match result {
-            Ok(remote) => return Some(remote),
+            Ok(remote) => return Some(TcpOutbound::Stream(remote)),
             Err(error) => {
                 record_group_proxy_failure(&traversed_groups, config, state, &error);
                 state.log("error", error);
@@ -2303,6 +2565,12 @@ async fn connect_configured_proxy(
     };
     let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
     match proxy.kind {
+        ProxyKind::Direct => {
+            rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
+                .await
+                .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
+                .map_err(|error| format!("DIRECT connection failed: {error}"))
+        }
         ProxyKind::Http => {
             let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                 server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
@@ -2330,12 +2598,60 @@ async fn connect_configured_proxy(
         )
         .await
         .map_err(|error| format!("SOCKS5 proxy connection failed: {error}")),
+        ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
+            Err("configured proxy is not a TCP dialer".to_owned())
+        }
     }
 }
 
 fn group_retry_delay(attempt: usize) -> Duration {
     let multiplier = 1_u64 << u32::try_from(attempt.min(7)).unwrap_or(7);
     Duration::from_millis(10_u64.saturating_mul(multiplier).min(1000))
+}
+
+fn configured_proxy<'a>(config: &'a Config, name: &str) -> Option<&'a rewrite_config::ProxyConfig> {
+    config
+        .proxies
+        .iter()
+        .chain(
+            config
+                .proxy_providers
+                .iter()
+                .flat_map(|provider| provider.proxies.iter()),
+        )
+        .find(|proxy| proxy.name == name)
+}
+
+fn resolve_rematch_target(
+    mut decision: rewrite_rules::Decision,
+    metadata: &mut Metadata,
+    config: &Config,
+    state: &RuntimeState,
+) -> Option<(rewrite_rules::Decision, String, Vec<String>)> {
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        let (target, traversed_groups) =
+            resolve_selector_target(&decision.target, metadata, config, state)?;
+        if configured_proxy(config, &target).is_none_or(|proxy| proxy.kind != ProxyKind::Rematch) {
+            return Some((decision, target, traversed_groups));
+        }
+        let rematch = config.rematch(&target)?;
+        let key = (
+            target,
+            metadata.rematch_name.clone(),
+            metadata.special_rules.clone(),
+        );
+        if !seen.insert(key) {
+            return None;
+        }
+        if let Some(name) = &rematch.target_rematch_name {
+            name.clone_into(&mut metadata.rematch_name);
+        }
+        if let Some(sub_rule) = &rematch.target_sub_rule {
+            sub_rule.clone_into(&mut metadata.special_rules);
+        }
+        decision = config.rules.evaluate(metadata);
+    }
 }
 
 fn resolve_selector_target(

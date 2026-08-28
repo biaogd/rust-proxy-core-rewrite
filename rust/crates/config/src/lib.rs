@@ -164,6 +164,10 @@ pub struct Config {
 pub enum ProxyKind {
     Http,
     Socks5,
+    Direct,
+    Reject,
+    Dns,
+    Rematch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1711,6 +1715,11 @@ impl Config {
                 .map(|group| group.name.clone()),
         );
         names
+    }
+
+    #[must_use]
+    pub fn rematch(&self, name: &str) -> Option<&RematchSpec> {
+        self.rematches.iter().find(|rematch| rematch.name == name)
     }
 
     /// Converts the parsed integer into a bindable runtime port.
@@ -4350,6 +4359,7 @@ fn parse_proxies(
     let mut outbounds = Vec::new();
     let mut names = BTreeSet::new();
     for proxy in proxies {
+        let has_transport_fields = proxy_has_transport_fields(&proxy);
         let name = proxy
             .name
             .filter(|name| !name.is_empty())
@@ -4370,19 +4380,35 @@ fn parse_proxies(
         }
         match proxy.kind.as_deref() {
             Some("rematch") => {
-                if proxy.server.is_some()
-                    || proxy.port.is_some()
-                    || proxy.username.is_some()
-                    || proxy.password.is_some()
+                if has_transport_fields || !proxy.extra.is_empty() {
+                    return Err(ConfigError::UnsupportedProxy(name));
+                }
+                let rematch = RematchSpec {
+                    name: name.clone(),
+                    target_rematch_name: proxy.target_rematch_name,
+                    target_sub_rule: proxy.target_sub_rule,
+                };
+                if rematch.target_rematch_name.is_none() && rematch.target_sub_rule.is_none() {
+                    return Err(ConfigError::UnsupportedProxy(name));
+                }
+                rematches.push(rematch);
+                outbounds.push(simple_proxy(name, ProxyKind::Rematch));
+            }
+            Some(kind @ ("direct" | "reject" | "dns")) => {
+                if proxy.target_rematch_name.is_some()
+                    || proxy.target_sub_rule.is_some()
+                    || has_transport_fields
                     || !proxy.extra.is_empty()
                 {
                     return Err(ConfigError::UnsupportedProxy(name));
                 }
-                rematches.push(RematchSpec {
-                    name,
-                    target_rematch_name: proxy.target_rematch_name,
-                    target_sub_rule: proxy.target_sub_rule,
-                });
+                let kind = match kind {
+                    "direct" => ProxyKind::Direct,
+                    "reject" => ProxyKind::Reject,
+                    "dns" => ProxyKind::Dns,
+                    _ => unreachable!("matched simple proxy kind"),
+                };
+                outbounds.push(simple_proxy(name, kind));
             }
             Some(kind @ ("http" | "socks5")) => {
                 let has_tls_options =
@@ -4426,6 +4452,32 @@ fn parse_proxies(
         }
     }
     Ok((rematches, outbounds))
+}
+
+fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
+    proxy.server.is_some()
+        || proxy.port.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.headers.is_some()
+}
+
+fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
+    ProxyConfig {
+        name,
+        kind,
+        server: String::new(),
+        port: 0,
+        username: None,
+        password: None,
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        headers: BTreeMap::new(),
+    }
 }
 
 fn parse_proxy_groups(
@@ -4781,6 +4833,10 @@ fn proxy_member_types(
         let kind = match proxy.kind {
             ProxyKind::Http => "Http",
             ProxyKind::Socks5 => "Socks5",
+            ProxyKind::Direct => "Direct",
+            ProxyKind::Reject => "Reject",
+            ProxyKind::Dns => "Dns",
+            ProxyKind::Rematch => "Rematch",
         };
         types.insert(proxy.name.clone(), kind.to_owned());
     }
@@ -5271,6 +5327,39 @@ rules:
 ";
         let config = Config::from_yaml(source).expect("rematch is a runtime scan action");
         assert_eq!(config.listener_port().expect("valid port"), 7890);
+        assert_eq!(config.proxies[0].kind, ProxyKind::Rematch);
+        assert_eq!(
+            config.rematch("SET-NAME").expect("rematch").name,
+            "SET-NAME"
+        );
+    }
+
+    #[test]
+    fn parses_phase_six_a_simple_adapters_and_provider_members() {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - {{name: local-direct, type: direct}}\n  - {{name: local-reject, type: reject}}\n  - {{name: local-dns, type: dns}}\nproxy-providers:\n  simple:\n    type: inline\n    payload:\n      - {{name: provider-direct, type: direct}}\nproxy-groups:\n  - {{name: simple-group, type: select, proxies: [local-reject], use: [simple]}}\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6A simple adapters");
+        assert_eq!(
+            config
+                .proxies
+                .iter()
+                .map(|proxy| proxy.kind)
+                .collect::<Vec<_>>(),
+            [ProxyKind::Direct, ProxyKind::Reject, ProxyKind::Dns]
+        );
+        assert_eq!(config.proxy_providers[0].proxies[0].kind, ProxyKind::Direct);
+        assert_eq!(
+            config.default_global_proxies(),
+            [
+                "DIRECT",
+                "REJECT",
+                "local-direct",
+                "local-reject",
+                "local-dns",
+                "simple-group"
+            ]
+        );
     }
 
     #[test]

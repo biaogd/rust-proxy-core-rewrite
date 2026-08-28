@@ -1319,8 +1319,28 @@ default and custom GLOBAL selection and configuration acceptance. Fast local
 runs prove the hold contract; the isolated Linux CI shard additionally waits
 for and compares the exact default-timeout expiry.
 
-Configured `direct`, `reject`, `dns` and `rematch` adapter records, UDP reject
-semantics and remaining dependency-order validation are later Phase 6A gates.
+### Phase 6A2 accepted scope
+
+The configured simple-adapter slice completes the Phase 6A product boundary.
+Top-level `direct`, `reject`, `dns` and `rematch` records now participate in
+validation, GLOBAL ordering, groups, controller views and live routing. Inline
+providers accept configured DIRECT records; provider REMATCH remains rejected
+like the pinned Go parser because its rule dependency is not self-contained.
+
+Configured DIRECT relays TCP and UDP through the existing local socket policy.
+Configured REJECT closes TCP and silently drops UDP. Configured DNS exposes the
+shared DNS service as a two-byte framed TCP adapter and a DNS-message UDP
+adapter. Configured REMATCH mutates the active rule context and restarts rule
+evaluation, including when selected through a group, with cycle protection.
+`compat/scripts/phase6a_simple_adapters.py` compares configuration acceptance,
+exact GLOBAL member order, controller fields and deterministic TCP/UDP outcomes
+against the pinned Go oracle.
+
+Phase 6A is therefore implementation-complete for the declared simple-adapter,
+current listener and local TCP/UDP boundary. Per-adapter interface, routing
+mark, IP-version, TFO/MPTCP and dialer-proxy combinations remain cross-cutting
+OUT-01/platform or later-protocol dependency gates. The exact 60-second
+REJECT-DROP expiry remains a Linux CI evidence gate and is not claimed locally.
 
 ### Phase 6B1a accepted scope
 

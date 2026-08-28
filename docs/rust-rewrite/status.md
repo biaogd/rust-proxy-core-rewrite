@@ -104,6 +104,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5F2 UDP NAT completion | Implementation complete in declared local scope; exact-timeout Linux CI result pending | IPv4/IPv6 reuse, fan-out, multi-response, control-close, generation retention and bounded-pressure recovery pass locally; CI enables the real 60-second expiry comparison |
 | Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI builds the all-feature release binary; a root-only Linux job writes and reads back nonzero `SO_MARK` through the production socket helper |
 | Phase 6A1 built-ins and GLOBAL | Implementation complete in declared fast mixed-TCP/control scope; exact expiry evidence pending | COMPATIBLE/PASS/REJECT/REJECT-DROP behavior, dynamic/default and custom GLOBAL data-plane selection, controller views and name-collision validation pass the Go/Rust differential |
+| Phase 6A2 configured simple adapters | Implementation complete in declared current-listener TCP/UDP scope | Configured DIRECT/REJECT/DNS/REMATCH, inline-provider DIRECT, group-contained REMATCH, GLOBAL order, controller views, framed DNS TCP and SOCKS5 DNS/direct/reject UDP pass the Go/Rust differential |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
 | Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
@@ -137,7 +138,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 136 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | All 137 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4450,8 +4451,29 @@ GLOBAL group replacement and delay paths, dynamic UDP capability, and
 duplicate/reserved/collision validation. The
 dedicated Linux `builtins` shard sets `PHASE6A_DROP_TIMEOUT_TEST=1` and compares
 closure around the oracle's 60-second timeout; that native result remains
-pending. Configured direct/reject/DNS/REMATCH adapter records and UDP reject
-behavior remain Phase 6A gaps.
+pending.
+
+Phase 6A2 completes the configured simple-adapter boundary. Top-level DIRECT,
+REJECT, DNS and REMATCH records now share validation, GLOBAL/group membership,
+controller rendering and live selection. DIRECT carries TCP and UDP, REJECT
+closes TCP and silently drops UDP, DNS carries framed TCP or message UDP through
+the runtime-owned `DnsService`, and REMATCH restarts rule evaluation directly
+or through a selected group. Inline providers accept DIRECT records in the same
+declared scope.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+PHASE6ASIMPLE_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6a_simple_adapters.py
+```
+
+The differential compares accepted and rejected configuration, exact default
+GLOBAL ordering, adapter/group/controller views, deterministic TCP direct,
+reject, DNS and rematch outcomes, and SOCKS5 UDP direct, reject, REJECT-DROP,
+DNS and rematch outcomes. Both Phase 6A scripts pass locally. Rich per-adapter
+socket/dialer options remain OUT-01 or protocol-composition work; the Linux
+60-second REJECT-DROP result remains pending CI evidence rather than a Phase 6A
+implementation gap.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

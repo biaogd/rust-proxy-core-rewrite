@@ -1267,6 +1267,14 @@ async fn measure_http_delay(
             };
             let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
             match proxy.kind {
+                rewrite_config::ProxyKind::Direct => rewrite_outbound::connect_with_options(
+                    &destination,
+                    config.ipv6,
+                    controller_socket_options(config),
+                )
+                .await
+                .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
+                .map_err(|_| ())?,
                 rewrite_config::ProxyKind::Http => {
                     let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
                         server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
@@ -1294,6 +1302,9 @@ async fn measure_http_delay(
                 )
                 .await
                 .map_err(|_| ())?,
+                rewrite_config::ProxyKind::Reject
+                | rewrite_config::ProxyKind::Dns
+                | rewrite_config::ProxyKind::Rematch => return Err(()),
             }
         };
     if url.scheme() == "https" {
@@ -1518,7 +1529,18 @@ fn configured_proxy_snapshot_with_provider(
     let kind = match proxy.kind {
         rewrite_config::ProxyKind::Http => "Http",
         rewrite_config::ProxyKind::Socks5 => "Socks5",
+        rewrite_config::ProxyKind::Direct => "Direct",
+        rewrite_config::ProxyKind::Reject => "Reject",
+        rewrite_config::ProxyKind::Dns => "Dns",
+        rewrite_config::ProxyKind::Rematch => "Rematch",
     };
+    let udp = matches!(
+        proxy.kind,
+        rewrite_config::ProxyKind::Direct
+            | rewrite_config::ProxyKind::Reject
+            | rewrite_config::ProxyKind::Dns
+            | rewrite_config::ProxyKind::Rematch
+    );
     json!({
         "alive": health.alive,
         "dialer-proxy": "",
@@ -1533,7 +1555,7 @@ fn configured_proxy_snapshot_with_provider(
         "smux": false,
         "tfo": false,
         "type": kind,
-        "udp": false,
+        "udp": udp,
         "uot": false,
         "xudp": false,
     })
@@ -1644,6 +1666,25 @@ fn selector_supports_udp(
         "DIRECT" | "COMPATIBLE" | "REJECT" | "REJECT-DROP" | "PASS" | "PASS-RULE"
     ) {
         return true;
+    }
+    if let Some(proxy) = config
+        .proxies
+        .iter()
+        .chain(
+            config
+                .proxy_providers
+                .iter()
+                .flat_map(|provider| provider.proxies.iter()),
+        )
+        .find(|proxy| proxy.name == selected)
+    {
+        return matches!(
+            proxy.kind,
+            rewrite_config::ProxyKind::Direct
+                | rewrite_config::ProxyKind::Reject
+                | rewrite_config::ProxyKind::Dns
+                | rewrite_config::ProxyKind::Rematch
+        );
     }
     let Some(group) = config
         .proxy_groups
