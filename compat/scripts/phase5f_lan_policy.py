@@ -6,6 +6,7 @@ from __future__ import annotations
 import http.client
 import json
 import pathlib
+import platform
 import socket
 import tempfile
 import time
@@ -49,6 +50,14 @@ def controller_snapshot(port: int) -> dict[str, Any]:
                 "skip-auth-prefixes",
                 "lan-allowed-ips",
                 "lan-disallowed-ips",
+                "inbound-tfo",
+                "inbound-mptcp",
+                "keep-alive-idle",
+                "keep-alive-interval",
+                "disable-keep-alive",
+                "interface-name",
+                "routing-mark",
+                "tcp-concurrent",
             )
         }
     finally:
@@ -68,20 +77,26 @@ def http_route(port: int, destination_port: int) -> str:
 
 
 def http_route_at(host: str, port: int, destination_port: int) -> str:
+    return http_route_to(host, port, "127.0.0.1", destination_port)
+
+
+def http_route_to(
+    host: str, port: int, destination_host: str, destination_port: int
+) -> str:
     try:
         stream = socket.create_connection((host, port), timeout=IO_DEADLINE)
         stream.settimeout(IO_DEADLINE)
         with stream:
             stream.sendall(
                 (
-                    f"CONNECT 127.0.0.1:{destination_port} HTTP/1.1\r\n"
-                    f"Host: 127.0.0.1:{destination_port}\r\n\r\n"
+                    f"CONNECT {destination_host}:{destination_port} HTTP/1.1\r\n"
+                    f"Host: {destination_host}:{destination_port}\r\n\r\n"
                 ).encode()
             )
             response = recv_until(stream, b"\r\n\r\n")
             if " 200 " not in status(response):
                 return status(response)
-            return relay_result(stream, f"lan-{host}".encode())
+            return relay_result(stream, f"lan-{host}-{destination_host}".encode())
     except (OSError, EOFError, ConnectionResetError, BrokenPipeError):
         return "closed"
 
@@ -99,6 +114,28 @@ def wait_route_at(
     raise TimeoutError(f"listener {host}:{port} did not become {expected}")
 
 
+def native_ipv4_candidates() -> list[str]:
+    candidates: list[str] = []
+    try:
+        for family, _, _, _, address in socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET
+        ):
+            if family == socket.AF_INET and not address[0].startswith("127."):
+                candidates.append(str(address[0]))
+    except socket.gaierror:
+        pass
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))
+        address = str(probe.getsockname()[0])
+        if not address.startswith("127."):
+            candidates.append(address)
+    finally:
+        probe.close()
+    return list(dict.fromkeys(candidates))
+
+
 def socks_route(port: int, destination_port: int) -> str:
     try:
         stream = socks_connect(
@@ -113,6 +150,7 @@ def exercise_skip_auth(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
     echo = start_server(EchoHandler)
     http_port, socks_port, mixed_port = reserve_port(), reserve_port(), reserve_port()
     controller_port = reserve_port()
+    loopback_interface = "lo0" if platform.system() == "Darwin" else "lo"
     config = scratch / "config.yaml"
     config.write_text(
         f"""port: {http_port}
@@ -126,9 +164,17 @@ skip-auth-prefixes: [127.0.0.0/8]
 lan-allowed-ips: [0.0.0.0/0]
 lan-disallowed-ips: []
 authentication: [alice:secret]
+inbound-tfo: true
+inbound-mptcp: true
+keep-alive-idle: 17
+keep-alive-interval: 9
+disable-keep-alive: false
+interface-name: {loopback_interface}
+routing-mark: 2158
+tcp-concurrent: true
 mode: rule
 log-level: info
-ipv6: false
+ipv6: true
 rules: ['MATCH,DIRECT']
 """
     )
@@ -141,6 +187,9 @@ rules: ['MATCH,DIRECT']
             "http": http_route(http_port, echo.port),
             "socks": socks_route(socks_port, echo.port),
             "mixed": http_route(mixed_port, echo.port),
+            "tcp-concurrent-domain": http_route_to(
+                "127.0.0.1", mixed_port, "localhost", echo.port
+            ),
             "config": controller_snapshot(controller_port),
         }
     finally:
@@ -180,6 +229,32 @@ rules: ['MATCH,DIRECT']
         echo.close()
 
 
+def exercise_invalid_interface(
+    binary: pathlib.Path, scratch: pathlib.Path
+) -> str:
+    echo = start_server(EchoHandler)
+    mixed_port = reserve_port()
+    config = scratch / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+interface-name: phase5f-missing-interface
+mode: rule
+log-level: info
+ipv6: false
+rules: ['MATCH,DIRECT']
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        return http_route(mixed_port, echo.port)
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
 def exercise_loopback_override(
     binary: pathlib.Path, scratch: pathlib.Path
 ) -> str:
@@ -199,7 +274,8 @@ rules: ['MATCH,DIRECT']
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
-        return http_route(mixed_port, echo.port)
+        wait_route_at(process, "127.0.0.1", mixed_port, echo.port, "direct")
+        return "direct"
     finally:
         stop(process)
         stdout.close()
@@ -226,9 +302,19 @@ rules: ['MATCH,DIRECT']
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
-        ipv4 = http_route_at("127.0.0.1", mixed_port, echo.port)
-        ipv6 = http_route_at("::1", mixed_port, echo.port)
-        return {"ipv4": ipv4, "ipv6": ipv6}
+        wait_route_at(process, "127.0.0.1", mixed_port, echo.port, "direct")
+        wait_route_at(process, "::1", mixed_port, echo.port, "direct")
+        lan_candidates = native_ipv4_candidates()
+        if not lan_candidates:
+            raise RuntimeError("no native non-loopback IPv4 address is available")
+        for lan in lan_candidates:
+            if http_route_at(lan, mixed_port, echo.port) == "direct":
+                break
+        else:
+            raise RuntimeError(
+                f"wildcard listener did not accept native addresses: {lan_candidates}"
+            )
+        return {"ipv4": "direct", "ipv6": "direct", "native-lan": "direct"}
     finally:
         stop(process)
         stdout.close()
@@ -298,6 +384,7 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         "skip-auth",
         "allowed",
         "disallowed",
+        "invalid-interface",
         "loopback-override",
         "wildcard-dual-stack",
         "patch-rebind",
@@ -314,6 +401,9 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             binary,
             cases["disallowed"],
             "lan-allowed-ips: [0.0.0.0/0]\nlan-disallowed-ips: [127.0.0.0/8]",
+        ),
+        "invalid-interface": exercise_invalid_interface(
+            binary, cases["invalid-interface"]
         ),
         "allow-lan-false-ignores-bind": exercise_loopback_override(
             binary, cases["loopback-override"]

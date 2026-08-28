@@ -8,10 +8,19 @@ pub use dhcp::{
     parse_dhcp_offer, resolve_dns_from_dhcp,
 };
 
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(any(
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos"
+))]
+use std::num::NonZeroU32;
+use std::time::Duration;
 
 /// Number of missed refreshes retained by the Go system resolver.
 pub const SYSTEM_DNS_DELETE_TIMES: u32 = 12;
@@ -50,27 +59,256 @@ pub fn bind_marked_tcp_listener(
 /// Binds a nonblocking local TCP listener, optionally accepting IPv4 through
 /// an IPv6 wildcard socket.
 ///
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalTcpOptions {
+    pub dual_stack: bool,
+    pub multipath: bool,
+    pub keep_alive_idle: i64,
+    pub keep_alive_interval: i64,
+    pub disable_keep_alive: bool,
+}
+
+/// Binds a local TCP listener with Mihomo's socket policy.
+///
 /// # Errors
 ///
 /// Returns the socket option, bind, listen or nonblocking error.
 pub fn bind_local_tcp_listener(
     address: SocketAddr,
-    dual_stack: bool,
+    options: LocalTcpOptions,
+) -> io::Result<std::net::TcpListener> {
+    match bind_local_tcp_listener_inner(address, options) {
+        Ok(listener) => Ok(listener),
+        #[cfg(target_os = "linux")]
+        Err(_) if options.multipath => bind_local_tcp_listener_inner(
+            address,
+            LocalTcpOptions {
+                multipath: false,
+                ..options
+            },
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+fn bind_local_tcp_listener_inner(
+    address: SocketAddr,
+    options: LocalTcpOptions,
 ) -> io::Result<std::net::TcpListener> {
     let domain = if address.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
     };
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(target_os = "linux")]
+    let protocol = if options.multipath {
+        Protocol::MPTCP
+    } else {
+        Protocol::TCP
+    };
+    #[cfg(not(target_os = "linux"))]
+    let protocol = Protocol::TCP;
+    let socket = Socket::new(domain, Type::STREAM, Some(protocol))?;
     socket.set_reuse_address(true)?;
     if address.is_ipv6() {
-        socket.set_only_v6(!dual_stack)?;
+        socket.set_only_v6(!options.dual_stack)?;
     }
+    configure_tcp_keepalive(&socket, options)?;
     socket.bind(&SockAddr::from(address))?;
     socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
+}
+
+fn configure_tcp_keepalive(socket: &Socket, options: LocalTcpOptions) -> io::Result<()> {
+    if options.disable_keep_alive || cfg!(target_os = "android") {
+        return socket.set_keepalive(false);
+    }
+    let mut keepalive = TcpKeepalive::new();
+    if let Ok(seconds) = u64::try_from(options.keep_alive_idle)
+        && seconds != 0
+    {
+        keepalive = keepalive.with_time(Duration::from_secs(seconds));
+    }
+    if let Ok(seconds) = u64::try_from(options.keep_alive_interval)
+        && seconds != 0
+    {
+        keepalive = keepalive.with_interval(Duration::from_secs(seconds));
+    }
+    socket.set_tcp_keepalive(&keepalive)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OutboundTcpOptions<'a> {
+    pub interface: &'a str,
+    pub routing_mark: i64,
+    pub keep_alive_idle: i64,
+    pub keep_alive_interval: i64,
+    pub disable_keep_alive: bool,
+}
+
+/// Connects a TCP socket after applying the global interface, mark and
+/// keepalive policy used by DIRECT and proxy dials.
+///
+/// # Errors
+///
+/// Returns interface discovery, socket-option, connect or readiness errors.
+pub async fn connect_tcp(
+    address: SocketAddr,
+    options: OutboundTcpOptions<'_>,
+) -> io::Result<tokio::net::TcpStream> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    configure_tcp_keepalive(
+        &socket,
+        LocalTcpOptions {
+            keep_alive_idle: options.keep_alive_idle,
+            keep_alive_interval: options.keep_alive_interval,
+            disable_keep_alive: options.disable_keep_alive,
+            ..LocalTcpOptions::default()
+        },
+    )?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    if options.routing_mark != 0 && is_global_unicast(address.ip()) {
+        socket.set_mark(u32::try_from(options.routing_mark).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
+        })?)?;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    let _ = options.routing_mark;
+    bind_outbound_interface(&socket, address, options.interface)?;
+    socket.set_nonblocking(true)?;
+    if let Err(error) = socket.connect(&SockAddr::from(address))
+        && error.kind() != io::ErrorKind::WouldBlock
+        && !error
+            .raw_os_error()
+            .is_some_and(|code| matches!(code, 36 | 115 | 10_035))
+    {
+        return Err(error);
+    }
+    let stream = tokio::net::TcpStream::from_std(socket.into())?;
+    stream.writable().await?;
+    if let Some(error) = stream.take_error()? {
+        return Err(error);
+    }
+    Ok(stream)
+}
+
+/// Binds a nonblocking outbound UDP socket with global interface and routing
+/// mark policy.
+///
+/// # Errors
+///
+/// Returns interface discovery, socket-option or bind errors.
+pub fn bind_outbound_udp(
+    address: SocketAddr,
+    interface: &str,
+    routing_mark: i64,
+) -> io::Result<std::net::UdpSocket> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    if routing_mark != 0 {
+        socket.set_mark(u32::try_from(routing_mark).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
+        })?)?;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    let _ = routing_mark;
+    bind_outbound_interface(&socket, address, interface)?;
+    socket.bind(&SockAddr::from(address))?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
+fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        if !is_global_unicast(address.ip()) {
+            return Ok(());
+        }
+        socket.bind_device(Some(name.as_bytes()))
+    }
+    #[cfg(any(
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos"
+    ))]
+    {
+        use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+        let interface = NetworkInterface::show()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .into_iter()
+            .find(|interface| interface.name == name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface not found"))?;
+        let index = NonZeroU32::new(interface.index).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "interface index is zero")
+        })?;
+        if !is_global_unicast(address.ip()) {
+            return Ok(());
+        }
+        if address.is_ipv4() {
+            socket.bind_device_by_index_v4(Some(index))
+        } else {
+            socket.bind_device_by_index_v6(Some(index))
+        }
+    }
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos"
+    )))]
+    {
+        let _ = (socket, address);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interface binding is not supported on this platform",
+        ))
+    }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "tvos",
+    target_os = "visionos",
+    target_os = "watchos"
+))]
+fn is_global_unicast(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_multicast()
+                && !address.is_link_local()
+                && !address.is_broadcast()
+        }
+        IpAddr::V6(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_multicast()
+                && !address.is_unicast_link_local()
+        }
+    }
 }
 
 /// Binds a nonblocking local UDP socket with the same dual-stack policy as the
@@ -349,6 +587,40 @@ mod tests {
                 .expect("controller listener");
         assert!(listener.local_addr().expect("bound address").port() > 0);
         assert!(listener.accept().is_err(), "listener must be nonblocking");
+    }
+
+    #[test]
+    fn local_listener_applies_keepalive_policy() {
+        let disabled = bind_local_tcp_listener(
+            "127.0.0.1:0".parse().expect("loopback"),
+            LocalTcpOptions {
+                disable_keep_alive: true,
+                ..LocalTcpOptions::default()
+            },
+        )
+        .expect("disabled keepalive listener");
+        assert!(
+            !socket2::SockRef::from(&disabled)
+                .keepalive()
+                .expect("keepalive flag")
+        );
+
+        if !cfg!(target_os = "android") {
+            let enabled = bind_local_tcp_listener(
+                "127.0.0.1:0".parse().expect("loopback"),
+                LocalTcpOptions {
+                    keep_alive_idle: 17,
+                    keep_alive_interval: 9,
+                    ..LocalTcpOptions::default()
+                },
+            )
+            .expect("enabled keepalive listener");
+            assert!(
+                socket2::SockRef::from(&enabled)
+                    .keepalive()
+                    .expect("keepalive flag")
+            );
+        }
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

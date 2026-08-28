@@ -16,6 +16,7 @@ dhcproto.workspace = true
 hickory-proto = { version = "0.26.1", default-features = false, features = ["std"] }
 network-interface.workspace = true
 socket2.workspace = true
+tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ipconfig = "0.3.4"

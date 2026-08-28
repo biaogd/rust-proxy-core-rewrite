@@ -1152,9 +1152,11 @@ Accepted work is grouped into independently reproducible differentials:
 
 Darwin acceptance is recorded by `phase5d_*.py`. Linux runs the same set in
 the default differential matrix. Windows named-pipe behavior has its own
-native job because a cross-build cannot validate pipe lifecycle. Nonzero
-Linux `SO_MARK`, Go pprof/expvar payloads, allocator-specific memory release,
-and stress/backpressure retain explicit Phase 5F platform/release gates.
+native job because a cross-build cannot validate pipe lifecycle. Phase 5F now
+implements Linux/Android `SO_MARK`, accepts bounded local NAT pressure and adds
+the release build; nonzero marks still need privileged native evidence. Go
+`pprof`/`expvar` payloads and allocator-specific release are recorded as
+runtime-specific API gaps rather than normalized into portable Rust parity.
 
 The following controller paths remain dependent rather than unfinished 5D
 plumbing: `/configs/geo` and `/upgrade/geo` require `SVC-04`; `/upgrade/ui`
@@ -1250,6 +1252,37 @@ successful host cross-build is never sufficient for a native behavior claim.
   the fixed Go SOCKS UDP listener, whose packet lifecycle is source-keyed and
   not owned by the control connection. The exact 60-second expiry boundary,
   capacity/backpressure stress and remote UDP adapters/UoT remain later gates.
+- `5F1c`: the fixed TCP listeners apply keepalive policy through `socket2`,
+  enable inbound TFO through the maintained MIT-licensed `tokio-tfo` adapter,
+  and request Linux MPTCP with the same ordinary-TCP fallback as Go. Global
+  interface, routing-mark, keepalive and concurrent-domain-dial policy now
+  reaches DIRECT TCP/UDP plus every currently executable HTTP/SOCKS5 upstream
+  and health-check dial. The LAN differential proves the live `/configs`
+  values, a real non-loopback wildcard connection, TFO/MPTCP-enabled relay,
+  platform-specific invalid-interface handling, a concurrent domain dial and
+  a nonzero routing-mark snapshot. Applying a nonzero mark to a global-unicast
+  socket remains a privileged Linux evidence claim rather than being
+  normalized to success on Darwin.
+- `5F2c`: the NAT differential sends a burst larger than the 64-packet session
+  queue and requires a following marker round trip, so overload cannot wedge
+  the session. The default Linux CI gate additionally waits across the real
+  60-second idle deadline and requires the same client address to receive a
+  newly allocated upstream source port in both Go and Rust. Local focused runs
+  omit only that wall-clock wait through an explicit environment gate.
+- `5F3`: the default quality job builds the all-feature `rewrite-cli` release
+  binary after fmt, clippy and tests, while native platform jobs retain socket
+  contracts. Existing bounded traffic/memory/log/connection diagnostics are
+  the portable Phase 5F observability boundary. Go-runtime `pprof` and `expvar`
+  payloads are recorded as deliberately non-portable API gaps, and process
+  lookup remains coupled to future PROCESS-rule/original-flow metadata rather
+  than being falsely claimed by the local proxy slice.
+
+Phase 5F implementation is closed for the declared local HTTP/SOCKS/mixed,
+DIRECT TCP/UDP and currently executable upstream-adapter boundary. The Darwin
+fast differentials pass; the Linux exact-timeout, nonzero-mark and release
+results remain pending until their configured native CI gates report success.
+This closure does not imply remote UDP/UoT, TUN/redir/TProxy, process rules,
+Go-runtime diagnostics or protocols not already executable in Rust.
 
 ## Phase 6 — established remote protocols
 

@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use base64::Engine;
 use rewrite_model::{AuthUser, Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use url::Url;
 
@@ -17,8 +17,46 @@ struct ParsedHttpHead {
     body_offset: usize,
 }
 
+pub trait InboundStream: AsyncRead + AsyncWrite + Unpin + Send {
+    /// Returns the local socket address.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating-system socket query error.
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+
+    /// Returns the connected peer socket address.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating-system socket query error.
+    fn peer_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+impl InboundStream for TcpStream {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Self::local_addr(self)
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        Self::peer_addr(self)
+    }
+}
+
+impl InboundStream for tokio_tfo::TfoStream {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        Self::local_addr(self)
+    }
+
+    fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        Self::peer_addr(self)
+    }
+}
+
+pub type BoxedInboundStream = Box<dyn InboundStream>;
+
 pub struct AcceptedTcp {
-    pub client: TcpStream,
+    pub client: BoxedInboundStream,
     pub metadata: Metadata,
     pub preface: Vec<u8>,
     pub command: InboundCommand,
@@ -63,7 +101,7 @@ pub enum InboundError {
 /// Returns [`InboundError`] for I/O failures, malformed handshakes, unsupported
 /// SOCKS4 input, or HTTP behavior outside the Phase 1 surface.
 pub async fn accept_mixed(client: TcpStream) -> Result<AcceptedTcp, InboundError> {
-    accept(client, ListenerProtocol::Mixed, &[]).await
+    accept(Box::new(client), ListenerProtocol::Mixed, &[]).await
 }
 
 /// Decodes one authenticated Phase 3A local TCP proxy connection.
@@ -73,12 +111,12 @@ pub async fn accept_mixed(client: TcpStream) -> Result<AcceptedTcp, InboundError
 /// Returns [`InboundError`] for I/O failures, malformed HTTP/SOCKS handshakes,
 /// unsupported commands or rejected credentials.
 pub async fn accept(
-    client: TcpStream,
+    client: BoxedInboundStream,
     protocol: ListenerProtocol,
     users: &[AuthUser],
 ) -> Result<AcceptedTcp, InboundError> {
     match protocol {
-        ListenerProtocol::Http => accept_http(client, users).await,
+        ListenerProtocol::Http => accept_http(client, users, Vec::new()).await,
         ListenerProtocol::Socks => accept_socks(client, users).await,
         ListenerProtocol::Mixed => accept_detected(client, users).await,
     }
@@ -165,46 +203,46 @@ fn decode_socks_address(packet: &[u8]) -> Result<(Host, u16, usize), InboundErro
 }
 
 async fn accept_detected(
-    client: TcpStream,
+    mut client: BoxedInboundStream,
     users: &[AuthUser],
 ) -> Result<AcceptedTcp, InboundError> {
-    let mut first = [0_u8; 1];
-    let read = client.peek(&mut first).await?;
-    if read == 0 {
-        return Err(InboundError::Io(std::io::Error::from(
-            std::io::ErrorKind::UnexpectedEof,
-        )));
-    }
-    match first[0] {
-        0x04 | 0x05 => accept_socks(client, users).await,
-        _ => accept_http(client, users).await,
+    let first = client.read_u8().await?;
+    match first {
+        0x04 | 0x05 => accept_socks_version(client, users, first).await,
+        _ => accept_http(client, users, vec![first]).await,
     }
 }
 
-async fn accept_socks(client: TcpStream, users: &[AuthUser]) -> Result<AcceptedTcp, InboundError> {
-    let mut first = [0_u8; 1];
-    if client.peek(&mut first).await? == 0 {
-        return Err(InboundError::Io(std::io::Error::from(
-            std::io::ErrorKind::UnexpectedEof,
-        )));
-    }
-    match first[0] {
-        0x04 => accept_socks4(client, users).await,
-        0x05 => accept_socks5(client, users).await,
+async fn accept_socks(
+    mut client: BoxedInboundStream,
+    users: &[AuthUser],
+) -> Result<AcceptedTcp, InboundError> {
+    let version = client.read_u8().await?;
+    accept_socks_version(client, users, version).await
+}
+
+async fn accept_socks_version(
+    client: BoxedInboundStream,
+    users: &[AuthUser],
+    version: u8,
+) -> Result<AcceptedTcp, InboundError> {
+    match version {
+        0x04 => accept_socks4(client, users, version).await,
+        0x05 => accept_socks5(client, users, version).await,
         _ => Err(InboundError::UnsupportedProtocol),
     }
 }
 
 async fn accept_socks5(
-    mut client: TcpStream,
+    mut client: BoxedInboundStream,
     users: &[AuthUser],
+    version: u8,
 ) -> Result<AcceptedTcp, InboundError> {
-    let mut greeting = [0_u8; 2];
-    client.read_exact(&mut greeting).await?;
-    if greeting[0] != 5 {
+    if version != 5 {
         return Err(InboundError::Socks("invalid version"));
     }
-    let mut methods = vec![0_u8; usize::from(greeting[1])];
+    let method_count = client.read_u8().await?;
+    let mut methods = vec![0_u8; usize::from(method_count)];
     client.read_exact(&mut methods).await?;
 
     // Preserve the oracle's method-selection behavior. Configured credentials
@@ -271,8 +309,11 @@ async fn accept_socks5(
     reply.extend_from_slice(&local.port().to_be_bytes());
     client.write_all(&reply).await?;
 
-    let mut metadata =
-        socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks5);
+    let mut metadata = socket_metadata(
+        &*client,
+        Destination { host, port },
+        InboundProtocol::Socks5,
+    );
     metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
         metadata,
@@ -283,7 +324,7 @@ async fn accept_socks5(
 }
 
 async fn authenticate_socks5(
-    client: &mut TcpStream,
+    client: &mut BoxedInboundStream,
     users: &[AuthUser],
 ) -> Result<String, InboundError> {
     let mut header = [0_u8; 2];
@@ -315,11 +356,13 @@ async fn authenticate_socks5(
 }
 
 async fn accept_socks4(
-    mut client: TcpStream,
+    mut client: BoxedInboundStream,
     users: &[AuthUser],
+    version: u8,
 ) -> Result<AcceptedTcp, InboundError> {
     let mut request = [0_u8; 8];
-    client.read_exact(&mut request).await?;
+    request[0] = version;
+    client.read_exact(&mut request[1..]).await?;
     if request[0] != 4 || request[1] != 1 {
         return Err(InboundError::Socks("unsupported SOCKS4 command"));
     }
@@ -346,8 +389,11 @@ async fn accept_socks4(
         return Err(InboundError::Authentication);
     }
     let inbound_user = String::from_utf8_lossy(&username).into_owned();
-    let mut metadata =
-        socket_metadata(&client, Destination { host, port }, InboundProtocol::Socks4);
+    let mut metadata = socket_metadata(
+        &*client,
+        Destination { host, port },
+        InboundProtocol::Socks4,
+    );
     metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
         metadata,
@@ -357,7 +403,7 @@ async fn accept_socks4(
     })
 }
 
-async fn read_nul_terminated(client: &mut TcpStream) -> Result<Vec<u8>, InboundError> {
+async fn read_nul_terminated(client: &mut BoxedInboundStream) -> Result<Vec<u8>, InboundError> {
     let mut value = Vec::new();
     loop {
         let byte = client.read_u8().await?;
@@ -372,10 +418,11 @@ async fn read_nul_terminated(client: &mut TcpStream) -> Result<Vec<u8>, InboundE
 }
 
 async fn accept_http(
-    mut client: TcpStream,
+    mut client: BoxedInboundStream,
     users: &[AuthUser],
+    initial: Vec<u8>,
 ) -> Result<AcceptedTcp, InboundError> {
-    let (bytes, request) = read_http_head(&mut client).await?;
+    let (bytes, request) = read_http_head(&mut client, initial).await?;
     let inbound_user =
         authenticate_http(&mut client, request.version, &request.headers, users).await?;
 
@@ -384,7 +431,7 @@ async fn accept_http(
         client
             .write_all(format!("{} 200 Connection established\r\n\r\n", request.version).as_bytes())
             .await?;
-        let mut metadata = socket_metadata(&client, destination, InboundProtocol::Https);
+        let mut metadata = socket_metadata(&*client, destination, InboundProtocol::Https);
         metadata.inbound_user = inbound_user;
         return Ok(AcceptedTcp {
             metadata,
@@ -430,7 +477,7 @@ async fn accept_http(
     rewritten.extend_from_slice(b"\r\n");
     rewritten.extend_from_slice(&bytes[request.body_offset..]);
 
-    let mut metadata = socket_metadata(&client, destination, InboundProtocol::Http);
+    let mut metadata = socket_metadata(&*client, destination, InboundProtocol::Http);
     metadata.inbound_user = inbound_user;
     Ok(AcceptedTcp {
         metadata,
@@ -441,7 +488,7 @@ async fn accept_http(
 }
 
 async fn authenticate_http(
-    client: &mut TcpStream,
+    client: &mut BoxedInboundStream,
     version: &str,
     headers: &[(String, Vec<u8>)],
     users: &[AuthUser],
@@ -495,7 +542,7 @@ async fn authenticate_http(
 }
 
 fn socket_metadata(
-    client: &TcpStream,
+    client: &dyn InboundStream,
     destination: Destination,
     inbound: InboundProtocol,
 ) -> Metadata {
@@ -510,8 +557,12 @@ fn socket_metadata(
     metadata
 }
 
-async fn read_http_head(client: &mut TcpStream) -> Result<(Vec<u8>, ParsedHttpHead), InboundError> {
+async fn read_http_head(
+    client: &mut BoxedInboundStream,
+    initial: Vec<u8>,
+) -> Result<(Vec<u8>, ParsedHttpHead), InboundError> {
     let mut bytes = Vec::with_capacity(1024);
+    bytes.extend_from_slice(&initial);
     let mut chunk = [0_u8; 4096];
     loop {
         if let Some(request) = parse_http_head(&bytes)? {

@@ -14,13 +14,13 @@ use rewrite_config::{
     Config, ConfigError, ControllerTls, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy,
     Mode, ProxyGroupKind, ProxyKind, ProxyProviderVehicle,
 };
-use rewrite_inbound::{InboundCommand, ListenerProtocol};
+use rewrite_inbound::{BoxedInboundStream, InboundCommand, ListenerProtocol};
 use rewrite_model::{Destination, Host, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
 use rewrite_state::{ConnectionGuard, RuntimeState};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,26 @@ struct RuntimeTask {
 }
 
 type ListenerKey = (ListenerKind, u16, SocketAddr);
+
+enum LocalTcpListener {
+    Plain(TcpListener),
+    FastOpen(tokio_tfo::TfoListener),
+}
+
+impl LocalTcpListener {
+    async fn accept(&self) -> std::io::Result<(BoxedInboundStream, SocketAddr)> {
+        match self {
+            Self::Plain(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, address)| (Box::new(stream) as BoxedInboundStream, address)),
+            Self::FastOpen(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, address)| (Box::new(stream) as BoxedInboundStream, address)),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ControllerKey {
@@ -1304,8 +1324,21 @@ async fn apply_generation(
         }
 
         let dual_stack = next.allow_lan && next.bind_address == "*";
-        let listener = rewrite_platform::bind_local_tcp_listener(address, dual_stack)?;
-        let listener = TcpListener::from_std(listener)?;
+        let listener = rewrite_platform::bind_local_tcp_listener(
+            address,
+            rewrite_platform::LocalTcpOptions {
+                dual_stack,
+                multipath: next.inbound_mptcp,
+                keep_alive_idle: next.keep_alive_idle,
+                keep_alive_interval: next.keep_alive_interval,
+                disable_keep_alive: next.disable_keep_alive,
+            },
+        )?;
+        let listener = if next.inbound_tfo {
+            LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
+        } else {
+            LocalTcpListener::Plain(TcpListener::from_std(listener)?)
+        };
         let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
             let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
             Some(Arc::new(UdpSocket::from_std(udp)?))
@@ -1686,7 +1719,7 @@ async fn stop_task(task: RuntimeTask) {
 
 async fn run_listener(
     kind: ListenerKind,
-    listener: TcpListener,
+    listener: LocalTcpListener,
     udp: Option<Arc<UdpSocket>>,
     config: watch::Receiver<Arc<Config>>,
     state: Arc<RuntimeState>,
@@ -1915,12 +1948,18 @@ async fn run_udp_session(
                 return;
             }
         };
-    let family = if target.is_ipv6() {
-        "[::]:0"
+    let family: SocketAddr = if target.is_ipv6() {
+        "[::]:0".parse().expect("static IPv6 wildcard")
     } else {
-        "0.0.0.0:0"
+        "0.0.0.0:0".parse().expect("static IPv4 wildcard")
     };
-    let outbound = match UdpSocket::bind(family).await {
+    let outbound = match rewrite_platform::bind_outbound_udp(
+        family,
+        &config.interface_name,
+        config.routing_mark,
+    )
+    .and_then(UdpSocket::from_std)
+    {
         Ok(socket) => socket,
         Err(error) => {
             state.log("error", format!("DIRECT UDP bind failed: {error}"));
@@ -2016,7 +2055,7 @@ async fn resolve_udp_target(
 }
 
 async fn serve_connection(
-    client: TcpStream,
+    client: BoxedInboundStream,
     kind: ListenerKind,
     config: &Config,
     state: &Arc<RuntimeState>,
@@ -2142,7 +2181,11 @@ async fn connect_tcp_outbound(
             };
         return tokio::select! {
             () = shutdown.cancelled() => None,
-            result = rewrite_outbound::connect(&destination, config.ipv6) => match result {
+            result = rewrite_outbound::connect_with_options(
+                &destination,
+                config.ipv6,
+                direct_tcp_options(config),
+            ) => match result {
                 Ok(remote) => Some(Box::new(remote)),
                 Err(error) => {
                     state.log("error", format!("DIRECT connection failed: {error}"));
@@ -2171,7 +2214,11 @@ async fn connect_tcp_outbound(
                 };
             return tokio::select! {
                 () = shutdown.cancelled() => None,
-                result = rewrite_outbound::connect(&destination, config.ipv6) => match result {
+                result = rewrite_outbound::connect_with_options(
+                    &destination,
+                    config.ipv6,
+                    direct_tcp_options(config),
+                ) => match result {
                     Ok(remote) => Some(Box::new(remote)),
                     Err(error) => {
                         state.log("error", format!("DIRECT connection failed: {error}"));
@@ -2197,6 +2244,7 @@ async fn connect_tcp_outbound(
                 &metadata.destination,
                 config.ipv6,
                 state.clock(),
+                direct_tcp_options(config),
             ) => result,
         };
         match result {
@@ -2217,11 +2265,23 @@ async fn connect_tcp_outbound(
     None
 }
 
+fn direct_tcp_options(config: &Config) -> rewrite_outbound::DirectTcpOptions<'_> {
+    rewrite_outbound::DirectTcpOptions {
+        interface: &config.interface_name,
+        routing_mark: config.routing_mark,
+        keep_alive_idle: config.keep_alive_idle,
+        keep_alive_interval: config.keep_alive_interval,
+        disable_keep_alive: config.disable_keep_alive,
+        tcp_concurrent: config.tcp_concurrent,
+    }
+}
+
 async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
     allow_ipv6: bool,
     clock: Arc<rewrite_services::AdjustedClock>,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let server = Destination {
         host: proxy
@@ -2237,7 +2297,7 @@ async fn connect_configured_proxy(
                 server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                 skip_certificate_verification: proxy.skip_cert_verify,
             });
-            rewrite_outbound::connect_http(
+            rewrite_outbound::connect_http_with_options(
                 &server,
                 destination,
                 allow_ipv6,
@@ -2245,15 +2305,20 @@ async fn connect_configured_proxy(
                 &proxy.headers,
                 tls,
                 Some(clock),
+                socket_options,
             )
             .await
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }
-        ProxyKind::Socks5 => {
-            rewrite_outbound::connect_socks5(&server, destination, allow_ipv6, credentials)
-                .await
-                .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
-        }
+        ProxyKind::Socks5 => rewrite_outbound::connect_socks5_with_options(
+            &server,
+            destination,
+            allow_ipv6,
+            credentials,
+            socket_options,
+        )
+        .await
+        .map_err(|error| format!("SOCKS5 proxy connection failed: {error}")),
     }
 }
 
@@ -2369,7 +2434,7 @@ fn load_balance_key(metadata: &Metadata, include_source: bool) -> String {
 }
 
 async fn relay_tracked_tcp(
-    mut client: TcpStream,
+    mut client: BoxedInboundStream,
     mut remote: rewrite_outbound::BoxedOutboundStream,
     tracker: ConnectionGuard,
     state: &RuntimeState,

@@ -7,6 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use fast_socks5::util::target_addr::ToTargetAddr;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use http_body_util::Empty;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -68,6 +69,16 @@ pub enum HttpProxyError {
 pub struct HttpProxyTls<'a> {
     pub server_name: &'a str,
     pub skip_certificate_verification: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DirectTcpOptions<'a> {
+    pub interface: &'a str,
+    pub routing_mark: i64,
+    pub keep_alive_idle: i64,
+    pub keep_alive_interval: i64,
+    pub disable_keep_alive: bool,
+    pub tcp_concurrent: bool,
 }
 
 #[derive(Debug)]
@@ -141,25 +152,62 @@ pub async fn connect(
     destination: &Destination,
     allow_ipv6: bool,
 ) -> Result<TcpStream, DirectError> {
+    connect_with_options(destination, allow_ipv6, DirectTcpOptions::default()).await
+}
+
+/// Opens a direct TCP connection with global platform socket policy.
+///
+/// # Errors
+///
+/// Returns [`DirectError`] for policy, resolution, socket or timeout failures.
+pub async fn connect_with_options(
+    destination: &Destination,
+    allow_ipv6: bool,
+    options: DirectTcpOptions<'_>,
+) -> Result<TcpStream, DirectError> {
     let connect = async {
         match destination.host {
             Host::Ip(address) => {
                 if address.is_ipv6() && !allow_ipv6 {
                     return Err(DirectError::Ipv6Disabled);
                 }
-                TcpStream::connect((address, destination.port))
-                    .await
-                    .map_err(DirectError::Io)
+                rewrite_platform::connect_tcp(
+                    (address, destination.port).into(),
+                    platform_options(options),
+                )
+                .await
+                .map_err(DirectError::Io)
             }
             Host::Domain(ref domain) => {
                 let addresses = tokio::net::lookup_host((domain.as_str(), destination.port))
                     .await
                     .map_err(DirectError::Io)?;
+                let addresses: Vec<_> = addresses
+                    .filter(|address| allow_ipv6 || address.is_ipv4())
+                    .collect();
                 let mut last_error = None;
-                for address in addresses.filter(|address| allow_ipv6 || address.is_ipv4()) {
-                    match TcpStream::connect(address).await {
-                        Ok(stream) => return Ok(stream),
-                        Err(error) => last_error = Some(error),
+                if options.tcp_concurrent {
+                    let mut attempts = FuturesUnordered::new();
+                    for address in addresses {
+                        attempts.push(rewrite_platform::connect_tcp(
+                            address,
+                            platform_options(options),
+                        ));
+                    }
+                    while let Some(result) = attempts.next().await {
+                        match result {
+                            Ok(stream) => return Ok(stream),
+                            Err(error) => last_error = Some(error),
+                        }
+                    }
+                } else {
+                    for address in addresses {
+                        match rewrite_platform::connect_tcp(address, platform_options(options))
+                            .await
+                        {
+                            Ok(stream) => return Ok(stream),
+                            Err(error) => last_error = Some(error),
+                        }
                     }
                 }
                 Err(DirectError::Io(last_error.unwrap_or_else(|| {
@@ -174,6 +222,16 @@ pub async fn connect(
     tokio::time::timeout(Duration::from_secs(5), connect)
         .await
         .map_err(|_| DirectError::Timeout)?
+}
+
+fn platform_options(options: DirectTcpOptions<'_>) -> rewrite_platform::OutboundTcpOptions<'_> {
+    rewrite_platform::OutboundTcpOptions {
+        interface: options.interface,
+        routing_mark: options.routing_mark,
+        keep_alive_idle: options.keep_alive_idle,
+        keep_alive_interval: options.keep_alive_interval,
+        disable_keep_alive: options.disable_keep_alive,
+    }
 }
 
 /// Opens a TCP tunnel through an HTTP CONNECT proxy, optionally over TLS.
@@ -191,7 +249,36 @@ pub async fn connect_http(
     tls: Option<HttpProxyTls<'_>>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
-    let stream = connect(server, allow_ipv6).await?;
+    connect_http_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        credentials,
+        headers,
+        tls,
+        clock,
+        DirectTcpOptions::default(),
+    )
+    .await
+}
+
+/// Opens an HTTP CONNECT tunnel with global platform socket policy.
+///
+/// # Errors
+///
+/// Returns [`HttpProxyError`] under the same conditions as [`connect_http`].
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_http_with_options(
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    credentials: Option<(&str, &str)>,
+    headers: &BTreeMap<String, String>,
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+    options: DirectTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, HttpProxyError> {
+    let stream = connect_with_options(server, allow_ipv6, options).await?;
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
         let config = http_tls_config(tls, &[], clock)?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
@@ -326,11 +413,33 @@ pub async fn connect_socks5(
     allow_ipv6: bool,
     credentials: Option<(&str, &str)>,
 ) -> Result<BoxedOutboundStream, Socks5ProxyError> {
+    connect_socks5_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        credentials,
+        DirectTcpOptions::default(),
+    )
+    .await
+}
+
+/// Opens a SOCKS5 tunnel with global platform socket policy.
+///
+/// # Errors
+///
+/// Returns [`Socks5ProxyError`] under the same conditions as [`connect_socks5`].
+pub async fn connect_socks5_with_options(
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    credentials: Option<(&str, &str)>,
+    options: DirectTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, Socks5ProxyError> {
     let target = destination.host.to_string();
     let mut config = fast_socks5::client::Config::default();
     config.set_connect_timeout(Duration::from_secs(5));
+    let mut socket = connect_with_options(server, allow_ipv6, options).await?;
     let stream = if let Some((username, password)) = credentials {
-        let mut socket = connect(server, allow_ipv6).await?;
         strict_password_auth(&mut socket, username, password).await?;
         config.set_skip_auth(true);
         let mut stream =
@@ -343,13 +452,15 @@ pub async fn connect_socks5(
             .await?;
         stream
     } else {
-        fast_socks5::client::Socks5Stream::connect(
-            (server.host.to_string(), server.port),
-            target,
-            destination.port,
-            config,
-        )
-        .await?
+        let mut stream =
+            fast_socks5::client::Socks5Stream::use_stream(socket, None, config).await?;
+        let address = (target.as_str(), destination.port)
+            .to_target_addr()
+            .map_err(DirectError::Io)?;
+        stream
+            .request(fast_socks5::Socks5Command::TCPConnect, address)
+            .await?;
+        stream
     };
     Ok(Box::new(stream))
 }

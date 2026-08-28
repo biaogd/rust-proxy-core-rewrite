@@ -2838,6 +2838,7 @@ dependencies = [
  "rewrite-model",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-tfo",
  "url",
 ]
 
@@ -2859,10 +2860,12 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "fast-socks5",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
  "rewrite-model",
+ "rewrite-platform",
  "rewrite-services",
  "rustls-native-certs",
  "rustls-pemfile",
@@ -2880,6 +2883,7 @@ dependencies = [
  "ipconfig",
  "network-interface",
  "socket2 0.6.5",
+ "tokio",
 ]
 
 [[package]]
@@ -2926,6 +2930,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tokio-tfo",
  "tokio-util",
  "url",
 ]
@@ -3734,6 +3739,23 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tfo"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6ad2c3b3bb958ad992354a7ebc468fc0f7cdc9af4997bf4d3fd3cb28bad36dc"
+dependencies = [
+ "cfg-if",
+ "futures",
+ "libc",
+ "log",
+ "once_cell",
+ "pin-project",
+ "socket2 0.6.5",
+ "tokio",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

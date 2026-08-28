@@ -24,6 +24,7 @@ reqwest.workspace = true
 psl.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tfo.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 url.workspace = true

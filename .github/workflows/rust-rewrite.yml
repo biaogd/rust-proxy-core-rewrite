@@ -67,6 +67,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path rust/Cargo.toml --workspace --all-features
 
+      - name: Build release binary
+        run: cargo build --manifest-path rust/Cargo.toml --package rewrite-cli --all-features --release
+
   go-baseline:
     name: Go oracle baseline
     runs-on: ubuntu-latest
@@ -211,6 +214,7 @@ jobs:
       PHASE5ETLSAUTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5EGEORULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5FUDPNAT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE5F_TIMEOUT_TEST: "1"
       PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target

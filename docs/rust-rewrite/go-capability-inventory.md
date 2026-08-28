@@ -59,7 +59,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| CFG-01 | General ports, bind/LAN/auth, mode, logging, IPv6, interface, routing mark, TFO, MPTCP, TCP concurrency and keepalive | Partial | 5A9 plus listener/platform gates |
+| CFG-01 | General ports, bind/LAN/auth, mode, logging, IPv6, interface, routing mark, TFO, MPTCP, TCP concurrency and keepalive | Partial: Phase 5F applies all listed socket fields in the declared local/current-adapter scope | Remaining redir/TProxy/named-listener consumers and privileged nonzero-mark evidence |
 | CFG-02 | Controller TCP/TLS/Unix/Windows pipe, routing mark, CORS, secret, external UI/URL/name and external DoH mount | Partial: TCP/TLS/Unix, public UI/DoH, auth/CORS, hot replacement and native pipe CI are implemented; nonzero Linux mark and full TLS client-auth/ECH retain platform/service gates | 5D complete boundary; 5E2/5F platform evidence remain |
 | CFG-03 | Proxies, reserved built-ins, duplicate/reserved-name checks and dependency ordering | Not started | 6A0 |
 | CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: Phase 5C current-adapter group strategies/composition/health complete | Later adapter-specific validation gates |
@@ -86,8 +86,8 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| IN-01 | Mixed HTTP plus SOCKS4/4a/5 TCP and SOCKS5 UDP | Partial | 5F1 full local semantics |
-| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Partial: 5F1a/5F1b prove IPv4/IPv6 bind, dual-stack wildcard, same-port rebind and allow/deny/skip-auth across fixed HTTP/SOCKS/mixed; Phase 3/5F2 cover current association/NAT subset | Remaining 5F1 native non-loopback/TFO/MPTCP and 5F2 association gates |
+| IN-01 | Mixed HTTP plus SOCKS4/4a/5 TCP and SOCKS5 UDP | Complete in declared local TCP and source-keyed UDP scope | Broader HTTP edge cases and remote UDP/UoT remain protocol gates |
+| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Complete in declared fixed-listener scope: native bind/rebind/LAN policy, TFO, Linux MPTCP fallback and current source-keyed association behavior are implemented | Linux native/slow CI results remain evidence gates; named listeners remain CFG-07 |
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | Not started | 8A–8C |
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
@@ -131,7 +131,7 @@ The product parser enumerates outbound types in
 
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
-| OUT-01 | DIRECT TCP/UDP, interface, routing mark, IP strategy, TFO, MPTCP and dial concurrency | Partial | 6A1 plus platform gates |
+| OUT-01 | DIRECT TCP/UDP, interface, routing mark, IP strategy, TFO, MPTCP and dial concurrency | Partial: Phase 5F applies interface/mark/keepalive/concurrent resolution to current TCP dials and interface/mark to DIRECT UDP; inbound TFO/MPTCP is active | Rich IP strategy, privileged mark evidence and remote UDP/protocol-specific transport options remain |
 | OUT-02 | REJECT, REJECT-DROP, COMPATIBLE, PASS, PASS-RULE, DNS and REMATCH built-ins | Partial/Not started | 6A2 |
 | OUT-03 | HTTP proxy client: plaintext/TLS, auth, CONNECT and UDP limitations | Partial: plaintext/TLS authenticated and unauthenticated CONNECT TCP, explicit SNI, skip verification, default/custom headers, credential precedence and representative exact-200 status rejection | 6B1 trusted-root/name/client-cert/fingerprint/slow-malformed-response/UDP/platform gates |
 | OUT-04 | SOCKS5 proxy client: TCP/UDP, auth and remote/local resolution | Partial: authenticated TCP CONNECT | 6B2 resolution/UDP/error gates |
@@ -209,10 +209,10 @@ Primary anchors: [`tunnel`](../../tunnel),
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | RUN-01 | TCP routing, relay, half-close, cancellation, metadata mutation and adapter retries | Partial | Repeated routing/protocol gates |
-| RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Partial: 5F2a/5F2b prove bounded client-keyed IPv4/IPv6 DIRECT reuse, destination fan-out, multi-response write-back, control-close retention and reload generation retention | Remaining 5F2 exact-timeout/stress gates, then remote protocol gates |
+| RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Complete in declared local DIRECT scope: bounded client-keyed IPv4/IPv6 reuse, fan-out, multi-response, control-close/generation retention and pressure recovery pass; exact timeout is enabled in CI | Remote adapters/UoT and CI slow-gate result remain separate claims |
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
 | RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
-| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Not started | Platform gates |
+| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
 | RUN-08 | Power/network change handling and resolver/connection reset | Not started | 8F |
@@ -236,7 +236,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | API-09 | `/cache/fakeip/flush`, `/cache/dns/flush`, `/dns/query` | Complete on the declared TCP controller surface | 4F15 |
 | API-10 | `/storage/{key}` GET/PUT/DELETE | Complete: exact JSON lifecycle, bounded LRU, restart persistence and Go bbolt MessagePack interchange pass | 5D complete boundary |
 | API-11 | `/restart`, `/upgrade`, `/upgrade/ui`, `/upgrade/geo` | Partial: authenticated restart/re-exec is compatible; core/UI/Geo downloads require SVC-04/SVC-05 and remain 5E | 5D restart boundary; 5E4–5E5 update services |
-| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: UI redirect/files/reload, public DoH and public debug GC pass; Go pprof/expvar payload semantics remain a platform diagnostics gate | 5D complete boundary plus 5F diagnostics |
+| API-12 | External UI static serving/redirect, external DoH GET/POST mount and debug/GC routes | Partial: UI redirect/files/reload, public DoH and public debug GC pass; Go pprof/expvar payload semantics are deliberately unclaimed Go-runtime-specific gaps | Future portable profiling API, if required; do not treat Phase 5F closure as pprof parity |
 | API-13 | Exact JSON fields, headers, status/error bodies, stream cadence and concurrent behavior across all routes | Partial by design: exactness passes for every accepted 5D route; routes owned by unimplemented services remain unclaimed | Required in every later API/service gate |
 
 ## Supporting services and persistence

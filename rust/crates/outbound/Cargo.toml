@@ -9,10 +9,12 @@ publish.workspace = true
 base64.workspace = true
 bytes.workspace = true
 fast-socks5.workspace = true
+futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 rewrite-model = { path = "../model" }
+rewrite-platform = { path = "../platform" }
 rewrite-services = { path = "../services" }
 rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true

@@ -100,6 +100,9 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
 | Phase 5D controller completion boundary | Complete for every currently executable Rust service; API-04/API-11/API-12 retain only explicit 5E/5F service/platform dependencies | TCP/TLS/Unix and native-pipe CI, streams, safe config paths, current proxy/rule/provider surfaces, persistent Go-compatible storage, restart and public UI/DoH/debug are covered |
+| Phase 5F1 local TCP/socket completion | Implementation complete in declared local/current-adapter scope; privileged Linux evidence pending | Fixed HTTP/SOCKS/mixed use TFO, Linux MPTCP fallback and keepalive; interface/mark/concurrent dialing reaches DIRECT plus current HTTP/SOCKS5 adapters, while LAN/rebind/native-address differential passes |
+| Phase 5F2 UDP NAT completion | Implementation complete in declared local scope; exact-timeout Linux CI result pending | IPv4/IPv6 reuse, fan-out, multi-response, control-close, generation retention and bounded-pressure recovery pass locally; CI enables the real 60-second expiry comparison |
+| Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI now builds the all-feature release binary after fmt/clippy/test; nonzero Linux mark remains a privileged evidence claim |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
 | Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
@@ -4347,11 +4350,11 @@ PHASE3_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/ph
 ```
 
 The differential observes stable upstream source-port reuse for sequential
-packets, two SOCKS write-backs from one request, continued DIRECT traffic on an
-existing session after a REJECT reload and rejection for a fresh client. It
-does not yet claim timeout-expiry timing, multi-destination fan-out, IPv6,
-control-association ownership, remote UDP adapters/UoT or stress capacity. A
-dedicated Linux CI shard runs this gate in parallel; its result is pending.
+packets, multiple SOCKS write-backs, destination fan-out, continued DIRECT
+traffic on an existing session after a REJECT reload and rejection for a fresh
+client. IPv4 and IPv6, control-association closure and bounded-pressure recovery
+are covered. A dedicated Linux CI shard runs the real 60-second expiry gate;
+its result remains pending and remote UDP adapters/UoT remain protocol gates.
 
 Phase 5F2b broadens the same deterministic differential without changing the
 60-second production timeout. One IPv4 client now proves that two destination
@@ -4359,8 +4362,11 @@ authorities share the stable outbound socket, and that closing a SOCKS5 UDP
 ASSOCIATE control connection does not own or tear down the source-keyed NAT
 entry, matching the fixed Go listener. A dual-stack mixed listener additionally
 proves IPv6 request decoding, DIRECT forwarding, response encoding and source
-port reuse. Exact timeout expiry, queue/capacity stress and remote UDP
-adapters/UoT remain unclaimed.
+port reuse. Phase 5F2c sends 256 packets through the bounded 64-entry session
+queue and requires a later marker response, then enables exact idle-expiry
+source-port recreation under `PHASE5F_TIMEOUT_TEST=1` in Linux CI. The fast
+Darwin pressure gate passes; the wall-clock CI result and remote UDP
+adapters/UoT remain explicitly separate evidence/protocol claims.
 
 Phase 5F1a also accepts the fixed-listener IPv4 LAN-policy boundary. Runtime
 configuration now retains `allow-lan`, `bind-address`, allowed/disallowed
@@ -4377,8 +4383,8 @@ PHASE5FLANPOLICY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/
 The differential proves unauthenticated loopback access through all three
 listener kinds when explicitly skipped, allowed-list miss, disallowed-list
 precedence, and `allow-lan: false` forcing loopback even with a nonlocal bind
-address. IPv6 wildcard/dual-stack behavior, native non-loopback reachability,
-same-port bind-address hot rebind, TFO and MPTCP remain unclaimed.
+address. Its current expansion also covers IPv4/IPv6 wildcard behavior, a real
+native non-loopback address and same-port bind-address hot replacement.
 
 Phase 5F1b extends that accepted boundary through the platform socket adapter.
 `bind-address: '*'` now creates the oracle's dual-stack wildcard socket,
@@ -4388,8 +4394,37 @@ Controller PATCH can therefore replace a bind address on the same port while
 also updating the three validated prefix lists. The expanded
 `phase5f_lan_policy.py` differential proves IPv4 and IPv6 wildcard relay,
 IPv4-to-IPv6 same-port replacement with old-address retirement, a live auth
-bypass update and invalid-prefix rollback. TFO/MPTCP and a native
-non-loopback-host reachability gate remain unclaimed.
+bypass update and invalid-prefix rollback.
+
+Phase 5F1c completes the remaining executable socket policy. Fixed TCP
+listeners retain `inbound-tfo`/`inbound-mptcp` in live configuration, use
+`tokio-tfo` for accepted TFO streams, request Linux MPTCP with ordinary TCP
+fallback, and apply keepalive through `socket2`. DIRECT TCP/UDP and current
+HTTP/SOCKS5 proxy and health-check sockets apply interface/routing-mark policy;
+domain DIRECT dials honor `tcp-concurrent`. The Darwin differential passes
+TFO/MPTCP-enabled relay, non-loopback wildcard access, the `lo0` dial path,
+invalid-interface failure, domain concurrency and an exact nonzero-mark
+controller snapshot. Mark application on global-unicast Linux/Android sockets
+is implemented but remains a privileged native CI evidence claim.
+
+Phase 5F3 adds the all-feature release build to the default quality workflow.
+Portable logs, memory/traffic streams and connection lifecycle were already
+accepted in Phase 5D and remain the Rust diagnostics boundary. Go-runtime
+`pprof`/`expvar` payloads and process lookup are still visible in the inventory:
+the former are non-portable API gaps, while the latter requires future PROCESS
+rules/original-flow metadata. Neither is relabeled as compatible merely to
+close the local listener/data-plane phase.
+
+Focused Phase 5F local commands now are:
+
+```sh
+PHASE5FLANPOLICY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5f_lan_policy.py
+PHASE5FUDPNAT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5f_udp_nat.py
+```
+
+Both fast Darwin differentials pass on 2026-08-28. Linux CI additionally sets
+`PHASE5F_TIMEOUT_TEST=1`; no Linux or privileged-mark result is claimed until
+Actions reports it.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

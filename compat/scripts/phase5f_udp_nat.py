@@ -126,6 +126,24 @@ def receive_payload_v6(client: socket.socket) -> bytes:
     return packet[22:]
 
 
+def round_trip_v6(
+    client: socket.socket, proxy_port: int, destination_port: int, payload: bytes
+) -> bytes:
+    deadline = time.monotonic() + (2 * IO_DEADLINE) + 1
+    while time.monotonic() < deadline:
+        client.sendto(
+            socks_udp_packet_v6(destination_port, payload),
+            ("::1", proxy_port),
+        )
+        try:
+            response = receive_payload_v6(client)
+            if response == payload:
+                return response
+        except TimeoutError:
+            continue
+    raise TimeoutError(f"IPv6 UDP session did not return {payload!r}")
+
+
 def round_trip(
     client: socket.socket, proxy_port: int, destination_port: int, payload: bytes
 ) -> bytes:
@@ -136,7 +154,9 @@ def round_trip(
             ("127.0.0.1", proxy_port),
         )
         try:
-            return receive_payload(client)
+            response = receive_payload(client)
+            if response == payload:
+                return response
         except TimeoutError:
             continue
     raise TimeoutError(f"UDP session did not return {payload!r}")
@@ -182,6 +202,25 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         )
         burst = [receive_payload(client), receive_payload(client)]
 
+        for index in range(256):
+            client.sendto(
+                socks_udp_packet(authority.port, f"pressure-{index}".encode()),
+                ("127.0.0.1", mixed_port),
+            )
+        pressure = round_trip(client, mixed_port, authority.port, b"pressure-marker")
+
+        timeout_result = "ci-slow-gate-disabled"
+        if os.environ.get("PHASE5F_TIMEOUT_TEST") == "1":
+            timeout_before = authority.source_port(b"pressure-marker")
+            time.sleep(62)
+            expired = round_trip(client, mixed_port, authority.port, b"after-timeout")
+            timeout_after = authority.source_port(b"after-timeout")
+            if expired != b"after-timeout" or timeout_before == timeout_after:
+                raise AssertionError(
+                    "UDP NAT entry did not expire and recreate after the idle deadline"
+                )
+            timeout_result = "expired-and-recreated"
+
         write_config(config, socks_port, mixed_port, "REJECT")
         os.kill(process.pid, signal.SIGHUP)
         wait_route(process, mixed_port, tcp_echo.port, "reject")
@@ -219,6 +258,8 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             "control-close-retains-session": second.decode(),
             "destination-fanout": fanout.decode(),
             "burst": [payload.decode() for payload in burst],
+            "bounded-pressure": "survived" if pressure == b"pressure-marker" else "failed",
+            "idle-timeout": timeout_result,
             "reload": {
                 "existing-session": retained.decode(),
                 "existing-fixed-session": fixed_retained.decode(),
@@ -260,8 +301,9 @@ rules:
         payloads = []
         sources = []
         for payload in (b"ipv6-first", b"ipv6-second"):
-            client.sendto(socks_udp_packet_v6(authority.port, payload), ("::1", mixed_port))
-            payloads.append(receive_payload_v6(client).decode())
+            payloads.append(
+                round_trip_v6(client, mixed_port, authority.port, payload).decode()
+            )
             sources.append(authority.source_port(payload))
         return {
             "payloads": payloads,

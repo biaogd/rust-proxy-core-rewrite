@@ -1224,9 +1224,13 @@ async fn measure_http_delay(
     let mut stream: rewrite_outbound::BoxedOutboundStream =
         if matches!(name, "DIRECT" | "COMPATIBLE") {
             Box::new(
-                rewrite_outbound::connect(&destination, config.ipv6)
-                    .await
-                    .map_err(|_| ())?,
+                rewrite_outbound::connect_with_options(
+                    &destination,
+                    config.ipv6,
+                    controller_socket_options(config),
+                )
+                .await
+                .map_err(|_| ())?,
             )
         } else {
             let proxy = config
@@ -1254,7 +1258,7 @@ async fn measure_http_delay(
                         server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                         skip_certificate_verification: proxy.skip_cert_verify,
                     });
-                    rewrite_outbound::connect_http(
+                    rewrite_outbound::connect_http_with_options(
                         &server,
                         &destination,
                         config.ipv6,
@@ -1262,15 +1266,17 @@ async fn measure_http_delay(
                         &proxy.headers,
                         tls,
                         None,
+                        controller_socket_options(config),
                     )
                     .await
                     .map_err(|_| ())?
                 }
-                rewrite_config::ProxyKind::Socks5 => rewrite_outbound::connect_socks5(
+                rewrite_config::ProxyKind::Socks5 => rewrite_outbound::connect_socks5_with_options(
                     &server,
                     &destination,
                     config.ipv6,
                     credentials,
+                    controller_socket_options(config),
                 )
                 .await
                 .map_err(|_| ())?,
@@ -1320,6 +1326,17 @@ async fn measure_http_delay(
         delay: u16::try_from(started.elapsed().as_millis()).map_err(|_| ())?,
         satisfied,
     })
+}
+
+fn controller_socket_options(config: &Config) -> rewrite_outbound::DirectTcpOptions<'_> {
+    rewrite_outbound::DirectTcpOptions {
+        interface: &config.interface_name,
+        routing_mark: config.routing_mark,
+        keep_alive_idle: config.keep_alive_idle,
+        keep_alive_interval: config.keep_alive_interval,
+        disable_keep_alive: config.disable_keep_alive,
+        tcp_concurrent: config.tcp_concurrent,
+    }
 }
 
 fn parse_status_ranges(value: &str) -> Option<Vec<(u16, u16)>> {
@@ -2086,6 +2103,8 @@ struct ConfigPatch {
     skip_auth_prefixes: Option<Vec<String>>,
     lan_allowed_ips: Option<Vec<String>>,
     lan_disallowed_ips: Option<Vec<String>>,
+    tcp_concurrent: Option<bool>,
+    interface_name: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2132,6 +2151,12 @@ async fn patch_configs(State(state): State<ControllerState>, request: Request) -
             StatusCode::BAD_REQUEST,
             &json!({"message": error.to_string()}),
         );
+    }
+    if let Some(tcp_concurrent) = patch.tcp_concurrent {
+        config.tcp_concurrent = tcp_concurrent;
+    }
+    if let Some(interface_name) = patch.interface_name {
+        config.interface_name = interface_name;
     }
     apply_config_update(&state, config).await
 }
@@ -2842,13 +2867,15 @@ fn config_snapshot(config: &Config) -> serde_json::Value {
         "log-level": config.log_level,
         "ipv6": config.ipv6,
         "geodata-mode": config.geodata_mode,
-        "interface-name": "",
-        "routing-mark": 0,
-        "tcp-concurrent": false,
+        "interface-name": config.interface_name,
+        "routing-mark": config.routing_mark,
+        "tcp-concurrent": config.tcp_concurrent,
+        "inbound-tfo": config.inbound_tfo,
+        "inbound-mptcp": config.inbound_mptcp,
         "etag-support": true,
-        "keep-alive-idle": 0,
-        "keep-alive-interval": 0,
-        "disable-keep-alive": false
+        "keep-alive-idle": config.keep_alive_idle,
+        "keep-alive-interval": config.keep_alive_interval,
+        "disable-keep-alive": config.disable_keep_alive
     })
 }
 

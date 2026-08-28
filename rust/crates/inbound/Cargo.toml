@@ -11,6 +11,7 @@ httparse.workspace = true
 rewrite-model = { path = "../model" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tfo.workspace = true
 url.workspace = true
 
 [lints]
