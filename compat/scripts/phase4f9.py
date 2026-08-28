@@ -60,17 +60,21 @@ def render_config(
     *,
     lazy: bool = False,
 ) -> None:
+    mixed_port = reserve_port()
+    dns_port = reserve_port()
+    while dns_port == mixed_port:
+        dns_port = reserve_port()
     fallback_lines = "\n".join(f"    - {endpoint(server)}" for server in fallback)
     filters = "\n".join(f"    {line}" for line in filter_lines)
     path.write_text(
-        f"""mixed-port: {reserve_port()}
+        f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
 ipv6: true
 geodata-mode: true
 dns:
   enable: true
-  listen: 127.0.0.1:{reserve_port()}
+  listen: 127.0.0.1:{dns_port}
   ipv6: true
   use-hosts: false
   use-system-hosts: false
@@ -303,7 +307,14 @@ def validate_products(
             "go": lambda path: [
                 str(binaries["go-product"]), "-d", str(scratch), "-t", "-f", str(path)
             ],
-            "rust": lambda path: [str(binaries["rust-product"]), "-t", "-f", str(path)],
+            "rust": lambda path: [
+                str(binaries["rust-product"]),
+                "-d",
+                str(scratch),
+                "-t",
+                "-f",
+                str(path),
+            ],
         }
         return {
             implementation: {

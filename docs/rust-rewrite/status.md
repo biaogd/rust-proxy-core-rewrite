@@ -4632,6 +4632,15 @@ request through explicit environment variables instead of PowerShell
 attempts inside the overall readiness window and preserves the last exception
 as the timeout cause.
 
+Actions run `33159534696` verified both native build legs, the named-pipe
+differential and every non-DNS-general gate. Its sole failure was a Phase 4F9
+fixture setup mismatch: the Go product validation received the temporary home
+directory through `-d`, while the Rust product validation did not and therefore
+looked for `GeoIP.dat` under the runner's default home. The fixture now supplies
+the same `-d` input to both products and guarantees its released mixed/DNS port
+numbers are distinct. The complete Phase 4F9 differential passes locally after
+the correction; a subsequent Actions run remains the acceptance authority.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
