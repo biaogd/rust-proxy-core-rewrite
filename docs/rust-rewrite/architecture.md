@@ -89,6 +89,15 @@ listener boundary: it decodes one SOCKS datagram, applies the pure rule core,
 uses a local DIRECT UDP socket and restores the remote source in the SOCKS
 write-back header.
 
+The post-6B physical split keeps `rewrite-state::RuntimeState` as the shared
+facade while separating its implementation by state ownership: `connections`
+owns lifecycle/counters/log streaming, `groups` owns proxy health and group
+selection state, `dns_state` owns redir-host and fake-IP mappings, `storage`
+owns bbolt-backed profile/selector/controller persistence, and `model` owns the
+serialized controller snapshots. Public types continue to be re-exported from
+the crate root, so controller, DNS and runtime crates do not depend on this
+internal file layout.
+
 Phase 4A makes `rewrite-dns` responsible for classic DNS message validation,
 bounded positive caching and direct UDP/TCP upstream exchange. The runtime
 still owns socket lifetimes: it binds both local DNS transports before a

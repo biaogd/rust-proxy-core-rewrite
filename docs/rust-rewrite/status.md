@@ -4609,6 +4609,36 @@ unit tests, workspace fmt/clippy/test, the Phase 2 generated config/rule oracle
 suite and the Phase 6A simple-adapter differential pass after the move. This
 changes no compatibility-matrix support claim.
 
+## State module refactor
+
+The behavior-neutral post-6B structure pass replaces the 1,968-line state
+crate root with an 87-line facade. Controller snapshot models, connection and
+traffic lifecycle, proxy/group health and selection, DNS/redir-host/fake-IP
+state, bbolt-backed storage/profile persistence, and unit fixtures now live in
+focused modules. Existing public types and `RuntimeState` methods remain
+available from the same crate-root API. Production modules use explicit
+`crate::...` paths and contain no `use super` imports; test-only fake-IP
+inspection is exposed through narrow test-only methods instead of widening the
+production data structure.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+python3 compat/scripts/phase3.py
+python3 compat/scripts/phase4f13.py
+python3 compat/scripts/phase4f14.py
+python3 compat/scripts/phase5c_selector_persistence.py
+python3 compat/scripts/phase5d_storage_persistence.py
+```
+
+All gates pass. The connection/controller lifecycle, redir-host, fake-IP
+database interchange, selector persistence and controller storage interchange
+matrix evidence remains unchanged; this refactor adds no feature or platform
+compatibility claim.
+
 ## Native Windows and Apple Silicon build gates
 
 The default Rust workflow now has a separate native build matrix for
