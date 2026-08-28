@@ -1213,6 +1213,19 @@ lifecycle, and later 5F gates cover routing marks, native process/platform
 behavior, diagnostics, backpressure/stress and build-profile evidence. A
 successful host cross-build is never sufficient for a native behavior claim.
 
+### Phase 5F accepted slices
+
+- `5F2a`: fixed SOCKS and mixed UDP now use a bounded 64-packet NAT session
+  keyed by the client socket address instead of creating one outbound socket
+  per packet. The DIRECT session keeps one outbound socket, relays multiple
+  responses, resets its 60-second idle deadline on traffic, observes shutdown
+  and controller cancellation, and retains the routing generation that created
+  it. `compat/scripts/phase5f_udp_nat.py` proves stable outbound source-port
+  reuse, two write-backs from one request, and reload behavior where the old
+  session remains DIRECT while a new client is rejected. General destination
+  fan-out, IPv6, remote UDP adapters/UoT, timeout-expiry timing and association
+  ownership remain later `5F2` gates.
+
 ## Phase 6 — established remote protocols
 
 Port in small interop-gated slices, initially prioritizing commonly deployed

@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 9
       matrix:
         include:
           - shard: core
@@ -118,6 +118,8 @@ jobs:
             regex: 'phase5c_[a-z0-9_]+\.py$'
           - shard: controller-services-outbound
             regex: 'phase(5d|5e|6b)_[a-z0-9_]+\.py$'
+          - shard: local-runtime
+            regex: 'phase5f_[a-z0-9_]+\.py$'
     env:
       SHARD_REGEX: ${{ matrix.regex }}
       PHASE1_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -208,6 +210,7 @@ jobs:
       PHASE5ESERVICES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5ETLSAUTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5EGEORULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE5FUDPNAT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -290,6 +293,7 @@ jobs:
             compat/scripts/phase5e_services.py \
             compat/scripts/phase5e_tls_client_auth.py \
             compat/scripts/phase5e_geo_rules.py \
+            compat/scripts/phase5f_udp_nat.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \

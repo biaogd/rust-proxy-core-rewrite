@@ -1665,6 +1665,7 @@ async fn run_listener(
     shutdown: CancellationToken,
 ) {
     let mut connections = JoinSet::new();
+    let mut udp_sessions = UdpSessions::default();
     let mut datagram = vec![0_u8; 65_535];
     loop {
         tokio::select! {
@@ -1696,23 +1697,31 @@ async fn run_listener(
                     state.log("error", format!("connection task failed: {join_error}"));
                 }
             }
+            result = udp_sessions.tasks.join_next(), if !udp_sessions.tasks.is_empty() => {
+                udp_sessions.reap(result.as_ref());
+            }
             received = receive_udp(udp.as_ref(), &mut datagram) => {
                 if let Ok((length, source)) = received
                     && let Some(socket) = &udp
                 {
-                    let packet = datagram[..length].to_vec();
-                    let socket = Arc::clone(socket);
                     let connection_config = Arc::clone(&config.borrow());
-                    let connection_state = Arc::clone(&state);
-                    connections.spawn(async move {
-                        handle_udp(
-                            socket,
-                            packet,
-                            source,
-                            connection_config,
-                            connection_state,
-                        ).await;
-                    });
+                    let Some(request) = prepare_udp_request(
+                        &datagram[..length],
+                        source,
+                        socket.local_addr().map_or(0, |address| address.port()),
+                        &connection_config,
+                        &state,
+                    ) else {
+                        continue;
+                    };
+                    udp_sessions.dispatch(
+                        Arc::clone(socket),
+                        source,
+                        request,
+                        connection_config,
+                        Arc::clone(&state),
+                        shutdown.child_token(),
+                    );
                 }
             }
         }
@@ -1727,6 +1736,7 @@ async fn run_listener(
             );
         }
     }
+    udp_sessions.shutdown(&state).await;
 }
 
 async fn receive_udp(
@@ -1739,43 +1749,144 @@ async fn receive_udp(
     }
 }
 
-async fn handle_udp(
-    listener: Arc<UdpSocket>,
-    packet: Vec<u8>,
+struct UdpSessionPacket {
+    metadata: Metadata,
+    fake_host: Option<String>,
+    payload: Vec<u8>,
+}
+
+#[derive(Default)]
+struct UdpSessions {
+    tasks: JoinSet<(SocketAddr, u64)>,
+    entries: BTreeMap<SocketAddr, (u64, mpsc::Sender<UdpSessionPacket>)>,
+    next_id: u64,
+}
+
+impl UdpSessions {
+    fn reap(&mut self, result: Option<&Result<(SocketAddr, u64), tokio::task::JoinError>>) {
+        if let Some(Ok((source, session_id))) = result
+            && self
+                .entries
+                .get(source)
+                .is_some_and(|(current_id, _)| current_id == session_id)
+        {
+            self.entries.remove(source);
+        }
+    }
+
+    fn dispatch(
+        &mut self,
+        listener: Arc<UdpSocket>,
+        source: SocketAddr,
+        request: UdpSessionPacket,
+        config: Arc<Config>,
+        state: Arc<RuntimeState>,
+        shutdown: CancellationToken,
+    ) {
+        if let Some((_, sender)) = self.entries.get(&source) {
+            match sender.try_send(request) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    state.log("error", "SOCKS5 UDP session queue is full");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(request)) => {
+                    self.entries.remove(&source);
+                    self.start(listener, source, request, config, state, shutdown);
+                    return;
+                }
+            }
+        }
+        self.start(listener, source, request, config, state, shutdown);
+    }
+
+    fn start(
+        &mut self,
+        listener: Arc<UdpSocket>,
+        source: SocketAddr,
+        request: UdpSessionPacket,
+        config: Arc<Config>,
+        state: Arc<RuntimeState>,
+        shutdown: CancellationToken,
+    ) {
+        let decision = mode_decision(&config, &state)
+            .unwrap_or_else(|| config.rules.evaluate(&request.metadata));
+        if decision.route() != Route::Direct {
+            return;
+        }
+        let session_id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        let (sender, receiver) = mpsc::channel(64);
+        self.entries.insert(source, (session_id, sender));
+        self.tasks.spawn(async move {
+            run_udp_session(
+                listener, source, request, receiver, config, state, decision, shutdown,
+            )
+            .await;
+            (source, session_id)
+        });
+    }
+
+    async fn shutdown(mut self, state: &RuntimeState) {
+        self.entries.clear();
+        while let Some(result) = self.tasks.join_next().await {
+            if let Err(join_error) = result {
+                state.log(
+                    "error",
+                    format!("UDP session task failed during listener shutdown: {join_error}"),
+                );
+            }
+        }
+    }
+}
+
+fn prepare_udp_request(
+    packet: &[u8],
     source: SocketAddr,
-    config: Arc<Config>,
-    state: Arc<RuntimeState>,
-) {
-    let inbound_port = listener.local_addr().map_or(0, |address| address.port());
-    let accepted = match rewrite_inbound::decode_socks5_udp(&packet, source, inbound_port) {
+    inbound_port: u16,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+) -> Option<UdpSessionPacket> {
+    let accepted = match rewrite_inbound::decode_socks5_udp(packet, source, inbound_port) {
         Ok(accepted) => accepted,
         Err(error) => {
             state.log("error", format!("SOCKS5 UDP packet rejected: {error}"));
-            return;
+            return None;
         }
     };
     let mut metadata = accepted.metadata.clone();
     // Both pinned default SOCKS and mixed UDP listeners are backed by the Go
     // SOCKS UDP listener and therefore expose DEFAULT-SOCKS, not DEFAULT-MIXED.
     "DEFAULT-SOCKS".clone_into(&mut metadata.inbound_name);
-    let fake_host = apply_host_mapping(&mut metadata, &config, &state);
-    let decision =
-        mode_decision(&config, &state).unwrap_or_else(|| config.rules.evaluate(&metadata));
-    if decision.route() != Route::Direct {
-        return;
-    }
-    let tracker = state.register(
-        &metadata,
-        &decision.target,
-        decision.matched_kind.as_deref(),
-    );
-    let target = match resolve_udp_target(&metadata, fake_host.as_deref(), &config).await {
-        Ok(target) => target,
-        Err(error) => {
-            state.log("error", format!("DIRECT UDP resolution failed: {error}"));
-            return;
-        }
-    };
+    let fake_host = apply_host_mapping(&mut metadata, config, state);
+    Some(UdpSessionPacket {
+        metadata,
+        fake_host,
+        payload: accepted.payload.to_vec(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let target =
+        match resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await {
+            Ok(target) => target,
+            Err(error) => {
+                state.log("error", format!("DIRECT UDP resolution failed: {error}"));
+                return;
+            }
+        };
     let family = if target.is_ipv6() {
         "[::]:0"
     } else {
@@ -1788,18 +1899,55 @@ async fn handle_udp(
             return;
         }
     };
-    if outbound.send_to(accepted.payload, target).await.is_err() {
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    if outbound.send_to(&first.payload, target).await.is_err() {
         return;
     }
+    uploaded = uploaded.saturating_add(first.payload.len() as u64);
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
     let mut response = vec![0_u8; 65_535];
-    let received = tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response));
-    let Ok(Ok((length, remote))) = received.await else {
-        return;
-    };
-    let response = rewrite_inbound::encode_socks5_udp(remote, &response[..length]);
-    if listener.send_to(&response, source).await.is_ok() {
-        tracker.finish(accepted.payload.len() as u64, length as u64);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                let target = match resolve_udp_target(
+                    &request.metadata,
+                    request.fake_host.as_deref(),
+                    &config,
+                ).await {
+                    Ok(target) => target,
+                    Err(error) => {
+                        state.log("error", format!("DIRECT UDP resolution failed: {error}"));
+                        continue;
+                    }
+                };
+                if outbound.send_to(&request.payload, target).await.is_ok() {
+                    uploaded = uploaded.saturating_add(request.payload.len() as u64);
+                    idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+                }
+            }
+            received = outbound.recv_from(&mut response) => {
+                let Ok((length, remote)) = received else { break };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &response[..length]);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(length as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
     }
+    tracker.finish(uploaded, downloaded);
 }
 
 async fn resolve_udp_target(

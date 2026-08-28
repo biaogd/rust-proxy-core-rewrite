@@ -209,7 +209,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | RUN-01 | TCP routing, relay, half-close, cancellation, metadata mutation and adapter retries | Partial | Repeated routing/protocol gates |
-| RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Partial local subset | 5F2 then protocol gates |
+| RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Partial: 5F2a proves bounded client-keyed IPv4 DIRECT reuse, multi-response write-back and reload generation retention | Remaining 5F2 timeout/IPv6/association gates, then protocol gates |
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
 | RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Not started | Platform gates |

@@ -4331,6 +4331,28 @@ stack, ASN updates, MMDB-mode general GEOIP and exhaustive loader/matcher
 variants are not claimed. The default Linux differential shard includes all
 three Phase 5E scripts, but its result remains pending.
 
+Phase 5F2 now has its first complete vertical runtime slice. The local SOCKS
+UDP path owns a bounded 64-packet session per client socket address, reuses one
+DIRECT outbound socket, accepts multiple upstream responses, resets the
+60-second idle deadline on traffic and closes on listener/controller
+cancellation. A session retains the configuration generation that selected
+its route, matching the Go NAT table rather than silently switching an active
+flow during SIGHUP.
+
+Focused local acceptance on Darwin arm64, 2026-08-28:
+
+```sh
+PHASE5FUDPNAT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5f_udp_nat.py
+PHASE3_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase3.py
+```
+
+The differential observes stable upstream source-port reuse for sequential
+packets, two SOCKS write-backs from one request, continued DIRECT traffic on an
+existing session after a REJECT reload and rejection for a fresh client. It
+does not yet claim timeout-expiry timing, multi-destination fan-out, IPv6,
+control-association ownership, remote UDP adapters/UoT or stress capacity. A
+dedicated Linux CI shard runs this gate in parallel; its result is pending.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/
