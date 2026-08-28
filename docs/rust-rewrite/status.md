@@ -4371,6 +4371,17 @@ precedence, and `allow-lan: false` forcing loopback even with a nonlocal bind
 address. IPv6 wildcard/dual-stack behavior, native non-loopback reachability,
 same-port bind-address hot rebind, TFO and MPTCP remain unclaimed.
 
+Phase 5F1b extends that accepted boundary through the platform socket adapter.
+`bind-address: '*'` now creates the oracle's dual-stack wildcard socket,
+bracketed IPv6 literals are accepted, IPv4-mapped peers are normalized before
+LAN policy checks, and fixed listener identity includes the bound address.
+Controller PATCH can therefore replace a bind address on the same port while
+also updating the three validated prefix lists. The expanded
+`phase5f_lan_policy.py` differential proves IPv4 and IPv6 wildcard relay,
+IPv4-to-IPv6 same-port replacement with old-address retirement, a live auth
+bypass update and invalid-prefix rollback. TFO/MPTCP and a native
+non-loopback-host reachability gate remain unclaimed.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/

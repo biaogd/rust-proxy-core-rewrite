@@ -47,6 +47,56 @@ pub fn bind_marked_tcp_listener(
     Ok(socket.into())
 }
 
+/// Binds a nonblocking local TCP listener, optionally accepting IPv4 through
+/// an IPv6 wildcard socket.
+///
+/// # Errors
+///
+/// Returns the socket option, bind, listen or nonblocking error.
+pub fn bind_local_tcp_listener(
+    address: SocketAddr,
+    dual_stack: bool,
+) -> io::Result<std::net::TcpListener> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    if address.is_ipv6() {
+        socket.set_only_v6(!dual_stack)?;
+    }
+    socket.bind(&SockAddr::from(address))?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
+/// Binds a nonblocking local UDP socket with the same dual-stack policy as the
+/// fixed TCP listener sharing its address.
+///
+/// # Errors
+///
+/// Returns the socket option, bind or nonblocking error.
+pub fn bind_local_udp_socket(
+    address: SocketAddr,
+    dual_stack: bool,
+) -> io::Result<std::net::UdpSocket> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if address.is_ipv6() {
+        socket.set_only_v6(!dual_stack)?;
+    }
+    socket.bind(&SockAddr::from(address))?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
 /// A platform-neutral Windows adapter observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsAdapterSnapshot {

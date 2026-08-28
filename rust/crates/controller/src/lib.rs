@@ -2081,6 +2081,11 @@ struct ConfigPatch {
     log_level: Option<rewrite_config::LogLevel>,
     ipv6: Option<bool>,
     mode: Option<rewrite_config::Mode>,
+    allow_lan: Option<bool>,
+    bind_address: Option<String>,
+    skip_auth_prefixes: Option<Vec<String>>,
+    lan_allowed_ips: Option<Vec<String>>,
+    lan_disallowed_ips: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -2111,6 +2116,22 @@ async fn patch_configs(State(state): State<ControllerState>, request: Request) -
     }
     if let Some(mode) = patch.mode {
         config.mode = mode;
+    }
+    if let Some(allow_lan) = patch.allow_lan {
+        config.allow_lan = allow_lan;
+    }
+    if let Some(bind_address) = patch.bind_address {
+        config.bind_address = bind_address;
+    }
+    if let Err(error) = config.update_inbound_prefixes(
+        patch.skip_auth_prefixes,
+        patch.lan_allowed_ips,
+        patch.lan_disallowed_ips,
+    ) {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"message": error.to_string()}),
+        );
     }
     apply_config_update(&state, config).await
 }

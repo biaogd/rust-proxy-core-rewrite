@@ -38,6 +38,8 @@ struct RuntimeTask {
     handle: JoinHandle<()>,
 }
 
+type ListenerKey = (ListenerKind, u16, SocketAddr);
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ControllerKey {
     Tcp(SocketAddr, i64, Option<PathBuf>),
@@ -100,8 +102,10 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), Runt
 
 /// Runs transactional local listener generations and applies validated reloads.
 ///
-/// A reload binds every newly required socket before publishing its config.
-/// Failure leaves the previous generation running.
+/// A reload binds every non-conflicting socket before publishing its config.
+/// A same-port bind-address change must retire the old socket first, matching
+/// the Go fixed-listener recreation boundary. Other bind failures leave the
+/// previous generation running.
 ///
 /// # Errors
 ///
@@ -270,7 +274,7 @@ async fn apply_controller_update(
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
     controller_update_sender: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
-    listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
 ) -> bool {
@@ -1263,7 +1267,7 @@ async fn apply_generation(
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
     controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
-    listeners: &mut BTreeMap<(ListenerKind, u16), RuntimeTask>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
@@ -1273,18 +1277,42 @@ async fn apply_generation(
     let desired_dns = next.dns.as_ref().map(|config| config.listen);
 
     let mut prepared_listeners = Vec::new();
-    for &(kind, port) in &desired_listeners {
-        if listeners.contains_key(&(kind, port)) {
+    let desired_listener_keys = desired_listeners
+        .iter()
+        .map(|&(kind, port)| {
+            next.listener_address(port)
+                .map(|address| (kind, port, address))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for &(kind, port, address) in &desired_listener_keys {
+        let key = (kind, port, address);
+        if listeners.contains_key(&key) {
             continue;
         }
-        let address = next.listener_address(port)?;
-        let listener = TcpListener::bind(address).await?;
+
+        // A wildcard/specific-address change on the same port cannot be
+        // prepared while the old socket owns that port. Go closes this fixed
+        // listener before recreating it, so mirror that boundary here.
+        let conflicting = listeners
+            .keys()
+            .find(|(current_kind, current_port, _)| *current_kind == kind && *current_port == port)
+            .copied();
+        if let Some(conflicting) = conflicting
+            && let Some(task) = listeners.remove(&conflicting)
+        {
+            stop_task(task).await;
+        }
+
+        let dual_stack = next.allow_lan && next.bind_address == "*";
+        let listener = rewrite_platform::bind_local_tcp_listener(address, dual_stack)?;
+        let listener = TcpListener::from_std(listener)?;
         let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
-            Some(Arc::new(UdpSocket::bind(address).await?))
+            let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
+            Some(Arc::new(UdpSocket::from_std(udp)?))
         } else {
             None
         };
-        prepared_listeners.push((kind, port, listener, udp));
+        prepared_listeners.push((key, listener, udp));
     }
     let mut prepared_controllers = Vec::new();
     for key in &desired_controllers {
@@ -1327,7 +1355,7 @@ async fn apply_generation(
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
 
-    for (kind, port, listener, udp) in prepared_listeners {
+    for ((kind, port, address), listener, udp) in prepared_listeners {
         let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config_receiver.clone();
@@ -1336,7 +1364,7 @@ async fn apply_generation(
             run_listener(kind, listener, udp, task_config, task_state, child_shutdown).await;
         });
         listeners.insert(
-            (kind, port),
+            (kind, port, address),
             RuntimeTask {
                 shutdown: task_shutdown,
                 handle,
@@ -1365,7 +1393,7 @@ async fn apply_generation(
     )
     .await;
 
-    let desired: Vec<_> = desired_listeners.into_iter().collect();
+    let desired = desired_listener_keys;
     let obsolete: Vec<_> = listeners
         .keys()
         .filter(|key| !desired.contains(key))

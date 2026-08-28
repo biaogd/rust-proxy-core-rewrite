@@ -1224,6 +1224,15 @@ successful host cross-build is never sufficient for a native behavior claim.
   all three fixed listener families plus `/configs` rendering. IPv6 wildcard
   binding, same-port bind-address reload, TFO/MPTCP and native non-loopback
   reachability remain later `5F1` gates.
+- `5F1b`: the library-backed socket boundary binds `*` as an IPv4/IPv6
+  dual-stack wildcard and accepts bracketed explicit IPv6 addresses. Fixed
+  listener identity now includes its address, so controller PATCH can change
+  the bind address on the same port and recreate TCP/UDP sockets like the Go
+  oracle. PATCH also validates and applies all three LAN prefix lists. The
+  native differential proves IPv4 plus IPv6 wildcard relay, IPv4-to-IPv6
+  same-port replacement, old-address retirement, auth policy replacement and
+  malformed-prefix rollback. TFO/MPTCP and native non-loopback reachability
+  remain later `5F1` gates.
 - `5F2a`: fixed SOCKS and mixed UDP now use a bounded 64-packet NAT session
   keyed by the client socket address instead of creating one outbound socket
   per packet. The DIRECT session keeps one outbound socket, relays multiple

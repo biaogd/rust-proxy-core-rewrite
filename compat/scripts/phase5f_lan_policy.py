@@ -8,12 +8,23 @@ import json
 import pathlib
 import socket
 import tempfile
+import time
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, socks_connect, start_server, reserve_port, wait_ready
+from phase1 import (
+    EchoHandler,
+    IO_DEADLINE,
+    ROOT,
+    recv_until,
+    reserve_port,
+    socks_connect,
+    start_server,
+    wait_ready,
+)
 from phase3 import http_request, launch, status, stop
 from phase5b1a import build_binaries, debug_files
 from phase5b3a import relay_result
+from phase5d_configs import json_request
 from phase5d_streams import SECRET, wait_controller
 
 
@@ -54,6 +65,38 @@ def http_route(port: int, destination_port: int) -> str:
             return relay_result(stream, b"lan-http")
     except (OSError, EOFError, ConnectionResetError, BrokenPipeError):
         return "closed"
+
+
+def http_route_at(host: str, port: int, destination_port: int) -> str:
+    try:
+        stream = socket.create_connection((host, port), timeout=IO_DEADLINE)
+        stream.settimeout(IO_DEADLINE)
+        with stream:
+            stream.sendall(
+                (
+                    f"CONNECT 127.0.0.1:{destination_port} HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{destination_port}\r\n\r\n"
+                ).encode()
+            )
+            response = recv_until(stream, b"\r\n\r\n")
+            if " 200 " not in status(response):
+                return status(response)
+            return relay_result(stream, f"lan-{host}".encode())
+    except (OSError, EOFError, ConnectionResetError, BrokenPipeError):
+        return "closed"
+
+
+def wait_route_at(
+    process: Any, host: str, port: int, destination_port: int, expected: str
+) -> None:
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited while waiting for {host}: {process.returncode}")
+        if http_route_at(host, port, destination_port) == expected:
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"listener {host}:{port} did not become {expected}")
 
 
 def socks_route(port: int, destination_port: int) -> str:
@@ -164,9 +207,101 @@ rules: ['MATCH,DIRECT']
         echo.close()
 
 
+def exercise_wildcard_dual_stack(
+    binary: pathlib.Path, scratch: pathlib.Path
+) -> dict[str, str]:
+    echo = start_server(EchoHandler)
+    mixed_port = reserve_port()
+    config = scratch / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: info
+ipv6: true
+rules: ['MATCH,DIRECT']
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        ipv4 = http_route_at("127.0.0.1", mixed_port, echo.port)
+        ipv6 = http_route_at("::1", mixed_port, echo.port)
+        return {"ipv4": ipv4, "ipv6": ipv6}
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
+def exercise_patch_rebind(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
+    echo = start_server(EchoHandler)
+    mixed_port, controller_port = reserve_port(), reserve_port()
+    config = scratch / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+external-controller: 127.0.0.1:{controller_port}
+secret: {SECRET}
+allow-lan: true
+bind-address: 127.0.0.1
+authentication: [alice:secret]
+mode: rule
+log-level: info
+ipv6: false
+rules: ['MATCH,DIRECT']
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        wait_controller(process, controller_port)
+        before = http_route_at("127.0.0.1", mixed_port, echo.port)
+        patch_status, patch_body = json_request(
+            controller_port,
+            "PATCH",
+            "/configs",
+            {
+                "bind-address": "[::1]",
+                "skip-auth-prefixes": ["::1/128"],
+                "lan-allowed-ips": ["::1/128"],
+                "lan-disallowed-ips": [],
+            },
+        )
+        wait_route_at(process, "::1", mixed_port, echo.port, "direct")
+        old = http_route_at("127.0.0.1", mixed_port, echo.port)
+        invalid_status, _ = json_request(
+            controller_port,
+            "PATCH",
+            "/configs",
+            {"lan-allowed-ips": ["not-a-prefix"]},
+        )
+        return {
+            "before": before,
+            "patch": {"status": patch_status, "empty-body": patch_body == b""},
+            "new": http_route_at("::1", mixed_port, echo.port),
+            "old": old,
+            "invalid-prefix-status": invalid_status,
+            "config": controller_snapshot(controller_port),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     cases = {}
-    for name in ("skip-auth", "allowed", "disallowed", "loopback-override"):
+    for name in (
+        "skip-auth",
+        "allowed",
+        "disallowed",
+        "loopback-override",
+        "wildcard-dual-stack",
+        "patch-rebind",
+    ):
         case = scratch / name
         case.mkdir()
         cases[name] = case
@@ -183,6 +318,10 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         "allow-lan-false-ignores-bind": exercise_loopback_override(
             binary, cases["loopback-override"]
         ),
+        "wildcard-dual-stack": exercise_wildcard_dual_stack(
+            binary, cases["wildcard-dual-stack"]
+        ),
+        "patch-rebind": exercise_patch_rebind(binary, cases["patch-rebind"]),
     }
 
 

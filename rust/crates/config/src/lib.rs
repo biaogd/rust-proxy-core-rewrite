@@ -1730,9 +1730,12 @@ impl Config {
             return Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
         }
         if self.bind_address == "*" {
-            return Ok(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)));
+            return Ok(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port));
         }
         self.bind_address
+            .strip_prefix('[')
+            .and_then(|address| address.strip_suffix(']'))
+            .unwrap_or(&self.bind_address)
             .parse::<IpAddr>()
             .map(|address| SocketAddr::new(address, port))
             .map_err(|_| {
@@ -1745,6 +1748,7 @@ impl Config {
 
     #[must_use]
     pub fn permits_inbound(&self, address: IpAddr) -> bool {
+        let address = canonical_inbound_address(address);
         self.lan_allowed_ips
             .iter()
             .any(|network| network.contains(&address))
@@ -1756,9 +1760,34 @@ impl Config {
 
     #[must_use]
     pub fn skips_inbound_auth(&self, address: IpAddr) -> bool {
+        let address = canonical_inbound_address(address);
         self.skip_auth_prefixes
             .iter()
             .any(|network| network.contains(&address))
+    }
+
+    /// Applies validated controller updates to the three inbound prefix sets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInbound`] when any supplied value is not
+    /// an IP prefix.
+    pub fn update_inbound_prefixes(
+        &mut self,
+        skip_auth: Option<Vec<String>>,
+        allowed: Option<Vec<String>>,
+        disallowed: Option<Vec<String>>,
+    ) -> Result<(), ConfigError> {
+        if let Some(records) = skip_auth {
+            self.skip_auth_prefixes = parse_inbound_prefixes(records, "skip-auth-prefixes")?;
+        }
+        if let Some(records) = allowed {
+            self.lan_allowed_ips = parse_inbound_prefixes(records, "lan-allowed-ips")?;
+        }
+        if let Some(records) = disallowed {
+            self.lan_disallowed_ips = parse_inbound_prefixes(records, "lan-disallowed-ips")?;
+        }
+        Ok(())
     }
 
     /// Parses the optional Phase 3B TCP controller address.
@@ -1967,6 +1996,15 @@ fn parse_inbound_prefixes(records: Vec<String>, field: &str) -> Result<Vec<IpNet
             })
         })
         .collect()
+}
+
+fn canonical_inbound_address(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or(IpAddr::V6(address), IpAddr::V4),
+        address @ IpAddr::V4(_) => address,
+    }
 }
 
 fn parse_controller_cors(raw: Option<RawControllerCors>) -> ControllerCors {
@@ -6615,5 +6653,26 @@ dns:
             Config::from_yaml(&invalid),
             Err(ConfigError::InvalidInbound(_))
         ));
+
+        let mut patched = config.clone();
+        patched.bind_address = "[::1]".to_owned();
+        patched
+            .update_inbound_prefixes(
+                Some(vec!["::1/128".to_owned()]),
+                Some(vec!["127.0.0.0/8".to_owned()]),
+                Some(Vec::new()),
+            )
+            .expect("controller prefix update");
+        assert_eq!(
+            patched.listener_address(7890).expect("IPv6 address"),
+            "[::1]:7890".parse().expect("IPv6 socket address")
+        );
+        assert!(
+            patched.permits_inbound(
+                "::ffff:127.0.0.1"
+                    .parse()
+                    .expect("IPv4-mapped IPv6 address")
+            )
+        );
     }
 }

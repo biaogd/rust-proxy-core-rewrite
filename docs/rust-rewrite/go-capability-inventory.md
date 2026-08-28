@@ -87,7 +87,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | IN-01 | Mixed HTTP plus SOCKS4/4a/5 TCP and SOCKS5 UDP | Partial | 5F1 full local semantics |
-| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Partial: 5F1a proves IPv4 bind/allow/deny/skip-auth across fixed HTTP/SOCKS/mixed; Phase 3/5F2 cover current association/NAT subset | Remaining 5F1 IPv6/rebind/TFO/MPTCP and 5F2 association gates |
+| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Partial: 5F1a/5F1b prove IPv4/IPv6 bind, dual-stack wildcard, same-port rebind and allow/deny/skip-auth across fixed HTTP/SOCKS/mixed; Phase 3/5F2 cover current association/NAT subset | Remaining 5F1 native non-loopback/TFO/MPTCP and 5F2 association gates |
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | Not started | 8A–8C |
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
