@@ -86,6 +86,7 @@ pub struct RuleSnapshot {
     pub kind: String,
     pub payload: String,
     pub target: String,
+    pub size: i64,
     pub disabled: bool,
     pub hit_count: u64,
     pub hit_at_unix_nanos: i64,
@@ -148,6 +149,18 @@ enum Matcher {
         matchers: Vec<Matcher>,
         no_resolve: bool,
     },
+    Geo {
+        kind: GeoMatcherKind,
+        payload: String,
+        matchers: Vec<Matcher>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GeoMatcherKind {
+    GeoSite,
+    GeoIp,
+    SrcGeoIp,
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +425,7 @@ impl RuleSet {
                 kind: rule.kind(),
                 payload: rule.payload(),
                 target: rule.target.clone(),
+                size: rule.matcher.record_size(),
                 disabled: runtime.disabled.load(Ordering::Acquire),
                 hit_count: runtime.hit_count.load(Ordering::Relaxed),
                 hit_at_unix_nanos: runtime.hit_at_unix_nanos.load(Ordering::Relaxed),
@@ -558,6 +572,22 @@ fn now_unix_nanos() -> i64 {
 }
 
 impl Matcher {
+    fn record_size(&self) -> i64 {
+        match self {
+            Self::Geo {
+                kind: GeoMatcherKind::GeoIp,
+                payload,
+                ..
+            } if payload.eq_ignore_ascii_case("lan") => 0,
+            Self::Geo {
+                kind: GeoMatcherKind::GeoSite | GeoMatcherKind::GeoIp,
+                matchers,
+                ..
+            } => i64::try_from(matchers.len()).unwrap_or(i64::MAX),
+            _ => -1,
+        }
+    }
+
     fn match_result(&self, metadata: &Metadata, allow_resolution: bool) -> MatchResult {
         match self {
             Self::Match => MatchResult::Matched,
@@ -642,6 +672,7 @@ impl Matcher {
                 no_resolve,
                 ..
             } => match_provider(matchers, metadata, allow_resolution && !no_resolve),
+            Self::Geo { matchers, .. } => match_provider(matchers, metadata, allow_resolution),
         }
     }
 
@@ -680,6 +711,18 @@ impl Matcher {
             Self::Not(_) => "NOT",
             Self::SubRule { .. } => "SubRules",
             Self::RuleSet { .. } => "RuleSet",
+            Self::Geo {
+                kind: GeoMatcherKind::GeoSite,
+                ..
+            } => "GeoSite",
+            Self::Geo {
+                kind: GeoMatcherKind::GeoIp,
+                ..
+            } => "GeoIP",
+            Self::Geo {
+                kind: GeoMatcherKind::SrcGeoIp,
+                ..
+            } => "SrcGeoIP",
         }
     }
 
@@ -714,6 +757,7 @@ impl Matcher {
                 .join("/"),
             Self::InName(names) | Self::InUser(names) | Self::RematchName(names) => names.join("/"),
             Self::RuleSet { name, .. } => name.clone(),
+            Self::Geo { payload, .. } => payload.clone(),
             Self::Dscp(ranges) => ranges
                 .iter()
                 .map(|range| {
@@ -832,6 +876,8 @@ fn parse_rule(
     }
     let matcher = if fields.kind == "RULE-SET" {
         parse_rule_set(&fields.payload, &fields.params, providers)?
+    } else if matches!(fields.kind.as_str(), "GEOSITE" | "GEOIP" | "SRC-GEOIP") {
+        parse_geo_matcher(&fields.kind, &fields.payload, &fields.params, providers)?
     } else {
         parse_matcher(&fields.kind, &fields.payload, &fields.params)?
     };
@@ -846,6 +892,64 @@ fn parse_rule(
     Ok(Rule {
         matcher,
         target: fields.target,
+    })
+}
+
+/// Returns the internal provider key used to pass already validated geodata
+/// across the configuration/rule boundary.
+#[must_use]
+pub fn geodata_provider_key(kind: &str, payload: &str) -> String {
+    format!(
+        "__mihomo_rust_geo__{}__{}",
+        kind.to_ascii_uppercase(),
+        payload.to_ascii_uppercase()
+    )
+}
+
+fn parse_geo_matcher(
+    kind: &str,
+    payload: &str,
+    params: &[String],
+    providers: &BTreeMap<String, ProviderDefinition>,
+) -> Result<Matcher, RuleError> {
+    if payload.is_empty() {
+        return Err(RuleError::InvalidPayload);
+    }
+    let provider = providers
+        .get(&geodata_provider_key(kind, payload))
+        .ok_or_else(|| RuleError::Unsupported(format!("{kind}:{payload}")))?;
+    let source = kind == "SRC-GEOIP" || params.iter().any(|param| param == "src");
+    let no_resolve = source || params.iter().any(|param| param == "no-resolve");
+    let matchers = match kind {
+        "GEOSITE" if provider.behavior == ProviderBehavior::Classical => provider
+            .payload
+            .iter()
+            .filter_map(|entry| {
+                parse_provider_entry(ProviderBehavior::Classical, entry).transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        "GEOIP" | "SRC-GEOIP" if provider.behavior == ProviderBehavior::IpCidr => provider
+            .payload
+            .iter()
+            .map(|entry| parse_ip_cidr(entry, source, no_resolve))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(RuleError::Unsupported(format!("{kind}:{payload}"))),
+    };
+    let kind = match kind {
+        "GEOSITE" => GeoMatcherKind::GeoSite,
+        "GEOIP" => GeoMatcherKind::GeoIp,
+        "SRC-GEOIP" => GeoMatcherKind::SrcGeoIp,
+        _ => return Err(RuleError::Unsupported(kind.to_owned())),
+    };
+    let payload = if matches!(kind, GeoMatcherKind::GeoIp | GeoMatcherKind::SrcGeoIp) {
+        payload.to_ascii_lowercase()
+    } else {
+        payload.to_owned()
+    };
+    Ok(Matcher::Geo {
+        kind,
+        payload,
+        matchers,
     })
 }
 
@@ -1619,5 +1723,60 @@ mod tests {
             program.evaluate_lazy(&metadata("no-resolve.test", 80)),
             LazyEvaluation::Decision(Decision { target, .. }) if target == "REJECT"
         ));
+    }
+
+    #[test]
+    fn matches_validated_geosite_and_geoip_resources() {
+        let rules = vec![
+            "GEOSITE,TEST,REJECT".to_owned(),
+            "GEOIP,LOOPBACK,DIRECT,no-resolve".to_owned(),
+            "SRC-GEOIP,CLIENT,REJECT".to_owned(),
+            "MATCH,REJECT".to_owned(),
+        ];
+        let providers = BTreeMap::from([
+            (
+                geodata_provider_key("GEOSITE", "TEST"),
+                ProviderDefinition {
+                    behavior: ProviderBehavior::Classical,
+                    payload: vec!["DOMAIN-SUFFIX,geo.test".to_owned()],
+                },
+            ),
+            (
+                geodata_provider_key("GEOIP", "LOOPBACK"),
+                ProviderDefinition {
+                    behavior: ProviderBehavior::IpCidr,
+                    payload: vec!["127.0.0.0/8".to_owned()],
+                },
+            ),
+            (
+                geodata_provider_key("SRC-GEOIP", "CLIENT"),
+                ProviderDefinition {
+                    behavior: ProviderBehavior::IpCidr,
+                    payload: vec!["192.0.2.0/24".to_owned()],
+                },
+            ),
+        ]);
+        let program = RuleSet::parse_with_targets_and_providers(
+            &rules,
+            &BTreeMap::new(),
+            &[],
+            &BTreeSet::new(),
+            &providers,
+        )
+        .expect("validated geodata resources");
+
+        assert_eq!(
+            program.evaluate(&metadata("deep.geo.test", 80)).target,
+            "REJECT"
+        );
+        let mut destination = metadata("127.0.0.1", 80);
+        destination.destination_ip = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(program.evaluate(&destination).target, "DIRECT");
+        let mut source = metadata("other.test", 80);
+        source.source_ip = Some("192.0.2.1".parse().expect("source address"));
+        assert_eq!(program.evaluate(&source).target, "REJECT");
+        assert_eq!(program.snapshots()[0].kind, "GeoSite");
+        assert_eq!(program.snapshots()[1].kind, "GeoIP");
+        assert_eq!(program.snapshots()[2].kind, "SrcGeoIP");
     }
 }

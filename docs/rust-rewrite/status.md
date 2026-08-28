@@ -4309,6 +4309,7 @@ Focused local acceptance on Darwin arm64, 2026-08-28:
 cargo test -p rewrite-services -p rewrite-config --all-features
 PHASE5ESERVICES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5e_services.py
 PHASE5ETLSAUTH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5e_tls_client_auth.py
+PHASE5EGEORULES_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5e_geo_rules.py
 ```
 
 The UI/Geo differential covers automatic and manual success, both Geo route
@@ -4317,11 +4318,18 @@ rollback. The TLS differential generates independent trusted and untrusted
 client credentials and matches request/require/verify behavior for every
 mode. Direct local SNTP offset calculation is a deterministic contract test.
 
+The 5E4 general-rule slice additionally loads protobuf `GeoSite.dat` and
+`GeoIP.dat` resources from the configured home and compiles `GEOSITE`, `GEOIP`
+and `SRC-GEOIP` into the existing lazy rule engine. Its differential proves
+real mixed HTTP TCP routing plus the Go-compatible `/rules` type, payload and
+record-size fields. These rule consumers also participate in scheduled and
+manual geodata update selection.
+
 Phase 5E remains partial: NTP through a named UDP proxy, writing the platform
 clock, server ECH, adjusted-clock propagation through every DNS/client TLS
-stack, ASN updates, general GEOIP/GEOSITE rules and exhaustive loader/matcher
-variants are not claimed. The default Linux differential shard includes both
-new scripts, but its result remains pending.
+stack, ASN updates, MMDB-mode general GEOIP and exhaustive loader/matcher
+variants are not claimed. The default Linux differential shard includes all
+three Phase 5E scripts, but its result remains pending.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

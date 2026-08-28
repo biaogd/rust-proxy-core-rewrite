@@ -867,7 +867,7 @@ async fn rules(State(state): State<ControllerState>) -> Response {
                 "type": rule.kind,
                 "payload": rule.payload,
                 "proxy": rule.target,
-                "size": -1,
+                "size": rule.size,
                 "extra": {
                     "disabled": rule.disabled,
                     "hitCount": rule.hit_count,

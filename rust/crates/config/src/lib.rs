@@ -1098,6 +1098,7 @@ impl ConfigSpec {
         let raw = serde_yaml_ng::from_str::<Option<RawConfig>>(source)?.unwrap_or_default();
         let mode = parse_mode(raw.mode.as_deref().unwrap_or("rule"))?;
         let log_level = parse_log_level(raw.log_level.as_deref().unwrap_or("info"))?;
+        let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
         let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default(), true)?;
@@ -1118,7 +1119,7 @@ impl ConfigSpec {
             .map(|proxy| proxy.name.clone())
             .chain(proxy_groups.iter().map(|group| group.name.clone()))
             .collect();
-        let provider_definitions = rule_providers
+        let mut provider_definitions: BTreeMap<String, ProviderDefinition> = rule_providers
             .iter()
             .map(|(name, provider)| {
                 (
@@ -1130,6 +1131,13 @@ impl ConfigSpec {
                 )
             })
             .collect();
+        extend_geodata_rule_providers(
+            &raw_rules,
+            &raw_sub_rules,
+            provider_directory.or(config_directory),
+            geodata_mode,
+            &mut provider_definitions,
+        )?;
         let rules = RuleSet::parse_with_targets_and_providers(
             &raw_rules,
             &raw_sub_rules,
@@ -1141,7 +1149,6 @@ impl ConfigSpec {
         let ntp = parse_ntp(raw.ntp)?;
         let geox_url = parse_geox_urls(raw.geox_url)?;
         let (controller_tls, trust_certificates) = parse_tls(raw.tls, provider_directory)?;
-        let geodata_mode = raw.geodata_mode.unwrap_or(geodata_mode);
         let controller_cors = parse_controller_cors(raw.external_controller_cors);
         let dns = parse_dns(
             raw.dns,
@@ -1763,6 +1770,18 @@ impl Config {
     #[must_use]
     pub fn home_directory(&self) -> Option<&Path> {
         self.home_directory.as_deref()
+    }
+
+    #[must_use]
+    pub fn uses_rule_kind(&self, expected: &str) -> bool {
+        self.raw_rules
+            .iter()
+            .chain(self.raw_sub_rules.values().flatten())
+            .any(|rule| {
+                rule.split(',')
+                    .next()
+                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case(expected))
+            })
     }
 
     /// Parses an inline controller replacement using the original resource roots.
@@ -3086,6 +3105,97 @@ enum GeoSiteDomainTypeWire {
     Regex = 1,
     Domain = 2,
     Full = 3,
+}
+
+fn extend_geodata_rule_providers(
+    rules: &[String],
+    sub_rules: &BTreeMap<String, Vec<String>>,
+    directory: Option<&Path>,
+    geodata_mode: bool,
+    providers: &mut BTreeMap<String, ProviderDefinition>,
+) -> Result<(), ConfigError> {
+    let declarations = rules
+        .iter()
+        .chain(sub_rules.values().flatten())
+        .filter_map(|rule| {
+            let fields = rule.split(',').map(str::trim).collect::<Vec<_>>();
+            let kind = fields.first()?.to_ascii_uppercase();
+            matches!(kind.as_str(), "GEOSITE" | "GEOIP" | "SRC-GEOIP")
+                .then(|| (kind, fields.get(1).copied().unwrap_or_default().to_owned()))
+        })
+        .collect::<BTreeSet<_>>();
+    for (kind, payload) in declarations {
+        let definition = match kind.as_str() {
+            "GEOSITE" => load_geosite_rule_provider(&payload, directory)?,
+            "GEOIP" | "SRC-GEOIP" if payload.eq_ignore_ascii_case("lan") => ProviderDefinition {
+                behavior: ProviderBehavior::IpCidr,
+                payload: [
+                    "0.0.0.0/8",
+                    "10.0.0.0/8",
+                    "127.0.0.0/8",
+                    "169.254.0.0/16",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16",
+                    "224.0.0.0/4",
+                    "::/128",
+                    "::1/128",
+                    "fc00::/7",
+                    "fe80::/10",
+                    "ff00::/8",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            },
+            "GEOIP" | "SRC-GEOIP" if geodata_mode => load_geoip_rule_provider(&payload, directory)?,
+            _ => continue,
+        };
+        providers.insert(
+            rewrite_rules::geodata_provider_key(&kind, &payload),
+            definition,
+        );
+    }
+    Ok(())
+}
+
+fn load_geosite_rule_provider(
+    name: &str,
+    directory: Option<&Path>,
+) -> Result<ProviderDefinition, ConfigError> {
+    let DnsPolicyMatcher::Geosite { domains, .. } = load_geosite_matcher(name, directory)? else {
+        unreachable!("GeoSite loader always returns a GeoSite matcher")
+    };
+    let payload = domains
+        .into_iter()
+        .map(|domain| {
+            let kind = match domain.kind {
+                GeositeDomainKind::Plain => "DOMAIN-KEYWORD",
+                GeositeDomainKind::Regex => "DOMAIN-REGEX",
+                GeositeDomainKind::Domain => "DOMAIN-SUFFIX",
+                GeositeDomainKind::Full => "DOMAIN",
+            };
+            format!("{kind},{}", domain.value)
+        })
+        .collect();
+    Ok(ProviderDefinition {
+        behavior: ProviderBehavior::Classical,
+        payload,
+    })
+}
+
+fn load_geoip_rule_provider(
+    code: &str,
+    directory: Option<&Path>,
+) -> Result<ProviderDefinition, ConfigError> {
+    let filter = load_geoip_filter(code, directory)?;
+    Ok(ProviderDefinition {
+        behavior: ProviderBehavior::IpCidr,
+        payload: filter
+            .networks
+            .into_iter()
+            .map(|network| network.to_string())
+            .collect(),
+    })
 }
 
 fn load_geoip_filter(
@@ -6340,5 +6450,63 @@ dns:
         assert_eq!(configured.geosite_matcher, "mph");
         assert_eq!(configured.geox_url.geo_ip, "http://geo.test/ip");
         assert_eq!(configured.geox_url.geo_site, "http://geo.test/site");
+    }
+
+    #[test]
+    fn loads_general_geosite_and_geoip_rules_from_home_geodata() {
+        let home =
+            std::env::temp_dir().join(format!("mihomo-phase5e-geo-rules-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("geodata home");
+        std::fs::write(
+            home.join("GeoSite.dat"),
+            GeoSiteListWire {
+                entries: vec![GeoSiteWire {
+                    country_code: "PHASE5E".to_owned(),
+                    domains: vec![GeoSiteDomainWire {
+                        kind: GeoSiteDomainTypeWire::Domain as i32,
+                        value: "geo.phase5e.test".to_owned(),
+                    }],
+                }],
+            }
+            .encode_to_vec(),
+        )
+        .expect("GeoSite fixture");
+        std::fs::write(
+            home.join("GeoIP.dat"),
+            GeoIpListWire {
+                entries: vec![GeoIpWire {
+                    country_code: "LOOPBACK".to_owned(),
+                    networks: vec![GeoIpCidrWire {
+                        address: vec![127, 0, 0, 0],
+                        prefix: 8,
+                    }],
+                }],
+            }
+            .encode_to_vec(),
+        )
+        .expect("GeoIP fixture");
+        let source = MINIMAL.replace(
+            "rules:\n  - MATCH,DIRECT",
+            "geodata-mode: true\nrules:\n  - GEOSITE,PHASE5E,REJECT\n  - GEOIP,LOOPBACK,DIRECT,no-resolve\n  - MATCH,REJECT",
+        );
+        let config = Config::from_yaml_with_provider_directory(&source, &home, false)
+            .expect("general Geo rules");
+        let domain = rewrite_model::Metadata::new(
+            rewrite_model::Destination {
+                host: rewrite_model::Host::Domain("deep.geo.phase5e.test".to_owned()),
+                port: 80,
+            },
+            rewrite_model::InboundProtocol::Http,
+        );
+        assert_eq!(config.rules.evaluate(&domain).target, "REJECT");
+        let address = rewrite_model::Metadata::new(
+            rewrite_model::Destination {
+                host: rewrite_model::Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                port: 80,
+            },
+            rewrite_model::InboundProtocol::Http,
+        );
+        assert_eq!(config.rules.evaluate(&address).target, "DIRECT");
+        std::fs::remove_dir_all(home).expect("remove geodata fixture");
     }
 }

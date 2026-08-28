@@ -479,32 +479,35 @@ fn config_uses_geoip(config: &Config) -> bool {
         .as_ref()
         .and_then(|dns| dns.fallback.as_ref())
         .is_some_and(|fallback| fallback.geoip.is_some())
+        || config.uses_rule_kind("GEOIP")
+        || config.uses_rule_kind("SRC-GEOIP")
 }
 
 fn config_uses_geosite(config: &Config) -> bool {
     use rewrite_config::{DnsPolicyMatcher, FakeIpRuleMatcher};
-    let Some(dns) = &config.dns else {
-        return false;
-    };
-    let policy_has_geo = dns
-        .policies
-        .iter()
-        .chain(&dns.proxy_policies)
-        .any(|policy| matches!(policy.matcher, DnsPolicyMatcher::Geosite { .. }));
-    let fallback_has_geo = dns
-        .fallback
-        .as_ref()
-        .is_some_and(|fallback| !fallback.geosites.is_empty());
-    let fake_has_geo = dns.fake_ip.as_ref().is_some_and(|fake| {
-        fake.filter
+    let policy_has_geo = config.dns.as_ref().is_some_and(|dns| {
+        dns.policies
             .iter()
-            .any(|matcher| matches!(matcher, DnsPolicyMatcher::Geosite { .. }))
-            || fake
-                .rules
-                .iter()
-                .any(|rule| matches!(rule.matcher, FakeIpRuleMatcher::Geosite { .. }))
+            .chain(&dns.proxy_policies)
+            .any(|policy| matches!(policy.matcher, DnsPolicyMatcher::Geosite { .. }))
     });
-    policy_has_geo || fallback_has_geo || fake_has_geo
+    let fallback_has_geo = config.dns.as_ref().is_some_and(|dns| {
+        dns.fallback
+            .as_ref()
+            .is_some_and(|fallback| !fallback.geosites.is_empty())
+    });
+    let fake_has_geo = config.dns.as_ref().is_some_and(|dns| {
+        dns.fake_ip.as_ref().is_some_and(|fake| {
+            fake.filter
+                .iter()
+                .any(|matcher| matches!(matcher, DnsPolicyMatcher::Geosite { .. }))
+                || fake
+                    .rules
+                    .iter()
+                    .any(|rule| matches!(rule.matcher, FakeIpRuleMatcher::Geosite { .. }))
+        })
+    });
+    policy_has_geo || fallback_has_geo || fake_has_geo || config.uses_rule_kind("GEOSITE")
 }
 
 #[cfg(test)]

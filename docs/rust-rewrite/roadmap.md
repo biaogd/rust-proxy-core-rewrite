@@ -1186,17 +1186,22 @@ reload, failure rollback, shutdown and its REST side effects where applicable.
   retain the Go-compatible bbolt/MessagePack formats and existing bidirectional
   interchange gates. No incompatible replacement database was introduced.
 - `5E4`: `geox-url`, automatic scheduling, safe validation and atomic update
-  cover GeoIP.dat/GeoSite.dat and MMDB for currently executable DNS consumers;
-  both Geo REST aliases and invalid-payload rollback pass. ASN, general
-  GEOIP/GEOSITE rules and broader loader/matcher variants remain open.
+  cover GeoIP.dat/GeoSite.dat and MMDB for currently executable consumers;
+  both Geo REST aliases and invalid-payload rollback pass. General
+  geodata-mode `GEOSITE`, `GEOIP` and `SRC-GEOIP` rules now load from the
+  configured home, drive mixed TCP routing, expose oracle-compatible REST
+  type/payload/record-size fields and register their data files with the
+  updater. MMDB-mode general GEOIP, ASN and broader loader variants remain
+  open.
 - `5E5`: explicitly configured external UI directories auto-download when
   empty; authenticated manual updates use bounded `reqwest` downloads and the
   `zip`/`tar` libraries with traversal/link rejection, single-root flattening
   and failure rollback. `/upgrade/ui` passes against the oracle.
 
 `compat/scripts/phase5e_services.py` and
-`compat/scripts/phase5e_tls_client_auth.py` are the Phase 5E differential
-entrypoints. Phase 5E is not globally closed until the listed 5E1/5E2/5E4 gaps
+`compat/scripts/phase5e_tls_client_auth.py` cover the shared-service and TLS
+boundaries; `compat/scripts/phase5e_geo_rules.py` covers the general Geo rule
+boundary. Phase 5E is not globally closed until the listed 5E1/5E2/5E4 gaps
 are accepted rather than normalized away.
 
 ## Phase 5F — local runtime and platform completion
