@@ -4673,6 +4673,37 @@ bbolt interchange across the new module seams. Existing Phase 4A, 4D1–4D4,
 4E1–4E19, 4F1–4F14 and cache/DNS REST matrix claims remain unchanged; no DNS
 feature or platform support is added by this refactor.
 
+## Rules module refactor
+
+The behavior-neutral post-6B structure pass replaces the 1,782-line rules
+crate root with a 12-line facade. Public rule/provider/result models live in
+`model`; ordered scans, sub-rule traversal and rematch transitions in `engine`;
+pure metadata matchers and lazy destination resolution in `matcher`; and
+parsing, provider references and graph validation in `parser`. Unit fixtures
+move to `tests`. Existing public names, methods and signatures remain available
+from the same crate-root API.
+
+Every production and test module uses explicit imports; the rules source tree
+contains no `use super` or wildcard module imports. The public API inventory is
+identical before and after the move. Focused local acceptance on Darwin arm64,
+2026-08-28:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+python3 compat/scripts/phase2.py
+python3 compat/scripts/phase5b_core.py
+python3 compat/scripts/phase5d_rules.py
+```
+
+All gates pass. These cover generated configuration and rule observations,
+ordered routing decisions, rule families, sub-rules, provider-backed rules,
+lazy resolution/`no-resolve`, rematch behavior, and the `/rules` inventory and
+enable/disable controller boundary. Existing Phase 2, Phase 4D3A, Phase 5A2,
+Phase 5A3, Phase 5B and Phase 5D rule/routing matrix claims remain unchanged;
+this refactor adds no feature or platform compatibility claim.
+
 ## Native Windows and Apple Silicon build gates
 
 The default Rust workflow now has a separate native build matrix for

@@ -69,6 +69,14 @@ sub-rule graph validation and rematch state transitions. The test-only
 same JSON observation contract for deterministic differential and generated
 tests. Neither is linked into the product runtime.
 
+The post-6B behavior-neutral module split keeps the `rewrite-rules` crate root
+as a small public facade. Owned rule/provider/result types live in `model`,
+ordered evaluation and rematch transitions in `engine`, pure metadata matching
+and lazy destination resolution in `matcher`, and rule/provider parsing plus
+graph validation in `parser`. Unit fixtures are isolated in `tests`. The
+facade continues to export the same public types and helper, so callers do not
+depend on these internal physical boundaries.
+
 Phase 3 makes `rewrite-runtime` the owner of transactional local listener
 generations. Unchanged listener tasks receive the current `Arc<Config>` through
 a watch channel; new TCP/UDP/controller sockets are all bound before the config
