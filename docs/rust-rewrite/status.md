@@ -4639,6 +4639,40 @@ database interchange, selector persistence and controller storage interchange
 matrix evidence remains unchanged; this refactor adds no feature or platform
 compatibility claim.
 
+## DNS module refactor
+
+The behavior-neutral post-6B structure pass replaces the 4,784-line DNS crate
+root with a 238-line facade. Cache/TTL/singleflight behavior lives in `cache`;
+hosts, ECS, fake-IP and answer enhancement in `enhancer`; UDP/TCP listener
+framing in `server`; shared resolver/controller state and public lookup APIs in
+`service`; classic DNS, DoT, DoH and DoQ clients in `transport`; and wire,
+policy, resolver-set, fallback, platform resolver and REST rendering logic in
+`wire`. Unit fixtures move to `tests`. Existing public names and signatures are
+re-exported unchanged from the crate root.
+
+Every production and test module uses explicit imports; the DNS source tree
+contains no `use super` or wildcard module imports. The public API inventory is
+identical before and after the move. Focused local acceptance on Darwin arm64,
+2026-08-28:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+python3 compat/scripts/phase4.py
+python3 compat/scripts/phase4f1.py
+python3 compat/scripts/phase4e15.py
+python3 compat/scripts/phase4e18.py
+python3 compat/scripts/phase4f11.py
+python3 compat/scripts/phase4f14.py
+```
+
+All gates pass. These cover the basic UDP/TCP listener, full local wire/EDNS
+boundary, HTTP/2 DoH, DoQ connection lifecycle, cache lifecycle and fake-IP
+bbolt interchange across the new module seams. Existing Phase 4A, 4D1–4D4,
+4E1–4E19, 4F1–4F14 and cache/DNS REST matrix claims remain unchanged; no DNS
+feature or platform support is added by this refactor.
+
 ## Native Windows and Apple Silicon build gates
 
 The default Rust workflow now has a separate native build matrix for

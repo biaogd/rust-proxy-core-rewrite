@@ -112,6 +112,14 @@ The resolver retains explicit code for oracle-specific flags, raw question
 echo, EDNS handling, UDP truncation, hosts/fake-IP responses and cache keys;
 those are policy/compatibility behavior rather than generic DNS wire parsing.
 
+The post-6B physical split keeps `rewrite-dns` as the public facade while
+separating cache lifecycle, local listener framing, hosts/fake-IP enhancement,
+shared resolver/service state, encrypted and classic transports, wire/policy/
+REST handling, and unit fixtures into focused modules. Public service,
+registration, lookup and serving entry points are re-exported from the crate
+root. Production modules use explicit `crate::...` imports and do not depend on
+the physical layout through wildcard or `super` imports.
+
 Phase 4F1 completes the local DNS message boundary before resolver dispatch.
 `rewrite-dns` classifies raw UDP/TCP frames as accepted, rejected or silently
 ignored using the oracle's header rules; TCP ignore keeps the stream alive.
