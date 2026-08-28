@@ -173,11 +173,7 @@ pub async fn connect_tcp(
         },
     )?;
     #[cfg(any(target_os = "android", target_os = "linux"))]
-    if options.routing_mark != 0 && is_global_unicast(address.ip()) {
-        socket.set_mark(u32::try_from(options.routing_mark).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
-        })?)?;
-    }
+    apply_routing_mark(&socket, address.ip(), options.routing_mark)?;
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = options.routing_mark;
     bind_outbound_interface(&socket, address, options.interface)?;
@@ -217,9 +213,7 @@ pub fn bind_outbound_udp(
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     #[cfg(any(target_os = "android", target_os = "linux"))]
     if routing_mark != 0 {
-        socket.set_mark(u32::try_from(routing_mark).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
-        })?)?;
+        set_routing_mark(&socket, routing_mark)?;
     }
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = routing_mark;
@@ -227,6 +221,23 @@ pub fn bind_outbound_udp(
     socket.bind(&SockAddr::from(address))?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn apply_routing_mark(socket: &Socket, destination: IpAddr, routing_mark: i64) -> io::Result<()> {
+    if routing_mark == 0 || !is_global_unicast(destination) {
+        return Ok(());
+    }
+    set_routing_mark(socket, routing_mark)
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn set_routing_mark(socket: &Socket, routing_mark: i64) -> io::Result<()> {
+    socket.set_mark(
+        u32::try_from(routing_mark).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "routing mark is out of range")
+        })?,
+    )
 }
 
 fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
@@ -621,6 +632,21 @@ mod tests {
                     .expect("keepalive flag")
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires permission to set SO_MARK"]
+    fn privileged_routing_mark_round_trip() {
+        let socket =
+            Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("TCP socket");
+        apply_routing_mark(
+            &socket,
+            "192.0.2.1".parse().expect("global-unicast address"),
+            2158,
+        )
+        .expect("the test must run with permission to set SO_MARK");
+        assert_eq!(socket.mark().expect("SO_MARK read-back"), 2158);
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

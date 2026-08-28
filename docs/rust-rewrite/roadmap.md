@@ -1270,8 +1270,9 @@ successful host cross-build is never sufficient for a native behavior claim.
   newly allocated upstream source port in both Go and Rust. Local focused runs
   omit only that wall-clock wait through an explicit environment gate.
 - `5F3`: the default quality job builds the all-feature `rewrite-cli` release
-  binary after fmt, clippy and tests, while native platform jobs retain socket
-  contracts. Existing bounded traffic/memory/log/connection diagnostics are
+  binary after fmt, clippy and tests. A separate root-only Linux job writes and
+  reads back a nonzero `SO_MARK`, while native platform jobs retain the other
+  socket contracts. Existing bounded traffic/memory/log/connection diagnostics are
   the portable Phase 5F observability boundary. Go-runtime `pprof` and `expvar`
   payloads are recorded as deliberately non-portable API gaps, and process
   lookup remains coupled to future PROCESS-rule/original-flow metadata rather
@@ -1279,7 +1280,7 @@ successful host cross-build is never sufficient for a native behavior claim.
 
 Phase 5F implementation is closed for the declared local HTTP/SOCKS/mixed,
 DIRECT TCP/UDP and currently executable upstream-adapter boundary. The Darwin
-fast differentials pass; the Linux exact-timeout, nonzero-mark and release
+fast differentials pass; the Linux exact-timeout, privileged-mark and release
 results remain pending until their configured native CI gates report success.
 This closure does not imply remote UDP/UoT, TUN/redir/TProxy, process rules,
 Go-runtime diagnostics or protocols not already executable in Rust.

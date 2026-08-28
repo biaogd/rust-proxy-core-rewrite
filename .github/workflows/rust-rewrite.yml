@@ -419,6 +419,32 @@ jobs:
       - name: Run native system resolver contracts
         run: cargo test --manifest-path rust/Cargo.toml -p rewrite-platform --all-features
 
+  phase5f-linux-routing-mark:
+    name: Phase 5F privileged Linux routing mark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Prove SO_MARK write and read-back as root
+        shell: bash
+        run: |
+          sudo env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "CARGO_TARGET_DIR=${{ runner.temp }}/mihomo-phase5f-mark-target" \
+            "$HOME/.cargo/bin/cargo" test \
+              --manifest-path rust/Cargo.toml \
+              -p rewrite-platform \
+              --all-features \
+              tests::privileged_routing_mark_round_trip \
+              -- --ignored --exact
+
   windows-controller-pipe:
     name: Windows controller named-pipe differential
     runs-on: windows-latest

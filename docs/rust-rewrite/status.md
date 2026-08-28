@@ -102,7 +102,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5D controller completion boundary | Complete for every currently executable Rust service; API-04/API-11/API-12 retain only explicit 5E/5F service/platform dependencies | TCP/TLS/Unix and native-pipe CI, streams, safe config paths, current proxy/rule/provider surfaces, persistent Go-compatible storage, restart and public UI/DoH/debug are covered |
 | Phase 5F1 local TCP/socket completion | Implementation complete in declared local/current-adapter scope; privileged Linux evidence pending | Fixed HTTP/SOCKS/mixed use TFO, Linux MPTCP fallback and keepalive; interface/mark/concurrent dialing reaches DIRECT plus current HTTP/SOCKS5 adapters, while LAN/rebind/native-address differential passes |
 | Phase 5F2 UDP NAT completion | Implementation complete in declared local scope; exact-timeout Linux CI result pending | IPv4/IPv6 reuse, fan-out, multi-response, control-close, generation retention and bounded-pressure recovery pass locally; CI enables the real 60-second expiry comparison |
-| Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI now builds the all-feature release binary after fmt/clippy/test; nonzero Linux mark remains a privileged evidence claim |
+| Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI builds the all-feature release binary; a root-only Linux job writes and reads back nonzero `SO_MARK` through the production socket helper |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
 | Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
@@ -4405,7 +4405,8 @@ domain DIRECT dials honor `tcp-concurrent`. The Darwin differential passes
 TFO/MPTCP-enabled relay, non-loopback wildcard access, the `lo0` dial path,
 invalid-interface failure, domain concurrency and an exact nonzero-mark
 controller snapshot. Mark application on global-unicast Linux/Android sockets
-is implemented but remains a privileged native CI evidence claim.
+is implemented and has a root-only write/read-back CI gate; its result is not
+claimed before Actions completes.
 
 Phase 5F3 adds the all-feature release build to the default quality workflow.
 Portable logs, memory/traffic streams and connection lifecycle were already
@@ -4423,8 +4424,8 @@ PHASE5FUDPNAT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scr
 ```
 
 Both fast Darwin differentials pass on 2026-08-28. Linux CI additionally sets
-`PHASE5F_TIMEOUT_TEST=1`; no Linux or privileged-mark result is claimed until
-Actions reports it.
+`PHASE5F_TIMEOUT_TEST=1` and separately runs the ignored root-only routing-mark
+contract; neither Linux result is claimed until Actions reports it.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

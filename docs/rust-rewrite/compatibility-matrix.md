@@ -392,6 +392,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5F1 LAN/socket policy | Oracle | Pending | Dedicated local-runtime shard includes fixed-listener LAN/TFO/MPTCP/keepalive/config and current dial-policy differential; nonzero routing mark remains a separate privileged claim |
 | Linux amd64 — Phase 5F2 UDP NAT | Oracle | Pending | Dedicated local-runtime shard enables deterministic NAT/fan-out/backpressure plus the real 60-second idle-expiry differential; no result is claimed before completion |
 | Linux amd64 — Phase 5F3 release build | Oracle | Pending | Default quality job builds `rewrite-cli --all-features --release` after fmt, clippy and tests; no result is claimed before completion |
+| Linux amd64 — Phase 5F3 routing mark | Oracle | Pending | Separate root-only job calls the production mark helper with global-unicast metadata and requires exact nonzero `SO_MARK` read-back; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
