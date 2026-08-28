@@ -942,6 +942,10 @@ async fn fetch_http_proxy_provider(
     trust_certificates: &[String],
     hosts: &rewrite_config::HostTable,
 ) -> Result<HttpProviderFetch, String> {
+    // reqwest deliberately uses rustls-no-provider so the workspace does not
+    // pull AWS-LC beside the ring-backed DNS/QUIC stack. Install ring before
+    // constructing its client; repeated installation is harmless.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let url = url::Url::parse(raw_url).map_err(|error| error.to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("provider URL must use HTTP or HTTPS and include a host".to_owned());
@@ -1656,9 +1660,16 @@ async fn connect_configured_proxy(
                 server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                 skip_certificate_verification: proxy.skip_cert_verify,
             });
-            rewrite_outbound::connect_http(&server, destination, allow_ipv6, credentials, tls)
-                .await
-                .map_err(|error| format!("HTTP proxy connection failed: {error}"))
+            rewrite_outbound::connect_http(
+                &server,
+                destination,
+                allow_ipv6,
+                credentials,
+                &proxy.headers,
+                tls,
+            )
+            .await
+            .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }
         ProxyKind::Socks5 => {
             rewrite_outbound::connect_socks5(&server, destination, allow_ipv6, credentials)

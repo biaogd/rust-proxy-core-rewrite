@@ -101,6 +101,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5D aggregate controller core | API-02 and current-local API-07 complete; API-03/API-04/API-05/API-08, broader rule rendering and storage persistence retain listed gaps | Controller core, built-in proxy/mode control and the implicit default/empty provider boundary pass |
 | Phase 6B1a plaintext HTTP outbound | Complete in declared authenticated TCP scope; OUT-03 remains partial | Configured rule target emits authenticated HTTP CONNECT through Hyper and relays mixed TCP to deterministic echo |
 | Phase 6B1b TLS HTTP outbound | Complete in declared TLS/SNI/skip/status TCP scope; OUT-03 remains partial | tokio-rustls wraps the proxy stream before Hyper CONNECT; SNI, auth, relay, untrusted/SNI rejection and 502 behavior pass |
+| Phase 6B1c HTTP CONNECT contract | Complete in declared request-header/status TCP scope; OUT-03 remains partial | Unauthenticated/authenticated relay, Go default headers, custom overrides, credential precedence and exact-200 status acceptance pass |
 | Phase 5C1a configured selector | Complete in declared flat/process-local TCP scope; GRP-01 remains partial | Default and controller-selected REJECT/HTTP members drive new mixed TCP connections; exact detail views and invalid selection pass |
 | Phase 5C1b selector reload lifecycle | Complete in declared SIGHUP scope; GRP-01/PROV-03 remain partial | Valid choices survive, malformed config rolls back, and removed choices fall back to the first new member exactly like Go |
 | Phase 5C2a local file proxy provider | Complete in declared initial-load HTTP/SOCKS5 TCP scope; PROV-01/GRP-03 remain partial | YAML members, `use` composition, exact File/Compatible provider REST views and selected HTTP routing pass |
@@ -131,7 +132,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2a authenticated SOCKS5 outbound | Complete in declared TCP scope; OUT-04 remains partial | Strict username/password negotiation and library-backed CONNECT carry mixed TCP through a deterministic local SOCKS5 server |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 123 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ/TLS attempts and other non-semantic loaded-runner publication latency |
+| Differential harness | Implemented | All 124 Phase 1–6B Python gates run by default in eight fail-independent GitHub Actions matrix shards; bounded DNS/CONNECT/hook readiness barriers normalize only duplicate byte-identical DoQ/TLS attempts and other non-semantic loaded-runner publication latency |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4202,8 +4203,40 @@ PHASE4_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/ph
 ```
 
 Positive system/custom-root verification, `name-cert-verify`, client
-certificate/fingerprint/header behavior, unauthenticated and exhaustive
-status/timeout matrices, UDP and dialer chains remain OUT-03 gaps.
+certificate/fingerprint behavior, malformed/slow response boundaries, UDP and
+dialer chains remain OUT-03 gaps.
+
+## Phase 6B1c deliverables and evidence
+
+HTTP proxy configuration now carries string-valued custom `headers` through
+the same runtime and controller-health dial boundary. Hyper emits the oracle's
+default Host, User-Agent and Proxy-Connection fields, custom fields replace
+those defaults, and configured Basic credentials replace any custom
+Proxy-Authorization value last. The no-credential form omits authorization.
+
+The response gate now accepts exactly CONNECT status 200. The previous Rust
+`is_success()` check incorrectly admitted 204; the focused differential proves
+204, 301, 400, 405, 407 and 500 all close the attempted tunnel without
+terminating the process, while both default unauthenticated and overridden
+authenticated 200 paths relay TCP bytes.
+
+The prior Linux provider failure was also corrected at its source: reqwest
+keeps `rustls-no-provider`, and the runtime explicitly installs the workspace's
+ring provider before constructing a provider client. The focused Phase 5C2c
+provider differential re-passes locally.
+
+Local accepted gates:
+
+```sh
+PHASE6BHTTPCONTRACT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http_contract.py
+PHASE5CHTTPPROVIDER_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase5c_http_provider.py
+PHASE6BHTTP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http.py
+PHASE6BHTTPTLS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6b_http_tls.py
+```
+
+Positive trust-store verification, `name-cert-verify`, client certificates,
+fingerprints, malformed/slow response boundaries, UDP and dialer chains remain
+OUT-03 gaps.
 
 Exact timeout-window differential evidence, delayed-handshake success reset,
 exhaustive SOCKS5 auth/CONNECT status behavior, concurrent reload races,

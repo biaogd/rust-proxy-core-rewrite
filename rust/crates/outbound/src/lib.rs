@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +50,10 @@ pub enum HttpProxyError {
     Handshake(#[from] hyper::Error),
     #[error("HTTP proxy request is invalid: {0}")]
     Request(#[from] hyper::http::Error),
+    #[error("HTTP proxy header name is invalid: {0}")]
+    HeaderName(#[from] hyper::http::header::InvalidHeaderName),
+    #[error("HTTP proxy header value is invalid: {0}")]
+    HeaderValue(#[from] hyper::http::header::InvalidHeaderValue),
     #[error("HTTP proxy TLS configuration is invalid: {0}")]
     TlsConfiguration(String),
     #[error("HTTP proxy TLS handshake timed out")]
@@ -182,6 +187,7 @@ pub async fn connect_http(
     destination: &Destination,
     allow_ipv6: bool,
     credentials: Option<(&str, &str)>,
+    headers: &BTreeMap<String, String>,
     tls: Option<HttpProxyTls<'_>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect(server, allow_ipv6).await?;
@@ -205,18 +211,27 @@ pub async fn connect_http(
         let _ = connection.with_upgrades().await;
     });
     let authority = destination.authority();
-    let mut builder = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method(hyper::Method::CONNECT)
         .uri(&authority)
-        .header(hyper::header::HOST, &authority);
+        .header(hyper::header::HOST, &authority)
+        .header(hyper::header::USER_AGENT, "Go-http-client/1.1")
+        .header("proxy-connection", "Keep-Alive")
+        .body(Empty::<Bytes>::new())?;
+    for (name, value) in headers {
+        let name = hyper::http::HeaderName::from_bytes(name.as_bytes())?;
+        let value = hyper::http::HeaderValue::from_str(value)?;
+        request.headers_mut().insert(name, value);
+    }
     if let Some((username, password)) = credentials {
         let token = STANDARD.encode(format!("{username}:{password}"));
-        builder = builder.header(hyper::header::PROXY_AUTHORIZATION, format!("Basic {token}"));
+        request.headers_mut().insert(
+            hyper::header::PROXY_AUTHORIZATION,
+            hyper::http::HeaderValue::from_str(&format!("Basic {token}"))?,
+        );
     }
-    let response = sender
-        .send_request(builder.body(Empty::<Bytes>::new())?)
-        .await?;
-    if !response.status().is_success() {
+    let response = sender.send_request(request).await?;
+    if response.status() != hyper::StatusCode::OK {
         return Err(HttpProxyError::Status(response.status()));
     }
     let upgraded = hyper::upgrade::on(response).await?;

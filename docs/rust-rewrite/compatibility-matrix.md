@@ -335,6 +335,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, bounded startup readiness, stable shutdown-hook invocation and failure differential passed, 2026-08-27 |
 | Darwin arm64 — Phase 5D controller core | Oracle | **Parity in declared rows** | Native HTTP/WS streams, Bearer/query-token/CORS, single/all live connection deletion and the declared executable `/configs` transaction subset passed, 2026-08-27 |
 | Darwin arm64 — Phase 6B1b HTTP TLS outbound | Oracle | **Parity in declared scope** | Native TLS authority differential passed with SNI, skip/untrusted handling, authenticated CONNECT relay and 502 rejection, 2026-08-28 |
+| Darwin arm64 — Phase 6B1c HTTP CONNECT contract | Oracle | **Parity in declared scope** | Native unauthenticated/authenticated relay, default/custom header and exact-200 response matrix differential passed, 2026-08-28 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -361,6 +362,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A3a controller/secret overrides | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5C aggregate | Oracle | Pending | All 27 group/provider differentials are configured in the parallel GitHub Actions shard; no result is claimed before completion |
 | Linux amd64 — Phase 6B1b HTTP TLS outbound | Oracle | Pending | Default controller-outbound differential shard is configured; no result is claimed before completion |
+| Linux amd64 — Phase 6B1c HTTP CONNECT contract | Oracle | Pending | Default controller-outbound differential shard is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4a X25519 encrypted config | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4b X25519 age convert | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4c X25519 age encrypt/decrypt | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

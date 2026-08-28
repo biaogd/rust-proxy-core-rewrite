@@ -624,8 +624,11 @@ cross-implementation vectors and live interop tests.
 The current Rust HTTP adapter keeps those boundaries explicit: runtime owns
 the configured `tls`/SNI/verification policy, `tokio-rustls` returns one boxed
 proxy stream, and Hyper owns HTTP/1 CONNECT framing and upgrade on either the
-plain or TLS stream. DNS, provider downloads and HTTP outbounds share the ring
-rustls provider selection but do not share routing or retry policy.
+plain or TLS stream. The HTTP adapter explicitly supplies the oracle's default
+CONNECT headers, applies configured header replacements, then applies Basic
+credentials last; only status 200 upgrades to a tunnel. DNS, provider
+downloads and HTTP outbounds share the ring rustls provider selection but do
+not share routing or retry policy.
 
 ## REST controller
 

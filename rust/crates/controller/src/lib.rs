@@ -811,9 +811,16 @@ async fn measure_http_delay(
                     server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
                     skip_certificate_verification: proxy.skip_cert_verify,
                 });
-                rewrite_outbound::connect_http(&server, &destination, config.ipv6, credentials, tls)
-                    .await
-                    .map_err(|_| ())?
+                rewrite_outbound::connect_http(
+                    &server,
+                    &destination,
+                    config.ipv6,
+                    credentials,
+                    &proxy.headers,
+                    tls,
+                )
+                .await
+                .map_err(|_| ())?
             }
             rewrite_config::ProxyKind::Socks5 => {
                 rewrite_outbound::connect_socks5(&server, &destination, config.ipv6, credentials)

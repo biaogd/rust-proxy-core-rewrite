@@ -130,6 +130,7 @@ pub struct ProxyConfig {
     pub tls: bool,
     pub sni: Option<String>,
     pub skip_cert_verify: bool,
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -770,6 +771,7 @@ struct RawProxy {
     tls: Option<bool>,
     sni: Option<String>,
     skip_cert_verify: Option<bool>,
+    headers: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -3702,6 +3704,7 @@ fn parse_proxies(
                     || proxy.target_sub_rule.is_some()
                     || proxy.username.is_some() != proxy.password.is_some()
                     || ((kind != "http" || !allow_http_tls) && has_tls_options)
+                    || (kind != "http" && proxy.headers.is_some())
                     || !proxy.extra.is_empty()
                 {
                     return Err(ConfigError::UnsupportedProxy(name));
@@ -3729,6 +3732,7 @@ fn parse_proxies(
                     tls: proxy.tls.unwrap_or(false),
                     sni: proxy.sni.filter(|sni| !sni.is_empty()),
                     skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+                    headers: proxy.headers.unwrap_or_default(),
                 });
             }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
@@ -5700,6 +5704,7 @@ dns:
                     tls: false,
                     sni: None,
                     skip_cert_verify: false,
+                    headers: BTreeMap::new(),
                 })
                 .collect(),
         };
@@ -5766,6 +5771,7 @@ dns:
                 tls: false,
                 sni: None,
                 skip_cert_verify: false,
+                headers: BTreeMap::new(),
             }],
         };
         let group = ProxyGroupConfig {
@@ -5856,13 +5862,14 @@ dns:
     #[test]
     fn parses_http_proxy_tls_options_without_broadening_socks5() {
         let source = format!(
-            "{MINIMAL}\nproxies:\n  - name: secure-http\n    type: http\n    server: proxy.test\n    port: 8443\n    username: user\n    password: pass\n    tls: true\n    sni: front.test\n    skip-cert-verify: true\n"
+            "{MINIMAL}\nproxies:\n  - name: secure-http\n    type: http\n    server: proxy.test\n    port: 8443\n    username: user\n    password: pass\n    tls: true\n    sni: front.test\n    skip-cert-verify: true\n    headers:\n      X-Phase: 6b1c\n"
         );
         let config = Config::from_yaml(&source).expect("HTTP TLS config");
         let proxy = &config.proxies[0];
         assert!(proxy.tls);
         assert_eq!(proxy.sni.as_deref(), Some("front.test"));
         assert!(proxy.skip_cert_verify);
+        assert_eq!(proxy.headers["X-Phase"], "6b1c");
 
         let socks = source.replace("type: http", "type: socks5");
         assert!(matches!(

@@ -133,7 +133,7 @@ The product parser enumerates outbound types in
 | --- | --- | --- | --- |
 | OUT-01 | DIRECT TCP/UDP, interface, routing mark, IP strategy, TFO, MPTCP and dial concurrency | Partial | 6A1 plus platform gates |
 | OUT-02 | REJECT, REJECT-DROP, COMPATIBLE, PASS, PASS-RULE, DNS and REMATCH built-ins | Partial/Not started | 6A2 |
-| OUT-03 | HTTP proxy client: plaintext/TLS, auth, CONNECT and UDP limitations | Partial: plaintext plus TLS authenticated CONNECT TCP, explicit SNI, skip verification, untrusted/SNI/status rejection | 6B1 trusted-root/name/client-cert/header/error/UDP/platform gates |
+| OUT-03 | HTTP proxy client: plaintext/TLS, auth, CONNECT and UDP limitations | Partial: plaintext/TLS authenticated and unauthenticated CONNECT TCP, explicit SNI, skip verification, default/custom headers, credential precedence and representative exact-200 status rejection | 6B1 trusted-root/name/client-cert/fingerprint/slow-malformed-response/UDP/platform gates |
 | OUT-04 | SOCKS5 proxy client: TCP/UDP, auth and remote/local resolution | Partial: authenticated TCP CONNECT | 6B2 resolution/UDP/error gates |
 | OUT-05 | Shadowsocks: cipher matrix, plugins, UDP and UoT | Not started | 6C |
 | OUT-06 | ShadowsocksR: cipher/protocol/obfs and UDP | Not started | 7A |

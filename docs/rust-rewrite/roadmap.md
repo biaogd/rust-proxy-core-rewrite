@@ -1172,6 +1172,22 @@ certificates, fingerprints, arbitrary proxy headers, unauthenticated and
 exhaustive status/timeout matrices, UDP and chaining remain later OUT-03
 gates.
 
+### Phase 6B1c accepted scope
+
+The HTTP CONNECT request path now emits the oracle's default `Host`,
+`User-Agent: Go-http-client/1.1` and `Proxy-Connection: Keep-Alive` fields,
+accepts string-valued custom `headers`, and applies configured Basic
+credentials after those overrides. Unauthenticated and authenticated TCP
+tunnels share that path. The response boundary accepts exactly status 200,
+matching the oracle rather than treating every 2xx status as success.
+`compat/scripts/phase6b_http_contract.py` compares default and overridden
+headers, credential precedence, bidirectional echo, and rejection of 204,
+301, 400, 405, 407 and 500 while the product remains alive.
+
+Positive trust-store verification, `name-cert-verify`, client certificates,
+fingerprints, malformed/slow response boundaries, UDP and dialer chains remain
+later OUT-03 gates.
+
 ### Phase 5C1a accepted scope
 
 The first group slice accepts one or more flat `select` groups whose members

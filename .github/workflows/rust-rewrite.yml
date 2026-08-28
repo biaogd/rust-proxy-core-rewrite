@@ -202,6 +202,7 @@ jobs:
       PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/rust/target
+      PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/rust/target
       PHASE6BSOCKS_CARGO_TARGET: ${{ github.workspace }}/rust/target
     steps:
       - uses: actions/checkout@v6
@@ -263,6 +264,7 @@ jobs:
             compat/scripts/phase5c_selector.py \
             compat/scripts/phase6b_http.py \
             compat/scripts/phase6b_http_tls.py \
+            compat/scripts/phase6b_http_contract.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \
