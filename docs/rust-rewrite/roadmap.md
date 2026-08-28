@@ -1299,6 +1299,29 @@ Hysteria/Hysteria2, **6H** TUIC, **6I** WireGuard/AmneziaWG and **6J** SSH.
 TCP and UDP, client and server, and each security/transport variant remain
 separate exit gates inside these labels.
 
+### Phase 6A1 accepted scope
+
+The reserved built-in adapter slice now closes the TCP/control behavior that
+precedes configured remote protocols. `COMPATIBLE` uses the same DIRECT socket
+path, `PASS` continues ordered rule scanning, `REJECT` closes immediately and
+`REJECT-DROP` retains the accepted mixed TCP connection for the oracle's
+60-second drop interval. PASS-RULE and REMATCH rule-flow behavior remains
+covered by the existing Phase 5B gates rather than being reimplemented as a
+transport.
+
+The implicit GLOBAL selector is assembled in Go order from DIRECT, REJECT,
+top-level configured proxies and configured groups. Its selection is shared by
+the controller and data plane, and a user-defined `GLOBAL` group replaces the
+implicit selector. Duplicate proxy names, reserved proxy names and proxy/group
+collisions fail configuration validation.
+`compat/scripts/phase6a_builtins.py` compares built-in views, live TCP outcomes,
+default and custom GLOBAL selection and configuration acceptance. Fast local
+runs prove the hold contract; the isolated Linux CI shard additionally waits
+for and compares the exact default-timeout expiry.
+
+Configured `direct`, `reject`, `dns` and `rematch` adapter records, UDP reject
+semantics and remaining dependency-order validation are later Phase 6A gates.
+
 ### Phase 6B1a accepted scope
 
 The first remote-protocol slice accepts a single configured plaintext HTTP

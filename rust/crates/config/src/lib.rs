@@ -1695,6 +1695,24 @@ impl Config {
         Ok(next)
     }
 
+    #[must_use]
+    pub fn has_custom_global_group(&self) -> bool {
+        self.proxy_groups.iter().any(|group| group.name == "GLOBAL")
+    }
+
+    #[must_use]
+    pub fn default_global_proxies(&self) -> Vec<String> {
+        let mut names = vec!["DIRECT".to_owned(), "REJECT".to_owned()];
+        names.extend(self.proxies.iter().map(|proxy| proxy.name.clone()));
+        names.extend(
+            self.proxy_groups
+                .iter()
+                .filter(|group| group.name != "GLOBAL")
+                .map(|group| group.name.clone()),
+        );
+        names
+    }
+
     /// Converts the parsed integer into a bindable runtime port.
     ///
     /// # Errors
@@ -4444,7 +4462,7 @@ fn parse_proxy_groups(
         ) || !group.extra.is_empty()
             || !group_names.insert(name.to_owned())
             || proxy_names.contains(name)
-            || is_reserved_proxy_name(name)
+            || (name != "GLOBAL" && is_reserved_proxy_name(name))
         {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
@@ -6338,6 +6356,26 @@ dns:
         .expect("empty origins retain Go allow-all behavior");
         assert!(disabled.controller_cors.allow_origins.is_empty());
         assert!(!disabled.controller_cors.allow_private_network);
+    }
+
+    #[test]
+    fn builds_the_oracle_default_global_catalog_and_accepts_a_custom_global() {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - {{name: local-http, type: http, server: 127.0.0.1, port: 8080}}\nproxy-groups:\n  - {{name: local-group, type: select, proxies: [DIRECT]}}\n"
+        );
+        let default_global = Config::from_yaml(&source).expect("default GLOBAL");
+        assert!(!default_global.has_custom_global_group());
+        assert_eq!(
+            default_global.default_global_proxies(),
+            ["DIRECT", "REJECT", "local-http", "local-group"]
+        );
+
+        let custom = Config::from_yaml(&format!(
+            "{MINIMAL}\nproxy-groups:\n  - {{name: GLOBAL, type: select, proxies: [REJECT, DIRECT]}}\n"
+        ))
+        .expect("custom GLOBAL");
+        assert!(custom.has_custom_global_group());
+        assert_eq!(custom.proxy_groups[0].proxies, ["REJECT", "DIRECT"]);
     }
 
     #[test]

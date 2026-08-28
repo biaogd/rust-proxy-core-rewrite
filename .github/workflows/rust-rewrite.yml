@@ -102,7 +102,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 9
+      max-parallel: 10
       matrix:
         include:
           - shard: core
@@ -123,6 +123,9 @@ jobs:
             regex: 'phase(5d|5e|6b)_[a-z0-9_]+\.py$'
           - shard: local-runtime
             regex: 'phase5f_[a-z0-9_]+\.py$'
+          - shard: builtins
+            regex: 'phase6a_[a-z0-9_]+\.py$'
+            drop_timeout_test: "1"
     env:
       SHARD_REGEX: ${{ matrix.regex }}
       PHASE1_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -216,6 +219,8 @@ jobs:
       PHASE5FUDPNAT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5F_TIMEOUT_TEST: "1"
       PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6ABUILTINS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6A_DROP_TIMEOUT_TEST: ${{ matrix.drop_timeout_test || '0' }}
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -276,6 +281,7 @@ jobs:
           compat/scripts/phase5c_group_filters.py \
           compat/scripts/phase5c_file_provider.py \
             compat/scripts/phase5c_selector_reload.py \
+            compat/scripts/phase6a_builtins.py \
             compat/scripts/phase6b_socks5.py \
             compat/scripts/phase5c_selector.py \
             compat/scripts/phase6b_http.py \

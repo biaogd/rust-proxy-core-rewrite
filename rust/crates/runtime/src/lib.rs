@@ -1536,6 +1536,9 @@ fn prepare_controller(
 }
 
 fn sync_selector_state(state: &RuntimeState, config: &Config) {
+    if !config.has_custom_global_group() {
+        state.sync_global_proxy(&config.default_global_proxies());
+    }
     state.retain_proxy_groups(config.proxy_groups.iter().map(|group| group.name.as_str()));
     state.sync_group_choices(
         config
@@ -2132,7 +2135,15 @@ async fn serve_connection(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
-    if matches!(route, Route::Reject | Route::RejectDrop) {
+    if route == Route::Reject {
+        return;
+    }
+    if route == Route::RejectDrop {
+        let _client = accepted.client;
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_mins(1)) => {}
+        }
         return;
     }
     let Some(mut remote) = connect_tcp_outbound(
@@ -2474,6 +2485,7 @@ fn mode_decision(config: &Config, state: &RuntimeState) -> Option<rewrite_rules:
     let target = match config.mode {
         Mode::Rule => return None,
         Mode::Direct => "DIRECT".to_owned(),
+        Mode::Global if config.has_custom_global_group() => "GLOBAL".to_owned(),
         Mode::Global => state.global_proxy(),
     };
     Some(rewrite_rules::Decision {

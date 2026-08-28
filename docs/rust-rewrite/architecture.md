@@ -474,6 +474,8 @@ Important compatibility hazards:
 - Proxy groups are DAG-sorted and duplicate/reserved names are rejected.
 - Built-ins (`DIRECT`, `REJECT`, `REJECT-DROP`, `COMPATIBLE`, `PASS`,
   `PASS-RULE`, and synthesized `GLOBAL`) are inserted during parsing.
+- The synthesized GLOBAL selector orders DIRECT and REJECT before configured
+  top-level proxies and groups; an explicit group named GLOBAL replaces it.
 - Sub-rule cycles, missing proxy targets, dialer-proxy references, listeners,
   providers, paths and TUN/DNS relationships are validated during parsing.
 - Configuration parsing may decrypt data and load/download external resources;

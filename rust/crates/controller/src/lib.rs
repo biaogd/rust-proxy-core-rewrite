@@ -957,6 +957,12 @@ async fn proxies(State(state): State<ControllerState>) -> Response {
         .into_iter()
         .map(|name| (name.to_owned(), proxy_snapshot(name, &state.runtime)))
         .collect();
+    if !config.has_custom_global_group() {
+        proxies.insert(
+            "GLOBAL".to_owned(),
+            default_global_snapshot(&config, &state.runtime),
+        );
+    }
     for proxy in &config.proxies {
         proxies.insert(
             proxy.name.clone(),
@@ -973,9 +979,6 @@ async fn proxies(State(state): State<ControllerState>) -> Response {
 }
 
 async fn proxy(State(state): State<ControllerState>, Path(name): Path<String>) -> Response {
-    if PROXY_NAMES.contains(&name.as_str()) {
-        return json_response(StatusCode::OK, &proxy_snapshot(&name, &state.runtime));
-    }
     let config = state.current_config();
     if let Some(proxy) = config.proxies.iter().find(|proxy| proxy.name == name) {
         return json_response(
@@ -989,12 +992,24 @@ async fn proxy(State(state): State<ControllerState>, Path(name): Path<String>) -
             &selector_snapshot(group, &config, &state.runtime),
         );
     }
+    if PROXY_NAMES.contains(&name.as_str()) {
+        let snapshot = if name == "GLOBAL" {
+            default_global_snapshot(&config, &state.runtime)
+        } else {
+            proxy_snapshot(&name, &state.runtime)
+        };
+        return json_response(StatusCode::OK, &snapshot);
+    }
     proxy_not_found()
 }
 
 async fn groups(State(state): State<ControllerState>) -> Response {
     let config = state.current_config();
-    let mut groups = vec![proxy_snapshot("GLOBAL", &state.runtime)];
+    let mut groups = if config.has_custom_global_group() {
+        Vec::new()
+    } else {
+        vec![default_global_snapshot(&config, &state.runtime)]
+    };
     groups.extend(
         config
             .proxy_groups
@@ -1005,20 +1020,20 @@ async fn groups(State(state): State<ControllerState>) -> Response {
 }
 
 async fn group(State(state): State<ControllerState>, Path(name): Path<String>) -> Response {
-    if name == "GLOBAL" {
-        return json_response(StatusCode::OK, &proxy_snapshot("GLOBAL", &state.runtime));
-    }
     let config = state.current_config();
-    config
-        .proxy_groups
-        .iter()
-        .find(|group| group.name == name)
-        .map_or_else(proxy_not_found, |group| {
-            json_response(
-                StatusCode::OK,
-                &selector_snapshot(group, &config, &state.runtime),
-            )
-        })
+    if let Some(group) = config.proxy_groups.iter().find(|group| group.name == name) {
+        return json_response(
+            StatusCode::OK,
+            &selector_snapshot(group, &config, &state.runtime),
+        );
+    }
+    if name == "GLOBAL" {
+        return json_response(
+            StatusCode::OK,
+            &default_global_snapshot(&config, &state.runtime),
+        );
+    }
+    proxy_not_found()
 }
 
 async fn proxy_delay(
@@ -1046,7 +1061,10 @@ async fn proxy_delay(
     };
     let url = parameters.get("url").map_or("", String::as_str);
     let tested_name = if name == "GLOBAL" {
-        state.runtime.global_proxy()
+        configured_group.map_or_else(
+            || state.runtime.global_proxy(),
+            |group| group_selected_proxy(group, &state.runtime),
+        )
     } else {
         name.clone()
     };
@@ -1087,13 +1105,9 @@ async fn group_delay(
     uri: Uri,
 ) -> Response {
     let config = state.current_config();
-    let automatic_group = (name != "GLOBAL")
-        .then(|| {
-            config.proxy_groups.iter().find(|group| {
-                group.name == name && group.kind != rewrite_config::ProxyGroupKind::Select
-            })
-        })
-        .flatten();
+    let configured_group = config.proxy_groups.iter().find(|group| group.name == name);
+    let automatic_group = configured_group
+        .filter(|group| name == "GLOBAL" || group.kind != rewrite_config::ProxyGroupKind::Select);
     if name != "GLOBAL" && automatic_group.is_none() {
         return proxy_not_found();
     }
@@ -1402,13 +1416,16 @@ async fn select_proxy(
             &json!({"message": "Must be a Selector"}),
         );
     }
-    let updated = if name == "GLOBAL" {
-        state.runtime.set_global_proxy(&selection.name)
-    } else {
-        let group = configured_group.expect("configured group was checked");
+    let updated = if let Some(group) = configured_group {
         state
             .runtime
             .set_selector_proxy(&name, &selection.name, &group.proxies)
+    } else if name == "GLOBAL" {
+        state
+            .runtime
+            .set_global_proxy(&selection.name, &config.default_global_proxies())
+    } else {
+        false
     };
     if !updated {
         return json_response(
@@ -1466,6 +1483,22 @@ fn proxy_snapshot(name: &str, runtime: &RuntimeState) -> serde_json::Value {
         object.insert("now".to_owned(), json!(runtime.global_proxy()));
         object.insert("testUrl".to_owned(), json!(""));
     }
+    value
+}
+
+fn default_global_snapshot(config: &Config, runtime: &RuntimeState) -> serde_json::Value {
+    let mut value = proxy_snapshot("GLOBAL", runtime);
+    let object = value.as_object_mut().expect("GLOBAL snapshot is an object");
+    object.insert("all".to_owned(), json!(config.default_global_proxies()));
+    object.insert(
+        "udp".to_owned(),
+        json!(selector_supports_udp(
+            &runtime.global_proxy(),
+            config,
+            runtime,
+            &mut Vec::new(),
+        )),
+    );
     value
 }
 
@@ -1606,7 +1639,10 @@ fn selector_supports_udp(
     runtime: &RuntimeState,
     visited: &mut Vec<String>,
 ) -> bool {
-    if matches!(selected, "DIRECT" | "REJECT" | "REJECT-DROP") {
+    if matches!(
+        selected,
+        "DIRECT" | "COMPATIBLE" | "REJECT" | "REJECT-DROP" | "PASS" | "PASS-RULE"
+    ) {
         return true;
     }
     let Some(group) = config

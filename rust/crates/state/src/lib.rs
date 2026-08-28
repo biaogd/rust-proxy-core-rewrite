@@ -456,8 +456,8 @@ impl RuntimeState {
             .clone()
     }
 
-    pub fn set_global_proxy(&self, name: &str) -> bool {
-        if !matches!(name, "DIRECT" | "REJECT") {
+    pub fn set_global_proxy(&self, name: &str, available: &[String]) -> bool {
+        if !available.iter().any(|candidate| candidate == name) {
             return false;
         }
         name.clone_into(
@@ -467,6 +467,19 @@ impl RuntimeState {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         true
+    }
+
+    pub fn sync_global_proxy(&self, available: &[String]) {
+        let mut selected = self
+            .global_proxy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !available.iter().any(|candidate| candidate == &*selected) {
+            *selected = available
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "DIRECT".to_owned());
+        }
     }
 
     pub fn sync_group_choices<'a>(
@@ -1755,9 +1768,19 @@ mod tests {
     fn controller_proxy_selection_and_health_share_runtime_state() {
         let state = RuntimeState::default();
         assert_eq!(state.global_proxy(), "DIRECT");
-        assert!(!state.set_global_proxy("missing"));
-        assert!(state.set_global_proxy("REJECT"));
+        let available = vec!["DIRECT".to_owned(), "REJECT".to_owned()];
+        assert!(!state.set_global_proxy("missing", &available));
+        assert!(state.set_global_proxy("REJECT", &available));
         assert_eq!(state.global_proxy(), "REJECT");
+        let expanded = vec![
+            "DIRECT".to_owned(),
+            "REJECT".to_owned(),
+            "configured".to_owned(),
+        ];
+        state.sync_global_proxy(&expanded);
+        assert_eq!(state.global_proxy(), "REJECT");
+        state.sync_global_proxy(&["configured".to_owned()]);
+        assert_eq!(state.global_proxy(), "configured");
 
         let initial = state.proxy_health("DIRECT");
         assert!(initial.alive);

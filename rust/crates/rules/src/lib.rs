@@ -55,7 +55,7 @@ impl Decision {
     #[must_use]
     pub fn route(&self) -> Route {
         match self.target.as_str() {
-            "DIRECT" => Route::Direct,
+            "DIRECT" | "COMPATIBLE" => Route::Direct,
             "REJECT" => Route::Reject,
             "REJECT-DROP" => Route::RejectDrop,
             _ => Route::Unsupported,
@@ -542,7 +542,7 @@ impl Rule {
         matches!(self.matcher, Matcher::SubRule { .. })
             || matches!(
                 self.target.as_str(),
-                "DIRECT" | "REJECT" | "PASS" | "PASS-RULE"
+                "DIRECT" | "COMPATIBLE" | "REJECT" | "REJECT-DROP" | "PASS" | "PASS-RULE"
             )
             || matches!(actions.get(&self.target), Some(Action::Rematch(_)))
             || targets.contains(&self.target)
