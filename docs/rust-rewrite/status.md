@@ -4595,6 +4595,19 @@ replacement. Windows omits unsupported `bbolt-rs`; the native Actions gate is
 required before named-pipe parity is claimed, and durable Windows profile state
 remains explicitly unsupported.
 
+## Configuration module refactor
+
+The behavior-neutral post-6B structure pass replaces the 7,001-line
+configuration crate root with a 14-line public facade. Public normalized types,
+the crate-private raw YAML schema, load/default/reload policy, DNS/geodata/host
+parsing, proxy/group/provider parsing, public errors and unit fixtures now live
+in separate physical modules. Existing public names and signatures remain
+re-exported from the crate root. Production code contains no `use super`
+imports; sibling dependencies use explicit `crate::...` paths. The 57 config
+unit tests, workspace fmt/clippy/test, the Phase 2 generated config/rule oracle
+suite and the Phase 6A simple-adapter differential pass after the move. This
+changes no compatibility-matrix support claim.
+
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
 `DNS-10`–`DNS-13` and `DNS-16`–`DNS-18` retain the platform/database/adapter/

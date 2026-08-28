@@ -695,6 +695,16 @@ three existing run entry points. Production modules import their external
 crates directly and use explicit `crate::module` paths internally; neither
 crate uses its parent module as a dependency prelude.
 
+The configuration crate follows the same facade pattern. `model` owns the
+public normalized objects; `raw` owns the crate-private serde YAML schema;
+`load` owns default overlay, validation, reload and construction; `dns` owns
+resolver, geodata, hosts and fake-IP configuration parsing; `proxy` owns
+outbound, group and provider parsing plus provider ETag persistence; and
+`error` owns the public error taxonomy. Unit fixtures live in `tests` instead
+of the product root. Production modules import external crates directly and
+name cross-module helpers through explicit `crate::...` paths; the facade only
+declares modules and preserves the existing public exports.
+
 ## Cargo workspace boundary
 
 Phase 1 introduced the smallest workspace needed by the first vertical slice;
