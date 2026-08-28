@@ -1154,6 +1154,24 @@ echo server, compares the upstream request fields and proves a separate rule
 still rejects. TLS, broader authentication/error combinations, groups,
 providers, UDP and adapter-controller rendering remain separate gates.
 
+### Phase 6B1b accepted scope
+
+The HTTP adapter can wrap its proxy connection in TLS before Hyper performs
+the existing HTTP/1 CONNECT exchange. Configuration accepts `tls`, explicit
+`sni` and `skip-cert-verify` only for HTTP adapters; runtime and controller
+health paths pass those policies through the same narrow `tokio-rustls`
+boundary. The deterministic authority in
+`compat/scripts/phase6b_http_tls.py` observes SNI, Basic authentication,
+CONNECT authority/Host and bidirectional echo, then compares untrusted
+certificate rejection, an authority-rejected SNI and HTTP 502 failure without
+terminating the product. rustls uses the workspace's explicit ring provider,
+while Hyper continues to own CONNECT framing and upgrades.
+
+Positive system/custom-root verification, `name-cert-verify`, client
+certificates, fingerprints, arbitrary proxy headers, unauthenticated and
+exhaustive status/timeout matrices, UDP and chaining remain later OUT-03
+gates.
+
 ### Phase 5C1a accepted scope
 
 The first group slice accepts one or more flat `select` groups whose members

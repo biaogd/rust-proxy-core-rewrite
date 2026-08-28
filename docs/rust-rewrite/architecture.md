@@ -621,6 +621,12 @@ several packages from `transport/` and third-party forks. A Rust crate being
 available for a protocol does not establish wire parity; each protocol needs
 cross-implementation vectors and live interop tests.
 
+The current Rust HTTP adapter keeps those boundaries explicit: runtime owns
+the configured `tls`/SNI/verification policy, `tokio-rustls` returns one boxed
+proxy stream, and Hyper owns HTTP/1 CONNECT framing and upgrade on either the
+plain or TLS stream. DNS, provider downloads and HTTP outbounds share the ring
+rustls provider selection but do not share routing or retry policy.
+
 ## REST controller
 
 The controller can listen on plain TCP, TLS, Unix sockets and Windows named

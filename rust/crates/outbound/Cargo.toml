@@ -13,8 +13,11 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 rewrite-model = { path = "../model" }
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

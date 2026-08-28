@@ -127,6 +127,9 @@ pub struct ProxyConfig {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub tls: bool,
+    pub sni: Option<String>,
+    pub skip_cert_verify: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -764,6 +767,9 @@ struct RawProxy {
     port: Option<i64>,
     username: Option<String>,
     password: Option<String>,
+    tls: Option<bool>,
+    sni: Option<String>,
+    skip_cert_verify: Option<bool>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -975,7 +981,7 @@ impl ConfigSpec {
         let log_level = parse_log_level(raw.log_level.as_deref().unwrap_or("info"))?;
         let raw_rules = raw.rules.unwrap_or_default();
         let raw_sub_rules = raw.sub_rules.unwrap_or_default();
-        let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default())?;
+        let (rematches, proxies) = parse_proxies(raw.proxies.unwrap_or_default(), true)?;
         let proxy_providers = parse_proxy_providers(
             raw.proxy_providers.unwrap_or_default(),
             provider_directory,
@@ -3649,6 +3655,7 @@ fn parse_dns_socket_addr(value: &str, field: &str) -> Result<SocketAddr, ConfigE
 
 fn parse_proxies(
     proxies: Vec<RawProxy>,
+    allow_http_tls: bool,
 ) -> Result<(Vec<RematchSpec>, Vec<ProxyConfig>), ConfigError> {
     let mut rematches = Vec::new();
     let mut outbounds = Vec::new();
@@ -3689,9 +3696,12 @@ fn parse_proxies(
                 });
             }
             Some(kind @ ("http" | "socks5")) => {
+                let has_tls_options =
+                    proxy.tls.is_some() || proxy.sni.is_some() || proxy.skip_cert_verify.is_some();
                 if proxy.target_rematch_name.is_some()
                     || proxy.target_sub_rule.is_some()
                     || proxy.username.is_some() != proxy.password.is_some()
+                    || ((kind != "http" || !allow_http_tls) && has_tls_options)
                     || !proxy.extra.is_empty()
                 {
                     return Err(ConfigError::UnsupportedProxy(name));
@@ -3716,6 +3726,9 @@ fn parse_proxies(
                     port,
                     username: proxy.username,
                     password: proxy.password,
+                    tls: proxy.tls.unwrap_or(false),
+                    sni: proxy.sni.filter(|sni| !sni.is_empty()),
+                    skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
                 });
             }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
@@ -4389,7 +4402,7 @@ fn parse_proxy_provider_records(
         );
         record.name = Some(member_name);
     }
-    let (rematches, proxies) = parse_proxies(records)?;
+    let (rematches, proxies) = parse_proxies(records, false)?;
     if !rematches.is_empty() || proxies.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -5684,6 +5697,9 @@ dns:
                     port: 8080,
                     username: None,
                     password: None,
+                    tls: false,
+                    sni: None,
+                    skip_cert_verify: false,
                 })
                 .collect(),
         };
@@ -5747,6 +5763,9 @@ dns:
                 port: 8080,
                 username: None,
                 password: None,
+                tls: false,
+                sni: None,
+                skip_cert_verify: false,
             }],
         };
         let group = ProxyGroupConfig {
@@ -5832,6 +5851,24 @@ dns:
                 Md5::digest(b"http://127.0.0.1:18080/provider.yaml")
             ))
         );
+    }
+
+    #[test]
+    fn parses_http_proxy_tls_options_without_broadening_socks5() {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: secure-http\n    type: http\n    server: proxy.test\n    port: 8443\n    username: user\n    password: pass\n    tls: true\n    sni: front.test\n    skip-cert-verify: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("HTTP TLS config");
+        let proxy = &config.proxies[0];
+        assert!(proxy.tls);
+        assert_eq!(proxy.sni.as_deref(), Some("front.test"));
+        assert!(proxy.skip_cert_verify);
+
+        let socks = source.replace("type: http", "type: socks5");
+        assert!(matches!(
+            Config::from_yaml(&socks),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
     }
 
     #[test]

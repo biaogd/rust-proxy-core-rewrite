@@ -1652,7 +1652,11 @@ async fn connect_configured_proxy(
     let credentials = proxy.username.as_deref().zip(proxy.password.as_deref());
     match proxy.kind {
         ProxyKind::Http => {
-            rewrite_outbound::connect_http(&server, destination, allow_ipv6, credentials)
+            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
+                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                skip_certificate_verification: proxy.skip_cert_verify,
+            });
+            rewrite_outbound::connect_http(&server, destination, allow_ipv6, credentials, tls)
                 .await
                 .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }

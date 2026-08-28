@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import socket
 import subprocess
 import tempfile
 import time
@@ -12,7 +13,6 @@ from typing import Any
 
 from phase1 import IO_DEADLINE, ROOT, reserve_port
 from phase4 import build_binaries, dns_query, launch, observe_response, stop, wait_dns_ready
-from phase4e5 import encrypted_udp_query
 from phase4e17 import (
     SERVER_NAME,
     build_authority,
@@ -23,6 +23,39 @@ from phase4e17 import (
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase4e19-diff.json"
+
+
+def readiness_udp_query(port: int, query: bytes) -> bytes:
+    """Retry packets dropped between listener and DoQ resolver readiness."""
+    deadline = time.monotonic() + (2 * IO_DEADLINE) + 1
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(0.5)
+            client.sendto(query, ("127.0.0.1", port))
+            try:
+                response, source = client.recvfrom(65_535)
+            except TimeoutError:
+                continue
+            if source[1] != port:
+                raise AssertionError(f"unexpected DNS UDP source {source}")
+            return response
+    raise TimeoutError("Phase 4E19 DNS/DoQ route did not become ready")
+
+
+def reserve_dns_port(excluded: int) -> int:
+    """Select one number free for both DNS TCP and UDP listeners."""
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = int(tcp.getsockname()[1])
+            if port == excluded:
+                continue
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                    udp.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
 
 
 def typed_query(name: str, identifier: int, record_type: int) -> bytes:
@@ -139,7 +172,7 @@ def exercise(
 ) -> dict[str, Any]:
     scratch.mkdir(parents=True, exist_ok=True)
     authority, upstream_port, observation_path = start_authority(scratch, "answer")
-    dns_port = reserve_port()
+    dns_port = reserve_dns_port(upstream_port)
     config = scratch / "config.yaml"
     configured(
         config,
@@ -153,7 +186,7 @@ def exercise(
         identifier = int.from_bytes(query[:2], "big")
         deadline = time.monotonic() + IO_DEADLINE
         while True:
-            response = encrypted_udp_query(dns_port, query)
+            response = readiness_udp_query(dns_port, query)
             # The Go DNS listener can become reachable just before its DoQ
             # resolver finishes initialising.  Treat only that explicit,
             # empty SERVFAIL as a readiness observation and retry the same
@@ -326,10 +359,24 @@ def main() -> None:
         root = pathlib.Path(temporary)
         binaries = build_binaries(root)
         build_authority()
-        observations = {
-            implementation: run_candidate(binary, root / implementation)
-            for implementation, binary in binaries.items()
-        }
+        try:
+            observations = {
+                implementation: run_candidate(binary, root / implementation)
+                for implementation, binary in binaries.items()
+            }
+        except Exception as error:
+            debug = {}
+            for path in root.rglob("*"):
+                if path.is_file() and path.suffix in {".log", ".json", ".yaml"}:
+                    debug[str(path.relative_to(root))] = path.read_text(errors="replace")
+            FAILURE_ARTIFACT.write_text(
+                json.dumps(
+                    {"error": f"{type(error).__name__}: {error}", "debug": debug},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            raise
         if observations["go"] != observations["rust"] or not satisfies_phase_contract(
             observations["go"]
         ):

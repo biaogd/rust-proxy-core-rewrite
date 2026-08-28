@@ -155,7 +155,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Full DIRECT TCP/UDP/platform options | Oracle | Partial | Phase 1/3 local TCP plus IPv4 SOCKS UDP subset; interface/mark/TFO/MPTCP/general NAT are not claimed |
 | REJECT / REJECT-DROP | Oracle | Partial | Phase 3 immediate TCP REJECT parity only; REJECT-DROP timing and full UDP behavior are not claimed |
 | DNS / PASS / PASS-RULE / REMATCH | Oracle | Not started | Routing semantics and metadata mutation |
-| HTTP | Oracle | Partial | `phase6b_http.py` proves configured plaintext HTTP proxy parsing, Basic authentication, exact CONNECT authority/Host and bidirectional mixed-TCP relay with a rejecting fallback; TLS, unauthenticated/error/timeout matrices, UDP and controller adapter views remain unclaimed |
+| HTTP | Oracle | Partial | `phase6b_http.py` proves plaintext CONNECT; `phase6b_http_tls.py` proves TLS wrapping, explicit SNI, skip verification, Basic authentication, exact CONNECT authority/Host, bidirectional mixed-TCP relay and untrusted/SNI/502 rejection. Positive system/custom-root verification, name override, client certificates/fingerprints/headers, unauthenticated and exhaustive error/timeout matrices, UDP and chaining remain unclaimed |
 | SOCKS5 | Oracle | Partial | `phase6b_socks5.py` proves configured username/password, strict auth-method offer, CONNECT address bytes, exact adapter JSON and bidirectional mixed-TCP relay with a rejecting fallback; unauthenticated/failure matrices, domain-resolution policy, TLS, UDP/UoT and chaining remain unclaimed |
 | Shadowsocks (`ss`) | Oracle | Not started | Cipher/plugin/UoT interop |
 | ShadowsocksR (`ssr`) | Oracle | Not started | Cipher/protocol/obfs interop |
@@ -334,6 +334,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5A7b local-resource shutdown | Oracle | **Parity** | Native SIGINT/SIGTERM exit, stream closure and mixed/controller/DNS TCP/UDP release differential passed, 2026-08-26 |
 | Darwin arm64 — Phase 5A8a lifecycle hooks | Oracle | **Parity** | Native CLI/environment precedence, shell, bounded startup readiness, stable shutdown-hook invocation and failure differential passed, 2026-08-27 |
 | Darwin arm64 — Phase 5D controller core | Oracle | **Parity in declared rows** | Native HTTP/WS streams, Bearer/query-token/CORS, single/all live connection deletion and the declared executable `/configs` transaction subset passed, 2026-08-27 |
+| Darwin arm64 — Phase 6B1b HTTP TLS outbound | Oracle | **Parity in declared scope** | Native TLS authority differential passed with SNI, skip/untrusted handling, authenticated CONNECT relay and 502 rejection, 2026-08-28 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |
 | Linux amd64 — Phase 1–4E15 declared slices | Oracle | **Parity** | Default GitHub Actions full differential run `32923792731`, 2026-08-26; deterministic local fixtures only |
 | Linux amd64 — Phase 4E16 DoH HTTP/3 | Oracle | Pending | Default GitHub Actions run is configured; no result is claimed before that run completes |
@@ -359,6 +360,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5A2b geodata-mode CLI default | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A3a controller/secret overrides | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5C aggregate | Oracle | Pending | All 27 group/provider differentials are configured in the parallel GitHub Actions shard; no result is claimed before completion |
+| Linux amd64 — Phase 6B1b HTTP TLS outbound | Oracle | Pending | Default controller-outbound differential shard is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4a X25519 encrypted config | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4b X25519 age convert | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4c X25519 age encrypt/decrypt | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

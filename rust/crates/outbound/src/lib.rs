@@ -1,3 +1,5 @@
+use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -11,6 +13,17 @@ use rewrite_model::{Destination, Host};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::crypto::{
+    WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
+};
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -36,8 +49,69 @@ pub enum HttpProxyError {
     Handshake(#[from] hyper::Error),
     #[error("HTTP proxy request is invalid: {0}")]
     Request(#[from] hyper::http::Error),
+    #[error("HTTP proxy TLS configuration is invalid: {0}")]
+    TlsConfiguration(String),
+    #[error("HTTP proxy TLS handshake timed out")]
+    TlsTimeout,
+    #[error("HTTP proxy TLS handshake failed: {0}")]
+    TlsHandshake(std::io::Error),
     #[error("HTTP proxy rejected CONNECT with status {0}")]
     Status(hyper::StatusCode),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HttpProxyTls<'a> {
+    pub server_name: &'a str,
+    pub skip_certificate_verification: bool,
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification {
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl NoCertificateVerification {
+    fn new() -> Self {
+        Self {
+            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms,
+        }
+    }
+}
+
+impl ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -97,7 +171,7 @@ pub async fn connect(
         .map_err(|_| DirectError::Timeout)?
 }
 
-/// Opens a TCP tunnel through a plaintext HTTP CONNECT proxy.
+/// Opens a TCP tunnel through an HTTP CONNECT proxy, optionally over TLS.
 ///
 /// # Errors
 ///
@@ -108,8 +182,24 @@ pub async fn connect_http(
     destination: &Destination,
     allow_ipv6: bool,
     credentials: Option<(&str, &str)>,
+    tls: Option<HttpProxyTls<'_>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect(server, allow_ipv6).await?;
+    let stream: BoxedOutboundStream = if let Some(tls) = tls {
+        let config = http_tls_config(tls)?;
+        let server_name = ServerName::try_from(tls.server_name.to_owned())
+            .map_err(|_| HttpProxyError::TlsConfiguration("invalid server name".to_owned()))?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(config)).connect(server_name, stream),
+        )
+        .await
+        .map_err(|_| HttpProxyError::TlsTimeout)?
+        .map_err(HttpProxyError::TlsHandshake)?;
+        Box::new(stream)
+    } else {
+        Box::new(stream)
+    };
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(async move {
         let _ = connection.with_upgrades().await;
@@ -131,6 +221,43 @@ pub async fn connect_http(
     }
     let upgraded = hyper::upgrade::on(response).await?;
     Ok(Box::new(TokioIo::new(upgraded)))
+}
+
+fn http_tls_config(tls: HttpProxyTls<'_>) -> Result<ClientConfig, HttpProxyError> {
+    if tls.skip_certificate_verification {
+        return Ok(ClientConfig::builder_with_provider(Arc::new(
+            tokio_rustls::rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new()))
+        .with_no_client_auth());
+    }
+    let mut roots = RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    for certificate in native.certs {
+        roots
+            .add(certificate)
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    }
+    let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
+        "../../../../component/ca/ca-certificates.crt"
+    )))
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    for certificate in embedded {
+        roots
+            .add(certificate)
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    }
+    Ok(ClientConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
 }
 
 /// Opens a TCP stream through a SOCKS5 proxy using remote target addressing.
