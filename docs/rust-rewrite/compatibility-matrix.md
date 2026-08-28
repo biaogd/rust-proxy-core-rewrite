@@ -101,7 +101,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Listener | TCP | UDP | Go | Rust | Differential evidence |
 | --- | --- | --- | --- | --- | --- |
 | Phase 1 mixed HTTP/SOCKS5 TCP subset | Yes | No | Oracle | **Parity** | Fragmented HTTP absolute-form, CONNECT, SOCKS5 IPv4/domain, disabled-IPv6 close and auth-method reply; Phase 1 re-passes after HTTP syntax parsing moved to `httparse` |
-| Full mixed HTTP/SOCKS listener | Yes | SOCKS UDP | Oracle | Partial | Phase 3 declared HTTP/SOCKS4/4a/5 TCP and local SOCKS5 UDP subset; Phase 5F2 adds client-keyed NAT reuse, multiple write-backs and reload generation retention; broader HTTP, IPv6, timeout and association semantics remain |
+| Full mixed HTTP/SOCKS listener | Yes | SOCKS UDP | Oracle | Partial | Phase 3 declared HTTP/SOCKS4/4a/5 TCP and local SOCKS5 UDP subset; Phase 5F2 adds IPv4/IPv6 client-keyed NAT reuse, multiple write-backs, destination fan-out, control-close retention and reload generation retention; broader HTTP, exact timeout and stress semantics remain |
 | Phase 3 fixed HTTP TCP subset | Yes | No | Oracle | **Parity** | Absolute-form/CONNECT, Basic 407/403/success, relay and half-close observations re-pass after the `httparse` migration |
 | Phase 3 fixed/mixed SOCKS subset | Yes | Yes | Oracle | **Parity in declared local scope** | SOCKS4/4a/5 CONNECT, USERID/user-pass, UDP ASSOCIATE, IPv4 DIRECT write-back and FRAG drop; `phase5f_udp_nat.py` adds stable per-client DIRECT NAT, multi-response relay and old/new reload session behavior |
 | Redir | Yes | Platform-dependent | Oracle | Not started | Linux/Darwin/FreeBSD socket tests |
@@ -152,7 +152,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Outbound type | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
 | Phase 1 DIRECT TCP | Oracle | **Parity** | HTTP/echo, domain/IP, dial failure, binary relay and half-close |
-| Full DIRECT TCP/UDP/platform options | Oracle | Partial | Phase 1/3 local TCP plus IPv4 SOCKS UDP; Phase 5F2 proves bounded per-client NAT reuse, multi-response relay and generation retention. Interface/mark/TFO/MPTCP, IPv6, timeout expiry and remote UDP remain unclaimed |
+| Full DIRECT TCP/UDP/platform options | Oracle | Partial | Phase 1/3 local TCP plus SOCKS UDP; Phase 5F2 proves bounded IPv4/IPv6 per-client NAT reuse, destination fan-out, multi-response relay, control-close retention and generation retention. Interface/mark/TFO/MPTCP, timeout expiry and remote UDP adapters remain unclaimed |
 | REJECT / REJECT-DROP | Oracle | Partial | Phase 3 immediate TCP REJECT parity only; REJECT-DROP timing and full UDP behavior are not claimed |
 | DNS / PASS / PASS-RULE / REMATCH | Oracle | Not started | Routing semantics and metadata mutation |
 | HTTP | Oracle | Partial | `phase6b_http.py` proves plaintext CONNECT; `phase6b_http_tls.py` proves TLS wrapping, explicit SNI, skip verification, Basic authentication, exact CONNECT authority/Host, bidirectional mixed-TCP relay and untrusted/SNI/502 rejection. Positive system/custom-root verification, name override, client certificates/fingerprints/headers, unauthenticated and exhaustive error/timeout matrices, UDP and chaining remain unclaimed |
@@ -336,7 +336,7 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 5D controller boundary | Oracle | **Parity in declared rows** | Native TCP/TLS/Unix transport and UI reload, auth/CORS, sustained observability, config safe paths, connection deletion, HTTPS health, bbolt storage interchange and same-PID restart passed, 2026-08-28 |
 | Darwin arm64 — Phase 5E services | Oracle | **Partial** | Native UI/Geo REST/update rollback and all controller client-auth mode differentials passed, plus deterministic local SNTP contract, 2026-08-28; documented global TLS/NTP proxy/system-clock/ASN/general-Geo gaps remain |
 | Darwin arm64 — Phase 5F1 LAN policy | Oracle | **Parity in declared fixed-listener scope** | Native fixed HTTP/SOCKS/mixed IPv4/IPv6 wildcard and explicit bind, same-port PATCH rebind, allow/deny, skip-auth and controller snapshot differential passed, 2026-08-28; native non-loopback/TFO/MPTCP remain |
-| Darwin arm64 — Phase 5F2 UDP NAT | Oracle | **Parity in declared local scope** | Native stable outbound-port reuse, sequential/burst write-back and reload old/new session routing differential passed, 2026-08-28; IPv6, timeout expiry, association ownership and remote adapters remain |
+| Darwin arm64 — Phase 5F2 UDP NAT | Oracle | **Parity in declared local scope** | Native IPv4/IPv6 stable outbound-port reuse, destination fan-out, sequential/burst write-back, control-close retention and reload old/new session routing differential passed, 2026-08-28; exact timeout, stress and remote adapters remain |
 | Darwin arm64 — Phase 6B1b HTTP TLS outbound | Oracle | **Parity in declared scope** | Native TLS authority differential passed with SNI, skip/untrusted handling, authenticated CONNECT relay and 502 rejection, 2026-08-28 |
 | Darwin arm64 — Phase 6B1c HTTP CONNECT contract | Oracle | **Parity in declared scope** | Native unauthenticated/authenticated relay, default/custom header and exact-200 response matrix differential passed, 2026-08-28 |
 | Darwin arm64 beyond declared Phase 5 slices | Oracle | Not started | Capability-specific native evidence |

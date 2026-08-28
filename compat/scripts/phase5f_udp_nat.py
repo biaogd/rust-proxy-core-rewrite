@@ -15,7 +15,14 @@ import time
 from typing import Any
 
 from phase1 import EchoHandler, IO_DEADLINE, ROOT, reserve_port, start_server, wait_ready
-from phase3 import decode_socks_udp, launch, socks_udp_packet, stop, wait_route
+from phase3 import (
+    decode_socks_udp,
+    launch,
+    socks_udp_packet,
+    stop,
+    udp_associate,
+    wait_route,
+)
 from phase5b1a import build_binaries, debug_files
 
 
@@ -51,6 +58,17 @@ class NatUdpServer(socketserver.ThreadingUDPServer):
         self.shutdown()
         self.server_close()
         self.thread.join(timeout=IO_DEADLINE)
+
+
+class NatUdpServerV6(NatUdpServer):
+    address_family = socket.AF_INET6
+
+    def __init__(self) -> None:
+        self.observed = []
+        self.observed_lock = threading.Lock()
+        socketserver.ThreadingUDPServer.__init__(self, ("::1", 0), NatUdpHandler)
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
 
 
 class NatUdpHandler(socketserver.BaseRequestHandler):
@@ -90,6 +108,24 @@ def receive_payload(client: socket.socket) -> bytes:
     return payload
 
 
+def socks_udp_packet_v6(destination_port: int, payload: bytes) -> bytes:
+    return (
+        b"\x00\x00\x00\x04"
+        + socket.inet_pton(socket.AF_INET6, "::1")
+        + destination_port.to_bytes(2, "big")
+        + payload
+    )
+
+
+def receive_payload_v6(client: socket.socket) -> bytes:
+    packet, _ = client.recvfrom(65_535)
+    if len(packet) < 22 or packet[:4] != b"\x00\x00\x00\x04":
+        raise AssertionError(f"unexpected IPv6 SOCKS UDP response: {packet!r}")
+    if socket.inet_ntop(socket.AF_INET6, packet[4:20]) != "::1":
+        raise AssertionError(f"unexpected IPv6 response address: {packet!r}")
+    return packet[22:]
+
+
 def round_trip(
     client: socket.socket, proxy_port: int, destination_port: int, payload: bytes
 ) -> bytes:
@@ -108,6 +144,7 @@ def round_trip(
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     authority = NatUdpServer()
+    second_authority = NatUdpServer()
     tcp_echo = start_server(EchoHandler)
     socks_port, mixed_port = reserve_port(), reserve_port()
     config = scratch / "config.yaml"
@@ -122,7 +159,9 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     try:
         wait_ready(process, socks_port)
         wait_ready(process, mixed_port)
+        association, _, _ = udp_associate(mixed_port)
         first = round_trip(client, mixed_port, authority.port, b"first")
+        association.close()
         second = round_trip(client, mixed_port, authority.port, b"second")
         first_source = authority.source_port(b"first")
         second_source = authority.source_port(b"second")
@@ -134,6 +173,8 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         )
         fixed_first_source = authority.source_port(b"fixed-first")
         fixed_second_source = authority.source_port(b"fixed-second")
+        fanout = round_trip(client, mixed_port, second_authority.port, b"fanout")
+        fanout_source = second_authority.source_port(b"fanout")
 
         client.sendto(
             socks_udp_packet(authority.port, b"burst"),
@@ -173,7 +214,10 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             "outbound-port-reused": {
                 "mixed": first_source == second_source,
                 "fixed": fixed_first_source == fixed_second_source,
+                "across-destinations": first_source == fanout_source,
             },
+            "control-close-retains-session": second.decode(),
+            "destination-fanout": fanout.decode(),
             "burst": [payload.decode() for payload in burst],
             "reload": {
                 "existing-session": retained.decode(),
@@ -188,7 +232,47 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         stdout.close()
         stderr.close()
         authority.close()
+        second_authority.close()
         tcp_echo.close()
+
+
+def exercise_ipv6(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
+    authority = NatUdpServerV6()
+    mixed_port = reserve_port()
+    config = scratch / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: info
+ipv6: true
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    client = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    client.bind(("::1", 0))
+    client.settimeout(IO_DEADLINE)
+    try:
+        wait_ready(process, mixed_port)
+        payloads = []
+        sources = []
+        for payload in (b"ipv6-first", b"ipv6-second"):
+            client.sendto(socks_udp_packet_v6(authority.port, payload), ("::1", mixed_port))
+            payloads.append(receive_payload_v6(client).decode())
+            sources.append(authority.source_port(payload))
+        return {
+            "payloads": payloads,
+            "outbound-port-reused": sources[0] == sources[1],
+        }
+    finally:
+        client.close()
+        stop(process)
+        stdout.close()
+        stderr.close()
+        authority.close()
 
 
 def main() -> int:
@@ -200,7 +284,14 @@ def main() -> int:
             for name, binary in binaries.items():
                 scratch = root / name
                 scratch.mkdir()
-                observations[name] = exercise(binary, scratch)
+                ipv4 = scratch / "ipv4"
+                ipv6 = scratch / "ipv6"
+                ipv4.mkdir()
+                ipv6.mkdir()
+                observations[name] = {
+                    "ipv4": exercise(binary, ipv4),
+                    "ipv6": exercise_ipv6(binary, ipv6),
+                }
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

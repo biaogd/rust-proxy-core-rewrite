@@ -1243,6 +1243,13 @@ successful host cross-build is never sufficient for a native behavior claim.
   session remains DIRECT while a new client is rejected. General destination
   fan-out, IPv6, remote UDP adapters/UoT, timeout-expiry timing and association
   ownership remain later `5F2` gates.
+- `5F2b`: the same Go/Rust NAT differential now proves IPv4 destination
+  fan-out through one stable outbound socket, retention after the SOCKS5 UDP
+  ASSOCIATE control connection closes, and IPv6 request/write-back plus source
+  port reuse through the dual-stack mixed listener. These observations match
+  the fixed Go SOCKS UDP listener, whose packet lifecycle is source-keyed and
+  not owned by the control connection. The exact 60-second expiry boundary,
+  capacity/backpressure stress and remote UDP adapters/UoT remain later gates.
 
 ## Phase 6 — established remote protocols
 

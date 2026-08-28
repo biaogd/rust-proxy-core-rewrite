@@ -4353,6 +4353,15 @@ does not yet claim timeout-expiry timing, multi-destination fan-out, IPv6,
 control-association ownership, remote UDP adapters/UoT or stress capacity. A
 dedicated Linux CI shard runs this gate in parallel; its result is pending.
 
+Phase 5F2b broadens the same deterministic differential without changing the
+60-second production timeout. One IPv4 client now proves that two destination
+authorities share the stable outbound socket, and that closing a SOCKS5 UDP
+ASSOCIATE control connection does not own or tear down the source-keyed NAT
+entry, matching the fixed Go listener. A dual-stack mixed listener additionally
+proves IPv6 request decoding, DIRECT forwarding, response encoding and source
+port reuse. Exact timeout expiry, queue/capacity stress and remote UDP
+adapters/UoT remain unclaimed.
+
 Phase 5F1a also accepts the fixed-listener IPv4 LAN-policy boundary. Runtime
 configuration now retains `allow-lan`, `bind-address`, allowed/disallowed
 prefixes and skip-auth prefixes; fixed HTTP, SOCKS and mixed TCP use those
