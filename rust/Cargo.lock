@@ -79,6 +79,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-gcm-siv"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
+dependencies = [
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
+ "polyval 0.7.3",
+]
+
+[[package]]
 name = "age"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,6 +463,18 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "ccm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be9b34d99d395af800e996c5784f810f8400ccd64202f91859dc677825b5378"
+dependencies = [
+ "aead 0.6.1",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
 ]
 
 [[package]]
@@ -3447,18 +3473,24 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b404a62ebea5003f44b9a2748dee7555c5f9ae39896508e466a2a91ee6fa5df5"
 dependencies = [
+ "aead 0.6.1",
  "aes 0.9.3",
  "aes-gcm 0.11.1",
+ "aes-gcm-siv",
  "aws-lc-rs",
  "camellia",
+ "ccm",
  "cfg-if",
  "chacha20 0.10.1",
  "chacha20poly1305 0.11.0",
  "ctr 0.10.1",
+ "ghash 0.6.0",
  "hkdf 0.13.0",
  "md-5 0.11.0",
  "rand 0.10.2",
  "sha1 0.11.0",
+ "sm4",
+ "subtle",
 ]
 
 [[package]]
@@ -3504,6 +3536,15 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "sm4"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2d621883cdeeaee6759d39f4bc8cd314b29db72b6ac3d6714b31422512ee11"
+dependencies = [
+ "cipher 0.5.2",
+]
 
 [[package]]
 name = "smallvec"

@@ -142,6 +142,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-E Shadowsocks HTTP provider/health | Complete in declared lifecycle scope | Initial HTTP download, A→B manual refresh, TCP/UDP replacement, fresh-cache restart and a real HEAD health probe through SS TCP pass one Go/Rust differential; scheduled/ETag/rollback stress and later SS options remain open |
 | Phase 6C-F Shadowsocks UDP-over-TCP | Complete in declared SIP004 UoT scope | Go-compatible default/0/v1/v2 validation, v1/v2 magic destinations and framing, resolved IPv4/domain-originated relay, same-session reuse and exact controller capability pass one native differential; plugins/2022/UoT connect mode remain open |
 | Phase 6C-G Shadowsocks legacy stream ciphers | Complete in declared shared-library scope | AES-CTR×3, AES-CFB×3, RC4-MD5 and ChaCha20-IETF each pass config plus domain/large/half-close TCP and IPv4/domain native UDP wire comparison; Go-only extra methods remain rejected |
+| Phase 6C-H Shadowsocks extra AEAD ciphers | Complete in declared shared-library scope | XChaCha20-Poly1305, AES-128/256-CCM and AES-128/256-GCM-SIV each pass config plus domain/large/half-close TCP and IPv4/domain native UDP wire comparison; remaining Go-only methods stay explicit gaps |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
@@ -5020,6 +5021,27 @@ same official-library authority. The script is included in the default
 controller/outbound Actions shard; native Linux evidence remains pending.
 Plugins, Shadowsocks 2022, Go-only extra methods, IPv6 UDP, inbound/server mode
 and shared dialer/transport composition remain open.
+
+## Phase 6C-H Shadowsocks extra AEAD evidence
+
+The workspace enables the official library's extra SIP004 AEAD feature and the
+config parser accepts the five methods shared with Go: XChaCha20-IETF-Poly1305,
+AES-128/256-CCM and AES-128/256-GCM-SIV. The same outbound TCP/native-UDP
+adapters own routing and lifecycle; the product contains no new cipher code.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config parses_phase6c_shadowsocks_extra_aead_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-extra-aead
+PHASE6CSSEXTRAAEAD_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-extra-aead python3 compat/scripts/phase6c_shadowsocks_extra_aead.py
+```
+
+The five-method Go/Rust differential passes. Each method proves domain TCP,
+128 KiB IPv4 TCP, half-close delivery, IPv4/domain native UDP and process
+survival with an independent official-library authority. The script is in the
+default controller/outbound Actions shard; Linux evidence remains pending.
+Go-only AES-192-CCM, reduced-round ChaCha, AEGIS/AEZ/Deoxys/LEA/Ascon and other
+extra methods remain rejected, while 2022 and plugins remain later gates.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

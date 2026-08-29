@@ -29,6 +29,13 @@ const SHADOWSOCKS_LEGACY_STREAM_CIPHERS: [&str; 8] = [
     "rc4-md5",
     "chacha20-ietf",
 ];
+const SHADOWSOCKS_EXTRA_AEAD_CIPHERS: [&str; 5] = [
+    "xchacha20-ietf-poly1305",
+    "aes-128-ccm",
+    "aes-256-ccm",
+    "aes-128-gcm-siv",
+    "aes-256-gcm-siv",
+];
 
 pub(crate) fn parse_proxies(
     proxies: Vec<RawProxy>,
@@ -223,6 +230,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .filter(|cipher| {
             SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str())
                 || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher.as_str())
+                || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher.as_str())
         })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {

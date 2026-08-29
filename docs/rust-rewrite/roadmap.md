@@ -1627,6 +1627,24 @@ not implemented by this Rust dependency and remain rejected. Plugins,
 Shadowsocks 2022, IPv6 UDP, inbound/server direction and common dialer/
 transport composition remain separate gates.
 
+### Phase 6C-H accepted scope
+
+The non-2022 AEAD client matrix adds the five extra methods implemented by both
+the pinned Go oracle and the official Rust library:
+`xchacha20-ietf-poly1305`, `aes-128-ccm`, `aes-256-ccm`,
+`aes-128-gcm-siv` and `aes-256-gcm-siv`. The official library's extra-AEAD
+feature supplies their cryptography and existing TCP/native-UDP adapters supply
+the data plane; no product cipher implementation is introduced.
+
+`compat/scripts/phase6c_shadowsocks_extra_aead.py` reuses the deterministic
+Phase 6C-G lifecycle and starts a fresh authority/product pair for every method.
+It compares domain and large IPv4 TCP relay, half-close response delivery,
+IPv4 and domain-originated UDP relay, and process survival.
+
+Go-only `aes-192-ccm`, ChaCha8/XChaCha8, AEGIS, AEZ, Deoxys, LEA, Ascon and
+other methods remain rejected. Shadowsocks 2022 and plugins remain separate
+protocol/transport gates, as do IPv6 UDP and inbound/server direction.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
