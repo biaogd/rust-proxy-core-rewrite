@@ -139,6 +139,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-B Shadowsocks AEAD TCP matrix | Complete in declared SIP004 AEAD TCP scope | AES-128-GCM, AES-256-GCM and ChaCha20-IETF-Poly1305 each pass domain/IPv4 relay, 128 KiB framing, half-close and process-survival comparison; UDP/UoT/plugins/2022 remain open |
 | Phase 6C-C Shadowsocks AEAD UDP | Complete in declared SIP004 AEAD UDP scope | All three accepted ciphers pass mixed/SOCKS5 UDP ingress, IPv4/domain relay, one-client association reuse, controller capability and process-survival comparison; UoT/plugins/2022/IPv6 UDP remain open |
 | Phase 6C-D Shadowsocks local providers/groups | Complete in declared inline/file selector scope | Inline and file SS members expose provider/controller identity, switch through a selector and pass real domain TCP plus IPv4 UDP forwarding; HTTP-provider lifecycle/health and later SS options remain open |
+| Phase 6C-E Shadowsocks HTTP provider/health | Complete in declared lifecycle scope | Initial HTTP download, A→B manual refresh, TCP/UDP replacement, fresh-cache restart and a real HEAD health probe through SS TCP pass one Go/Rust differential; scheduled/ETag/rollback stress and later SS options remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
@@ -4929,6 +4930,35 @@ controller/outbound Actions shard. Linux evidence remains pending that run.
 HTTP-provider download/refresh/cache and automatic health behavior for SS,
 UoT, plugins, stream/extra/2022 ciphers, IPv6 UDP, inbound/server direction and
 shared dialer/transport composition remain open.
+
+## Phase 6C-E Shadowsocks HTTP-provider lifecycle and health evidence
+
+The generic HTTP provider can now be cited for its Shadowsocks consumer path.
+Initial download parses an SS member and persists the exact payload; manual
+refresh transactionally replaces the same member name with new server
+credentials; a clean restart uses the fresh cache while the HTTP endpoint
+returns 500. Selector state, provider ownership and `udp: true`/`uot: false`
+remain visible across those generations.
+
+The differential uses independent A and B official-library authorities with
+different ports and passwords. It proves A TCP/UDP, refreshes the provider to B,
+stops A and proves B TCP/UDP, then restarts the product and proves B again from
+cache without another successful provider response. The provider healthcheck
+performs a real HEAD request through B to a deterministic local 204 server and
+must populate both member history and per-URL health state.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+PHASE6CSSHTTPPROVIDER_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-provider python3 compat/scripts/phase6c_shadowsocks_http_provider.py
+```
+
+The Go/Rust differential passes and is included in the default
+controller/outbound Actions shard. Linux evidence remains pending that run.
+The generic scheduled refresh, ETag, malformed/oversized rollback, transform
+and concurrent reload corpus is not repeated with SS payloads. UoT, plugins,
+stream/extra/2022 ciphers, IPv6 UDP, inbound/server direction and shared
+dialer/transport composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

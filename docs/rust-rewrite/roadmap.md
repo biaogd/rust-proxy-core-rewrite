@@ -1550,6 +1550,31 @@ health behavior for Shadowsocks members. Those lifecycle paths, UoT, plugins,
 2022, IPv6 UDP, inbound/server mode and shared dialer/transport composition
 remain separate work.
 
+### Phase 6C-E accepted scope
+
+An HTTP proxy provider may initially download a Shadowsocks member, persist its
+payload, replace that member transactionally through the manual provider refresh
+endpoint and restore the fresh cached member on process restart without a
+successful network fetch. The selected member's new TCP and UDP sessions use
+the refreshed server credentials immediately. Provider health checks open the
+configured HEAD request through the native SS TCP adapter and publish the
+result in the member's standard history and per-URL state.
+
+`compat/scripts/phase6c_shadowsocks_http_provider.py` starts independent A and
+B SS authorities with different ports and passwords. It proves initial A TCP/
+UDP relay, refreshes the same member name to B, stops A and proves B relay,
+restarts each product while the provider endpoint returns 500 and proves the
+fresh B cache is retained. Finally it invokes provider healthcheck and requires
+a successful history entry for a deterministic local 204 endpoint reached
+through B. Cache bytes, controller capability and process survival are compared
+as well.
+
+This does not re-run the generic provider's scheduled refresh, ETag, malformed/
+oversized rollback, concurrent reload or transform corpus with SS payloads;
+those remain bounded integration evidence rather than protocol implementation.
+UoT, plugins, 2022, IPv6 UDP, inbound/server direction and shared dialer/
+transport composition also remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
