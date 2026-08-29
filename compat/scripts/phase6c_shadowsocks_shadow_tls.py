@@ -253,6 +253,63 @@ rules:
         half_close_server.close()
 
 
+def exercise_hostile(
+    binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
+) -> dict[str, bool]:
+    """Wrong plugin password must fail the wire path for both runtimes."""
+    tcp_echo = start_server(EchoHandler)
+    mixed_port = reserve_port()
+    authority_port = reserve_port()
+    hostile = scratch / "hostile-wrong-password"
+    hostile.mkdir(parents=True, exist_ok=True)
+    authority_process, authority_stdout, authority_stderr = start_shadowtls_authority(
+        authority, hostile, authority_port, VERSION, None
+    )
+    config = hostile / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: local-ss
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {KEY_256}
+    plugin: shadow-tls
+    plugin-opts:
+      host: {HOST}
+      password: wrong-plugin-password
+      version: {VERSION}
+      skip-cert-verify: true
+rules:
+  - MATCH,local-ss
+"""
+    )
+    process, stdout, stderr = launch(binary, config, hostile)
+    try:
+        wait_ready(process, mixed_port)
+        try:
+            ok = echo(mixed_port, "127.0.0.1", tcp_echo.port, b"hostile")
+        except (EOFError, OSError, TimeoutError):
+            ok = False
+        # Expect failure: wrong password must not successfully echo.
+        return {
+            "hostile:wrong-password-rejected": not ok,
+            "hostile:process-alive": process.poll() is None,
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        tcp_echo.close()
+
+
 def exercise(
     binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
 ) -> dict[str, Any]:
@@ -260,9 +317,12 @@ def exercise(
     validation.mkdir()
     wire = scratch / "wire"
     wire.mkdir()
+    hostile = scratch / "hostile"
+    hostile.mkdir()
     return {
         "config": validate(binary, validation),
         "wire": exercise_wire(binary, authority, wire),
+        "hostile": exercise_hostile(binary, authority, hostile),
     }
 
 

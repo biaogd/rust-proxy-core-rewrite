@@ -51,7 +51,11 @@ pub struct ShadowTlsConnectOptions<'a> {
     pub custom_roots: &'a [String],
     pub alpn: &'a [String],
     /// Browser fingerprint label from the proxy-level `client-fingerprint` field.
-    /// Reserved for future uTLS parity; rustls currently ignores this value.
+    ///
+    /// Go Clash feeds this into uTLS (`UClient` / `GetFingerprint`). The vendored
+    /// rustls session-id hook can only rewrite the 32-byte session-id; it cannot
+    /// impersonate browser `ClientHello` shape (cipher suites, extensions, GREASE).
+    /// Full uTLS parity needs a different TLS stack and is intentionally not claimed.
     pub client_fingerprint: Option<&'a str>,
 }
 
@@ -183,12 +187,16 @@ impl ShadowTlsIo {
     fn finish(self, version: u8) -> Result<BoxedOutboundStream, ShadowTlsError> {
         match version {
             1 => Ok(Box::new(self.inner)),
-            2 => Ok(Box::new(V2ClientStream::new(
-                self.inner,
-                self.read_hash
-                    .map(|mac| mac.finalize().into_bytes()[..8].to_vec())
-                    .unwrap_or_default(),
-            ))),
+            2 => {
+                let mut stream = V2ClientStream::new(
+                    self.inner,
+                    self.read_hash
+                        .map(|mac| mac.finalize().into_bytes()[..8].to_vec())
+                        .unwrap_or_default(),
+                );
+                stream.take_read_phase(self.read_phase);
+                Ok(Box::new(stream))
+            }
             3 => {
                 if !self.authorized {
                     return Err(ShadowTlsError::Protocol("traffic hijacked".to_owned()));
@@ -204,14 +212,15 @@ impl ShadowTlsIo {
                     .map_err(|error| ShadowTlsError::Protocol(format!("HMAC key: {error}")))?;
                 hmac_verify.update(&server_random);
                 hmac_verify.update(b"S");
+                let (read_buffer, read_offset) = read_phase_to_verified(self.read_phase);
                 Ok(Box::new(VerifiedStream {
                     inner: self.inner,
                     hmac_add,
                     hmac_verify,
                     hmac_ignore: self.read_hmac,
                     pending: Vec::new(),
-                    read_buffer: None,
-                    read_offset: 0,
+                    read_buffer,
+                    read_offset,
                     write_state: WriteState::Idle,
                 }))
             }
@@ -430,6 +439,7 @@ struct V2ClientStream {
     read_remaining: usize,
     read_header: [u8; TLS_HEADER_SIZE],
     read_header_filled: usize,
+    pending: Vec<u8>,
 }
 
 impl V2ClientStream {
@@ -442,6 +452,27 @@ impl V2ClientStream {
             read_remaining: 0,
             read_header: [0_u8; TLS_HEADER_SIZE],
             read_header_filled: 0,
+            pending: Vec::new(),
+        }
+    }
+
+    fn take_read_phase(&mut self, phase: Option<ReadPhase>) {
+        match phase {
+            Some(ReadPhase::Header { header, filled }) => {
+                self.read_header = header;
+                self.read_header_filled = filled;
+            }
+            Some(ReadPhase::Body {
+                header,
+                buf,
+                filled,
+            }) => {
+                self.read_header = header;
+                self.read_header_filled = 0;
+                self.pending = buf[..filled].to_vec();
+                self.read_remaining = buf.len().saturating_sub(filled);
+            }
+            None => {}
         }
     }
 
@@ -464,6 +495,12 @@ impl AsyncRead for V2ClientStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
+        if !this.pending.is_empty() {
+            let to_copy = buf.remaining().min(this.pending.len());
+            buf.put_slice(&this.pending[..to_copy]);
+            this.pending.drain(..to_copy);
+            return Poll::Ready(Ok(()));
+        }
         if this.read_remaining > 0 {
             let limit = buf.remaining().min(this.read_remaining);
             let mut scratch = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
@@ -552,7 +589,17 @@ impl AsyncWrite for V2ClientStream {
                 return Poll::Ready(Ok(consumed));
             }
             if data.is_empty() {
-                return Poll::Ready(Ok(0));
+                // Go shadowConn writes an empty application-data record for zero-length writes.
+                let frame = match Self::encode_tls_record(&[]) {
+                    Ok(frame) => frame,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                this.write_state = WriteState::Active {
+                    frame,
+                    offset: 0,
+                    consumed: 0,
+                };
+                continue;
             }
             let chunk = if this.prefix_sent {
                 data.len().min(MAX_TLS_PLAINTEXT)
@@ -589,12 +636,24 @@ impl AsyncWrite for V2ClientStream {
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(drain_write_state(
+            &mut this.write_state,
+            &mut this.inner,
+            cx
+        ))?;
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(drain_write_state(
+            &mut this.write_state,
+            &mut this.inner,
+            cx
+        ))?;
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -778,12 +837,24 @@ impl AsyncWrite for VerifiedStream {
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(drain_write_state(
+            &mut this.write_state,
+            &mut this.inner,
+            cx
+        ))?;
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(drain_write_state(
+            &mut this.write_state,
+            &mut this.inner,
+            cx
+        ))?;
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -819,7 +890,54 @@ fn send_alert(mut writer: Pin<&mut BoxedOutboundStream>, cx: &mut Context<'_>) {
     record[2] = 3;
     record[4] = 26;
     rand::rng().fill(&mut record[TLS_HEADER_SIZE..]);
-    let _ = writer.as_mut().poll_write(cx, &record);
+    let mut offset = 0;
+    while offset < RECORD_SIZE {
+        match writer.as_mut().poll_write(cx, &record[offset..]) {
+            Poll::Ready(Ok(written)) if written > 0 => offset += written,
+            _ => break,
+        }
+    }
+}
+
+fn drain_write_state(
+    write_state: &mut WriteState,
+    inner: &mut BoxedOutboundStream,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<()>> {
+    if let WriteState::Active {
+        frame,
+        offset,
+        consumed,
+    } = std::mem::replace(write_state, WriteState::Idle)
+    {
+        let written = ready!(poll_write_all(Pin::new(inner), cx, &frame, offset))?;
+        if written < frame.len() {
+            *write_state = WriteState::Active {
+                frame,
+                offset: written,
+                consumed,
+            };
+            return Poll::Pending;
+        }
+    }
+    Poll::Ready(Ok(()))
+}
+
+fn read_phase_to_verified(phase: Option<ReadPhase>) -> (Option<Vec<u8>>, usize) {
+    match phase {
+        Some(ReadPhase::Header { header, filled }) => (Some(header.to_vec()), filled),
+        Some(ReadPhase::Body {
+            header,
+            buf,
+            filled,
+        }) => {
+            let mut buffer = Vec::with_capacity(TLS_HEADER_SIZE + buf.len());
+            buffer.extend_from_slice(&header);
+            buffer.extend_from_slice(&buf);
+            (Some(buffer), TLS_HEADER_SIZE + filled)
+        }
+        None => (None, 0),
+    }
 }
 
 fn encode_application_data_frame(hmac_add: &mut HmacSha1, payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -1057,6 +1175,130 @@ mod tests {
             }
         }
         assert_eq!(consumed, payload.len());
+    }
+
+    #[test]
+    fn verified_stream_flush_drains_pending_frame_before_completing() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [3_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(LimitedWriter {
+                inner: client,
+                max_write: 1,
+            }),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write(&mut cx, b"xy"),
+            Poll::Pending
+        ));
+        assert!(matches!(stream.write_state, WriteState::Active { .. }));
+        loop {
+            match Pin::new(&mut stream).poll_flush(&mut cx) {
+                Poll::Ready(Ok(())) => break,
+                Poll::Ready(Err(error)) => panic!("flush failed: {error}"),
+                Poll::Pending => {
+                    let mut drain = [0_u8; 64];
+                    let _ = std::future::poll_fn(|cx| {
+                        Pin::new(&mut peer).poll_read(cx, &mut ReadBuf::new(&mut drain))
+                    })
+                    .now_or_never();
+                }
+            }
+        }
+        assert!(matches!(stream.write_state, WriteState::Idle));
+    }
+
+    #[test]
+    fn verified_stream_read_survives_partial_record() {
+        let (client, server) = tokio::io::duplex(4096);
+        let server_random = [4_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"S");
+        let payload = b"hello";
+        let frame = encode_application_data_frame(&mut hmac_add, payload).expect("frame");
+        let mut peer = client;
+        // Deliver only the TLS header first via a non-blocking short write pattern.
+        let header = frame[..TLS_HEADER_SIZE].to_vec();
+        let body = frame[TLS_HEADER_SIZE..].to_vec();
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut hmac_client = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_client.update(&server_random);
+        hmac_client.update(b"C");
+        let mut stream = VerifiedStream {
+            inner: Box::new(server),
+            hmac_add: hmac_client,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // Inject header bytes into the stream's read_buffer to simulate a partial record
+        // that arrived before finish() handed off state — then deliver the remainder.
+        stream.read_buffer = Some(header);
+        stream.read_offset = TLS_HEADER_SIZE;
+        let mut offset = 0;
+        while offset < body.len() {
+            match Pin::new(&mut peer).poll_write(&mut cx, &body[offset..]) {
+                Poll::Ready(Ok(written)) if written > 0 => offset += written,
+                Poll::Ready(Err(error)) => panic!("peer write failed: {error}"),
+                _ => break,
+            }
+        }
+        let mut buf = [0_u8; 16];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        for _ in 0..8 {
+            match Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => break,
+                Poll::Ready(Err(error)) => panic!("read failed: {error}"),
+                Poll::Pending => {}
+            }
+        }
+        assert_eq!(&read_buf.filled()[..payload.len()], payload);
+    }
+
+    #[test]
+    fn finish_transfers_partial_read_phase_into_verified_stream() {
+        let (read_buffer, read_offset) = read_phase_to_verified(Some(ReadPhase::Header {
+            header: [APPLICATION_DATA, 3, 3, 0, 9],
+            filled: 3,
+        }));
+        assert_eq!(read_offset, 3);
+        assert_eq!(
+            read_buffer.as_deref(),
+            Some([APPLICATION_DATA, 3, 3, 0, 9].as_slice())
+        );
+        let (read_buffer, read_offset) = read_phase_to_verified(Some(ReadPhase::Body {
+            header: [APPLICATION_DATA, 3, 3, 0, 4],
+            buf: vec![1, 2, 3, 4],
+            filled: 2,
+        }));
+        assert_eq!(read_offset, TLS_HEADER_SIZE + 2);
+        assert_eq!(
+            read_buffer.as_deref(),
+            Some([APPLICATION_DATA, 3, 3, 0, 4, 1, 2, 3, 4].as_slice())
+        );
     }
 
     #[tokio::test]

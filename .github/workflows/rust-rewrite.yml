@@ -5,9 +5,11 @@ on:
     branches:
       - main
       - "codex/**"
+      - "cursor/**"
   pull_request:
     branches:
       - main
+      - "codex/**"
   workflow_dispatch:
 
 permissions:
