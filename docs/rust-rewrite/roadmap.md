@@ -1685,6 +1685,23 @@ ChaCha20-2022 EIH and AES chains with more than one identity key remain
 rejected. Multi-hop EIH, native 2022 UDP, 2022-extra methods, plugins, IPv6 UDP
 and server direction remain separate gates.
 
+### Phase 6C-K accepted scope
+
+The client cipher set adds `2022-blake3-chacha8-poly1305` through the official
+library's 2022-extra feature. Configuration requires one standard-base64
+32-byte PSK and rejects EIH and native UDP. The differential uses an
+independent official-library authority and compares domain TCP, 128 KiB IPv4
+TCP, half-close delivery and process survival.
+
+### Phase 6C-L accepted scope
+
+The shared pre-2022 UDP path accepts explicit IPv6 destinations when global
+IPv6 is enabled. `compat/scripts/phase6c_shadowsocks_ipv6_udp.py` compares
+mixed and SOCKS5 ingress through representative AEAD, stream and extra-AEAD
+ciphers, preserving the returned IPv6 source address and payload. Domain
+resolution preference, 2022 UDP, plugins and server direction remain separate
+gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

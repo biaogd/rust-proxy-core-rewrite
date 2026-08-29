@@ -295,6 +295,8 @@ jobs:
       PHASE6CSSEXTRAAEAD_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSS2022_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSS2022EIH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSS2022CHACHA8_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSIPV6UDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -371,6 +373,8 @@ jobs:
             compat/scripts/phase6c_shadowsocks_extra_aead.py \
             compat/scripts/phase6c_shadowsocks_2022.py \
             compat/scripts/phase6c_shadowsocks_2022_eih.py \
+            compat/scripts/phase6c_shadowsocks_2022_chacha8.py \
+            compat/scripts/phase6c_shadowsocks_ipv6_udp.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

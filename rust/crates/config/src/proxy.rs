@@ -38,10 +38,11 @@ const SHADOWSOCKS_EXTRA_AEAD_CIPHERS: [&str; 5] = [
     "aes-128-gcm-siv",
     "aes-256-gcm-siv",
 ];
-const SHADOWSOCKS_2022_CIPHERS: [&str; 3] = [
+const SHADOWSOCKS_2022_CIPHERS: [&str; 4] = [
     "2022-blake3-aes-128-gcm",
     "2022-blake3-aes-256-gcm",
     "2022-blake3-chacha20-poly1305",
+    "2022-blake3-chacha8-poly1305",
 ];
 
 pub(crate) fn parse_proxies(
@@ -243,12 +244,17 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let expected_key_length = match cipher.as_str() {
         "2022-blake3-aes-128-gcm" => Some(16),
-        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => Some(32),
+        "2022-blake3-aes-256-gcm"
+        | "2022-blake3-chacha20-poly1305"
+        | "2022-blake3-chacha8-poly1305" => Some(32),
         _ => None,
     };
     if let Some(expected_key_length) = expected_key_length {
         let keys = password.split(':').collect::<Vec<_>>();
-        let maximum_keys = if cipher == "2022-blake3-chacha20-poly1305" {
+        let maximum_keys = if matches!(
+            cipher.as_str(),
+            "2022-blake3-chacha20-poly1305" | "2022-blake3-chacha8-poly1305"
+        ) {
             1
         } else {
             2

@@ -1633,6 +1633,32 @@ fn parses_phase6c_shadowsocks_2022_single_hop_eih_scope() {
 }
 
 #[test]
+fn parses_phase6c_shadowsocks_2022_chacha8_scope() {
+    let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let valid = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-chacha8-poly1305\n    password: {key}\n"
+    );
+    let config = Config::from_yaml(&valid).expect("Phase 6C Shadowsocks 2022 ChaCha8 config");
+    assert_eq!(
+        config.proxies[0].cipher.as_deref(),
+        Some("2022-blake3-chacha8-poly1305")
+    );
+    for password in [
+        "ordinary-password",
+        "AAECAwQFBgcICQoLDA0ODw==",
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-chacha8-poly1305\n    password: {password}\n"
+        );
+        assert!(matches!(
+            Config::from_yaml(&source),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+}
+
+#[test]
 fn parses_phase6c_shadowsocks_legacy_stream_scope() {
     for cipher in [
         "aes-128-ctr",
