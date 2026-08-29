@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
-"""Go/Rust differential for Shadowsocks AEAD TCP outbound.
-
-Not run in CI until a portable upstream fixture is available. Requires
-`ssserver` from shadowsocks-rust locally, or set PHASE6CSS_SKIP_ROUNDTRIP=1.
-"""
+"""Go/Rust differential for Shadowsocks AEAD TCP outbound."""
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, recv_exact, reserve_port, start_server, wait_ready
+from phase1 import EchoHandler, ROOT, recv_exact, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, connect_domain, debug_files
 from phase5d_proxies import normalize, request
@@ -25,6 +19,7 @@ from phase6c_fixtures import ShadowsocksAeadServer
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6c-shadowsocks-diff.json"
 PASSWORD = "phase6c-ss-pass"
+PAYLOAD = b"ss-outbound"
 ROUTE_DEADLINE = 15.0
 ATTEMPT_TIMEOUT = 2.0
 
@@ -32,9 +27,9 @@ ATTEMPT_TIMEOUT = 2.0
 def proxied_route(mixed_port: int, echo_port: int) -> bool:
     with connect_domain(mixed_port, "localhost", echo_port) as stream:
         stream.settimeout(ATTEMPT_TIMEOUT)
-        stream.sendall(b"ss-outbound")
+        stream.sendall(PAYLOAD)
         try:
-            return recv_exact(stream, 12) == b"ss-outbound"
+            return recv_exact(stream, len(PAYLOAD)) == PAYLOAD
         except (EOFError, ConnectionResetError, TimeoutError, OSError):
             return False
 
@@ -53,10 +48,8 @@ def wait_proxy_route(process, mixed_port: int, echo_port: int) -> None:
     raise TimeoutError("Shadowsocks outbound did not become ready")
 
 
-def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
+def exercise(binary: Path, scratch: Path, upstream: ShadowsocksAeadServer) -> dict[str, Any]:
     echo = start_server(EchoHandler)
-    upstream = ShadowsocksAeadServer(PASSWORD)
-    time.sleep(0.2)
     mixed_port, controller_port = reserve_port(), reserve_port()
     config = scratch / "config.yaml"
     config.write_text(
@@ -94,37 +87,37 @@ rules:
         stop(process)
         stdout.close()
         stderr.close()
-        upstream.close()
         echo.close()
 
 
 def main() -> int:
-    if os.environ.get("PHASE6CSS_SKIP_ROUNDTRIP") == "1" or shutil.which("ssserver") is None:
-        print("Phase 6C Shadowsocks round-trip differential skipped (no ssserver fixture)")
-        return 0
     observations: dict[str, Any] = {}
-    with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-") as temporary:
-        root = Path(temporary)
-        binaries = build_binaries(root, "PHASE6CSS_CARGO_TARGET", "phase6c-shadowsocks")
-        try:
-            for name, binary in binaries.items():
-                scratch = root / name
-                scratch.mkdir()
-                observations[name] = exercise(binary, scratch)
-        except Exception as error:
-            FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-            FAILURE_ARTIFACT.write_text(
-                json.dumps(
-                    {
-                        "error": f"{type(error).__name__}: {error}",
-                        "observations": observations,
-                        "debug": debug_files(root),
-                    },
-                    indent=2,
-                    sort_keys=True,
+    upstream = ShadowsocksAeadServer(PASSWORD)
+    try:
+        with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-") as temporary:
+            root = Path(temporary)
+            binaries = build_binaries(root, "PHASE6CSS_CARGO_TARGET", "phase6c-shadowsocks")
+            try:
+                for name, binary in binaries.items():
+                    scratch = root / name
+                    scratch.mkdir()
+                    observations[name] = exercise(binary, scratch, upstream)
+            except Exception as error:
+                FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+                FAILURE_ARTIFACT.write_text(
+                    json.dumps(
+                        {
+                            "error": f"{type(error).__name__}: {error}",
+                            "observations": observations,
+                            "debug": debug_files(root),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
                 )
-            )
-            raise
+                raise
+    finally:
+        upstream.close()
     if observations["go"] != observations["rust"]:
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))

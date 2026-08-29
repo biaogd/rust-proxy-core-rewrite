@@ -3,65 +3,96 @@
 
 from __future__ import annotations
 
-import json
-import shutil
+import os
+import re
 import subprocess
-import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import reserve_port
+from phase1 import ROOT, reserve_port
+from phase3 import launch, stop
 
-ROOT = Path(__file__).resolve().parents[2]
+_LISTEN_RE = re.compile(
+    r"ShadowSocks\[[^\]]+\] proxy listening at: (?P<addr>[0-9a-fA-F:.]+)"
+)
 
 
-class SsserverFixture:
-    """Runs shadowsocks-rust ssserver on an ephemeral port."""
+class GoOracleShadowsocksInbound:
+    """Run the Go oracle with a sing-shadowsocks AEAD inbound listener."""
 
-    def __init__(self, password: str, *, cipher: str = "aes-256-gcm") -> None:
+    def __init__(
+        self,
+        password: str,
+        *,
+        cipher: str = "aes-256-gcm",
+        go_binary: Path | None = None,
+    ) -> None:
         self.observations: list[dict[str, Any]] = []
         self.password = password
         self.cipher = cipher
-        self._scratch = tempfile.TemporaryDirectory(prefix="phase6c-ssserver-")
+        self._scratch = tempfile.TemporaryDirectory(prefix="phase6c-ss-inbound-")
+        scratch = Path(self._scratch.name)
+        scratch.mkdir(parents=True, exist_ok=True)
+
         listen_port = reserve_port()
-        config_path = Path(self._scratch.name) / "config.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "servers": [
-                        {
-                            "server": "127.0.0.1",
-                            "server_port": listen_port,
-                            "password": password,
-                            "method": cipher,
-                        }
-                    ],
-                }
-            )
+        config = scratch / "config.yaml"
+        config.write_text(
+            f"""mode: rule
+ipv6: false
+log-level: info
+listeners:
+  - name: ss-in
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {listen_port}
+    cipher: {cipher}
+    password: {password}
+    udp: false
+rules:
+  - MATCH,DIRECT
+"""
         )
-        ssserver = shutil.which("ssserver")
-        if ssserver is None:
-            raise RuntimeError("ssserver not found; install shadowsocks-rust locally")
-        self.process = subprocess.Popen(
-            [ssserver, "-c", str(config_path), "-v"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self.address = f"127.0.0.1:{listen_port}"
-        self.port = listen_port
-        if self.process.poll() is not None:
-            raise RuntimeError("ssserver failed to start")
+
+        binary = go_binary or _default_go_binary()
+        self.process, self._stdout, self._stderr = launch(binary, config, scratch)
+        self.address = _wait_listen(scratch / "stdout.log", listen_port)
+        self.port = int(self.address.rsplit(":", 1)[-1])
 
     def close(self) -> None:
         if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+            stop(self.process)
+        self._stdout.close()
+        self._stderr.close()
         self._scratch.cleanup()
 
 
-ShadowsocksAeadServer = SsserverFixture
+def _default_go_binary() -> Path:
+    override = os.environ.get("PHASE6CSS_GO_BINARY")
+    if override:
+        return Path(override)
+    binary = ROOT / "compat" / "artifacts" / "phase6c-go-oracle"
+    if not binary.exists():
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["go", "build", "-trimpath", "-o", str(binary), "."],
+            cwd=ROOT,
+            check=True,
+        )
+    return binary
+
+
+def _wait_listen(log_path: Path, fallback_port: int) -> str:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if log_path.exists():
+            for line in log_path.read_text(errors="replace").splitlines():
+                match = _LISTEN_RE.search(line)
+                if match:
+                    return match.group("addr")
+        time.sleep(0.02)
+    return f"127.0.0.1:{fallback_port}"
+
+
+ShadowsocksAeadServer = GoOracleShadowsocksInbound
