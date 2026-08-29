@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use md5::{Digest, Md5};
 use rewrite_rules::RematchSpec;
 use url::Url;
@@ -35,6 +37,11 @@ const SHADOWSOCKS_EXTRA_AEAD_CIPHERS: [&str; 5] = [
     "aes-256-ccm",
     "aes-128-gcm-siv",
     "aes-256-gcm-siv",
+];
+const SHADOWSOCKS_2022_CIPHERS: [&str; 3] = [
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
 ];
 
 pub(crate) fn parse_proxies(
@@ -231,8 +238,25 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
             SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str())
                 || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher.as_str())
                 || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher.as_str())
+                || SHADOWSOCKS_2022_CIPHERS.contains(&cipher.as_str())
         })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let expected_key_length = match cipher.as_str() {
+        "2022-blake3-aes-128-gcm" => Some(16),
+        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => Some(32),
+        _ => None,
+    };
+    if let Some(expected_key_length) = expected_key_length
+        && STANDARD
+            .decode(&password)
+            .ok()
+            .is_none_or(|key| key.len() != expected_key_length)
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if expected_key_length.is_some() && proxy.udp.unwrap_or(false) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,
         2 => 2,

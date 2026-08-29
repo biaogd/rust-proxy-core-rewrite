@@ -1645,6 +1645,28 @@ Go-only `aes-192-ccm`, ChaCha8/XChaCha8, AEGIS, AEZ, Deoxys, LEA, Ascon and
 other methods remain rejected. Shadowsocks 2022 and plugins remain separate
 protocol/transport gates, as do IPv6 UDP and inbound/server direction.
 
+### Phase 6C-I accepted scope
+
+The Shadowsocks 2022 TCP client accepts the three standard methods shared by
+the pinned Go oracle and official Rust library:
+`2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm` and
+`2022-blake3-chacha20-poly1305`. Configuration validates a single standard
+base64 PSK with the method's exact 16- or 32-byte decoded length. EIH identity
+key chains are deliberately outside this first 2022 slice.
+
+`compat/scripts/phase6c_shadowsocks_2022.py` compares valid and malformed key
+acceptance, then runs each method against an independent official-library
+authority. Domain TCP, 128 KiB IPv4 TCP, half-close response delivery and
+process survival must match.
+
+Native 2022 UDP is not enabled. During development, the pinned Go oracle's
+`sing-shadowsocks2` client panicked at `clientPacketConn.readPacket` when it
+received the first AES-2022 UDP response from the official Rust authority due
+to a nil `remoteCipher`. Rust therefore rejects `udp: true` for these methods
+until a deterministic cross-implementation oracle can verify the path. The
+2022-extra methods, EIH, plugins, IPv6 UDP and server direction remain separate
+gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
