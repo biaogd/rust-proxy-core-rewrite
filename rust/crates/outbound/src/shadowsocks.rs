@@ -31,6 +31,8 @@ pub enum ShadowsocksProxyError {
     Io(#[from] std::io::Error),
     #[error("Shadowsocks UDP protocol failed: {0}")]
     Protocol(String),
+    #[error("Shadowsocks plugin failed: {0}")]
+    Plugin(String),
 }
 
 pub struct ShadowsocksUdpAssociation {
@@ -177,6 +179,11 @@ pub async fn connect_shadowsocks_with_plugin_options(
         Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
             Box::new(TlsObfsClient::new(stream, host.clone()))
         }
+        Some(ShadowsocksPluginConfig::V2rayWebSocket { host, path }) => Box::new(
+            crate::connect_websocket(stream, host, server.port, path)
+                .await
+                .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
+        ),
         None => Box::new(stream),
     };
     let context = Context::new_shared(ServerType::Local);

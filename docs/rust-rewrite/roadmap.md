@@ -1732,6 +1732,20 @@ configuration, invalid modes, domain and 128 KiB TCP relay, process survival
 and the oracle's lack of half-close preservation. Other SIP003 plugins,
 provider/plugin combinations and server direction remain separate gates.
 
+### Phase 6C-M3 accepted scope
+
+A top-level Shadowsocks client may use `plugin: v2ray-plugin` with
+`mode: websocket`, plaintext WebSocket and explicit `mux: false`. Host defaults
+to `bing.com`; path defaults to `/` and receives a leading slash when omitted.
+The product client uses `tokio-tungstenite`, the same WebSocket engine exposed
+by Axum, while the independent authority uses Axum's `WebSocketUpgrade` before
+passing the binary message stream to the official Shadowsocks server.
+
+`compat/scripts/phase6c_shadowsocks_v2ray_websocket.py` compares the common
+configuration and proves exact Host/path, domain TCP, 128 KiB IPv4 TCP,
+process survival and the oracle's non-preserved half-close. Default/enabled
+mux, TLS, headers, early data and HTTP-upgrade mode remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

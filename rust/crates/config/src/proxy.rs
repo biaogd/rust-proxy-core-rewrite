@@ -334,25 +334,65 @@ fn parse_shadowsocks_plugin(
             if options
                 .keys()
                 .any(|key| !matches!(key.as_str(), "mode" | "host"))
-                || !matches!(
-                    options.get("mode").map(String::as_str),
-                    Some("http" | "tls")
-                )
+                || !matches!(plugin_string(options, "mode"), Some("http" | "tls"))
             {
                 return Err(ConfigError::UnsupportedProxy(name.to_owned()));
             }
             let host = options
                 .get("host")
+                .and_then(serde_yaml_ng::Value::as_str)
                 .filter(|host| !host.is_empty())
-                .cloned()
-                .unwrap_or_else(|| "bing.com".to_owned());
-            Some(match options.get("mode").map(String::as_str) {
+                .map_or_else(|| "bing.com".to_owned(), str::to_owned);
+            Some(match plugin_string(options, "mode") {
                 Some("http") => ShadowsocksPluginConfig::SimpleObfsHttp { host },
                 Some("tls") => ShadowsocksPluginConfig::SimpleObfsTls { host },
                 _ => unreachable!("mode validated above"),
             })
         }
+        Some("v2ray-plugin") => {
+            let options = proxy
+                .plugin_opts
+                .as_ref()
+                .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+            if options
+                .keys()
+                .any(|key| !matches!(key.as_str(), "mode" | "host" | "path" | "mux" | "tls"))
+                || plugin_string(options, "mode") != Some("websocket")
+                || plugin_bool(options, "mux") != Some(false)
+                || plugin_bool(options, "tls").unwrap_or(false)
+            {
+                return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+            }
+            let host = plugin_string(options, "host")
+                .filter(|host| !host.is_empty())
+                .unwrap_or("bing.com")
+                .to_owned();
+            let path = plugin_string(options, "path")
+                .filter(|path| !path.is_empty())
+                .unwrap_or("/");
+            let path = if path.starts_with('/') {
+                path.to_owned()
+            } else {
+                format!("/{path}")
+            };
+            Some(ShadowsocksPluginConfig::V2rayWebSocket { host, path })
+        }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    })
+}
+
+fn plugin_string<'a>(
+    options: &'a BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    options.get(key).and_then(serde_yaml_ng::Value::as_str)
+}
+
+fn plugin_bool(options: &BTreeMap<String, serde_yaml_ng::Value>, key: &str) -> Option<bool> {
+    options.get(key).and_then(|value| match value {
+        serde_yaml_ng::Value::Bool(value) => Some(*value),
+        serde_yaml_ng::Value::String(value) => value.parse().ok(),
+        _ => None,
     })
 }
 

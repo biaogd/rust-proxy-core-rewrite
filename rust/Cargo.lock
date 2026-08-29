@@ -2890,6 +2890,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2994,8 +2995,10 @@ dependencies = [
 name = "rewrite-test-support"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "bytes",
+ "futures-util",
  "h2",
  "http",
  "rewrite-config",

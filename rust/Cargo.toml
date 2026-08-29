@@ -80,6 +80,7 @@ time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-tfo = "0.4.3"
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
 tower = "0.5"
 tower-http = { version = "0.7.0", default-features = false, features = ["cors", "fs"] }
 tar = { version = "0.4.46", default-features = false }

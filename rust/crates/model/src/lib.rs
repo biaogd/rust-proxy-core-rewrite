@@ -26,6 +26,7 @@ pub struct Destination {
 pub enum ShadowsocksPluginConfig {
     SimpleObfsHttp { host: String },
     SimpleObfsTls { host: String },
+    V2rayWebSocket { host: String, path: String },
 }
 
 impl Destination {

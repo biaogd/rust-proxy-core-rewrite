@@ -6,6 +6,7 @@ mod shadowsocks;
 mod simple_obfs;
 mod socks5;
 mod tls;
+mod websocket;
 
 pub use direct::{DirectError, DirectTcpOptions, connect, connect_with_options};
 pub use http::{HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls};
@@ -20,6 +21,7 @@ pub use socks5::{
     connect_socks5_with_options,
 };
 pub use tls::HttpProxyTls;
+pub use websocket::{WebSocketIo, connect_websocket};
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
