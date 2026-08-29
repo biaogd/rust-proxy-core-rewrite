@@ -409,12 +409,13 @@ pub(super) async fn measure_http_delay(
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::Shadowsocks => {
-                    rewrite_outbound::connect_shadowsocks_with_options(
+                    rewrite_outbound::connect_shadowsocks_with_plugin_options(
                         &server,
                         &destination,
                         config.ipv6,
                         proxy.password.as_deref().unwrap_or_default(),
                         proxy.cipher.as_deref().unwrap_or_default(),
+                        proxy.shadowsocks_plugin.as_ref(),
                         controller_socket_options(config),
                     )
                     .await

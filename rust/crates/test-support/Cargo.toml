@@ -28,6 +28,7 @@ path = "src/shadowsocks_authority.rs"
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
+rewrite-outbound = { path = "../outbound" }
 rewrite-rules = { path = "../rules" }
 rewrite-dns = { path = "../dns" }
 serde.workspace = true

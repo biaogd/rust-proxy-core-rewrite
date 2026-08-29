@@ -1255,6 +1255,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 udp: false,
                 udp_over_tcp: false,
                 udp_over_tcp_version: 1,
+                shadowsocks_plugin: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1330,6 +1331,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             udp: false,
             udp_over_tcp: false,
             udp_over_tcp_version: 1,
+            shadowsocks_plugin: None,
             headers: BTreeMap::new(),
         }],
     };
@@ -1653,6 +1655,34 @@ fn parses_phase6c_shadowsocks_2022_chacha8_scope() {
         );
         assert!(matches!(
             Config::from_yaml(&source),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+}
+
+#[test]
+fn parses_phase6c_shadowsocks_simple_obfs_http_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: obfs\n    plugin-opts:\n      mode: http\n      host: phase6c.example\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6C simple-obfs HTTP config");
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::SimpleObfsHttp {
+            host: "phase6c.example".to_owned(),
+        })
+    );
+    for extra in [
+        "plugin: obfs\n",
+        "plugin: obfs\n    plugin-opts:\n      mode: websocket\n",
+        "plugin: v2ray-plugin\n    plugin-opts:\n      mode: http\n",
+        "plugin: obfs\n    plugin-opts:\n      mode: http\n    udp-over-tcp: true\n",
+    ] {
+        let invalid = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    {extra}"
+        );
+        assert!(matches!(
+            Config::from_yaml(&invalid),
             Err(ConfigError::UnsupportedProxy(_))
         ));
     }

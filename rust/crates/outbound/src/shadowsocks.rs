@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use bytes::BufMut;
-use rewrite_model::{Destination, Host};
+use rewrite_model::{Destination, Host, ShadowsocksPluginConfig};
 use shadowsocks::ProxyClientStream;
 use shadowsocks::config::{ServerConfig, ServerType};
 use shadowsocks::context::Context;
@@ -14,7 +14,9 @@ use shadowsocks::relay::udprelay::proxy_socket::UdpSocketType;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
+use crate::{
+    BoxedOutboundStream, DirectError, DirectTcpOptions, HttpObfsClient, connect_with_options,
+};
 
 #[derive(Debug, Error)]
 pub enum ShadowsocksProxyError {
@@ -134,11 +136,45 @@ pub async fn connect_shadowsocks_with_options(
     cipher: &str,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
+    connect_shadowsocks_with_plugin_options(
+        server,
+        destination,
+        allow_ipv6,
+        password,
+        cipher,
+        None,
+        options,
+    )
+    .await
+}
+
+/// Opens a Shadowsocks TCP stream with an optional embedded transport plugin.
+///
+/// # Errors
+///
+/// Returns [`ShadowsocksProxyError`] when the cipher or plugin configuration
+/// is invalid, the upstream cannot be dialed, or the encrypted stream cannot
+/// be initialized.
+pub async fn connect_shadowsocks_with_plugin_options(
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    password: &str,
+    cipher: &str,
+    plugin: Option<&ShadowsocksPluginConfig>,
+    options: DirectTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
     let method = CipherKind::from_str(cipher)
         .map_err(|_| ShadowsocksProxyError::Cipher(cipher.to_owned()))?;
     let server_config = ServerConfig::new(destination_address(server), password, method)
         .map_err(|error| ShadowsocksProxyError::Configuration(error.to_string()))?;
     let stream = connect_with_options(server, allow_ipv6, options).await?;
+    let stream: BoxedOutboundStream = match plugin {
+        Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => {
+            Box::new(HttpObfsClient::new(stream, host.clone(), server.port))
+        }
+        None => Box::new(stream),
+    };
     let context = Context::new_shared(ServerType::Local);
     let stream = ProxyClientStream::from_stream(
         context,

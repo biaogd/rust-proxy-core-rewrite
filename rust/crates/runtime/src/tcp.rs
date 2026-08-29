@@ -408,12 +408,13 @@ pub(super) async fn connect_configured_proxy(
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
         }
-        ProxyKind::Shadowsocks => rewrite_outbound::connect_shadowsocks_with_options(
+        ProxyKind::Shadowsocks => rewrite_outbound::connect_shadowsocks_with_plugin_options(
             &server,
             destination,
             allow_ipv6,
             proxy.password.as_deref().unwrap_or_default(),
             proxy.cipher.as_deref().unwrap_or_default(),
+            proxy.shadowsocks_plugin.as_ref(),
             socket_options,
         )
         .await

@@ -90,6 +90,8 @@ def exercise_tcp_cipher(
     *,
     authority_password: str | None = None,
     authority_user_key: str | None = None,
+    plugin_mode: str | None = None,
+    plugin_host: str | None = None,
 ) -> dict[str, bool]:
     tcp_echo = start_server(EchoHandler)
     half_close_server = start_server(HalfCloseHandler)
@@ -102,8 +104,15 @@ def exercise_tcp_cipher(
         cipher,
         authority_password or password,
         authority_user_key,
+        plugin_mode,
+        f"{plugin_host or 'bing.com'}:{authority_port}"
+        if plugin_mode == "http"
+        else plugin_host,
     )
     config = scratch / "config.yaml"
+    plugin = ""
+    if plugin_mode is not None:
+        plugin = f"    plugin: obfs\n    plugin-opts:\n      mode: {plugin_mode}\n      host: {plugin_host or 'bing.com'}\n"
     config.write_text(
         f"""mixed-port: {mixed_port}
 mode: rule
@@ -116,7 +125,7 @@ proxies:
     port: {authority_port}
     cipher: {cipher}
     password: {password}
-rules:
+{plugin}rules:
   - MATCH,local-ss
 """
     )
@@ -124,12 +133,16 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_route(process, mixed_port, tcp_echo.port)
+        try:
+            half_close_result = half_close(mixed_port, half_close_server.port)
+        except (EOFError, OSError):
+            half_close_result = False
         return {
             "tcp-domain": echo(mixed_port, "localhost", tcp_echo.port, b"domain"),
             "tcp-ipv4-large": echo(
                 mixed_port, "127.0.0.1", tcp_echo.port, LARGE_PAYLOAD
             ),
-            "tcp-half-close": half_close(mixed_port, half_close_server.port),
+            "tcp-half-close": half_close_result,
             "process-alive": process.poll() is None,
         }
     finally:

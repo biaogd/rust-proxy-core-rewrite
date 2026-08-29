@@ -147,12 +147,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-J Shadowsocks 2022 EIH | Complete in declared AES single-hop TCP scope | AES-128/256 accept exactly `iPSK:uPSK`, reject malformed keys and unsupported ChaCha EIH, and pass domain/large/half-close TCP wire comparison; multi-hop and UDP remain open |
 | Phase 6C-K Shadowsocks 2022 ChaCha8 | Complete in declared TCP scope | Exact 32-byte base64 PSK validation plus domain/large/half-close TCP wire comparison pass; EIH stays AES-only and 2022 UDP remains blocked |
 | Phase 6C-L Shadowsocks IPv6 UDP | Complete in declared explicit-destination scope | AEAD, stream and extra-AEAD representatives pass mixed/SOCKS5 relay to `::1`, response-address preservation and process survival |
+| Phase 6C-M1 Shadowsocks simple-obfs HTTP | Complete in declared top-level TCP scope | Custom/default Host config, native-UDP bypass, domain/128 KiB TCP framing, process survival and Go's HTTP-obfs half-close limitation pass one native differential; TLS and other plugins remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1–6C-L Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | Phase 1–6C-M1 Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5123,6 +5124,30 @@ AEAD data paths. Linux execution is configured in the default Actions shard.
 Domain-to-IPv6 resolver preference remains a general DNS/IP-strategy concern,
 not part of this explicit-address gate. Native 2022 UDP remains separately
 blocked by the pinned Go oracle failure.
+
+## Phase 6C-M1 Shadowsocks simple-obfs HTTP evidence
+
+The pinned Go tree contains an embedded simple-obfs implementation, while the
+official Rust Shadowsocks library exposes only external SIP003 process
+orchestration. The original simple-obfs project is deprecated and supplies an
+external executable rather than an embeddable maintained Rust transport; the
+reviewed broader Rust proxy implementation would import an unrelated proxy
+kernel and still exercises an external obfs server. This slice therefore keeps
+a small hand-written HTTP masking codec in the outbound crate, with product
+configuration and routing policy outside that codec.
+
+`compat/scripts/phase6c_shadowsocks_obfs_http.py` passes on Darwin arm64,
+2026-08-29. It compares custom/default Host and invalid plugin configuration,
+proves that native UDP remains accepted through the existing non-plugin path,
+and runs domain plus 128 KiB TCP through an independent server-side HTTP
+unwrapper and official Shadowsocks authority. The authority verifies the exact
+Host. The gate also records the oracle behavior that HTTP obfs loses the
+response direction on client half-close; Rust deliberately preserves that
+observable limitation instead of claiming stronger compatibility.
+
+TLS simple-obfs, v2ray/gost and other plugins, provider/plugin combinations and
+server direction remain open. Linux execution is configured in the default
+controller/outbound Actions shard.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

@@ -210,6 +210,8 @@ pub(crate) struct RawProxy {
     pub(crate) udp: Option<bool>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
+    pub(crate) plugin: Option<String>,
+    pub(crate) plugin_opts: Option<BTreeMap<String, String>>,
     pub(crate) sni: Option<String>,
     pub(crate) skip_cert_verify: Option<bool>,
     pub(crate) name_cert_verify: Option<String>,

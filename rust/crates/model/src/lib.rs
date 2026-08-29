@@ -22,6 +22,11 @@ pub struct Destination {
     pub port: u16,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShadowsocksPluginConfig {
+    SimpleObfsHttp { host: String },
+}
+
 impl Destination {
     #[must_use]
     pub fn authority(&self) -> String {

@@ -18,6 +18,7 @@ use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
     RawProxyProviderFile,
 };
+use rewrite_model::ShadowsocksPluginConfig;
 
 const SHADOWSOCKS_SIP004_AEAD_CIPHERS: [&str; 3] =
     ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"];
@@ -148,6 +149,8 @@ fn parse_remote_proxy(
         || proxy.cipher.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
         || (!is_http && proxy.sni.is_some())
         || (!is_http && proxy.headers.is_some())
         || (is_http && proxy.udp.is_some())
@@ -200,6 +203,7 @@ fn parse_remote_proxy(
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -218,6 +222,10 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.headers.is_some()
         || !proxy.extra.is_empty()
     {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let shadowsocks_plugin = parse_shadowsocks_plugin(&name, &proxy)?;
+    if shadowsocks_plugin.is_some() && proxy.udp_over_tcp.unwrap_or(false) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let server = proxy
@@ -242,38 +250,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
                 || SHADOWSOCKS_2022_CIPHERS.contains(&cipher.as_str())
         })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-    let expected_key_length = match cipher.as_str() {
-        "2022-blake3-aes-128-gcm" => Some(16),
-        "2022-blake3-aes-256-gcm"
-        | "2022-blake3-chacha20-poly1305"
-        | "2022-blake3-chacha8-poly1305" => Some(32),
-        _ => None,
-    };
-    if let Some(expected_key_length) = expected_key_length {
-        let keys = password.split(':').collect::<Vec<_>>();
-        let maximum_keys = if matches!(
-            cipher.as_str(),
-            "2022-blake3-chacha20-poly1305" | "2022-blake3-chacha8-poly1305"
-        ) {
-            1
-        } else {
-            2
-        };
-        if keys.is_empty()
-            || keys.len() > maximum_keys
-            || keys.iter().any(|key| {
-                STANDARD
-                    .decode(key)
-                    .ok()
-                    .is_none_or(|key| key.len() != expected_key_length)
-            })
-        {
-            return Err(ConfigError::UnsupportedProxy(name));
-        }
-    }
-    if expected_key_length.is_some() && proxy.udp.unwrap_or(false) {
-        return Err(ConfigError::UnsupportedProxy(name));
-    }
+    validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,
         2 => 2,
@@ -297,7 +274,78 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
+        shadowsocks_plugin,
         headers: BTreeMap::new(),
+    })
+}
+
+fn validate_shadowsocks_key(
+    name: &str,
+    cipher: &str,
+    password: &str,
+    udp: bool,
+) -> Result<(), ConfigError> {
+    let expected_key_length = match cipher {
+        "2022-blake3-aes-128-gcm" => Some(16),
+        "2022-blake3-aes-256-gcm"
+        | "2022-blake3-chacha20-poly1305"
+        | "2022-blake3-chacha8-poly1305" => Some(32),
+        _ => None,
+    };
+    if let Some(expected_key_length) = expected_key_length {
+        let keys = password.split(':').collect::<Vec<_>>();
+        let maximum_keys = if matches!(
+            cipher,
+            "2022-blake3-chacha20-poly1305" | "2022-blake3-chacha8-poly1305"
+        ) {
+            1
+        } else {
+            2
+        };
+        if keys.is_empty()
+            || keys.len() > maximum_keys
+            || keys.iter().any(|key| {
+                STANDARD
+                    .decode(key)
+                    .ok()
+                    .is_none_or(|key| key.len() != expected_key_length)
+            })
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+    }
+    if expected_key_length.is_some() && udp {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(())
+}
+
+fn parse_shadowsocks_plugin(
+    name: &str,
+    proxy: &RawProxy,
+) -> Result<Option<ShadowsocksPluginConfig>, ConfigError> {
+    Ok(match proxy.plugin.as_deref() {
+        None | Some("") if proxy.plugin_opts.is_none() => None,
+        Some("obfs") => {
+            let options = proxy
+                .plugin_opts
+                .as_ref()
+                .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+            if options
+                .keys()
+                .any(|key| !matches!(key.as_str(), "mode" | "host"))
+                || options.get("mode").map(String::as_str) != Some("http")
+            {
+                return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+            }
+            let host = options
+                .get("host")
+                .filter(|host| !host.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "bing.com".to_owned());
+            Some(ShadowsocksPluginConfig::SimpleObfsHttp { host })
+        }
+        _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
     })
 }
 
@@ -311,6 +359,8 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
         || proxy.name_cert_verify.is_some()
@@ -339,6 +389,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         udp: true,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
         headers: BTreeMap::new(),
     }
 }

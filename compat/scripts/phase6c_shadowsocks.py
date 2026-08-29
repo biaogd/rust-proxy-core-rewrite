@@ -46,12 +46,20 @@ def start_authority(
     cipher: str = CIPHER,
     password: str = PASSWORD,
     eih_user_key: str | None = None,
+    plugin_mode: str | None = None,
+    plugin_host: str | None = None,
 ):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
     command = [str(binary), f"127.0.0.1:{port}", password, cipher]
     if eih_user_key is not None:
         command.append(eih_user_key)
+    elif plugin_mode is not None:
+        command.append("-")
+    if plugin_mode is not None:
+        command.append(plugin_mode)
+    if plugin_host is not None:
+        command.append(plugin_host)
     process = subprocess.Popen(
         command,
         cwd=scratch,

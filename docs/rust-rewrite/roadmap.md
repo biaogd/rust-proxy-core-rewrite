@@ -1702,6 +1702,22 @@ ciphers, preserving the returned IPv6 source address and payload. Domain
 resolution preference, 2022 UDP, plugins and server direction remain separate
 gates.
 
+### Phase 6C-M1 accepted scope
+
+A top-level Shadowsocks client may use Mihomo's embedded `plugin: obfs` with
+`plugin-opts.mode: http` and an optional `host` (default `bing.com`). A focused
+HTTP masking transport wraps the official Shadowsocks TCP stream boundary; it
+does not replace cipher or routing policy. The deterministic authority unwraps
+the HTTP request independently, verifies the configured Host, and then hands
+the byte stream to the official Shadowsocks server implementation.
+
+`compat/scripts/phase6c_shadowsocks_obfs_http.py` compares accepted and
+rejected configuration, domain TCP, 128 KiB IPv4 TCP, process survival and the
+pinned oracle's lack of response-direction preservation after client
+half-close. Native UDP continues to bypass the TCP plugin, matching Go. TLS
+simple-obfs, other plugins, provider/plugin combinations and server direction
+remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

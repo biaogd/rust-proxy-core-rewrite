@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use ipnet::IpNet;
-use rewrite_model::AuthUser;
+use rewrite_model::{AuthUser, ShadowsocksPluginConfig};
 use rewrite_rules::{ProviderBehavior, RematchSpec, RuleSet};
 use serde::{Deserialize, Serialize};
 
@@ -207,6 +207,7 @@ pub struct ProxyConfig {
     pub udp: bool,
     pub udp_over_tcp: bool,
     pub udp_over_tcp_version: u8,
+    pub shadowsocks_plugin: Option<ShadowsocksPluginConfig>,
     pub headers: BTreeMap<String, String>,
 }
 

@@ -23,13 +23,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let password = arguments.next().ok_or("missing password")?;
     let cipher = arguments.next().ok_or("missing cipher")?;
     let user_key = arguments.next();
+    let plugin_mode = arguments.next();
+    let plugin_host = arguments.next();
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
 
     let method = CipherKind::from_str(&cipher).map_err(|_| "unsupported cipher")?;
     let mut server = ServerConfig::new(listen, password, method)?;
-    if let Some(user_key) = user_key {
+    if let Some(user_key) = user_key.filter(|key| key != "-") {
         let mut users = ServerUserManager::new();
         users.add_user(ServerUser::with_encoded_key("phase6c-eih", &user_key)?);
         server.set_user_manager(users);
@@ -41,7 +43,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tokio::spawn(async move {
         loop {
-            let accepted = listener.accept().await;
+            let accepted = listener
+                .accept_map(|stream| -> rewrite_outbound::BoxedOutboundStream {
+                    match plugin_mode.as_deref() {
+                        Some("http") => Box::new(rewrite_outbound::HttpObfsServer::new(
+                            stream,
+                            plugin_host.clone(),
+                        )),
+                        _ => Box::new(stream),
+                    }
+                })
+                .await;
             let Ok((mut inbound, _)) = accepted else {
                 break;
             };
