@@ -145,9 +145,7 @@ where
         _cx: &mut Context<'_>,
         _buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Poll::Ready(Err(io::Error::other(
-            "stream cipher io requires SsrStream",
-        )))
+        Poll::Ready(Err(io::Error::other("stream cipher io requires SsrStream")))
     }
 }
 
@@ -160,8 +158,6 @@ where
         _cx: &mut Context<'_>,
         _buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Poll::Ready(Err(io::Error::other(
-            "stream cipher io requires SsrStream",
-        )))
+        Poll::Ready(Err(io::Error::other("stream cipher io requires SsrStream")))
     }
 }
