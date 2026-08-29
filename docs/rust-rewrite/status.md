@@ -138,6 +138,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-A Shadowsocks outbound | Complete in declared AES-128-GCM TCP-only scope | Required SS YAML fields, mixed/rule dispatch, domain-target SIP004 AEAD TCP relay and exact controller type/UDP/UoT view pass one native Go/Rust differential; every other SS mode remains open |
 | Phase 6C-B Shadowsocks AEAD TCP matrix | Complete in declared SIP004 AEAD TCP scope | AES-128-GCM, AES-256-GCM and ChaCha20-IETF-Poly1305 each pass domain/IPv4 relay, 128 KiB framing, half-close and process-survival comparison; UDP/UoT/plugins/2022 remain open |
 | Phase 6C-C Shadowsocks AEAD UDP | Complete in declared SIP004 AEAD UDP scope | All three accepted ciphers pass mixed/SOCKS5 UDP ingress, IPv4/domain relay, one-client association reuse, controller capability and process-survival comparison; UoT/plugins/2022/IPv6 UDP remain open |
+| Phase 6C-D Shadowsocks local providers/groups | Complete in declared inline/file selector scope | Inline and file SS members expose provider/controller identity, switch through a selector and pass real domain TCP plus IPv4 UDP forwarding; HTTP-provider lifecycle/health and later SS options remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
@@ -4894,11 +4895,40 @@ PHASE6CSSUDP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks
 
 Both checks pass. The differential covers AES-128-GCM, AES-256-GCM and
 ChaCha20-IETF-Poly1305 independently; each listener uses one inbound client for
-IPv4, domain and a subsequent 4 KiB IPv4 exchange, then compares controller fields
-and process survival. It is included in the default controller/outbound
+IPv4, domain and a subsequent 4 KiB IPv4 exchange, then compares controller
+fields and process survival. It is included in the default controller/outbound
 Actions shard. Native Linux CI evidence remains pending. UoT, plugins,
-stream/extra/2022 ciphers, IPv6 UDP, providers/groups, inbound/server direction
-and shared dialer/transport composition remain open.
+stream/extra/2022 ciphers, IPv6 UDP, HTTP-provider lifecycle/health,
+inbound/server direction and shared dialer/transport composition remain open.
+
+## Phase 6C-D Shadowsocks local provider/group evidence
+
+The generic proxy-provider parser now has direct compatibility evidence for
+Shadowsocks records in both inline payloads and local files. Their provider
+member controller views retain `type: Shadowsocks`, provider ownership,
+`udp: true` and `uot: false`; a `select` group expands both provider member
+lists in configured order and reports the selected member's UDP capability.
+No SS-specific provider branch or new dependency was required.
+
+The deterministic differential starts two independent official-library SS
+authorities with different ports and passwords. It selects the inline member,
+proves domain TCP and IPv4 UDP echo, then stops that authority before selecting
+the file member and repeating both transfers. This makes a stale or ignored
+selector choice observable instead of allowing two equivalent authorities to
+hide it. Provider/member and group summaries plus process survival are also
+compared.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+PHASE6CSSPROVIDER_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-provider python3 compat/scripts/phase6c_shadowsocks_provider.py
+```
+
+The Go/Rust differential passes and is included in the default
+controller/outbound Actions shard. Linux evidence remains pending that run.
+HTTP-provider download/refresh/cache and automatic health behavior for SS,
+UoT, plugins, stream/extra/2022 ciphers, IPv6 UDP, inbound/server direction and
+shared dialer/transport composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

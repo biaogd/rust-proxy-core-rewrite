@@ -1527,6 +1527,29 @@ Phase 6C-C does not add UoT, plugins, stream/extra/2022 ciphers, IPv6 UDP,
 provider/group consumption, inbound/server mode or shared dialer/transport
 composition. Those remain separately testable gates.
 
+### Phase 6C-D accepted scope
+
+Shadowsocks records using the Phase 6C A–C option set are accepted from local
+inline and file proxy providers and can be expanded into a `select` group. The
+controller exposes provider ownership plus the member's Shadowsocks type and
+UDP/UoT capability, and a selector mutation immediately directs new TCP and
+new UDP sessions through the chosen provider member. This reuses the tested
+generic provider/group boundaries; it does not duplicate protocol dispatch or
+introduce a Shadowsocks-specific provider abstraction.
+
+`compat/scripts/phase6c_shadowsocks_provider.py` gives Go and Rust identical
+inline and file providers backed by two deterministic local SS authorities.
+It compares provider/member and group controller summaries, selects each member
+in turn, and proves domain TCP plus IPv4 UDP echo through both selections. The
+authorities use different ports and passwords, and the first is stopped before
+the second selection, so successful wire relay proves the selected provider
+record reaches the native SS adapter.
+
+This gate does not claim HTTP-provider download/refresh/cache or automatic
+health behavior for Shadowsocks members. Those lifecycle paths, UoT, plugins,
+2022, IPv6 UDP, inbound/server mode and shared dialer/transport composition
+remain separate work.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

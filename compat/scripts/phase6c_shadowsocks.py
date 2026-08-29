@@ -40,12 +40,16 @@ def authority_binary() -> pathlib.Path:
 
 
 def start_authority(
-    binary: pathlib.Path, scratch: pathlib.Path, port: int, cipher: str = CIPHER
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    port: int,
+    cipher: str = CIPHER,
+    password: str = PASSWORD,
 ):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{port}", PASSWORD, cipher],
+        [str(binary), f"127.0.0.1:{port}", password, cipher],
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
