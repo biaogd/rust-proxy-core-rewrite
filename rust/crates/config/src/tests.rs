@@ -1515,6 +1515,36 @@ fn parses_phase6c_shadowsocks_sip004_aead_scope() {
 }
 
 #[test]
+fn parses_phase6c_shadowsocks_legacy_stream_scope() {
+    for cipher in [
+        "aes-128-ctr",
+        "aes-192-ctr",
+        "aes-256-ctr",
+        "aes-128-cfb",
+        "aes-192-cfb",
+        "aes-256-cfb",
+        "rc4-md5",
+        "chacha20-ietf",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: phase6c-password\n    udp: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6C legacy stream config");
+        assert_eq!(config.proxies[0].cipher.as_deref(), Some(cipher));
+        assert!(config.proxies[0].udp);
+    }
+    for unsupported in ["chacha20", "xchacha20", "aes-192-gcm"] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {unsupported}\n    password: phase6c-password\n"
+        );
+        assert!(matches!(
+            Config::from_yaml(&source),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+}
+
+#[test]
 fn mirrors_http_credential_activation_boundaries() {
     let config = Config::from_yaml(&format!(
             "{MINIMAL}\nproxies:\n  - {{name: noauth, type: http, server: proxy.test, port: 8080}}\n  - {{name: user-only, type: http, server: proxy.test, port: 8080, username: user}}\n  - {{name: password-only, type: http, server: proxy.test, port: 8080, password: ignored}}\n  - {{name: both, type: http, server: proxy.test, port: 8080, username: user, password: pass}}\n"

@@ -141,6 +141,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-D Shadowsocks local providers/groups | Complete in declared inline/file selector scope | Inline and file SS members expose provider/controller identity, switch through a selector and pass real domain TCP plus IPv4 UDP forwarding; HTTP-provider lifecycle/health and later SS options remain open |
 | Phase 6C-E Shadowsocks HTTP provider/health | Complete in declared lifecycle scope | Initial HTTP download, A→B manual refresh, TCP/UDP replacement, fresh-cache restart and a real HEAD health probe through SS TCP pass one Go/Rust differential; scheduled/ETag/rollback stress and later SS options remain open |
 | Phase 6C-F Shadowsocks UDP-over-TCP | Complete in declared SIP004 UoT scope | Go-compatible default/0/v1/v2 validation, v1/v2 magic destinations and framing, resolved IPv4/domain-originated relay, same-session reuse and exact controller capability pass one native differential; plugins/2022/UoT connect mode remain open |
+| Phase 6C-G Shadowsocks legacy stream ciphers | Complete in declared shared-library scope | AES-CTR×3, AES-CFB×3, RC4-MD5 and ChaCha20-IETF each pass config plus domain/large/half-close TCP and IPv4/domain native UDP wire comparison; Go-only extra methods remain rejected |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
@@ -4994,6 +4995,31 @@ gate accidentally. The script is in the default controller/outbound Actions
 shard; native Linux evidence remains pending. Plugins, stream/extra/2022
 ciphers, IPv6 UDP, inbound/server direction, UoT connect mode and shared
 dialer/transport composition remain open.
+
+## Phase 6C-G Shadowsocks legacy stream-cipher evidence
+
+The workspace enables the official Shadowsocks library's stream-cipher feature
+and configuration accepts exactly the eight additional methods shared with the
+Go oracle: three AES-CTR widths, three AES-CFB widths, RC4-MD5 and
+ChaCha20-IETF. The existing outbound stream and datagram adapters require no
+hand-written cipher logic. `chacha20`, `xchacha20`, `aes-192-gcm` and the Go
+implementation's broader extra AEAD set remain rejected because the selected
+Rust library does not implement compatible methods for them.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config parses_phase6c_shadowsocks_legacy_stream_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-legacy
+PHASE6CSSLEGACY_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-legacy python3 compat/scripts/phase6c_shadowsocks_legacy.py
+```
+
+The differential passes all eight methods independently. Every method proves a
+domain TCP exchange, a 128 KiB IPv4 TCP exchange, half-close response delivery,
+IPv4 and domain-originated native UDP relay, and product survival against the
+same official-library authority. The script is included in the default
+controller/outbound Actions shard; native Linux evidence remains pending.
+Plugins, Shadowsocks 2022, Go-only extra methods, IPv6 UDP, inbound/server mode
+and shared dialer/transport composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

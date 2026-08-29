@@ -1605,6 +1605,28 @@ Phase 6C-F does not add plugin transports, stream/extra/2022 ciphers, IPv6 UDP,
 inbound/server direction, UoT connect mode or shared dialer/transport
 composition. Those remain independent gates.
 
+### Phase 6C-G accepted scope
+
+The client cipher set adds the eight legacy stream methods implemented by both
+the pinned Go oracle and the selected official Rust library:
+`aes-128/192/256-ctr`, `aes-128/192/256-cfb`, `rc4-md5` and
+`chacha20-ietf`. They use the existing Shadowsocks TCP and native UDP adapter
+boundaries; enabling the library's stream-cipher feature is the only protocol
+implementation change. Configuration continues to reject methods that have no
+tested Rust implementation.
+
+`compat/scripts/phase6c_shadowsocks_legacy.py` starts a fresh official-library
+authority and product generation for every method. It compares domain TCP,
+large IPv4 TCP framing, half-close delivery, IPv4 and domain-originated native
+UDP relay, and process survival for Go and Rust. This makes every newly accepted
+method carry both config and wire evidence instead of relying on a library
+method-name lookup.
+
+Go's `chacha20`, `xchacha20`, `aes-192-gcm` and broader nonstandard AEAD set are
+not implemented by this Rust dependency and remain rejected. Plugins,
+Shadowsocks 2022, IPv6 UDP, inbound/server direction and common dialer/
+transport composition remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

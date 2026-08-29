@@ -19,6 +19,16 @@ use crate::raw::{
 
 const SHADOWSOCKS_SIP004_AEAD_CIPHERS: [&str; 3] =
     ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"];
+const SHADOWSOCKS_LEGACY_STREAM_CIPHERS: [&str; 8] = [
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "rc4-md5",
+    "chacha20-ietf",
+];
 
 pub(crate) fn parse_proxies(
     proxies: Vec<RawProxy>,
@@ -210,7 +220,10 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let cipher = proxy
         .cipher
-        .filter(|cipher| SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str()))
+        .filter(|cipher| {
+            SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str())
+                || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher.as_str())
+        })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,

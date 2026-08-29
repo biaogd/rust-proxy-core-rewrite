@@ -431,6 +431,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "camellia"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3ed33f9863ee76491bbe0d7e16a225c694d8525287e320dc7fbe71ee212254c"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3438,10 +3447,14 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b404a62ebea5003f44b9a2748dee7555c5f9ae39896508e466a2a91ee6fa5df5"
 dependencies = [
+ "aes 0.9.3",
  "aes-gcm 0.11.1",
  "aws-lc-rs",
+ "camellia",
  "cfg-if",
+ "chacha20 0.10.1",
  "chacha20poly1305 0.11.0",
+ "ctr 0.10.1",
  "hkdf 0.13.0",
  "md-5 0.11.0",
  "rand 0.10.2",
