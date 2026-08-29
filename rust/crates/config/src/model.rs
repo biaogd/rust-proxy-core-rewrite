@@ -156,6 +156,7 @@ pub struct Config {
 pub enum ProxyKind {
     Http,
     Socks5,
+    Shadowsocks,
     Direct,
     Reject,
     Dns,
@@ -194,6 +195,7 @@ pub struct ProxyConfig {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub cipher: Option<String>,
     pub tls: bool,
     pub sni: Option<String>,
     pub skip_cert_verify: bool,

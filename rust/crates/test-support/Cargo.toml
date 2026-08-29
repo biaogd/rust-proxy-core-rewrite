@@ -21,6 +21,10 @@ path = "src/resolver_set.rs"
 name = "rewrite-dns-lookup"
 path = "src/dns_lookup.rs"
 
+[[bin]]
+name = "rewrite-shadowsocks-authority"
+path = "src/shadowsocks_authority.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
@@ -35,6 +39,7 @@ http.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
+shadowsocks.workspace = true
 
 [lints]
 workspace = true

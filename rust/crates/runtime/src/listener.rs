@@ -247,7 +247,11 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Direct => Some(UdpSessionMode::Direct),
         ProxyKind::Dns => Some(UdpSessionMode::Dns),
         ProxyKind::Socks5 if proxy.udp => Some(UdpSessionMode::Socks5(target.to_owned())),
-        ProxyKind::Http | ProxyKind::Socks5 | ProxyKind::Reject | ProxyKind::Rematch => None,
+        ProxyKind::Http
+        | ProxyKind::Socks5
+        | ProxyKind::Shadowsocks
+        | ProxyKind::Reject
+        | ProxyKind::Rematch => None,
     }
 }
 

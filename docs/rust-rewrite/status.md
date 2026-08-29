@@ -135,12 +135,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
 | Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
+| Phase 6C-A Shadowsocks outbound | Complete in declared AES-128-GCM TCP-only scope | Required SS YAML fields, mixed/rule dispatch, domain-target SIP004 AEAD TCP relay and exact controller type/UDP/UoT view pass one native Go/Rust differential; every other SS mode remains open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 140 Phase 1–6B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | All 141 Phase 1–6C-A Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4797,6 +4798,48 @@ All four gates pass, including bidirectional Go/Rust `cache.db` interchange.
 This does not yet establish native Windows product restart compatibility. The
 dependency repository is public, so the public product repository's Actions
 can fetch the pinned revision without an additional credential.
+
+## Phase 6C-A Shadowsocks AES-128-GCM TCP evidence
+
+The first SS client slice uses the official `shadowsocks` crate at an exact
+`1.25.0` pin with default DNS/service features disabled and only its legacy
+AEAD cipher feature enabled. The product first opens the server socket through
+the existing platform-aware direct connector, then gives that established
+Tokio stream to `ProxyClientStream`. This keeps interface, routing-mark,
+keepalive, concurrency and product DNS policy on the rewrite side of a narrow
+adapter while avoiding a hand-written SIP004 cipher/framing implementation.
+The lower-level `shadowsocks-crypto` crate was not selected because it would
+leave record framing, nonce and lifecycle code in the product. The full service
+crate surface is also not enabled.
+
+Dependency review: `shadowsocks` 1.25.0 is the MIT-licensed core library from
+the actively maintained
+[`shadowsocks/shadowsocks-rust`](https://github.com/shadowsocks/shadowsocks-rust)
+project, requires Rust 1.91 (below this workspace's pinned 1.95 CI toolchain),
+and its upstream releases publish Linux, Windows and Apple arm64 artifacts. Its
+legacy AEAD feature currently brings the C-backed `aws-lc` implementation; the
+existing native Windows x86_64 and macOS arm64 workspace build jobs therefore
+remain mandatory before either platform gains a Phase 6C build claim. The exact
+crate pin prevents an unreviewed protocol/dependency expansion.
+
+Configuration intentionally accepts only required nonempty server, port and
+password fields with `cipher: aes-128-gcm`; UDP, plugins, TLS fields and all
+other ciphers fail validation in this gate. The controller reports
+`type: Shadowsocks`, `udp: false` and `uot: false`. The deterministic
+`rewrite-shadowsocks-authority` test binary uses the same official core in
+server mode and relays the decoded target to a local echo server.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test -p rewrite-config -p rewrite-outbound -p rewrite-test-support --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks
+PHASE6CSS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks python3 compat/scripts/phase6c_shadowsocks.py
+```
+
+Both gates pass. The default controller/outbound Actions shard now includes the
+new differential, but Linux compatibility is pending that native run. Other
+ciphers, 2022, UDP, UoT, plugins, group/provider use, inbound/server direction
+and cross-adapter dialer composition remain explicit Phase 6C gaps.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

@@ -18,6 +18,7 @@ rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-services = { path = "../services" }
 sha2.workspace = true
+shadowsocks.workspace = true
 rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true
 thiserror.workspace = true

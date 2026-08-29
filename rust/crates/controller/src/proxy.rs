@@ -408,6 +408,18 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Shadowsocks => {
+                    rewrite_outbound::connect_shadowsocks_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        proxy.password.as_deref().unwrap_or_default(),
+                        proxy.cipher.as_deref().unwrap_or_default(),
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -638,6 +650,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
     let kind = match proxy.kind {
         rewrite_config::ProxyKind::Http => "Http",
         rewrite_config::ProxyKind::Socks5 => "Socks5",
+        rewrite_config::ProxyKind::Shadowsocks => "Shadowsocks",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -649,7 +662,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Shadowsocks => false,
     };
     json!({
         "alive": health.alive,
@@ -794,7 +807,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Shadowsocks => false,
         };
     }
     let Some(group) = config

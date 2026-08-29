@@ -1463,6 +1463,28 @@ current mixed TCP/UDP data plane. Common `dialer-proxy` composition, richer
 per-adapter platform combinations and later provider override expressions are
 owned by OUT-21/Phase 7T and are not relabeled as Phase 6B protocol gaps.
 
+### Phase 6C-A accepted scope
+
+The first Shadowsocks slice accepts one top-level `type: ss` outbound with a
+nonempty server, port and password and the `aes-128-gcm` SIP004 AEAD cipher.
+The existing mixed HTTP/SOCKS TCP ingress and rule engine may select it; the
+runtime preserves the rewrite's platform socket policy while the official
+`shadowsocks` core crate owns encryption and framing on the established
+upstream stream. Product DNS/routing policy therefore remains outside the
+third-party adapter boundary.
+
+`compat/scripts/phase6c_shadowsocks.py` uses the same deterministic local
+Shadowsocks authority for Go and Rust, then compares a domain-address TCP echo,
+the following MATCH rejection and the controller's name/type/UDP/UoT fields.
+The authority itself uses the official Rust protocol implementation, so the
+gate is real wire interoperability rather than an in-process mock.
+
+This is deliberately not aggregate Shadowsocks completion. Other legacy AEAD
+and stream ciphers, Shadowsocks 2022, UDP, UoT, plugins, provider/group use,
+server/inbound direction, per-adapter socket options and dialer chains require
+independent Phase 6C gates. Unsupported Phase 6C-A options are rejected rather
+than silently ignored.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

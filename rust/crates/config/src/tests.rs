@@ -1244,6 +1244,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 port: 8080,
                 username: None,
                 password: None,
+                cipher: None,
                 tls: false,
                 sni: None,
                 skip_cert_verify: false,
@@ -1316,6 +1317,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             port: 8080,
             username: None,
             password: None,
+            cipher: None,
             tls: false,
             sni: None,
             skip_cert_verify: false,
@@ -1463,6 +1465,31 @@ fn parses_phase6b_http_and_socks5_tls_options() {
         Config::from_yaml(&invalid_pair),
         Err(ConfigError::UnsupportedProxy(_))
     ));
+}
+
+#[test]
+fn parses_phase6c_a_shadowsocks_tcp_subset() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6C-A Shadowsocks config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Shadowsocks);
+    assert_eq!(proxy.cipher.as_deref(), Some("aes-128-gcm"));
+    assert_eq!(proxy.password.as_deref(), Some("phase6c-password"));
+    assert!(!proxy.udp);
+
+    for unsupported in [
+        source.replace("aes-128-gcm", "chacha20-ietf-poly1305"),
+        source.replace("    password: phase6c-password\n", ""),
+        format!("{source}    udp: true\n"),
+        format!("{source}    plugin: obfs-local\n"),
+    ] {
+        assert!(matches!(
+            Config::from_yaml(&unsupported),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
 }
 
 #[test]

@@ -408,6 +408,16 @@ pub(super) async fn connect_configured_proxy(
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
         }
+        ProxyKind::Shadowsocks => rewrite_outbound::connect_shadowsocks_with_options(
+            &server,
+            destination,
+            allow_ipv6,
+            proxy.password.as_deref().unwrap_or_default(),
+            proxy.cipher.as_deref().unwrap_or_default(),
+            socket_options,
+        )
+        .await
+        .map_err(|error| format!("Shadowsocks proxy connection failed: {error}")),
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }

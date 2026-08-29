@@ -205,6 +205,7 @@ pub(crate) struct RawProxy {
     pub(crate) port: Option<i64>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
+    pub(crate) cipher: Option<String>,
     pub(crate) tls: Option<bool>,
     pub(crate) udp: Option<bool>,
     pub(crate) sni: Option<String>,
