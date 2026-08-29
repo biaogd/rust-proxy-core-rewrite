@@ -679,7 +679,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         "tfo": false,
         "type": kind,
         "udp": udp,
-        "uot": false,
+        "uot": proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp,
         "xudp": false,
     })
 }

@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
+use bytes::BufMut;
 use rewrite_model::{Destination, Host};
 use shadowsocks::ProxyClientStream;
 use shadowsocks::config::{ServerConfig, ServerType};
@@ -11,6 +12,7 @@ use shadowsocks::relay::socks5::Address;
 use shadowsocks::relay::udprelay::ProxySocket;
 use shadowsocks::relay::udprelay::proxy_socket::UdpSocketType;
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
 
@@ -30,6 +32,54 @@ pub enum ShadowsocksProxyError {
 
 pub struct ShadowsocksUdpAssociation {
     socket: ProxySocket<ShadowUdpSocket>,
+}
+
+pub struct ShadowsocksUotAssociation {
+    stream: BoxedOutboundStream,
+    version: u8,
+    request_written: bool,
+}
+
+impl ShadowsocksUotAssociation {
+    /// Sends one UDP-over-TCP frame over the encrypted Shadowsocks stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol or I/O error when the destination or payload cannot
+    /// be encoded, or when the encrypted stream fails.
+    pub async fn send(
+        &mut self,
+        destination: &Destination,
+        payload: &[u8],
+    ) -> Result<(), ShadowsocksProxyError> {
+        let length = u16::try_from(payload.len()).map_err(|_| {
+            ShadowsocksProxyError::Protocol("UoT payload exceeds 65535 bytes".to_owned())
+        })?;
+        let mut frame = Vec::with_capacity(payload.len() + 32);
+        if self.version == 2 && !self.request_written {
+            frame.put_u8(0);
+            destination_address(destination).write_to_buf(&mut frame);
+            self.request_written = true;
+        }
+        write_uot_address(&mut frame, destination)?;
+        frame.put_u16(length);
+        frame.extend_from_slice(payload);
+        self.stream.write_all(&frame).await?;
+        Ok(())
+    }
+
+    /// Receives and decodes one UDP-over-TCP response frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol or I/O error for malformed or truncated frames.
+    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), ShadowsocksProxyError> {
+        let destination = read_uot_address(&mut self.stream).await?;
+        let length = self.stream.read_u16().await? as usize;
+        let mut payload = vec![0_u8; length];
+        self.stream.read_exact(&mut payload).await?;
+        Ok((destination, payload))
+    }
 }
 
 impl ShadowsocksUdpAssociation {
@@ -134,6 +184,110 @@ pub async fn associate_shadowsocks_udp_with_options(
         ShadowUdpSocket::from(socket),
     );
     Ok(ShadowsocksUdpAssociation { socket })
+}
+
+/// Opens the sing-style Shadowsocks UDP-over-TCP v1 or v2 stream.
+///
+/// The Shadowsocks crate supplies SIP004 encryption. The small `UoT` envelope
+/// is kept here because that crate does not expose sing `UoT` framing.
+///
+/// # Errors
+///
+/// Returns [`ShadowsocksProxyError`] for invalid versions, cipher/configuration
+/// errors, or when the upstream TCP stream cannot be established.
+pub async fn associate_shadowsocks_uot_with_options(
+    server: &Destination,
+    allow_ipv6: bool,
+    password: &str,
+    cipher: &str,
+    version: u8,
+    options: DirectTcpOptions<'_>,
+) -> Result<ShadowsocksUotAssociation, ShadowsocksProxyError> {
+    let magic_domain = match version {
+        1 => "sp.udp-over-tcp.arpa",
+        2 => "sp.v2.udp-over-tcp.arpa",
+        _ => {
+            return Err(ShadowsocksProxyError::Configuration(format!(
+                "unsupported UoT version {version}"
+            )));
+        }
+    };
+    let destination = Destination {
+        host: Host::Domain(magic_domain.to_owned()),
+        port: 0,
+    };
+    let stream = connect_shadowsocks_with_options(
+        server,
+        &destination,
+        allow_ipv6,
+        password,
+        cipher,
+        options,
+    )
+    .await?;
+    Ok(ShadowsocksUotAssociation {
+        stream,
+        version,
+        request_written: false,
+    })
+}
+
+fn write_uot_address(
+    buffer: &mut Vec<u8>,
+    destination: &Destination,
+) -> Result<(), ShadowsocksProxyError> {
+    match &destination.host {
+        Host::Ip(IpAddr::V4(address)) => {
+            buffer.put_u8(0);
+            buffer.extend_from_slice(&address.octets());
+        }
+        Host::Ip(IpAddr::V6(address)) => {
+            buffer.put_u8(1);
+            buffer.extend_from_slice(&address.octets());
+        }
+        Host::Domain(domain) => {
+            let length = u8::try_from(domain.len()).map_err(|_| {
+                ShadowsocksProxyError::Protocol("UoT domain exceeds 255 bytes".to_owned())
+            })?;
+            buffer.put_u8(2);
+            buffer.put_u8(length);
+            buffer.extend_from_slice(domain.as_bytes());
+        }
+    }
+    buffer.put_u16(destination.port);
+    Ok(())
+}
+
+async fn read_uot_address(
+    stream: &mut BoxedOutboundStream,
+) -> Result<Destination, ShadowsocksProxyError> {
+    let host = match stream.read_u8().await? {
+        0 => {
+            let mut octets = [0_u8; 4];
+            stream.read_exact(&mut octets).await?;
+            Host::Ip(IpAddr::V4(Ipv4Addr::from(octets)))
+        }
+        1 => {
+            let mut octets = [0_u8; 16];
+            stream.read_exact(&mut octets).await?;
+            Host::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        2 => {
+            let length = stream.read_u8().await? as usize;
+            let mut domain = vec![0_u8; length];
+            stream.read_exact(&mut domain).await?;
+            Host::Domain(String::from_utf8(domain).map_err(|_| {
+                ShadowsocksProxyError::Protocol("UoT domain is not UTF-8".to_owned())
+            })?)
+        }
+        kind => {
+            return Err(ShadowsocksProxyError::Protocol(format!(
+                "unsupported UoT address type {kind}"
+            )));
+        }
+    };
+    let port = stream.read_u16().await?;
+    Ok(Destination { host, port })
 }
 
 async fn resolve_server(

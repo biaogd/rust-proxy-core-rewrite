@@ -290,6 +290,7 @@ jobs:
       PHASE6CSSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSPROVIDER_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSHTTPPROVIDER_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSUOT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -361,6 +362,7 @@ jobs:
             compat/scripts/phase6c_shadowsocks_udp.py \
             compat/scripts/phase6c_shadowsocks_provider.py \
             compat/scripts/phase6c_shadowsocks_http_provider.py \
+            compat/scripts/phase6c_shadowsocks_uot.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

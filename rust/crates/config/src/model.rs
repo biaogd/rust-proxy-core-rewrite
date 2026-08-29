@@ -188,6 +188,7 @@ pub struct GeoXUrls {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ProxyConfig {
     pub name: String,
     pub kind: ProxyKind,
@@ -204,6 +205,8 @@ pub struct ProxyConfig {
     pub certificate: Option<String>,
     pub private_key: Option<String>,
     pub udp: bool,
+    pub udp_over_tcp: bool,
+    pub udp_over_tcp_version: u8,
     pub headers: BTreeMap<String, String>,
 }
 

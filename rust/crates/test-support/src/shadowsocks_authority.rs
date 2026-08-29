@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use shadowsocks::context::Context;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::relay::socks5::Address;
 use shadowsocks::relay::udprelay::ProxySocket;
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpStream, UdpSocket};
 
 #[tokio::main]
@@ -42,6 +42,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tokio::spawn(async move {
                 let result = async {
                     let destination = inbound.handshake().await?;
+                    if let Address::DomainNameAddress(domain, 0) = &destination {
+                        let version = match domain.as_str() {
+                            "sp.udp-over-tcp.arpa" => Some(1),
+                            "sp.v2.udp-over-tcp.arpa" => Some(2),
+                            _ => None,
+                        };
+                        if let Some(version) = version {
+                            println!("UOT {version}");
+                            serve_uot(&mut inbound, version).await?;
+                            return Ok::<(), std::io::Error>(());
+                        }
+                    }
                     let mut outbound = connect_destination(&destination).await?;
                     copy_bidirectional(&mut inbound, &mut outbound).await?;
                     Ok::<(), std::io::Error>(())
@@ -66,6 +78,122 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         });
     }
+}
+
+async fn serve_uot<S>(stream: &mut S, version: u8) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if version == 2 {
+        let is_connect = stream.read_u8().await?;
+        if is_connect != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test authority only accepts non-connect UoT v2",
+            ));
+        }
+        Address::read_from(stream)
+            .await
+            .map_err(std::io::Error::other)?;
+    }
+    let outbound = UdpSocket::bind("0.0.0.0:0").await?;
+    loop {
+        let destination = read_uot_address(stream).await?;
+        let length = stream.read_u16().await? as usize;
+        let mut payload = vec![0_u8; length];
+        stream.read_exact(&mut payload).await?;
+        let destination = resolve_uot_destination(&destination).await?;
+        outbound.send_to(&payload, destination).await?;
+        let mut response = vec![0_u8; 65_536];
+        let (length, source) =
+            tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response))
+                .await
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+        write_uot_address(stream, source).await?;
+        stream
+            .write_u16(u16::try_from(length).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "UoT response too large")
+            })?)
+            .await?;
+        stream.write_all(&response[..length]).await?;
+        stream.flush().await?;
+    }
+}
+
+async fn read_uot_address<S>(stream: &mut S) -> std::io::Result<UotDestination>
+where
+    S: AsyncRead + Unpin,
+{
+    let host = match stream.read_u8().await? {
+        0 => {
+            let mut octets = [0_u8; 4];
+            stream.read_exact(&mut octets).await?;
+            UotHost::Ip(IpAddr::V4(Ipv4Addr::from(octets)))
+        }
+        1 => {
+            let mut octets = [0_u8; 16];
+            stream.read_exact(&mut octets).await?;
+            UotHost::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        2 => {
+            let length = stream.read_u8().await? as usize;
+            let mut domain = vec![0_u8; length];
+            stream.read_exact(&mut domain).await?;
+            UotHost::Domain(String::from_utf8(domain).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UoT domain")
+            })?)
+        }
+        kind => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UoT address type {kind}"),
+            ));
+        }
+    };
+    let port = stream.read_u16().await?;
+    Ok(UotDestination { host, port })
+}
+
+async fn write_uot_address<S>(stream: &mut S, address: SocketAddr) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    match address.ip() {
+        IpAddr::V4(address) => {
+            stream.write_u8(0).await?;
+            stream.write_all(&address.octets()).await?;
+        }
+        IpAddr::V6(address) => {
+            stream.write_u8(1).await?;
+            stream.write_all(&address.octets()).await?;
+        }
+    }
+    stream.write_u16(address.port()).await
+}
+
+async fn resolve_uot_destination(destination: &UotDestination) -> std::io::Result<SocketAddr> {
+    match &destination.host {
+        UotHost::Ip(address) => Ok(SocketAddr::new(*address, destination.port)),
+        UotHost::Domain(domain) => tokio::net::lookup_host((domain.as_str(), destination.port))
+            .await?
+            .find(SocketAddr::is_ipv4)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "no IPv4 UoT authority destination resolved",
+                )
+            }),
+    }
+}
+
+struct UotDestination {
+    host: UotHost,
+    port: u16,
+}
+
+enum UotHost {
+    Ip(IpAddr),
+    Domain(String),
 }
 
 async fn relay_udp(

@@ -121,6 +121,8 @@ fn parse_remote_proxy(
         || proxy.target_sub_rule.is_some()
         || (!allow_tls && has_tls_options)
         || proxy.cipher.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
         || (!is_http && proxy.sni.is_some())
         || (!is_http && proxy.headers.is_some())
         || (is_http && proxy.udp.is_some())
@@ -171,6 +173,8 @@ fn parse_remote_proxy(
             .map(|value| resolve_controller_pem(value, home_directory))
             .transpose()?,
         udp: proxy.udp.unwrap_or(false),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -208,6 +212,11 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .cipher
         .filter(|cipher| SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str()))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
+        0 | 1 => 1,
+        2 => 2,
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
     Ok(ProxyConfig {
         name,
         kind: ProxyKind::Shadowsocks,
@@ -224,6 +233,8 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         certificate: None,
         private_key: None,
         udp: proxy.udp.unwrap_or(false),
+        udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
+        udp_over_tcp_version,
         headers: BTreeMap::new(),
     })
 }
@@ -236,6 +247,8 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.cipher.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
         || proxy.name_cert_verify.is_some()
@@ -262,6 +275,8 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         certificate: None,
         private_key: None,
         udp: true,
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
         headers: BTreeMap::new(),
     }
 }

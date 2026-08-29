@@ -1575,6 +1575,36 @@ those remain bounded integration evidence rather than protocol implementation.
 UoT, plugins, 2022, IPv6 UDP, inbound/server direction and shared dialer/
 transport composition also remain separate gates.
 
+### Phase 6C-F accepted scope
+
+The existing SIP004 AEAD Shadowsocks client may opt into sing-compatible
+UDP-over-TCP with `udp-over-tcp: true`. An omitted or zero
+`udp-over-tcp-version` selects legacy v1, explicit versions 1 and 2 are
+accepted, and every other version is rejected as the pinned Go oracle rejects
+it. The option only changes UDP routing when `udp: true`; TCP remains on the
+existing SIP004 stream path. Controller member views report the configured UoT
+capability.
+
+The official `shadowsocks` crate continues to own encryption and SIP004 TCP
+framing. It does not expose sing UoT, while available AnyTLS-specific and
+generic UDP-over-TCP crates do not provide the oracle's v1/v2 non-connect wire
+format over an arbitrary encrypted stream. A narrow outbound adapter therefore
+owns only the two magic destinations, the v2 request prefix and the tested
+address/length datagram envelope. Product DNS policy resolves UoT destinations
+before framing, matching the oracle, and the normal bounded UDP session queue,
+cancellation, tracker and idle timeout remain in force.
+
+`compat/scripts/phase6c_shadowsocks_uot.py` compares accepted/rejected version
+configuration, controller `udp`/`uot` fields, v1 and v2 magic-address selection,
+IPv4 and domain-originated datagrams, multi-packet session reuse and process
+survival. Its deterministic authority terminates the official Shadowsocks TCP
+stream and logs the negotiated UoT version before relaying framed datagrams to
+a local UDP echo server.
+
+Phase 6C-F does not add plugin transports, stream/extra/2022 ciphers, IPv6 UDP,
+inbound/server direction, UoT connect mode or shared dialer/transport
+composition. Those remain independent gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

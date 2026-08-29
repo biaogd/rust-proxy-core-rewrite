@@ -140,12 +140,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-C Shadowsocks AEAD UDP | Complete in declared SIP004 AEAD UDP scope | All three accepted ciphers pass mixed/SOCKS5 UDP ingress, IPv4/domain relay, one-client association reuse, controller capability and process-survival comparison; UoT/plugins/2022/IPv6 UDP remain open |
 | Phase 6C-D Shadowsocks local providers/groups | Complete in declared inline/file selector scope | Inline and file SS members expose provider/controller identity, switch through a selector and pass real domain TCP plus IPv4 UDP forwarding; HTTP-provider lifecycle/health and later SS options remain open |
 | Phase 6C-E Shadowsocks HTTP provider/health | Complete in declared lifecycle scope | Initial HTTP download, A→B manual refresh, TCP/UDP replacement, fresh-cache restart and a real HEAD health probe through SS TCP pass one Go/Rust differential; scheduled/ETag/rollback stress and later SS options remain open |
+| Phase 6C-F Shadowsocks UDP-over-TCP | Complete in declared SIP004 UoT scope | Go-compatible default/0/v1/v2 validation, v1/v2 magic destinations and framing, resolved IPv4/domain-originated relay, same-session reuse and exact controller capability pass one native differential; plugins/2022/UoT connect mode remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 142 Phase 1–6C-B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | Phase 1–6C-F Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4958,6 +4959,40 @@ controller/outbound Actions shard. Linux evidence remains pending that run.
 The generic scheduled refresh, ETag, malformed/oversized rollback, transform
 and concurrent reload corpus is not repeated with SS payloads. UoT, plugins,
 stream/extra/2022 ciphers, IPv6 UDP, inbound/server direction and shared
+dialer/transport composition remain open.
+
+## Phase 6C-F Shadowsocks UDP-over-TCP evidence
+
+Configuration now models `udp-over-tcp` and `udp-over-tcp-version` explicitly.
+Omitted/zero and explicit v1 select the legacy magic destination; v2 adds its
+request prefix and selects the v2 magic destination; other versions fail
+validation. The controller reports `uot: true` only for a configured
+Shadowsocks member with the option enabled. Non-Shadowsocks adapters continue
+to reject these fields.
+
+The official Shadowsocks crate still owns the encrypted TCP stream. A narrow
+local adapter implements only sing UoT v1/v2 non-connect framing because the
+selected Shadowsocks library has no UoT surface and reviewed alternatives are
+bound to AnyTLS or a different UDP-over-TCP protocol. The runtime resolves the
+requested UDP target before writing the UoT frame, retains the existing
+per-client bounded session lifecycle, and uses the same tracker/cancellation/
+one-minute idle rules as native Shadowsocks UDP.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config parses_phase6c_shadowsocks_sip004_aead_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-uot
+PHASE6CSSUOT_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-uot python3 compat/scripts/phase6c_shadowsocks_uot.py
+```
+
+Both checks pass. The differential proves Go/Rust agreement for accepted
+versions 0/1/2 and rejected version 3, real v1 and v2 encrypted TCP relay,
+IPv4 and domain-originated requests, repeated datagrams on one client session,
+controller capability and process survival. The authority independently logs
+the magic destination version, preventing native SS UDP from satisfying the
+gate accidentally. The script is in the default controller/outbound Actions
+shard; native Linux evidence remains pending. Plugins, stream/extra/2022
+ciphers, IPv6 UDP, inbound/server direction, UoT connect mode and shared
 dialer/transport composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.

@@ -9,7 +9,8 @@ mod tls;
 pub use direct::{DirectError, DirectTcpOptions, connect, connect_with_options};
 pub use http::{HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls};
 pub use shadowsocks::{
-    ShadowsocksProxyError, ShadowsocksUdpAssociation, associate_shadowsocks_udp_with_options,
+    ShadowsocksProxyError, ShadowsocksUdpAssociation, ShadowsocksUotAssociation,
+    associate_shadowsocks_udp_with_options, associate_shadowsocks_uot_with_options,
     connect_shadowsocks_with_options,
 };
 pub use socks5::{

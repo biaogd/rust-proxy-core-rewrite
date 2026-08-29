@@ -1253,6 +1253,8 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 certificate: None,
                 private_key: None,
                 udp: false,
+                udp_over_tcp: false,
+                udp_over_tcp_version: 1,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1326,6 +1328,8 @@ fn filtered_empty_provider_uses_configured_fallback() {
             certificate: None,
             private_key: None,
             udp: false,
+            udp_over_tcp: false,
+            udp_over_tcp_version: 1,
             headers: BTreeMap::new(),
         }],
     };
@@ -1487,10 +1491,21 @@ fn parses_phase6c_shadowsocks_sip004_aead_scope() {
     let udp = Config::from_yaml(&format!("{source}    udp: true\n"))
         .expect("Phase 6C SIP004 AEAD UDP config");
     assert!(udp.proxies[0].udp);
+    assert!(!udp.proxies[0].udp_over_tcp);
+    assert_eq!(udp.proxies[0].udp_over_tcp_version, 1);
+    for (version, expected) in [(0, 1), (1, 1), (2, 2)] {
+        let uot = Config::from_yaml(&format!(
+            "{source}    udp: true\n    udp-over-tcp: true\n    udp-over-tcp-version: {version}\n"
+        ))
+        .expect("Phase 6C Shadowsocks UoT config");
+        assert!(uot.proxies[0].udp_over_tcp);
+        assert_eq!(uot.proxies[0].udp_over_tcp_version, expected);
+    }
     for unsupported in [
         source.replace("aes-128-gcm", "xchacha20-ietf-poly1305"),
         source.replace("    password: phase6c-password\n", ""),
         format!("{source}    plugin: obfs-local\n"),
+        format!("{source}    udp-over-tcp-version: 3\n"),
     ] {
         assert!(matches!(
             Config::from_yaml(&unsupported),
