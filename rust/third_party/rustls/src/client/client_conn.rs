@@ -11,6 +11,7 @@ use super::hs::{self, ClientHelloInput};
 use crate::WantsVerifier;
 use crate::builder::ConfigBuilder;
 use crate::client::{EchMode, EchStatus};
+use crate::client::fingerprint::ClientHelloFingerprint;
 use crate::common_state::{CommonState, Protocol, Side};
 use crate::conn::{ConnectionCore, UnbufferedConnectionCommon};
 use crate::crypto::{CryptoProvider, SupportedKxGroup};
@@ -294,6 +295,16 @@ pub struct ClientConfig {
     ///
     /// [RFC 9149]: https://datatracker.ietf.org/doc/html/rfc9149
     pub send_ticket_request: Option<TicketRequest>,
+
+    /// Optional ClientHello fingerprint profile (cipher/extension/GREASE shape).
+    ///
+    /// Used by ShadowTLS camouflage to match Mihomo/uTLS `client-fingerprint`.
+    /// `None` keeps the default rustls ClientHello.
+    pub client_hello_fingerprint: Option<ClientHelloFingerprint>,
+
+    /// When `client_hello_fingerprint` is Chrome, include X25519MLKEM768
+    /// (ShadowTLS v3). Set false for v2 (`BuildRemovedX25519MLKEM768` parity).
+    pub client_hello_fingerprint_mlkem: bool,
 }
 
 /// Desired session ticket counts for the RFC 9149 `ticket_request` extension.
@@ -306,6 +317,14 @@ pub struct TicketRequest {
 }
 
 impl ClientConfig {
+    /// Enable GREASE Encrypted Client Hello without forcing TLS 1.3-only.
+    ///
+    /// Unlike [`ConfigBuilder::with_ech`], this keeps the configured protocol
+    /// versions (Chrome offers TLS 1.2 + 1.3 alongside GREASE ECH).
+    pub fn enable_ech_grease(&mut self, grease: crate::client::EchGreaseConfig) {
+        self.ech_mode = Some(EchMode::Grease(grease));
+    }
+
     /// Create a builder for a client configuration with
     /// [the process-default `CryptoProvider`][CryptoProvider#using-the-per-process-default-cryptoprovider]
     /// and safe protocol version defaults.

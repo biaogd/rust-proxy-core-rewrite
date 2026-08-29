@@ -376,6 +376,8 @@ pub(super) async fn measure_http_delay(
                         alpn_protocols: &[],
                         tls12_only: false,
                         tls13_only: false,
+                        client_hello_fingerprint: None,
+                        client_hello_fingerprint_mlkem: true,
                     });
                     rewrite_outbound::connect_http_with_options(
                         &server,
@@ -403,6 +405,8 @@ pub(super) async fn measure_http_delay(
                         alpn_protocols: &[],
                         tls12_only: false,
                         tls13_only: false,
+                        client_hello_fingerprint: None,
+                        client_hello_fingerprint_mlkem: true,
                     });
                     rewrite_outbound::connect_socks5_with_options(
                         &server,

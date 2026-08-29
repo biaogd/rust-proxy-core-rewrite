@@ -584,6 +584,7 @@ pub mod client {
     mod client_conn;
     mod common;
     mod ech;
+    mod fingerprint;
     pub(super) mod handy;
     mod hs;
     #[cfg(test)]
@@ -600,6 +601,7 @@ pub mod client {
     #[cfg(feature = "std")]
     pub use client_conn::{ClientConnection, WriteEarlyData};
     pub use ech::{EchConfig, EchGreaseConfig, EchMode, EchStatus};
+    pub use fingerprint::ClientHelloFingerprint;
     pub use handy::AlwaysResolvesClientRawPublicKeys;
     #[cfg(any(feature = "std", feature = "hashbrown"))]
     pub use handy::ClientSessionMemoryCache;
@@ -621,6 +623,7 @@ pub mod client {
 pub use client::ClientConfig;
 #[cfg(feature = "std")]
 pub use client::ClientConnection;
+pub use client::ClientHelloFingerprint;
 
 /// Items for use in a server.
 pub mod server {

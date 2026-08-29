@@ -52,10 +52,11 @@ pub struct ShadowTlsConnectOptions<'a> {
     pub alpn: &'a [String],
     /// Browser fingerprint label from the proxy-level `client-fingerprint` field.
     ///
-    /// Go Clash feeds this into uTLS (`UClient` / `GetFingerprint`). The vendored
-    /// rustls session-id hook can only rewrite the 32-byte session-id; it cannot
-    /// impersonate browser `ClientHello` shape (cipher suites, extensions, GREASE).
-    /// Full uTLS parity needs a different TLS stack and is intentionally not claimed.
+    /// Go Clash feeds this into uTLS (`UClient` / `GetFingerprint`). When set to
+    /// `chrome`, the vendored rustls `ClientHello` is reshaped to match uTLS
+    /// `HelloChrome_Auto` (cipher list, GREASE, extension set). Other named
+    /// profiles are accepted as no-ops until implemented. Empty/`none` keeps
+    /// the default rustls `ClientHello`. Session-id HMAC for v3 is independent.
     pub client_fingerprint: Option<&'a str>,
 }
 
@@ -77,7 +78,6 @@ pub async fn connect_shadow_tls(
             options.version
         )));
     }
-    let _ = options.client_fingerprint;
     let alpn: Vec<Vec<u8>> = options
         .alpn
         .iter()
@@ -97,6 +97,8 @@ pub async fn connect_shadow_tls(
             alpn_protocols: &alpn_refs,
             tls12_only: options.version == 1,
             tls13_only: false,
+            client_hello_fingerprint: options.client_fingerprint,
+            client_hello_fingerprint_mlkem: options.version != 2,
         },
         clock,
     )?);

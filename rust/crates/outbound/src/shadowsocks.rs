@@ -238,6 +238,8 @@ async fn apply_v2ray_websocket_plugin(
                 alpn_protocols: &[b"http/1.1"],
                 tls12_only: false,
                 tls13_only: false,
+                client_hello_fingerprint: None,
+                client_hello_fingerprint_mlkem: true,
             },
             options.clock,
         )

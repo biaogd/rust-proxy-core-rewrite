@@ -709,6 +709,8 @@ impl TlsListElement for KeyShareEntry {
 pub(crate) struct SupportedProtocolVersions {
     pub(crate) tls13: bool,
     pub(crate) tls12: bool,
+    /// Optional GREASE version encoded first (Chrome ClientHello fingerprinting).
+    pub(crate) grease: Option<ProtocolVersion>,
 }
 
 impl SupportedProtocolVersions {
@@ -731,6 +733,9 @@ impl SupportedProtocolVersions {
 impl Codec<'_> for SupportedProtocolVersions {
     fn encode(&self, bytes: &mut Vec<u8>) {
         let inner = LengthPrefixedBuffer::new(Self::LIST_LENGTH, bytes);
+        if let Some(grease) = self.grease {
+            grease.encode(inner.buf);
+        }
         if self.tls13 {
             ProtocolVersion::TLSv1_3.encode(inner.buf);
         }
@@ -751,7 +756,11 @@ impl Codec<'_> for SupportedProtocolVersions {
             };
         }
 
-        Ok(Self { tls13, tls12 })
+        Ok(Self {
+            tls13,
+            tls12,
+            grease: None,
+        })
     }
 }
 
@@ -989,6 +998,9 @@ extension_struct! {
 
         /// Extensions that must appear contiguously.
         pub(crate) contiguous_extensions: Vec<ExtensionType>,
+
+        /// Extra ClientHello extensions not modeled as typed fields (GREASE, SCT, ALPS, …).
+        pub(crate) extra_extensions: Vec<(ExtensionType, Vec<u8>)>,
     }
 }
 
@@ -1021,6 +1033,7 @@ impl ClientExtensions<'_> {
             encrypted_client_hello_outer,
             order_seed,
             contiguous_extensions,
+            extra_extensions,
         } = self;
         ClientExtensions {
             server_name: server_name.map(|x| x.into_owned()),
@@ -1049,10 +1062,56 @@ impl ClientExtensions<'_> {
             encrypted_client_hello_outer,
             order_seed,
             contiguous_extensions,
+            extra_extensions,
         }
     }
 
     pub(crate) fn used_extensions_in_encoding_order(&self) -> Vec<ExtensionType> {
+        // Fingerprint mode: contiguous list is the sole order for known + extra types.
+        // ECH / PSK may appear in the contiguous list (Chrome puts GREASE ECH before
+        // the trailing GREASE); only append them at the end when not already placed.
+        if !self.contiguous_extensions.is_empty() && !self.extra_extensions.is_empty() {
+            let mut used = self.collect_used();
+            for (typ, _) in &self.extra_extensions {
+                if !used.contains(typ) {
+                    used.push(*typ);
+                }
+            }
+            let mut out = Vec::new();
+            for typ in &self.contiguous_extensions {
+                if used.contains(typ) {
+                    out.push(*typ);
+                }
+            }
+            for typ in used {
+                if !out.contains(&typ)
+                    && !matches!(
+                        typ,
+                        ExtensionType::PreSharedKey
+                            | ExtensionType::EncryptedClientHello
+                            | ExtensionType::EncryptedClientHelloOuterExtensions
+                    )
+                {
+                    out.push(typ);
+                }
+            }
+            if self.encrypted_client_hello_outer.is_some()
+                && !out.contains(&ExtensionType::EncryptedClientHelloOuterExtensions)
+            {
+                out.push(ExtensionType::EncryptedClientHelloOuterExtensions);
+            }
+            if self.encrypted_client_hello.is_some()
+                && !out.contains(&ExtensionType::EncryptedClientHello)
+            {
+                out.push(ExtensionType::EncryptedClientHello);
+            }
+            if self.preshared_key_offer.is_some() && !out.contains(&ExtensionType::PreSharedKey)
+            {
+                out.push(ExtensionType::PreSharedKey);
+            }
+            return out;
+        }
+
         let mut exts = self.order_insensitive_extensions_in_random_order();
         exts.extend(&self.contiguous_extensions);
 
@@ -1069,6 +1128,12 @@ impl ClientExtensions<'_> {
             exts.push(ExtensionType::PreSharedKey);
         }
         exts
+    }
+
+    fn encode_extra_extension(typ: ExtensionType, payload: &[u8], output: &mut Vec<u8>) {
+        typ.encode(output);
+        let body = LengthPrefixedBuffer::new(ListLength::U16, output);
+        body.buf.extend_from_slice(payload);
     }
 
     /// Returns extensions which don't need a specific order, in randomized order.
@@ -1116,7 +1181,15 @@ impl<'a> Codec<'a> for ClientExtensions<'a> {
 
         let body = LengthPrefixedBuffer::new(ListLength::U16, bytes);
         for item in order {
-            self.encode_one(item, body.buf);
+            if let Some((_, payload)) = self
+                .extra_extensions
+                .iter()
+                .find(|(typ, _)| *typ == item)
+            {
+                Self::encode_extra_extension(item, payload, body.buf);
+            } else {
+                self.encode_one(item, body.buf);
+            }
         }
     }
 

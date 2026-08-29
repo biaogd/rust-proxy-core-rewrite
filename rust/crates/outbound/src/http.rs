@@ -155,6 +155,8 @@ pub async fn wrap_client_tls(
         alpn_protocols: &[],
         tls12_only: false,
         tls13_only: false,
+        client_hello_fingerprint: None,
+        client_hello_fingerprint_mlkem: true,
     };
     wrap_client_tls_with_options(stream, tls, clock).await
 }

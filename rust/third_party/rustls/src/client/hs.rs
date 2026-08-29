@@ -215,6 +215,7 @@ fn emit_client_hello_for_retry(
         tls12: config.supports_version(ProtocolVersion::TLSv1_2, cx.common.protocol)
             && !forbids_tls12,
         tls13: config.supports_version(ProtocolVersion::TLSv1_3, cx.common.protocol),
+        grease: None,
     };
 
     // should be unreachable thanks to config builder
@@ -388,6 +389,18 @@ fn emit_client_hello_for_retry(
     if supported_versions.tls12 {
         // We don't do renegotiation at all, in fact.
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
+    }
+
+    if let Some(fingerprint) = config.client_hello_fingerprint {
+        match fingerprint {
+            crate::client::ClientHelloFingerprint::Chrome => {
+                super::fingerprint::apply_chrome_fingerprint(
+                    &mut exts,
+                    &mut cipher_suites,
+                    config.client_hello_fingerprint_mlkem,
+                );
+            }
+        }
     }
 
     let mut chp_payload = ClientHelloPayload {
