@@ -158,8 +158,8 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Configured DNS / REMATCH adapters | Oracle | **Parity in declared current-listener scope** | `phase6a_simple_adapters.py` proves validation, exact views, framed DNS TCP, DNS-message UDP and direct/group-selected REMATCH rescan; later listener families, rich per-adapter socket/dialer options and resolver configurations outside existing DNS rows remain separate gates |
 | HTTP | Oracle | **Parity in native adapter scope** | Phase 6B proves plaintext/TLS CONNECT, auth/partial credentials, default/custom headers, exact status and malformed/delayed framing, SNI/name override, custom roots, skip, SHA-256 pinning, client certificates, controller/group/provider use and the adapter's no-UDP/no-UoT boundary. Cross-cutting `dialer-proxy` composition remains OUT-21 |
 | SOCKS5 | Oracle | **Parity in native adapter scope** | Phase 6B proves plaintext/TLS CONNECT, no-auth/auth/partial/overlength credential wire behavior, domain/IPv4/IPv6 addressing, method/reply/retry lifecycle, client certificates/pinning and authenticated plaintext/TLS UDP ASSOCIATE reuse with `udp: true`, `uot: false`. Cross-cutting `dialer-proxy` composition remains OUT-21 |
-| Shadowsocks (`ss`) | Oracle | Not started | Cipher/plugin/UoT interop |
-| ShadowsocksR (`ssr`) | Oracle | Not started | Cipher/protocol/obfs interop |
+| Shadowsocks (`ss`) | Oracle | Partial | AEAD TCP outbound via `shadowsocks` crate; config/runtime wired; `phase6c_shadowsocks.py` and contract differential wired; upstream fixture gap remains open |
+| ShadowsocksR (`ssr`) | Oracle | Not started | Deferred; in-tree stub only |
 | VMess | Oracle | Not started | Security/early-data/transport interop |
 | VLESS | Oracle | Not started | Encryption/Vision/Reality/transports |
 | Snell | Oracle | Not started | Version/UDP/pool interop |

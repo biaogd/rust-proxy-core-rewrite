@@ -1,6 +1,6 @@
 # Rust rewrite status
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
@@ -4773,3 +4773,22 @@ DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
 selection and broader REST control, `respect-rules`, intercepted DNS, TUN, remote proxy
 protocols, external providers and broader REST/platform
 compatibility are planned but not implied by this status.
+
+## Phase 6C Shadowsocks (SS) deliverables and evidence
+
+Phase 6C SS adds AEAD TCP outbound for the `ss` proxy type using the maintained
+`shadowsocks` crate at a narrow adapter boundary. Config parsing accepts the
+oracle's AEAD cipher list and rejects plugins/transport options outside this
+slice at parse time. Runtime mixed-TCP dispatch, controller adapter views and
+delay measurement are wired.
+
+Local differential scripts `compat/scripts/phase6c_shadowsocks.py` and
+`compat/scripts/phase6c_shadowsocks_contract.py` are wired into the Rust rewrite
+CI shard. The outbound round-trip script remains red pending a stable upstream
+SS fixture compatible with the oracle's sing-shadowsocks2 client stack; the
+contract script compares accepted valid SS configuration only.
+
+ShadowsocksR remains deferred. In-tree SSR stub code is not claimed in this slice.
+
+Matrix row: outbound Shadowsocks (`ss`) — Partial.
+

@@ -340,6 +340,7 @@ pub(super) fn direct_tcp_options(config: &Config) -> rewrite_outbound::DirectTcp
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
@@ -407,6 +408,60 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
+        }
+        ProxyKind::Shadowsocks => {
+            let cipher = proxy
+                .cipher
+                .as_deref()
+                .ok_or_else(|| "shadowsocks cipher is missing".to_owned())?;
+            let password = proxy
+                .password
+                .as_deref()
+                .ok_or_else(|| "shadowsocks password is missing".to_owned())?;
+            rewrite_outbound::connect_shadowsocks_with_options(
+                &server,
+                destination,
+                allow_ipv6,
+                cipher,
+                password,
+                Some(clock),
+                socket_options,
+            )
+            .await
+            .map_err(|error| format!("Shadowsocks connection failed: {error}"))
+        }
+        ProxyKind::ShadowsocksR => {
+            let cipher = proxy
+                .cipher
+                .as_deref()
+                .ok_or_else(|| "shadowsocksr cipher is missing".to_owned())?;
+            let password = proxy
+                .password
+                .as_deref()
+                .ok_or_else(|| "shadowsocksr password is missing".to_owned())?;
+            let obfs = proxy
+                .obfs
+                .as_deref()
+                .ok_or_else(|| "shadowsocksr obfs is missing".to_owned())?;
+            let protocol = proxy
+                .protocol
+                .as_deref()
+                .ok_or_else(|| "shadowsocksr protocol is missing".to_owned())?;
+            rewrite_outbound::connect_shadowsocksr_with_options(
+                &server,
+                destination,
+                allow_ipv6,
+                cipher,
+                password,
+                obfs,
+                proxy.obfs_param.as_deref().unwrap_or_default(),
+                protocol,
+                proxy.protocol_param.as_deref().unwrap_or_default(),
+                Some(clock),
+                socket_options,
+            )
+            .await
+            .map_err(|error| format!("ShadowsocksR connection failed: {error}"))
         }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())

@@ -6,17 +6,30 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aes.workspace = true
 base64.workspace = true
 bytes.workspace = true
+cfb-mode.workspace = true
+chacha20.workspace = true
+cipher.workspace = true
+crc32fast.workspace = true
+ctr.workspace = true
+rc4.workspace = true
+typenum.workspace = true
 fast-socks5.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+hmac.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+md-5.workspace = true
+rand.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-services = { path = "../services" }
+sha1.workspace = true
+shadowsocks.workspace = true
 sha2.workspace = true
 rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true

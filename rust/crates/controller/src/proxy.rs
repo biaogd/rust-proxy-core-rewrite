@@ -408,6 +408,42 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Shadowsocks => {
+                    let cipher = proxy.cipher.as_deref().ok_or(())?;
+                    let password = proxy.password.as_deref().ok_or(())?;
+                    rewrite_outbound::connect_shadowsocks_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        cipher,
+                        password,
+                        None,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
+                rewrite_config::ProxyKind::ShadowsocksR => {
+                    let cipher = proxy.cipher.as_deref().ok_or(())?;
+                    let password = proxy.password.as_deref().ok_or(())?;
+                    let obfs = proxy.obfs.as_deref().ok_or(())?;
+                    let protocol = proxy.protocol.as_deref().ok_or(())?;
+                    rewrite_outbound::connect_shadowsocksr_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        cipher,
+                        password,
+                        obfs,
+                        proxy.obfs_param.as_deref().unwrap_or_default(),
+                        protocol,
+                        proxy.protocol_param.as_deref().unwrap_or_default(),
+                        None,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -638,18 +674,26 @@ pub(super) fn configured_proxy_snapshot_with_provider(
     let kind = match proxy.kind {
         rewrite_config::ProxyKind::Http => "Http",
         rewrite_config::ProxyKind::Socks5 => "Socks5",
+        rewrite_config::ProxyKind::Shadowsocks => "Shadowsocks",
+        rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
         rewrite_config::ProxyKind::Rematch => "Rematch",
     };
     let udp = match proxy.kind {
-        rewrite_config::ProxyKind::Socks5 => proxy.udp,
+        rewrite_config::ProxyKind::Socks5
+        | rewrite_config::ProxyKind::Shadowsocks
+        | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
         rewrite_config::ProxyKind::Http => false,
+    };
+    let uot = match proxy.kind {
+        rewrite_config::ProxyKind::Shadowsocks => proxy.udp_over_tcp,
+        _ => false,
     };
     json!({
         "alive": health.alive,
@@ -666,7 +710,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         "tfo": false,
         "type": kind,
         "udp": udp,
-        "uot": false,
+        "uot": uot,
         "xudp": false,
     })
 }
@@ -789,7 +833,9 @@ pub(super) fn selector_supports_udp(
         .find(|proxy| proxy.name == selected)
     {
         return match proxy.kind {
-            rewrite_config::ProxyKind::Socks5 => proxy.udp,
+            rewrite_config::ProxyKind::Socks5
+            | rewrite_config::ProxyKind::Shadowsocks
+            | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns

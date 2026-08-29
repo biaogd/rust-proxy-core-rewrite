@@ -156,6 +156,8 @@ pub struct Config {
 pub enum ProxyKind {
     Http,
     Socks5,
+    Shadowsocks,
+    ShadowsocksR,
     Direct,
     Reject,
     Dns,
@@ -187,6 +189,7 @@ pub struct GeoXUrls {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ProxyConfig {
     pub name: String,
     pub kind: ProxyKind,
@@ -203,6 +206,13 @@ pub struct ProxyConfig {
     pub private_key: Option<String>,
     pub udp: bool,
     pub headers: BTreeMap<String, String>,
+    pub cipher: Option<String>,
+    pub plugin: Option<String>,
+    pub udp_over_tcp: bool,
+    pub obfs: Option<String>,
+    pub obfs_param: Option<String>,
+    pub protocol: Option<String>,
+    pub protocol_param: Option<String>,
 }
 
 impl ProxyConfig {

@@ -1253,6 +1253,13 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 private_key: None,
                 udp: false,
                 headers: BTreeMap::new(),
+                cipher: None,
+                plugin: None,
+                udp_over_tcp: false,
+                obfs: None,
+                obfs_param: None,
+                protocol: None,
+                protocol_param: None,
             })
             .collect(),
     };
@@ -1325,6 +1332,13 @@ fn filtered_empty_provider_uses_configured_fallback() {
             private_key: None,
             udp: false,
             headers: BTreeMap::new(),
+            cipher: None,
+            plugin: None,
+            udp_over_tcp: false,
+            obfs: None,
+            obfs_param: None,
+            protocol: None,
+            protocol_param: None,
         }],
     };
     let group = ProxyGroupConfig {

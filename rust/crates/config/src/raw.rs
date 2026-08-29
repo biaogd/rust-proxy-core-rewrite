@@ -214,6 +214,18 @@ pub(crate) struct RawProxy {
     pub(crate) certificate: Option<String>,
     pub(crate) private_key: Option<String>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    pub(crate) cipher: Option<String>,
+    pub(crate) plugin: Option<String>,
+    #[serde(rename = "udp-over-tcp")]
+    pub(crate) udp_over_tcp: Option<bool>,
+    #[serde(rename = "udp-over-tcp-version")]
+    pub(crate) udp_over_tcp_version: Option<i64>,
+    pub(crate) obfs: Option<String>,
+    #[serde(rename = "obfs-param")]
+    pub(crate) obfs_param: Option<String>,
+    pub(crate) protocol: Option<String>,
+    #[serde(rename = "protocol-param")]
+    pub(crate) protocol_param: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

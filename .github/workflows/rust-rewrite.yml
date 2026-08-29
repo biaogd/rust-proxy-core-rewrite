@@ -176,7 +176,7 @@ jobs:
           - shard: groups-providers
             regex: 'phase5c_[a-z0-9_]+\.py$'
           - shard: controller-services-outbound
-            regex: 'phase(5d|5e|6b)_[a-z0-9_]+\.py$'
+            regex: 'phase(5d|5e|6b|6c)_[a-z0-9_]+\.py$'
           - shard: local-runtime
             regex: 'phase5f_[a-z0-9_]+\.py$'
           - shard: builtins
@@ -285,6 +285,10 @@ jobs:
       PHASE6BSOCKSCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BSOCKSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BTLSIDENTITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSRAUTH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -351,6 +355,8 @@ jobs:
             compat/scripts/phase6b_http.py \
             compat/scripts/phase6b_http_tls.py \
             compat/scripts/phase6b_http_contract.py \
+            compat/scripts/phase6c_shadowsocks.py \
+            compat/scripts/phase6c_shadowsocks_contract.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

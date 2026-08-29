@@ -92,6 +92,12 @@ pub(crate) fn parse_proxies(
                     home_directory,
                 )?);
             }
+            Some("ss") => {
+                outbounds.push(parse_shadowsocks_proxy(name, proxy)?);
+            }
+            Some("ssr") => {
+                outbounds.push(parse_shadowsocksr_proxy(name, proxy)?);
+            }
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -166,7 +172,224 @@ fn parse_remote_proxy(
             .transpose()?,
         udp: proxy.udp.unwrap_or(false),
         headers: proxy.headers.unwrap_or_default(),
+        cipher: None,
+        plugin: None,
+        udp_over_tcp: false,
+        obfs: None,
+        obfs_param: None,
+        protocol: None,
+        protocol_param: None,
     })
+}
+
+fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.headers.is_some()
+        || proxy.obfs.is_some()
+        || proxy.obfs_param.is_some()
+        || proxy.protocol.is_some()
+        || proxy.protocol_param.is_some()
+        || proxy.plugin.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let password = proxy
+        .password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let cipher = proxy
+        .cipher
+        .filter(|cipher| !cipher.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    if !is_supported_shadowsocks_cipher(&cipher) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Shadowsocks,
+        server,
+        port,
+        username: None,
+        password: Some(password),
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        udp: proxy.udp.unwrap_or(false),
+        headers: BTreeMap::new(),
+        cipher: Some(cipher),
+        plugin: None,
+        udp_over_tcp: false,
+        obfs: None,
+        obfs_param: None,
+        protocol: None,
+        protocol_param: None,
+    })
+}
+
+fn parse_shadowsocksr_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.headers.is_some()
+        || proxy.plugin.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let password = proxy
+        .password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let mut cipher = proxy
+        .cipher
+        .filter(|cipher| !cipher.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    if cipher.eq_ignore_ascii_case("none") {
+        "dummy".clone_into(&mut cipher);
+    }
+    if !is_supported_shadowsocksr_cipher(&cipher) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let obfs = proxy
+        .obfs
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let protocol = proxy
+        .protocol
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    if !is_supported_shadowsocksr_obfs(&obfs) || !is_supported_shadowsocksr_protocol(&protocol) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::ShadowsocksR,
+        server,
+        port,
+        username: None,
+        password: Some(password),
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        udp: proxy.udp.unwrap_or(false),
+        headers: BTreeMap::new(),
+        cipher: Some(cipher),
+        plugin: None,
+        udp_over_tcp: false,
+        obfs: Some(obfs),
+        obfs_param: proxy.obfs_param,
+        protocol: Some(protocol),
+        protocol_param: proxy.protocol_param,
+    })
+}
+
+fn is_supported_shadowsocks_cipher(cipher: &str) -> bool {
+    matches!(
+        cipher.to_ascii_lowercase().as_str(),
+        "aes-128-gcm"
+            | "aes-192-gcm"
+            | "aes-256-gcm"
+            | "chacha20-ietf-poly1305"
+            | "xchacha20-ietf-poly1305"
+            | "aes-128-cfb"
+            | "aes-192-cfb"
+            | "aes-256-cfb"
+            | "aes-128-ctr"
+            | "aes-192-ctr"
+            | "aes-256-ctr"
+            | "rc4-md5"
+            | "chacha20-ietf"
+            | "chacha20"
+            | "xchacha20"
+    )
+}
+
+fn is_supported_shadowsocksr_cipher(cipher: &str) -> bool {
+    matches!(
+        cipher.to_ascii_lowercase().as_str(),
+        "dummy"
+            | "aes-128-cfb"
+            | "aes-192-cfb"
+            | "aes-256-cfb"
+            | "aes-128-ctr"
+            | "aes-192-ctr"
+            | "aes-256-ctr"
+            | "rc4-md5"
+            | "chacha20-ietf"
+            | "chacha20"
+            | "xchacha20"
+    )
+}
+
+fn is_supported_shadowsocksr_obfs(obfs: &str) -> bool {
+    matches!(
+        obfs,
+        "plain"
+            | "random_head"
+            | "http_simple"
+            | "http_post"
+            | "tls1.2_ticket_auth"
+            | "tls1.2_ticket_fastauth"
+    )
+}
+
+fn is_supported_shadowsocksr_protocol(protocol: &str) -> bool {
+    matches!(
+        protocol,
+        "origin"
+            | "auth_sha1_v4"
+            | "auth_aes128_md5"
+            | "auth_aes128_sha1"
+            | "auth_chain_a"
+            | "auth_chain_b"
+    )
 }
 
 fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
@@ -183,6 +406,14 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
         || proxy.headers.is_some()
+        || proxy.cipher.is_some()
+        || proxy.plugin.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.obfs.is_some()
+        || proxy.obfs_param.is_some()
+        || proxy.protocol.is_some()
+        || proxy.protocol_param.is_some()
 }
 
 fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
@@ -202,6 +433,13 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         private_key: None,
         udp: true,
         headers: BTreeMap::new(),
+        cipher: None,
+        plugin: None,
+        udp_over_tcp: false,
+        obfs: None,
+        obfs_param: None,
+        protocol: None,
+        protocol_param: None,
     }
 }
 
@@ -558,6 +796,8 @@ pub(crate) fn proxy_member_types(
         let kind = match proxy.kind {
             ProxyKind::Http => "Http",
             ProxyKind::Socks5 => "Socks5",
+            ProxyKind::Shadowsocks => "Shadowsocks",
+            ProxyKind::ShadowsocksR => "ShadowsocksR",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",
