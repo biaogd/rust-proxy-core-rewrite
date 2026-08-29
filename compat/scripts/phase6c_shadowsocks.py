@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Go/Rust differential for Shadowsocks AEAD TCP outbound."""
+"""Go/Rust differential for Shadowsocks AEAD TCP outbound.
+
+Not run in CI until a portable upstream fixture is available. Requires
+`ssserver` from shadowsocks-rust locally, or set PHASE6CSS_SKIP_ROUNDTRIP=1.
+"""
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -93,6 +99,9 @@ rules:
 
 
 def main() -> int:
+    if os.environ.get("PHASE6CSS_SKIP_ROUNDTRIP") == "1" or shutil.which("ssserver") is None:
+        print("Phase 6C Shadowsocks round-trip differential skipped (no ssserver fixture)")
+        return 0
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-") as temporary:
         root = Path(temporary)

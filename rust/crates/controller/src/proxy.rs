@@ -423,28 +423,8 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
-                rewrite_config::ProxyKind::ShadowsocksR => {
-                    let cipher = proxy.cipher.as_deref().ok_or(())?;
-                    let password = proxy.password.as_deref().ok_or(())?;
-                    let obfs = proxy.obfs.as_deref().ok_or(())?;
-                    let protocol = proxy.protocol.as_deref().ok_or(())?;
-                    rewrite_outbound::connect_shadowsocksr_with_options(
-                        &server,
-                        &destination,
-                        config.ipv6,
-                        cipher,
-                        password,
-                        obfs,
-                        proxy.obfs_param.as_deref().unwrap_or_default(),
-                        protocol,
-                        proxy.protocol_param.as_deref().unwrap_or_default(),
-                        None,
-                        controller_socket_options(config),
-                    )
-                    .await
-                    .map_err(|_| ())?
-                }
-                rewrite_config::ProxyKind::Reject
+                rewrite_config::ProxyKind::ShadowsocksR
+                | rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
             }

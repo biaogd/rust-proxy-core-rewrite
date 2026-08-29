@@ -355,7 +355,6 @@ jobs:
             compat/scripts/phase6b_http.py \
             compat/scripts/phase6b_http_tls.py \
             compat/scripts/phase6b_http_contract.py \
-            compat/scripts/phase6c_shadowsocks.py \
             compat/scripts/phase6c_shadowsocks_contract.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \

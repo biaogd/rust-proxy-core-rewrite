@@ -9,7 +9,6 @@ use shadowsocks::relay::tcprelay::proxy_stream::ProxyClientStream;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
-use super::cipher::CipherError;
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions, connect_with_options};
 
@@ -20,7 +19,7 @@ pub enum ShadowsocksError {
     #[error("shadowsocks configuration is invalid: {0}")]
     Configuration(String),
     #[error("shadowsocks cipher is invalid: {0}")]
-    Cipher(#[from] CipherError),
+    Cipher(String),
     #[error("shadowsocks tunnel failed: {0}")]
     Tunnel(std::io::Error),
 }
@@ -61,10 +60,10 @@ fn server_config(
     .map_err(|error| ShadowsocksError::Configuration(error.to_string()))
 }
 
-fn parse_cipher_kind(cipher: &str) -> Result<CipherKind, CipherError> {
+fn parse_cipher_kind(cipher: &str) -> Result<CipherKind, ShadowsocksError> {
     cipher
         .parse::<CipherKind>()
-        .map_err(|_| CipherError::Unsupported(cipher.to_owned()))
+        .map_err(|_| ShadowsocksError::Cipher(cipher.to_owned()))
 }
 
 fn destination_address(destination: &Destination) -> Address {
