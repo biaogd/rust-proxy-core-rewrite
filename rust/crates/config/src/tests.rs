@@ -1713,12 +1713,13 @@ fn parses_phase6c_shadowsocks_v2ray_websocket_scope() {
         Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
             host: "phase6c.example".to_owned(),
             path: "/tunnel".to_owned(),
+            tls: false,
+            skip_certificate_verification: false,
         })
     );
     for options in [
         "mode: websocket\n",
         "mode: websocket\n      mux: true\n",
-        "mode: websocket\n      mux: false\n      tls: true\n",
         "mode: grpc\n      mux: false\n",
     ] {
         let invalid = format!(
@@ -1729,6 +1730,23 @@ fn parses_phase6c_shadowsocks_v2ray_websocket_scope() {
             Err(ConfigError::UnsupportedProxy(_))
         ));
     }
+}
+
+#[test]
+fn parses_phase6c_shadowsocks_v2ray_websocket_tls_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      mode: websocket\n      host: dot.phase4.test\n      path: /wss\n      mux: false\n      tls: true\n      skip-cert-verify: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6C v2ray-plugin WSS config");
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+            host: "dot.phase4.test".to_owned(),
+            path: "/wss".to_owned(),
+            tls: true,
+            skip_certificate_verification: true,
+        })
+    );
 }
 
 #[test]

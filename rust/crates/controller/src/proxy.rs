@@ -415,8 +415,12 @@ pub(super) async fn measure_http_delay(
                         config.ipv6,
                         proxy.password.as_deref().unwrap_or_default(),
                         proxy.cipher.as_deref().unwrap_or_default(),
-                        proxy.shadowsocks_plugin.as_ref(),
-                        controller_socket_options(config),
+                        rewrite_outbound::ShadowsocksTcpOptions {
+                            socket: controller_socket_options(config),
+                            plugin: proxy.shadowsocks_plugin.as_ref(),
+                            clock: None,
+                            custom_roots: &config.trust_certificates,
+                        },
                     )
                     .await
                     .map_err(|_| ())?

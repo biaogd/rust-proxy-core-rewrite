@@ -1,5 +1,7 @@
 use std::error::Error;
+use std::fs;
 use std::io;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -11,6 +13,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use axum::serve::Listener;
 use bytes::Bytes;
 use futures_util::{Sink, Stream};
 use shadowsocks::config::{ServerConfig, ServerType};
@@ -20,6 +23,9 @@ use shadowsocks::relay::socks5::Address;
 use shadowsocks::relay::tcprelay::ProxyServerStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::ServerConfig as TlsServerConfig;
+use tokio_rustls::server::TlsStream;
 
 #[derive(Clone)]
 struct AuthorityState {
@@ -41,6 +47,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cipher = arguments.next().ok_or("missing cipher")?;
     let host = arguments.next().ok_or("missing expected Host")?;
     let path = arguments.next().ok_or("missing expected path")?;
+    let certificate = arguments.next();
+    let private_key = arguments.next();
+    if certificate.is_some() != private_key.is_some() {
+        return Err("certificate and private key must be supplied together".into());
+    }
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
@@ -54,10 +65,121 @@ async fn main() -> Result<(), Box<dyn Error>> {
         path: path.into(),
     };
     let listener = TcpListener::bind(listen).await?;
-    println!("READY {}", listener.local_addr()?);
+    let local_addr = listener.local_addr()?;
+    let listener = if let (Some(certificate), Some(private_key)) = (certificate, private_key) {
+        AuthorityListener::tls(listener, &certificate, &private_key)?
+    } else {
+        AuthorityListener::Plain(listener)
+    };
+    println!("READY {local_addr}");
     let router = Router::new().fallback(upgrade).with_state(state);
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+enum AuthorityListener {
+    Plain(TcpListener),
+    Tls {
+        listener: TcpListener,
+        acceptor: TlsAcceptor,
+    },
+}
+
+impl AuthorityListener {
+    fn tls(
+        listener: TcpListener,
+        certificate: &str,
+        private_key: &str,
+    ) -> Result<Self, Box<dyn Error>> {
+        let certificates = rustls_pemfile::certs(&mut BufReader::new(fs::File::open(certificate)?))
+            .collect::<Result<Vec<_>, _>>()?;
+        let private_key =
+            rustls_pemfile::private_key(&mut BufReader::new(fs::File::open(private_key)?))?
+                .ok_or("private key is missing")?;
+        let config = TlsServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, private_key)?;
+        Ok(Self::Tls {
+            listener,
+            acceptor: TlsAcceptor::from(Arc::new(config)),
+        })
+    }
+}
+
+enum AuthorityIo {
+    Plain(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for AuthorityIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, output),
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, output),
+        }
+    }
+}
+
+impl AsyncWrite for AuthorityIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, input),
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, input),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+impl Listener for AuthorityListener {
+    type Io = AuthorityIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self {
+                Self::Plain(listener) => match TcpListener::accept(listener).await {
+                    Ok((stream, address)) => return (AuthorityIo::Plain(stream), address),
+                    Err(error) => eprintln!("WebSocket authority accept failed: {error}"),
+                },
+                Self::Tls { listener, acceptor } => {
+                    let Ok((stream, address)) = TcpListener::accept(listener).await else {
+                        continue;
+                    };
+                    match acceptor.accept(stream).await {
+                        Ok(stream) => return (AuthorityIo::Tls(Box::new(stream)), address),
+                        Err(error) => eprintln!("WebSocket authority TLS failed: {error}"),
+                    }
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        match self {
+            Self::Plain(listener) | Self::Tls { listener, .. } => listener.local_addr(),
+        }
+    }
 }
 
 async fn upgrade(

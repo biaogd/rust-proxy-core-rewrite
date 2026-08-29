@@ -24,9 +24,18 @@ pub struct Destination {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShadowsocksPluginConfig {
-    SimpleObfsHttp { host: String },
-    SimpleObfsTls { host: String },
-    V2rayWebSocket { host: String, path: String },
+    SimpleObfsHttp {
+        host: String,
+    },
+    SimpleObfsTls {
+        host: String,
+    },
+    V2rayWebSocket {
+        host: String,
+        path: String,
+        tls: bool,
+        skip_certificate_verification: bool,
+    },
 }
 
 impl Destination {

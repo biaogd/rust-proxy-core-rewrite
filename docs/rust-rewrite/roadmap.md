@@ -1746,6 +1746,21 @@ configuration and proves exact Host/path, domain TCP, 128 KiB IPv4 TCP,
 process survival and the oracle's non-preserved half-close. Default/enabled
 mux, TLS, headers, early data and HTTP-upgrade mode remain separate gates.
 
+### Phase 6C-M4 accepted scope
+
+The non-mux v2ray-plugin WebSocket client may set `tls: true` and
+`skip-cert-verify`. Rustls wraps the existing platform TCP dial before the
+standard WebSocket handshake. The configured Host is both TLS SNI and the
+WebSocket Host; global inline `tls.custom-certifactes` roots participate in
+verification through the shared TLS client boundary.
+
+`compat/scripts/phase6c_shadowsocks_v2ray_websocket_tls.py` compares trusted
+custom-root success, explicit verification bypass, untrusted-certificate
+rejection, exact Host/path, domain and 128 KiB TCP, process survival and the
+oracle's non-preserved half-close. Mux, headers, client certificates,
+fingerprints/name overrides, ECH, early data and raw HTTP-upgrade remain
+separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

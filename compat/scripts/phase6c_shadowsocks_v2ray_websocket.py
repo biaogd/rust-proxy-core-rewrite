@@ -32,11 +32,23 @@ def authority_binary() -> pathlib.Path:
     return target / "debug" / f"rewrite-shadowsocks-websocket-authority{suffix}"
 
 
-def start_authority(binary: pathlib.Path, scratch: pathlib.Path, port: int):
+def start_authority(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    port: int,
+    *,
+    host: str = HOST,
+    path: str = PATH,
+    certificate: pathlib.Path | None = None,
+    private_key: pathlib.Path | None = None,
+):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
+    command = [str(binary), f"127.0.0.1:{port}", PASSWORD, CIPHER, host, path]
+    if certificate is not None and private_key is not None:
+        command.extend((str(certificate), str(private_key)))
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{port}", PASSWORD, CIPHER, HOST, PATH],
+        command,
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,

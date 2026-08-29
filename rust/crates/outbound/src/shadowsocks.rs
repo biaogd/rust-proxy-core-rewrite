@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use bytes::BufMut;
 use rewrite_model::{Destination, Host, ShadowsocksPluginConfig};
@@ -33,6 +34,14 @@ pub enum ShadowsocksProxyError {
     Protocol(String),
     #[error("Shadowsocks plugin failed: {0}")]
     Plugin(String),
+}
+
+#[derive(Default)]
+pub struct ShadowsocksTcpOptions<'a> {
+    pub socket: DirectTcpOptions<'a>,
+    pub plugin: Option<&'a ShadowsocksPluginConfig>,
+    pub clock: Option<Arc<rewrite_services::AdjustedClock>>,
+    pub custom_roots: &'a [String],
 }
 
 pub struct ShadowsocksUdpAssociation {
@@ -145,8 +154,10 @@ pub async fn connect_shadowsocks_with_options(
         allow_ipv6,
         password,
         cipher,
-        None,
-        options,
+        ShadowsocksTcpOptions {
+            socket: options,
+            ..ShadowsocksTcpOptions::default()
+        },
     )
     .await
 }
@@ -164,26 +175,45 @@ pub async fn connect_shadowsocks_with_plugin_options(
     allow_ipv6: bool,
     password: &str,
     cipher: &str,
-    plugin: Option<&ShadowsocksPluginConfig>,
-    options: DirectTcpOptions<'_>,
+    options: ShadowsocksTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
     let method = CipherKind::from_str(cipher)
         .map_err(|_| ShadowsocksProxyError::Cipher(cipher.to_owned()))?;
     let server_config = ServerConfig::new(destination_address(server), password, method)
         .map_err(|error| ShadowsocksProxyError::Configuration(error.to_string()))?;
-    let stream = connect_with_options(server, allow_ipv6, options).await?;
-    let stream: BoxedOutboundStream = match plugin {
+    let stream = connect_with_options(server, allow_ipv6, options.socket).await?;
+    let stream: BoxedOutboundStream = match options.plugin {
         Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => {
             Box::new(HttpObfsClient::new(stream, host.clone(), server.port))
         }
         Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
             Box::new(TlsObfsClient::new(stream, host.clone()))
         }
-        Some(ShadowsocksPluginConfig::V2rayWebSocket { host, path }) => Box::new(
-            crate::connect_websocket(stream, host, server.port, path)
+        Some(ShadowsocksPluginConfig::V2rayWebSocket {
+            host,
+            path,
+            tls,
+            skip_certificate_verification,
+        }) => {
+            let stream = if *tls {
+                crate::wrap_client_tls(
+                    Box::new(stream),
+                    host,
+                    *skip_certificate_verification,
+                    options.custom_roots,
+                    options.clock,
+                )
                 .await
-                .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
-        ),
+                .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
+            } else {
+                Box::new(stream) as BoxedOutboundStream
+            };
+            Box::new(
+                crate::connect_websocket(stream, host, server.port, path)
+                    .await
+                    .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
+            )
+        }
         None => Box::new(stream),
     };
     let context = Context::new_shared(ServerType::Local);

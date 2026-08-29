@@ -354,12 +354,16 @@ fn parse_shadowsocks_plugin(
                 .plugin_opts
                 .as_ref()
                 .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-            if options
-                .keys()
-                .any(|key| !matches!(key.as_str(), "mode" | "host" | "path" | "mux" | "tls"))
-                || plugin_string(options, "mode") != Some("websocket")
+            if options.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "mode" | "host" | "path" | "mux" | "tls" | "skip-cert-verify"
+                )
+            }) || plugin_string(options, "mode") != Some("websocket")
                 || plugin_bool(options, "mux") != Some(false)
-                || plugin_bool(options, "tls").unwrap_or(false)
+                || options.contains_key("tls") && plugin_bool(options, "tls").is_none()
+                || options.contains_key("skip-cert-verify")
+                    && plugin_bool(options, "skip-cert-verify").is_none()
             {
                 return Err(ConfigError::UnsupportedProxy(name.to_owned()));
             }
@@ -375,7 +379,13 @@ fn parse_shadowsocks_plugin(
             } else {
                 format!("/{path}")
             };
-            Some(ShadowsocksPluginConfig::V2rayWebSocket { host, path })
+            Some(ShadowsocksPluginConfig::V2rayWebSocket {
+                host,
+                path,
+                tls: plugin_bool(options, "tls").unwrap_or(false),
+                skip_certificate_verification: plugin_bool(options, "skip-cert-verify")
+                    .unwrap_or(false),
+            })
         }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
     })

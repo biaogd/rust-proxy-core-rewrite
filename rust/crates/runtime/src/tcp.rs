@@ -414,8 +414,12 @@ pub(super) async fn connect_configured_proxy(
             allow_ipv6,
             proxy.password.as_deref().unwrap_or_default(),
             proxy.cipher.as_deref().unwrap_or_default(),
-            proxy.shadowsocks_plugin.as_ref(),
-            socket_options,
+            rewrite_outbound::ShadowsocksTcpOptions {
+                socket: socket_options,
+                plugin: proxy.shadowsocks_plugin.as_ref(),
+                clock: Some(clock),
+                custom_roots,
+            },
         )
         .await
         .map_err(|error| format!("Shadowsocks proxy connection failed: {error}")),
