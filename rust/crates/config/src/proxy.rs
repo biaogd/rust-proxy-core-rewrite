@@ -17,6 +17,9 @@ use crate::raw::{
     RawProxyProviderFile,
 };
 
+const SHADOWSOCKS_SIP004_AEAD_CIPHERS: [&str; 3] =
+    ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"];
+
 pub(crate) fn parse_proxies(
     proxies: Vec<RawProxy>,
     allow_http_tls: bool,
@@ -204,7 +207,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let cipher = proxy
         .cipher
-        .filter(|cipher| cipher == "aes-128-gcm")
+        .filter(|cipher| SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str()))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     Ok(ProxyConfig {
         name,

@@ -136,12 +136,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
 | Phase 6C-A Shadowsocks outbound | Complete in declared AES-128-GCM TCP-only scope | Required SS YAML fields, mixed/rule dispatch, domain-target SIP004 AEAD TCP relay and exact controller type/UDP/UoT view pass one native Go/Rust differential; every other SS mode remains open |
+| Phase 6C-B Shadowsocks AEAD TCP matrix | Complete in declared SIP004 AEAD TCP scope | AES-128-GCM, AES-256-GCM and ChaCha20-IETF-Poly1305 each pass domain/IPv4 relay, 128 KiB framing, half-close and process-survival comparison; UDP/UoT/plugins/2022 remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | All 141 Phase 1–6C-A Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | All 142 Phase 1–6C-B Python gates are assigned to ten fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4840,6 +4841,30 @@ Both gates pass. The default controller/outbound Actions shard now includes the
 new differential, but Linux compatibility is pending that native run. Other
 ciphers, 2022, UDP, UoT, plugins, group/provider use, inbound/server direction
 and cross-adapter dialer composition remain explicit Phase 6C gaps.
+
+## Phase 6C-B SIP004 AEAD TCP matrix evidence
+
+Configuration now accepts the complete standard SIP004 AEAD set exposed by the
+selected library feature: `aes-128-gcm`, `aes-256-gcm` and
+`chacha20-ietf-poly1305`. No new crypto or framing implementation was added;
+all three methods retain the Phase 6C-A established-stream adapter boundary.
+Extra AEAD, stream and 2022 methods remain rejected.
+
+The new local authority differential creates independent Go and Rust product
+generations for every cipher. Each generation relays both domain and IPv4
+targets, echoes a 128 KiB deterministic payload across multiple encrypted
+records, delivers the response after client half-close and remains alive.
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test -p rewrite-config parses_phase6c_shadowsocks_sip004_aead_tcp_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks
+PHASE6CSSCIPHERS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks python3 compat/scripts/phase6c_shadowsocks_ciphers.py
+```
+
+Both checks pass. The differential is assigned to the default
+controller/outbound Actions shard; Linux and native dependency build evidence
+remain pending CI. UDP, UoT, plugins, provider/group use, inbound/server mode,
+2022 and cross-adapter composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

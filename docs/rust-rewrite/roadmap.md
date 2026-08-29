@@ -1485,6 +1485,24 @@ server/inbound direction, per-adapter socket options and dialer chains require
 independent Phase 6C gates. Unsupported Phase 6C-A options are rejected rather
 than silently ignored.
 
+### Phase 6C-B accepted scope
+
+The SIP004 AEAD TCP client matrix adds `aes-256-gcm` and
+`chacha20-ietf-poly1305` beside the Phase 6C-A `aes-128-gcm` path. These are the
+three standard legacy AEAD methods enabled by the selected official library
+feature; the product still rejects stream, extra AEAD and Shadowsocks 2022
+methods until their own dependency and oracle review.
+
+`compat/scripts/phase6c_shadowsocks_ciphers.py` starts a fresh authority and
+product generation for each cipher and compares Go/Rust domain and IPv4 target
+relay, a 128 KiB payload spanning encrypted records, TCP half-close response
+delivery and process survival. Phase 6C-A continues to own the exact controller
+view and MATCH rejection checks.
+
+Phase 6C-B closes only the native SIP004 AEAD TCP cipher/address/framing
+boundary. UDP, UoT, plugins, provider/group consumption, server/inbound mode,
+Shadowsocks 2022 and shared dialer/transport composition remain later gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

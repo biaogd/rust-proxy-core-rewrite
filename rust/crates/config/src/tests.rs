@@ -1468,19 +1468,24 @@ fn parses_phase6b_http_and_socks5_tls_options() {
 }
 
 #[test]
-fn parses_phase6c_a_shadowsocks_tcp_subset() {
+fn parses_phase6c_shadowsocks_sip004_aead_tcp_scope() {
+    for cipher in ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: phase6c-password\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6C SIP004 AEAD config");
+        let proxy = &config.proxies[0];
+        assert_eq!(proxy.kind, ProxyKind::Shadowsocks);
+        assert_eq!(proxy.cipher.as_deref(), Some(cipher));
+        assert_eq!(proxy.password.as_deref(), Some("phase6c-password"));
+        assert!(!proxy.udp);
+    }
+
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n"
     );
-    let config = Config::from_yaml(&source).expect("Phase 6C-A Shadowsocks config");
-    let proxy = &config.proxies[0];
-    assert_eq!(proxy.kind, ProxyKind::Shadowsocks);
-    assert_eq!(proxy.cipher.as_deref(), Some("aes-128-gcm"));
-    assert_eq!(proxy.password.as_deref(), Some("phase6c-password"));
-    assert!(!proxy.udp);
-
     for unsupported in [
-        source.replace("aes-128-gcm", "chacha20-ietf-poly1305"),
+        source.replace("aes-128-gcm", "xchacha20-ietf-poly1305"),
         source.replace("    password: phase6c-password\n", ""),
         format!("{source}    udp: true\n"),
         format!("{source}    plugin: obfs-local\n"),

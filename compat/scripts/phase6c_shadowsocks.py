@@ -39,11 +39,13 @@ def authority_binary() -> pathlib.Path:
     return target / "debug" / f"rewrite-shadowsocks-authority{suffix}"
 
 
-def start_authority(binary: pathlib.Path, scratch: pathlib.Path, port: int):
+def start_authority(
+    binary: pathlib.Path, scratch: pathlib.Path, port: int, cipher: str = CIPHER
+):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{port}", PASSWORD, CIPHER],
+        [str(binary), f"127.0.0.1:{port}", PASSWORD, cipher],
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
