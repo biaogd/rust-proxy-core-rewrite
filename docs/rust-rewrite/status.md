@@ -137,6 +137,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
 | Phase 6C-A Shadowsocks outbound | Complete in declared AES-128-GCM TCP-only scope | Required SS YAML fields, mixed/rule dispatch, domain-target SIP004 AEAD TCP relay and exact controller type/UDP/UoT view pass one native Go/Rust differential; every other SS mode remains open |
 | Phase 6C-B Shadowsocks AEAD TCP matrix | Complete in declared SIP004 AEAD TCP scope | AES-128-GCM, AES-256-GCM and ChaCha20-IETF-Poly1305 each pass domain/IPv4 relay, 128 KiB framing, half-close and process-survival comparison; UDP/UoT/plugins/2022 remain open |
+| Phase 6C-C Shadowsocks AEAD UDP | Complete in declared SIP004 AEAD UDP scope | All three accepted ciphers pass mixed/SOCKS5 UDP ingress, IPv4/domain relay, one-client association reuse, controller capability and process-survival comparison; UoT/plugins/2022/IPv6 UDP remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
@@ -4857,7 +4858,7 @@ records, delivers the response after client half-close and remains alive.
 Focused Darwin arm64 evidence on 2026-08-29:
 
 ```sh
-cargo test -p rewrite-config parses_phase6c_shadowsocks_sip004_aead_tcp_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks
+cargo test -p rewrite-config parses_phase6c_shadowsocks_sip004_aead_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks
 PHASE6CSSCIPHERS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks python3 compat/scripts/phase6c_shadowsocks_ciphers.py
 ```
 
@@ -4865,6 +4866,39 @@ Both checks pass. The differential is assigned to the default
 controller/outbound Actions shard; Linux and native dependency build evidence
 remain pending CI. UDP, UoT, plugins, provider/group use, inbound/server mode,
 2022 and cross-adapter composition remain open.
+
+## Phase 6C-C SIP004 AEAD UDP evidence
+
+Configuration accepts `udp: true` for the three Phase 6C-B ciphers and exposes
+that capability through direct adapter and selector controller views while
+continuing to report `uot: false`. The runtime adds a Shadowsocks branch to its
+existing per-client mixed/SOCKS5 UDP session table. It keeps the established
+64-packet bounded queue, explicit cancellation and one-minute idle timeout and
+tracks uploaded/downloaded payload bytes through the normal connection state.
+
+The outbound adapter resolves only the Shadowsocks server locally, asks
+`rewrite-platform` to bind the nonblocking UDP socket with interface and
+routing-mark policy, connects that socket, and passes it into the official
+crate's `ProxySocket`. Destination domain bytes therefore remain intact on the
+wire rather than being pre-resolved by product code. The test authority was
+extended with the same official crate's server-side UDP decoder and a bounded
+local UDP relay; it remains test support and creates no inbound/server product
+claim.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config parses_phase6c_shadowsocks_sip004_aead_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-udp
+PHASE6CSSUDP_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-udp python3 compat/scripts/phase6c_shadowsocks_udp.py
+```
+
+Both checks pass. The differential covers AES-128-GCM, AES-256-GCM and
+ChaCha20-IETF-Poly1305 independently; each listener uses one inbound client for
+IPv4, domain and a subsequent 4 KiB IPv4 exchange, then compares controller fields
+and process survival. It is included in the default controller/outbound
+Actions shard. Native Linux CI evidence remains pending. UoT, plugins,
+stream/extra/2022 ciphers, IPv6 UDP, providers/groups, inbound/server direction
+and shared dialer/transport composition remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

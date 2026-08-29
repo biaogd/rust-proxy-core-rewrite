@@ -187,7 +187,6 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
         || proxy.headers.is_some()
-        || proxy.udp.unwrap_or(false)
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
@@ -224,7 +223,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         fingerprint: None,
         certificate: None,
         private_key: None,
-        udp: false,
+        udp: proxy.udp.unwrap_or(false),
         headers: BTreeMap::new(),
     })
 }

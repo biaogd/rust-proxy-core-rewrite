@@ -138,6 +138,7 @@ pub(super) enum UdpSessionMode {
     Direct,
     Dns,
     Socks5(String),
+    Shadowsocks(String),
 }
 
 #[derive(Default)]
@@ -247,6 +248,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Direct => Some(UdpSessionMode::Direct),
         ProxyKind::Dns => Some(UdpSessionMode::Dns),
         ProxyKind::Socks5 if proxy.udp => Some(UdpSessionMode::Socks5(target.to_owned())),
+        ProxyKind::Shadowsocks if proxy.udp => Some(UdpSessionMode::Shadowsocks(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -330,6 +332,12 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::Socks5(proxy) => {
             run_socks5_udp_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Shadowsocks(proxy) => {
+            run_shadowsocks_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
@@ -595,6 +603,111 @@ pub(super) async fn run_socks5_udp_session(
         }
     }
     tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_shadowsocks_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
+        &server,
+        config.ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("Shadowsocks UDP association failed: {error}"),
+            );
+            return;
+        }
+    };
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            if matches!(destination.host, Host::Ip(address) if address.is_ipv6() && !config.ipv6) {
+                break;
+            }
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+fn udp_proxy_destination(request: &UdpSessionPacket) -> Destination {
+    request.fake_host.as_ref().map_or_else(
+        || request.metadata.destination.clone(),
+        |host| Destination {
+            host: Host::Domain(host.clone()),
+            port: request.metadata.destination.port,
+        },
+    )
 }
 
 pub(super) async fn resolve_udp_response_source(

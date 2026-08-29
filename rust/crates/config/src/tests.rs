@@ -1468,7 +1468,7 @@ fn parses_phase6b_http_and_socks5_tls_options() {
 }
 
 #[test]
-fn parses_phase6c_shadowsocks_sip004_aead_tcp_scope() {
+fn parses_phase6c_shadowsocks_sip004_aead_scope() {
     for cipher in ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"] {
         let source = format!(
             "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: phase6c-password\n"
@@ -1484,10 +1484,12 @@ fn parses_phase6c_shadowsocks_sip004_aead_tcp_scope() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n"
     );
+    let udp = Config::from_yaml(&format!("{source}    udp: true\n"))
+        .expect("Phase 6C SIP004 AEAD UDP config");
+    assert!(udp.proxies[0].udp);
     for unsupported in [
         source.replace("aes-128-gcm", "xchacha20-ietf-poly1305"),
         source.replace("    password: phase6c-password\n", ""),
-        format!("{source}    udp: true\n"),
         format!("{source}    plugin: obfs-local\n"),
     ] {
         assert!(matches!(

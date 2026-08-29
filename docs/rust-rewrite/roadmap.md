@@ -1503,6 +1503,30 @@ Phase 6C-B closes only the native SIP004 AEAD TCP cipher/address/framing
 boundary. UDP, UoT, plugins, provider/group consumption, server/inbound mode,
 Shadowsocks 2022 and shared dialer/transport composition remain later gates.
 
+### Phase 6C-C accepted scope
+
+The three accepted SIP004 AEAD methods may now opt into native UDP with
+`udp: true`. Mixed and SOCKS5 UDP ingress selects the configured Shadowsocks
+adapter through the existing rule engine, retains one encrypted upstream socket
+per inbound client, forwards both IPv4 and domain target addresses, and expires
+through the existing bounded queue, cancellation and one-minute idle lifecycle.
+The platform crate still binds the upstream socket and applies the global
+interface/routing-mark policy; the official `shadowsocks` crate exclusively
+owns SIP004 UDP authentication, encryption and address framing.
+
+`compat/scripts/phase6c_shadowsocks_udp.py` starts the same dual TCP/UDP local
+authority for Go and Rust and runs every accepted cipher independently. One
+client on each mixed and SOCKS5 UDP listener sends an IPv4 packet, a domain
+packet and a later 4 KiB IPv4 packet over the same product-side session. The fixture also compares the
+adapter's `udp: true`, `uot: false` controller view and process survival. A
+bounded readiness retry accounts for the oracle exposing its TCP mixed port
+slightly before the paired UDP listener; it does not normalize data-plane
+failures.
+
+Phase 6C-C does not add UoT, plugins, stream/extra/2022 ciphers, IPv6 UDP,
+provider/group consumption, inbound/server mode or shared dialer/transport
+composition. Those remain separately testable gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
