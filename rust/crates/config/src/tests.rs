@@ -1851,6 +1851,40 @@ fn parses_phase6c_v2ray_plugin_dns_ech() {
 }
 
 #[test]
+fn parses_phase6c_shadowsocks_shadow_tls_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6C shadow-tls config");
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {
+            host: "phase6c-shadow-tls.example".to_owned(),
+            password: "phase6c-shadow-tls-plugin-password".to_owned(),
+            version: 3,
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
+        })
+    );
+    for extra in [
+        "plugin: shadow-tls\n",
+        "plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n    udp-over-tcp: true\n",
+    ] {
+        let invalid = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    {extra}"
+        );
+        assert!(matches!(
+            Config::from_yaml(&invalid),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+}
+
+#[test]
 fn parses_phase6c_shadowsocks_legacy_stream_scope() {
     for cipher in [
         "aes-128-ctr",

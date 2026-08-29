@@ -46,6 +46,17 @@ pub enum ShadowsocksPluginConfig {
         http_upgrade: bool,
         http_upgrade_fast_open: bool,
     },
+    ShadowTls {
+        host: String,
+        password: String,
+        version: u8,
+        skip_certificate_verification: bool,
+        verification_name: Option<String>,
+        certificate_fingerprint: Option<String>,
+        certificate: Option<String>,
+        private_key: Option<String>,
+        alpn: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

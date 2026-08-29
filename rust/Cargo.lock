@@ -2878,6 +2878,7 @@ dependencies = [
  "fast-socks5",
  "futures-util",
  "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "httparse",
  "hyper",
@@ -2888,6 +2889,7 @@ dependencies = [
  "rewrite-services",
  "rustls-native-certs",
  "rustls-pemfile",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "shadowsocks",
  "thiserror 2.0.20",
@@ -3105,8 +3107,6 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -3856,8 +3856,6 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",

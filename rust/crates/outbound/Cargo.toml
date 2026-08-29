@@ -18,7 +18,9 @@ httparse.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-services = { path = "../services" }
+hmac.workspace = true
 rand.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 shadowsocks.workspace = true
 rustls-native-certs.workspace = true

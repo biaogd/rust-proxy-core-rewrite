@@ -31,6 +31,8 @@ pub struct HttpProxyTls<'a> {
     pub custom_roots: &'a [String],
     pub ech_config: Option<&'a [u8]>,
     pub alpn_protocols: &'a [&'a [u8]],
+    pub tls12_only: bool,
+    pub tls13_only: bool,
 }
 
 #[derive(Debug)]
@@ -238,9 +240,19 @@ pub(crate) fn client_config(
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
     } else {
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-        ClientConfig::builder_with_details(provider, clock)
-            .with_safe_default_protocol_versions()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        if tls.tls12_only {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        } else if tls.tls13_only {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        } else {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_safe_default_protocol_versions()
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        }
     };
     let builder = if let Some(fingerprint) = tls.fingerprint {
         let normalized = fingerprint.trim().replace(':', "");

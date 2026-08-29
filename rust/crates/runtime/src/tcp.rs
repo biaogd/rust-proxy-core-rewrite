@@ -376,6 +376,8 @@ pub(super) async fn connect_configured_proxy(
                 custom_roots,
                 ech_config: None,
                 alpn_protocols: &[],
+                tls12_only: false,
+                tls13_only: false,
             });
             rewrite_outbound::connect_http_with_options(
                 &server,
@@ -401,6 +403,8 @@ pub(super) async fn connect_configured_proxy(
                 custom_roots,
                 ech_config: None,
                 alpn_protocols: &[],
+                tls12_only: false,
+                tls13_only: false,
             });
             rewrite_outbound::connect_socks5_with_options(
                 &server,

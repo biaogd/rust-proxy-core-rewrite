@@ -356,7 +356,79 @@ fn parse_shadowsocks_plugin(
                 .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
             Some(parse_v2ray_plugin(name, options)?)
         }
+        Some("shadow-tls") => {
+            let options = proxy
+                .plugin_opts
+                .as_ref()
+                .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+            Some(parse_shadow_tls_plugin(name, options)?)
+        }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    })
+}
+
+fn parse_shadow_tls_plugin(
+    name: &str,
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+) -> Result<ShadowsocksPluginConfig, ConfigError> {
+    let host = plugin_string(options, "host")
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?
+        .to_owned();
+    let password = plugin_string(options, "password")
+        .unwrap_or_default()
+        .to_owned();
+    let version = match options.get("version") {
+        None => 2,
+        Some(value) => {
+            plugin_u8(value).ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?
+        }
+    };
+    if options.contains_key("skip-cert-verify")
+        && plugin_bool(options, "skip-cert-verify").is_none()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let alpn = match options.get("alpn") {
+        None => vec!["h2".to_owned(), "http/1.1".to_owned()],
+        Some(serde_yaml_ng::Value::Sequence(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .ok_or(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| ConfigError::UnsupportedProxy(name.to_owned()))?,
+        Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    };
+    let verification_name = plugin_string(options, "name-cert-verify")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let certificate_fingerprint = plugin_string(options, "fingerprint")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let certificate = plugin_string(options, "certificate")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let private_key = plugin_string(options, "private-key")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if certificate.is_some() != private_key.is_some() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(ShadowsocksPluginConfig::ShadowTls {
+        host,
+        password,
+        version,
+        skip_certificate_verification: plugin_bool(options, "skip-cert-verify").unwrap_or(false),
+        verification_name,
+        certificate_fingerprint,
+        certificate,
+        private_key,
+        alpn,
     })
 }
 
@@ -477,6 +549,16 @@ fn plugin_bool(options: &BTreeMap<String, serde_yaml_ng::Value>, key: &str) -> O
         serde_yaml_ng::Value::String(value) => value.parse().ok(),
         _ => None,
     })
+}
+
+fn plugin_u8(value: &serde_yaml_ng::Value) -> Option<u8> {
+    match value {
+        serde_yaml_ng::Value::Number(number) => {
+            number.as_u64().and_then(|value| u8::try_from(value).ok())
+        }
+        serde_yaml_ng::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
 }
 
 fn plugin_headers(

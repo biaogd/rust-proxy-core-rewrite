@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Go/Rust differential for Shadowsocks shadow-tls plugin TCP."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import socket
+import subprocess
+import tempfile
+import time
+from typing import Any
+
+from phase1 import (
+    EchoHandler,
+    HalfCloseHandler,
+    IO_DEADLINE,
+    ROOT,
+    cargo_target_path,
+    reserve_port,
+    start_server,
+    wait_ready,
+)
+from phase3 import launch, stop
+from phase5b1a import build_binaries, debug_files
+from phase6c_shadowsocks_ciphers import LARGE_PAYLOAD, echo, half_close, wait_route
+
+
+FAILURE_ARTIFACT = (
+    ROOT / "compat" / "artifacts" / "phase6c-shadowsocks-shadow-tls-diff.json"
+)
+TARGET_ENV = "PHASE6CSSSHADOWTLS_CARGO_TARGET"
+TARGET_NAME = "phase6c-shadowsocks-shadow-tls"
+HOST = "phase6c-shadow-tls.example"
+PLUGIN_PASSWORD = "phase6c-shadow-tls-plugin-password"
+CIPHER = "2022-blake3-aes-256-gcm"
+KEY_256 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+VERSION = 3
+
+
+def target_dir() -> pathlib.Path:
+    return cargo_target_path(TARGET_ENV, TARGET_NAME)
+
+
+def authority_binary() -> pathlib.Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return target_dir() / f"shadowtls-shadowsocks-authority{suffix}"
+
+
+def build_authority() -> pathlib.Path:
+    output = authority_binary()
+    subprocess.run(
+        [
+            "go",
+            "build",
+            "-o",
+            str(output),
+            "./compat/helpers/shadowtls_shadowsocks_authority",
+        ],
+        cwd=ROOT,
+        check=True,
+        timeout=120,
+    )
+    return output
+
+
+def config_text(plugin_options: str) -> str:
+    return f"""mixed-port: 17890
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: local-ss
+    type: ss
+    server: 127.0.0.1
+    port: 8388
+    cipher: {CIPHER}
+    password: {KEY_256}
+    plugin: shadow-tls
+    plugin-opts:
+{plugin_options}
+rules:
+  - MATCH,local-ss
+"""
+
+
+def validate(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
+    cases = (
+        (
+            "valid-v3",
+            f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 3\n      skip-cert-verify: true\n",
+        ),
+        (
+            "valid-default-version",
+            f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      skip-cert-verify: true\n",
+        ),
+        ("invalid-version", f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 4\n"),
+        (
+            "invalid-unknown-option",
+            f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 3\n      mode: tls\n",
+        ),
+        ("missing-plugin-opts", ""),
+    )
+    observations = {}
+    for label, plugin_options in cases:
+        config = scratch / f"{label}.yaml"
+        if plugin_options:
+            config.write_text(config_text(plugin_options))
+        else:
+            config.write_text(
+                f"""mixed-port: 17890
+mode: rule
+log-level: info
+proxies:
+  - name: local-ss
+    type: ss
+    server: 127.0.0.1
+    port: 8388
+    cipher: {CIPHER}
+    password: {KEY_256}
+    plugin: shadow-tls
+rules:
+  - MATCH,local-ss
+"""
+            )
+        result = subprocess.run(
+            [str(binary), "-t", "-f", str(config)],
+            cwd=scratch,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        observations[label] = result.returncode == 0
+    return observations
+
+
+def start_shadowtls_authority(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    port: int,
+) -> tuple[Any, Any, Any]:
+    stdout = (scratch / "authority-stdout.log").open("wb")
+    stderr = (scratch / "authority-stderr.log").open("wb")
+    process = subprocess.Popen(
+        [
+            str(binary),
+            f"127.0.0.1:{port}",
+            KEY_256,
+            CIPHER,
+            PLUGIN_PASSWORD,
+            str(VERSION),
+        ],
+        cwd=scratch,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"shadow-tls authority exited with {process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return process, stdout, stderr
+        except OSError:
+            time.sleep(0.02)
+    raise TimeoutError("shadow-tls authority did not become ready")
+
+
+def exercise_wire(
+    binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
+) -> dict[str, bool]:
+    tcp_echo = start_server(EchoHandler)
+    half_close_server = start_server(HalfCloseHandler)
+    mixed_port = reserve_port()
+    authority_port = reserve_port()
+    authority_process, authority_stdout, authority_stderr = start_shadowtls_authority(
+        authority, scratch, authority_port
+    )
+    config = scratch / "config.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: local-ss
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {KEY_256}
+    plugin: shadow-tls
+    plugin-opts:
+      host: {HOST}
+      password: {PLUGIN_PASSWORD}
+      version: {VERSION}
+      skip-cert-verify: true
+rules:
+  - MATCH,local-ss
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        wait_route(process, mixed_port, tcp_echo.port)
+        try:
+            half_close_result = half_close(mixed_port, half_close_server.port)
+        except (EOFError, OSError):
+            half_close_result = False
+        return {
+            "tcp-domain": echo(mixed_port, "localhost", tcp_echo.port, b"domain"),
+            "tcp-ipv4-large": echo(
+                mixed_port, "127.0.0.1", tcp_echo.port, LARGE_PAYLOAD
+            ),
+            "tcp-half-close": half_close_result,
+            "process-alive": process.poll() is None,
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        tcp_echo.close()
+        half_close_server.close()
+
+
+def exercise(
+    binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
+) -> dict[str, Any]:
+    validation = scratch / "validation"
+    validation.mkdir()
+    wire = scratch / "wire"
+    wire.mkdir()
+    return {
+        "config": validate(binary, validation),
+        "wire": exercise_wire(binary, authority, wire),
+    }
+
+
+def main() -> int:
+    observations: dict[str, Any] = {}
+    with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-shadow-tls-") as temporary:
+        root = pathlib.Path(temporary)
+        binaries = build_binaries(
+            root,
+            "PHASE6CSSSHADOWTLS_CARGO_TARGET",
+            "phase6c-shadowsocks-shadow-tls",
+        )
+        authority = build_authority()
+        try:
+            for name, binary in binaries.items():
+                scratch = root / name
+                scratch.mkdir()
+                observations[name] = exercise(binary, authority, scratch)
+        except Exception as error:
+            FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+            FAILURE_ARTIFACT.write_text(
+                json.dumps(
+                    {
+                        "error": f"{type(error).__name__}: {error}",
+                        "observations": observations,
+                        "debug": debug_files(root),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            raise
+    if observations["go"] != observations["rust"]:
+        FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+        FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
+        return 1
+    FAILURE_ARTIFACT.unlink(missing_ok=True)
+    print("Phase 6C-M6 Shadowsocks shadow-tls differential passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -3,6 +3,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 mod direct;
 mod http;
 mod http_upgrade;
+mod shadow_tls;
 mod shadowsocks;
 mod simple_obfs;
 mod socks5;
@@ -16,6 +17,7 @@ pub use http::{
     wrap_client_tls_with_options,
 };
 pub use http_upgrade::connect_v2ray_http_upgrade;
+pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,

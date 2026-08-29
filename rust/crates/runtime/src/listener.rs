@@ -541,6 +541,8 @@ pub(super) async fn run_socks5_udp_session(
         custom_roots: &config.trust_certificates,
         ech_config: None,
         alpn_protocols: &[],
+        tls12_only: false,
+        tls13_only: false,
     });
     let association = match rewrite_outbound::associate_socks5_udp_with_options(
         &server,

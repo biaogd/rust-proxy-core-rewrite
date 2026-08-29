@@ -222,6 +222,8 @@ pub async fn connect_shadowsocks_with_plugin_options(
                         custom_roots: options.custom_roots,
                         ech_config: options.ech_config,
                         alpn_protocols: &[b"http/1.1"],
+                        tls12_only: false,
+                        tls13_only: false,
                     },
                     options.clock,
                 )
@@ -262,6 +264,34 @@ pub async fn connect_shadowsocks_with_plugin_options(
                 stream
             }
         }
+        Some(ShadowsocksPluginConfig::ShadowTls {
+            host,
+            password,
+            version,
+            skip_certificate_verification,
+            verification_name,
+            certificate_fingerprint,
+            certificate,
+            private_key,
+            alpn,
+        }) => crate::connect_shadow_tls(
+            Box::new(stream),
+            crate::ShadowTlsConnectOptions {
+                host,
+                password,
+                version: *version,
+                skip_certificate_verification: *skip_certificate_verification,
+                verification_name: verification_name.as_deref(),
+                certificate_fingerprint: certificate_fingerprint.as_deref(),
+                certificate: certificate.as_deref(),
+                private_key: private_key.as_deref(),
+                custom_roots: options.custom_roots,
+                alpn,
+            },
+            options.clock,
+        )
+        .await
+        .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
         None => Box::new(stream),
     };
     let context = Context::new_shared(ServerType::Local);
