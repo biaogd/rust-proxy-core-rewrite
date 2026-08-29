@@ -148,12 +148,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-K Shadowsocks 2022 ChaCha8 | Complete in declared TCP scope | Exact 32-byte base64 PSK validation plus domain/large/half-close TCP wire comparison pass; EIH stays AES-only and 2022 UDP remains blocked |
 | Phase 6C-L Shadowsocks IPv6 UDP | Complete in declared explicit-destination scope | AEAD, stream and extra-AEAD representatives pass mixed/SOCKS5 relay to `::1`, response-address preservation and process survival |
 | Phase 6C-M1 Shadowsocks simple-obfs HTTP | Complete in declared top-level TCP scope | Custom/default Host config, native-UDP bypass, domain/128 KiB TCP framing, process survival and Go's HTTP-obfs half-close limitation pass one native differential; TLS and other plugins remain open |
+| Phase 6C-M2 Shadowsocks simple-obfs TLS | Complete in declared top-level TCP scope | Custom/default SNI config, independent ClientHello/record parsing, domain/128 KiB TCP, process survival and Go's TLS-obfs half-close limitation pass one native differential; other plugins remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1–6C-M1 Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | Phase 1–6C-M2 Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5148,6 +5149,24 @@ observable limitation instead of claiming stronger compatibility.
 TLS simple-obfs, v2ray/gost and other plugins, provider/plugin combinations and
 server direction remain open. Linux execution is configured in the default
 controller/outbound Actions shard.
+
+## Phase 6C-M2 Shadowsocks simple-obfs TLS evidence
+
+The focused hand-written simple-obfs boundary now also implements the pinned
+Go TLS wire shape: a randomized ClientHello with the first encrypted
+Shadowsocks bytes in the session-ticket extension, configured Host in SNI, and
+bounded application-data records thereafter. It is masking only, not a TLS
+security layer. Cipher framing remains owned by the official Shadowsocks
+library and routing policy remains outside the codec.
+
+`compat/scripts/phase6c_shadowsocks_obfs_tls.py` passes on Darwin arm64,
+2026-08-29. An independent server wrapper parses and verifies SNI, extracts the
+ticket and all later records, and drives the official Shadowsocks authority.
+Custom/default Host validation, invalid mode rejection, domain and 128 KiB TCP,
+process survival and the oracle's non-preserved client half-close all match.
+Linux execution is configured in the default controller/outbound Actions
+shard. V2Ray/Gost/ShadowTLS and other plugins, provider/plugin combinations and
+server direction remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

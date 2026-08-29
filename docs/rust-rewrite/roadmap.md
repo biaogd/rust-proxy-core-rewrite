@@ -1718,6 +1718,20 @@ half-close. Native UDP continues to bypass the TCP plugin, matching Go. TLS
 simple-obfs, other plugins, provider/plugin combinations and server direction
 remain separate gates.
 
+### Phase 6C-M2 accepted scope
+
+The same embedded `plugin: obfs` boundary accepts `plugin-opts.mode: tls`.
+Rust emits the pinned Go simple-obfs ClientHello shape, places the first
+Shadowsocks bytes in the session-ticket extension, carries the configured Host
+as SNI, and frames subsequent traffic as bounded TLS application records. The
+test authority independently parses the ClientHello and records before handing
+bytes to the official Shadowsocks server.
+
+`compat/scripts/phase6c_shadowsocks_obfs_tls.py` compares custom/default Host
+configuration, invalid modes, domain and 128 KiB TCP relay, process survival
+and the oracle's lack of half-close preservation. Other SIP003 plugins,
+provider/plugin combinations and server direction remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

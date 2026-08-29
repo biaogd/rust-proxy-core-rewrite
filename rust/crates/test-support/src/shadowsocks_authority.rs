@@ -50,6 +50,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             stream,
                             plugin_host.clone(),
                         )),
+                        Some("tls") => Box::new(rewrite_outbound::TlsObfsServer::new(
+                            stream,
+                            plugin_host.clone(),
+                        )),
                         _ => Box::new(stream),
                     }
                 })

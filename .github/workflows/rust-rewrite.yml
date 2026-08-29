@@ -298,6 +298,7 @@ jobs:
       PHASE6CSS2022CHACHA8_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSIPV6UDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSOBFSHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSOBFSTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -377,6 +378,7 @@ jobs:
             compat/scripts/phase6c_shadowsocks_2022_chacha8.py \
             compat/scripts/phase6c_shadowsocks_ipv6_udp.py \
             compat/scripts/phase6c_shadowsocks_obfs_http.py \
+            compat/scripts/phase6c_shadowsocks_obfs_tls.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

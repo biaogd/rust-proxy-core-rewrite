@@ -25,6 +25,7 @@ pub struct Destination {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShadowsocksPluginConfig {
     SimpleObfsHttp { host: String },
+    SimpleObfsTls { host: String },
 }
 
 impl Destination {

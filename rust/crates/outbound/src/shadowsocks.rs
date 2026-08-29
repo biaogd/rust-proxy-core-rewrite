@@ -15,7 +15,8 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    BoxedOutboundStream, DirectError, DirectTcpOptions, HttpObfsClient, connect_with_options,
+    BoxedOutboundStream, DirectError, DirectTcpOptions, HttpObfsClient, TlsObfsClient,
+    connect_with_options,
 };
 
 #[derive(Debug, Error)]
@@ -172,6 +173,9 @@ pub async fn connect_shadowsocks_with_plugin_options(
     let stream: BoxedOutboundStream = match plugin {
         Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => {
             Box::new(HttpObfsClient::new(stream, host.clone(), server.port))
+        }
+        Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
+            Box::new(TlsObfsClient::new(stream, host.clone()))
         }
         None => Box::new(stream),
     };

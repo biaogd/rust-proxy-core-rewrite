@@ -334,7 +334,10 @@ fn parse_shadowsocks_plugin(
             if options
                 .keys()
                 .any(|key| !matches!(key.as_str(), "mode" | "host"))
-                || options.get("mode").map(String::as_str) != Some("http")
+                || !matches!(
+                    options.get("mode").map(String::as_str),
+                    Some("http" | "tls")
+                )
             {
                 return Err(ConfigError::UnsupportedProxy(name.to_owned()));
             }
@@ -343,7 +346,11 @@ fn parse_shadowsocks_plugin(
                 .filter(|host| !host.is_empty())
                 .cloned()
                 .unwrap_or_else(|| "bing.com".to_owned());
-            Some(ShadowsocksPluginConfig::SimpleObfsHttp { host })
+            Some(match options.get("mode").map(String::as_str) {
+                Some("http") => ShadowsocksPluginConfig::SimpleObfsHttp { host },
+                Some("tls") => ShadowsocksPluginConfig::SimpleObfsTls { host },
+                _ => unreachable!("mode validated above"),
+            })
         }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
     })
