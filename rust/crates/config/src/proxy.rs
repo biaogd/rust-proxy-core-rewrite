@@ -18,7 +18,7 @@ use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
     RawProxyProviderFile,
 };
-use rewrite_model::ShadowsocksPluginConfig;
+use rewrite_model::{ShadowsocksPluginConfig, V2rayEchConfig};
 
 const SHADOWSOCKS_SIP004_AEAD_CIPHERS: [&str; 3] =
     ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305"];
@@ -354,40 +354,113 @@ fn parse_shadowsocks_plugin(
                 .plugin_opts
                 .as_ref()
                 .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-            if options.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "mode" | "host" | "path" | "mux" | "tls" | "skip-cert-verify"
-                )
-            }) || plugin_string(options, "mode") != Some("websocket")
-                || plugin_bool(options, "mux") != Some(false)
-                || options.contains_key("tls") && plugin_bool(options, "tls").is_none()
-                || options.contains_key("skip-cert-verify")
-                    && plugin_bool(options, "skip-cert-verify").is_none()
-            {
-                return Err(ConfigError::UnsupportedProxy(name.to_owned()));
-            }
-            let host = plugin_string(options, "host")
-                .filter(|host| !host.is_empty())
-                .unwrap_or("bing.com")
-                .to_owned();
-            let path = plugin_string(options, "path")
-                .filter(|path| !path.is_empty())
-                .unwrap_or("/");
-            let path = if path.starts_with('/') {
-                path.to_owned()
-            } else {
-                format!("/{path}")
-            };
-            Some(ShadowsocksPluginConfig::V2rayWebSocket {
-                host,
-                path,
-                tls: plugin_bool(options, "tls").unwrap_or(false),
-                skip_certificate_verification: plugin_bool(options, "skip-cert-verify")
-                    .unwrap_or(false),
-            })
+            Some(parse_v2ray_plugin(name, options)?)
         }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    })
+}
+
+#[derive(Default)]
+struct V2rayTlsOptions {
+    verification_name: Option<String>,
+    certificate_fingerprint: Option<String>,
+    certificate: Option<String>,
+    private_key: Option<String>,
+    ech: Option<V2rayEchConfig>,
+}
+
+fn parse_v2ray_plugin(
+    name: &str,
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+) -> Result<ShadowsocksPluginConfig, ConfigError> {
+    if plugin_string(options, "mode") != Some("websocket") {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    for key in [
+        "mux",
+        "tls",
+        "skip-cert-verify",
+        "v2ray-http-upgrade",
+        "v2ray-http-upgrade-fast-open",
+    ] {
+        if options.contains_key(key) && plugin_bool(options, key).is_none() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+    }
+    let host = plugin_string(options, "host")
+        .filter(|host| !host.is_empty())
+        .unwrap_or("bing.com")
+        .to_owned();
+    let path = plugin_string(options, "path")
+        .filter(|path| !path.is_empty())
+        .unwrap_or("/");
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    let headers = plugin_headers(options, "headers")
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let tls = plugin_bool(options, "tls").unwrap_or(false);
+    let tls_options = if tls {
+        parse_v2ray_tls_options(name, options)?
+    } else {
+        V2rayTlsOptions::default()
+    };
+    Ok(ShadowsocksPluginConfig::V2rayWebSocket {
+        host,
+        path,
+        headers,
+        tls,
+        skip_certificate_verification: plugin_bool(options, "skip-cert-verify").unwrap_or(false),
+        verification_name: tls_options.verification_name,
+        certificate_fingerprint: tls_options.certificate_fingerprint,
+        certificate: tls_options.certificate,
+        private_key: tls_options.private_key,
+        ech: tls_options.ech,
+        mux: plugin_bool(options, "mux").unwrap_or(true),
+        http_upgrade: plugin_bool(options, "v2ray-http-upgrade").unwrap_or(false),
+        http_upgrade_fast_open: plugin_bool(options, "v2ray-http-upgrade-fast-open")
+            .unwrap_or(false),
+    })
+}
+
+fn parse_v2ray_tls_options(
+    name: &str,
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+) -> Result<V2rayTlsOptions, ConfigError> {
+    let verification_name = plugin_string(options, "name-cert-verify")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let certificate_fingerprint = plugin_string(options, "fingerprint")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if certificate_fingerprint
+        .as_deref()
+        .is_some_and(|fingerprint| {
+            let normalized = fingerprint.trim().replace(':', "");
+            normalized.len() != 64 || hex::decode(normalized).is_err()
+        })
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let certificate = plugin_string(options, "certificate")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let private_key = plugin_string(options, "private-key")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if certificate.is_some() != private_key.is_some() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let ech =
+        parse_v2ray_ech(options).map_err(|()| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    Ok(V2rayTlsOptions {
+        verification_name,
+        certificate_fingerprint,
+        certificate,
+        private_key,
+        ech,
     })
 }
 
@@ -404,6 +477,51 @@ fn plugin_bool(options: &BTreeMap<String, serde_yaml_ng::Value>, key: &str) -> O
         serde_yaml_ng::Value::String(value) => value.parse().ok(),
         _ => None,
     })
+}
+
+fn plugin_headers(
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Option<BTreeMap<String, String>> {
+    let Some(value) = options.get(key) else {
+        return Some(BTreeMap::new());
+    };
+    let mapping = value.as_mapping()?;
+    mapping
+        .iter()
+        .map(|(key, value)| Some((key.as_str()?.to_owned(), value.as_str()?.to_owned())))
+        .collect()
+}
+
+fn parse_v2ray_ech(
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+) -> Result<Option<V2rayEchConfig>, ()> {
+    let Some(value) = options.get("ech-opts") else {
+        return Ok(None);
+    };
+    let mapping = value.as_mapping().ok_or(())?;
+    let get = |key: &str| mapping.get(serde_yaml_ng::Value::String(key.to_owned()));
+    let enabled = match get("enable") {
+        None => false,
+        Some(serde_yaml_ng::Value::Bool(enabled)) => *enabled,
+        _ => return Err(()),
+    };
+    if !enabled {
+        return Ok(None);
+    }
+    let config = get("config").and_then(serde_yaml_ng::Value::as_str);
+    if let Some(config) = config.filter(|config| !config.is_empty()) {
+        return STANDARD
+            .decode(config)
+            .map_err(|_| ())
+            .map(V2rayEchConfig::Inline)
+            .map(Some);
+    }
+    let query_server_name = get("query-server-name")
+        .and_then(serde_yaml_ng::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok(Some(V2rayEchConfig::Dns { query_server_name }))
 }
 
 fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {

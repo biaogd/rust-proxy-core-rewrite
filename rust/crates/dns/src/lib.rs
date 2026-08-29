@@ -32,7 +32,7 @@ pub use server::serve;
 pub use service::{
     DnsService, RestDnsResponse, RestQuestion, RestRecord, lookup_domain,
     lookup_domain_primary_ipv4, resolve_default_domain, resolve_direct_domain, resolve_domain,
-    resolve_ech, resolve_proxy_domain,
+    resolve_ech, resolve_proxy_domain, resolve_proxy_ech,
 };
 
 const DNS_HEADER_LENGTH: usize = 12;

@@ -151,12 +151,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-M2 Shadowsocks simple-obfs TLS | Complete in declared top-level TCP scope | Custom/default SNI config, independent ClientHello/record parsing, domain/128 KiB TCP, process survival and Go's TLS-obfs half-close limitation pass one native differential; other plugins remain open |
 | Phase 6C-M3 Shadowsocks v2ray-plugin WebSocket | Complete in declared plaintext non-mux TCP scope | Standard-library WebSocket client plus Axum authority verify explicit Host/path, domain/128 KiB TCP, process survival and Go's half-close limitation; TLS/mux/early-data remain open |
 | Phase 6C-M4 Shadowsocks v2ray-plugin WebSocket TLS | Complete in declared non-mux WSS scope | Rustls plus Axum TLS authority verify custom-root trust, skip verification, untrusted rejection, SNI/Host/path, domain/128 KiB TCP and Go's half-close limitation; mux/advanced TLS remain open |
+| Phase 6C-M5 complete Shadowsocks v2ray-plugin TCP surface | Complete in documented functional TCP scope; one corrupt-frame oracle edge is deliberately not copied | Unified Go/Rust differential proves headers/Host override, default mux, early data, raw/fast HTTP Upgrade, name override, DER SHA-256 pinning, mTLS, inline ECH and proxy-resolver DNS ECH |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1–6C-M4 Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | Phase 1–6C-M5 Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5205,6 +5206,36 @@ domain TCP, 128 KiB IPv4 TCP, process survival and the pinned Go half-close
 limitation. Linux execution is configured in the default controller/outbound
 Actions shard. Mux, headers, client identity, fingerprint/name override, ECH,
 early data and raw HTTP-upgrade remain open.
+
+## Phase 6C-M5 complete Shadowsocks v2ray-plugin TCP evidence
+
+The product now parses and applies every documented Mihomo v2ray-plugin TCP
+option: custom headers and Host override, default/enabled mux, `?ed=N` early
+data, raw HTTP Upgrade and fast-open, WSS roots/skip/name override/DER SHA-256
+pin/client identity, and inline or DNS-resolved ECH. Tungstenite remains the
+WebSocket codec, Rustls remains the TLS boundary, Axum/Hyper drives the
+independent authority, and `httparse` is limited to validating raw HTTP Upgrade
+responses. Mux is the Go plugin's single-session framing, not a general-purpose
+multiplexer.
+
+`compat/scripts/phase6c_shadowsocks_v2ray_plugin.py` passes on Darwin arm64,
+2026-08-29. It compares valid/invalid configuration and real domain/128 KiB TCP
+relay for custom Host/header plus default mux and early data, normal and
+fast-open raw upgrade, distinct Host/SNI verification name, DER pinning, inline
+mTLS identity and real ECH against a Go TLS authority that refuses non-ECH
+connections. A second end-to-end case gives ordinary DNS a non-ECH HTTPS record
+and `proxy-server-nameserver` the valid ECH config, proving
+`query-server-name` selects the Go proxy-server resolver before completing the
+same relay. The unified gate replaces the redundant M3/M4 scripts in default CI
+and is configured for Linux amd64.
+
+The sole intentional v2ray mux wire divergence is a pathological single
+`Write` larger than 65,535 bytes: the pinned Go writer truncates its length but
+appends the full payload, corrupting the next frame; Rust splits the payload
+into valid frames. Native Shadowsocks UDP bypasses v2ray-plugin in Go and is
+therefore not a missing plugin feature. Provider consumption and server mode
+remain tracked by their own adapter/provider inventory rows, not by this TCP
+transport gate.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

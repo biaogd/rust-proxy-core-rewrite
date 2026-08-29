@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -33,9 +34,24 @@ pub enum ShadowsocksPluginConfig {
     V2rayWebSocket {
         host: String,
         path: String,
+        headers: BTreeMap<String, String>,
         tls: bool,
         skip_certificate_verification: bool,
+        verification_name: Option<String>,
+        certificate_fingerprint: Option<String>,
+        certificate: Option<String>,
+        private_key: Option<String>,
+        ech: Option<V2rayEchConfig>,
+        mux: bool,
+        http_upgrade: bool,
+        http_upgrade_fast_open: bool,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum V2rayEchConfig {
+    Inline(Vec<u8>),
+    Dns { query_server_name: Option<String> },
 }
 
 impl Destination {

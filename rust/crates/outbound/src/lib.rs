@@ -2,14 +2,20 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 mod direct;
 mod http;
+mod http_upgrade;
 mod shadowsocks;
 mod simple_obfs;
 mod socks5;
 mod tls;
+mod v2ray_mux;
 mod websocket;
 
 pub use direct::{DirectError, DirectTcpOptions, connect, connect_with_options};
-pub use http::{HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls};
+pub use http::{
+    HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
+    wrap_client_tls_with_options,
+};
+pub use http_upgrade::connect_v2ray_http_upgrade;
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,
@@ -22,7 +28,8 @@ pub use socks5::{
     connect_socks5_with_options,
 };
 pub use tls::HttpProxyTls;
-pub use websocket::{WebSocketIo, connect_websocket};
+pub use v2ray_mux::{V2rayMux, V2rayMuxNetwork, V2rayMuxOptions};
+pub use websocket::{WebSocketIo, connect_v2ray_websocket, connect_websocket};
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}
 

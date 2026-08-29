@@ -1761,6 +1761,31 @@ oracle's non-preserved half-close. Mux, headers, client certificates,
 fingerprints/name overrides, ECH, early data and raw HTTP-upgrade remain
 separate gates.
 
+### Phase 6C-M5 accepted scope — complete v2ray-plugin TCP surface
+
+This gate closes the remaining documented Mihomo `v2ray-plugin` TCP client
+surface in one vertical slice. It adds custom headers and Host override,
+Go-compatible default single-session mux framing, `path?ed=N` lazy early data,
+raw HTTP Upgrade and fast-open, TLS verification-name override, DER SHA-256
+certificate pinning, inline client certificate/key authentication, and ECH
+from either inline configuration or the existing DNS HTTPS-record resolver.
+WebSocket framing remains library-backed by Tungstenite; Axum/Hyper owns the
+test-side upgrade boundary and `httparse` is used only at the raw-upgrade
+framing boundary.
+
+`compat/scripts/phase6c_shadowsocks_v2ray_plugin.py` compares Go and Rust for
+configuration acceptance plus real TCP relay through ordinary WebSocket,
+normal/fast raw upgrade, custom headers, default mux, early data, name override,
+certificate pinning, mTLS and a Go authority that rejects TLS connections where
+ECH was not accepted. A second ECH case proves that `query-server-name` uses
+`proxy-server-nameserver`, not the ordinary resolver, before completing the
+same ECH-required TLS relay. v2ray-plugin does not wrap native
+Shadowsocks UDP in the Go implementation, so UDP is not part of this plugin
+surface. Rust deliberately splits writes larger than 65,535 bytes into valid
+mux frames instead of reproducing the pinned Go writer's corrupt-frame edge.
+This documented safety divergence is not normalized or presented as exact
+wire parity for that invalid edge.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

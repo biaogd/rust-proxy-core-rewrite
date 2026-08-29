@@ -82,6 +82,7 @@ pub(crate) async fn query_tls(query: &[u8], upstream: SocketAddr) -> Result<Vec<
 pub(crate) async fn connect_tls_insecure(
     upstream: SocketAddr,
 ) -> Result<TlsStream<TcpStream>, DnsError> {
+    install_default_crypto_provider();
     let stream = tokio::time::timeout(UPSTREAM_TIMEOUT, TcpStream::connect(upstream))
         .await
         .map_err(|_| DnsError::UpstreamTimeout)??;
@@ -145,6 +146,7 @@ pub(crate) async fn connect_tls_verified_with_alpn(
 }
 
 pub(crate) fn verified_client_config(tls: &DnsTlsConfig) -> Result<ClientConfig, DnsError> {
+    install_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     if !go_style_env_flag("DISABLE_SYSTEM_CA") {
         let native = rustls_native_certs::load_native_certs();
@@ -193,6 +195,10 @@ pub(crate) fn verified_client_config(tls: &DnsTlsConfig) -> Result<ClientConfig,
             .with_no_client_auth()
     };
     Ok(client_config)
+}
+
+fn install_default_crypto_provider() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
 
 pub(crate) fn go_style_env_flag(name: &str) -> bool {

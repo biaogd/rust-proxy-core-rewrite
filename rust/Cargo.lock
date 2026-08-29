@@ -2747,6 +2747,7 @@ dependencies = [
  "rewrite-generator",
  "rewrite-ruleset",
  "rewrite-runtime",
+ "rewrite-services",
  "rustc_version",
  "time",
  "tokio",
@@ -2760,6 +2761,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "fancy-regex",
+ "hex",
  "ipnet",
  "md-5 0.10.6",
  "network-interface",
@@ -2877,6 +2879,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
  "rand 0.10.2",
@@ -2891,6 +2894,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "url",
 ]
 
 [[package]]
@@ -3001,6 +3005,8 @@ dependencies = [
  "futures-util",
  "h2",
  "http",
+ "hyper",
+ "hyper-util",
  "rewrite-config",
  "rewrite-dns",
  "rewrite-model",
@@ -3102,6 +3108,7 @@ version = "0.23.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
+ "aws-lc-rs",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3174,6 +3181,7 @@ version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",

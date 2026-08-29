@@ -621,6 +621,26 @@ pub async fn resolve_ech(config: &DnsConfig, host: &str) -> Result<Vec<u8>, DnsE
     answer_https_ech(&response)?.ok_or(DnsError::NoEchConfig)
 }
 
+/// Resolves ECH through the proxy-server resolver set used for proxy endpoints.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] for transport/message failures or when no HTTPS answer
+/// contains the ECH service parameter.
+pub async fn resolve_proxy_ech(config: &DnsConfig, host: &str) -> Result<Vec<u8>, DnsError> {
+    let query = make_query(host, 65)?;
+    let identifier = [query[0], query[1]];
+    let response = if let Some(resolvers) = selected_policy(&config.proxy_policies, host) {
+        query_resolver_set(&query, resolvers, None, None).await?
+    } else if config.proxy_resolvers.is_empty() {
+        query_configured(&query, config, host, None, None).await?
+    } else {
+        query_resolver_set(&query, &config.proxy_resolvers, None, None).await?
+    };
+    validate_response(&response, identifier)?;
+    answer_https_ech(&response)?.ok_or(DnsError::NoEchConfig)
+}
+
 /// Resolves a DIRECT outbound domain through the configured direct resolver.
 /// If no direct resolver is configured, the normal resolver remains the Go
 /// compatible fallback.

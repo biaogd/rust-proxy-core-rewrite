@@ -18,6 +18,7 @@ rewrite-config = { path = "../config" }
 rewrite-generator = { path = "../generator" }
 rewrite-age = { path = "../age" }
 rewrite-runtime = { path = "../runtime" }
+rewrite-services = { path = "../services" }
 rewrite-ruleset = { path = "../ruleset" }
 tokio.workspace = true
 tokio-util.workspace = true

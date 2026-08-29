@@ -372,6 +372,8 @@ pub(super) async fn measure_http_delay(
                         certificate: proxy.certificate.as_deref(),
                         private_key: proxy.private_key.as_deref(),
                         custom_roots: &config.trust_certificates,
+                        ech_config: None,
+                        alpn_protocols: &[],
                     });
                     rewrite_outbound::connect_http_with_options(
                         &server,
@@ -395,6 +397,8 @@ pub(super) async fn measure_http_delay(
                         certificate: proxy.certificate.as_deref(),
                         private_key: proxy.private_key.as_deref(),
                         custom_roots: &config.trust_certificates,
+                        ech_config: None,
+                        alpn_protocols: &[],
                     });
                     rewrite_outbound::connect_socks5_with_options(
                         &server,
@@ -409,6 +413,29 @@ pub(super) async fn measure_http_delay(
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::Shadowsocks => {
+                    let resolved_ech = match proxy.shadowsocks_plugin.as_ref() {
+                        Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+                            ech: Some(rewrite_model::V2rayEchConfig::Dns { query_server_name }),
+                            host,
+                            ..
+                        }) => {
+                            let dns = config.dns.as_ref().ok_or(())?;
+                            let query = query_server_name.as_deref().unwrap_or(host);
+                            Some(
+                                rewrite_dns::resolve_proxy_ech(dns, query)
+                                    .await
+                                    .map_err(|_| ())?,
+                            )
+                        }
+                        _ => None,
+                    };
+                    let inline_ech = match proxy.shadowsocks_plugin.as_ref() {
+                        Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+                            ech: Some(rewrite_model::V2rayEchConfig::Inline(bytes)),
+                            ..
+                        }) => Some(bytes.as_slice()),
+                        _ => None,
+                    };
                     rewrite_outbound::connect_shadowsocks_with_plugin_options(
                         &server,
                         &destination,
@@ -420,6 +447,7 @@ pub(super) async fn measure_http_delay(
                             plugin: proxy.shadowsocks_plugin.as_ref(),
                             clock: None,
                             custom_roots: &config.trust_certificates,
+                            ech_config: resolved_ech.as_deref().or(inline_ech),
                         },
                     )
                     .await

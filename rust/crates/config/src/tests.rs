@@ -1713,23 +1713,26 @@ fn parses_phase6c_shadowsocks_v2ray_websocket_scope() {
         Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
             host: "phase6c.example".to_owned(),
             path: "/tunnel".to_owned(),
+            headers: std::collections::BTreeMap::new(),
             tls: false,
             skip_certificate_verification: false,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            ech: None,
+            mux: false,
+            http_upgrade: false,
+            http_upgrade_fast_open: false,
         })
     );
-    for options in [
-        "mode: websocket\n",
-        "mode: websocket\n      mux: true\n",
-        "mode: grpc\n      mux: false\n",
-    ] {
-        let invalid = format!(
-            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      {options}"
-        );
-        assert!(matches!(
-            Config::from_yaml(&invalid),
-            Err(ConfigError::UnsupportedProxy(_))
-        ));
-    }
+    let invalid = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      mode: grpc\n      mux: false\n"
+    );
+    assert!(matches!(
+        Config::from_yaml(&invalid),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
 }
 
 #[test]
@@ -1743,8 +1746,106 @@ fn parses_phase6c_shadowsocks_v2ray_websocket_tls_scope() {
         Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
             host: "dot.phase4.test".to_owned(),
             path: "/wss".to_owned(),
+            headers: std::collections::BTreeMap::new(),
             tls: true,
             skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            ech: None,
+            mux: false,
+            http_upgrade: false,
+            http_upgrade_fast_open: false,
+        })
+    );
+}
+
+#[test]
+fn parses_phase6c_complete_v2ray_plugin_surface() {
+    let fingerprint = "11".repeat(32);
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      mode: websocket\n      host: phase6c.example\n      path: /tunnel?ed=2048&z=1\n      tls: true\n      skip-cert-verify: true\n      name-cert-verify: verify.example\n      fingerprint: '{fingerprint}'\n      certificate: client.pem\n      private-key: client.key\n      headers:\n        Host: front.example\n        X-Phase: 6c\n      mux: true\n      v2ray-http-upgrade: true\n      v2ray-http-upgrade-fast-open: true\n      ech-opts:\n        enable: true\n        config: AAE=\n"
+    );
+    let config = Config::from_yaml(&source).expect("complete v2ray-plugin config");
+    let Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+        host,
+        path,
+        headers,
+        tls,
+        verification_name,
+        certificate_fingerprint,
+        certificate,
+        private_key,
+        ech,
+        mux,
+        http_upgrade,
+        http_upgrade_fast_open,
+        ..
+    }) = config.proxies[0].shadowsocks_plugin.as_ref()
+    else {
+        panic!("v2ray-plugin config missing")
+    };
+    assert_eq!(host, "phase6c.example");
+    assert_eq!(path, "/tunnel?ed=2048&z=1");
+    assert_eq!(
+        headers.get("Host").map(String::as_str),
+        Some("front.example")
+    );
+    assert_eq!(headers.get("X-Phase").map(String::as_str), Some("6c"));
+    assert!(*tls && *mux && *http_upgrade && *http_upgrade_fast_open);
+    assert_eq!(verification_name.as_deref(), Some("verify.example"));
+    assert_eq!(
+        certificate_fingerprint.as_deref(),
+        Some(fingerprint.as_str())
+    );
+    assert_eq!(certificate.as_deref(), Some("client.pem"));
+    assert_eq!(private_key.as_deref(), Some("client.key"));
+    assert_eq!(
+        ech,
+        &Some(rewrite_model::V2rayEchConfig::Inline(vec![0, 1]))
+    );
+}
+
+#[test]
+fn defaults_phase6c_v2ray_plugin_mux_and_ignores_tls_fields_without_tls() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      mode: websocket\n      fingerprint: not-a-fingerprint\n      certificate: ignored.pem\n      ech-opts:\n        enable: true\n        config: not-base64\n"
+    );
+    let config = Config::from_yaml(&source).expect("TLS-only fields are ignored without TLS");
+    let Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+        host,
+        path,
+        mux,
+        certificate_fingerprint,
+        ech,
+        ..
+    }) = config.proxies[0].shadowsocks_plugin.as_ref()
+    else {
+        panic!("v2ray-plugin config missing")
+    };
+    assert_eq!(host, "bing.com");
+    assert_eq!(path, "/");
+    assert!(*mux);
+    assert!(certificate_fingerprint.is_none());
+    assert!(ech.is_none());
+}
+
+#[test]
+fn parses_phase6c_v2ray_plugin_dns_ech() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: aes-128-gcm\n    password: phase6c-password\n    plugin: v2ray-plugin\n    plugin-opts:\n      mode: websocket\n      tls: true\n      ech-opts:\n        enable: true\n        query-server-name: ech.example\n"
+    );
+    let config = Config::from_yaml(&source).expect("DNS ECH v2ray-plugin config");
+    let Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket { ech, .. }) =
+        config.proxies[0].shadowsocks_plugin.as_ref()
+    else {
+        panic!("v2ray-plugin config missing")
+    };
+    assert_eq!(
+        ech,
+        &Some(rewrite_model::V2rayEchConfig::Dns {
+            query_server_name: Some("ech.example".to_owned()),
         })
     );
 }

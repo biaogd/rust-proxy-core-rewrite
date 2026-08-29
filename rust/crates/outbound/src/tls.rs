@@ -6,10 +6,14 @@ use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use tokio_rustls::rustls::client::{EchConfig, EchMode};
+use tokio_rustls::rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES;
 use tokio_rustls::rustls::crypto::{
     WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
 };
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use tokio_rustls::rustls::pki_types::{
+    CertificateDer, EchConfigListBytes, PrivateKeyDer, ServerName, UnixTime,
+};
 use tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
 };
@@ -25,6 +29,8 @@ pub struct HttpProxyTls<'a> {
     pub certificate: Option<&'a str>,
     pub private_key: Option<&'a str>,
     pub custom_roots: &'a [String],
+    pub ech_config: Option<&'a [u8]>,
+    pub alpn_protocols: &'a [&'a [u8]],
 }
 
 #[derive(Debug)]
@@ -195,7 +201,6 @@ pub(crate) fn client_config(
     tls: HttpProxyTls<'_>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<ClientConfig, HttpProxyError> {
-    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
     let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
@@ -224,9 +229,19 @@ pub(crate) fn client_config(
                 .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
         }
     }
-    let builder = ClientConfig::builder_with_details(provider, clock)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    let builder = if let Some(ech_config) = tls.ech_config {
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+        let ech_config = EchConfig::new(EchConfigListBytes::from(ech_config), ALL_SUPPORTED_SUITES)
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        ClientConfig::builder_with_details(provider, clock)
+            .with_ech(EchMode::Enable(ech_config))
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+    } else {
+        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        ClientConfig::builder_with_details(provider, clock)
+            .with_safe_default_protocol_versions()
+            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+    };
     let builder = if let Some(fingerprint) = tls.fingerprint {
         let normalized = fingerprint.trim().replace(':', "");
         let fingerprint = hex::decode(normalized)
@@ -269,7 +284,7 @@ pub(crate) fn client_config(
     } else {
         builder.with_root_certificates(roots)
     };
-    match (tls.certificate, tls.private_key) {
+    let mut config = match (tls.certificate, tls.private_key) {
         (Some(certificate), Some(private_key)) => {
             let certificates = load_certificates(certificate)?;
             let private_key = load_private_key(private_key)?;
@@ -281,7 +296,13 @@ pub(crate) fn client_config(
         _ => Err(HttpProxyError::TlsConfiguration(
             "client certificate and private key must be configured together".to_owned(),
         )),
-    }
+    }?;
+    apply_alpn(&mut config, tls.alpn_protocols);
+    Ok(config)
+}
+
+fn apply_alpn(config: &mut ClientConfig, protocols: &[&[u8]]) {
+    config.alpn_protocols = protocols.iter().map(|value| value.to_vec()).collect();
 }
 
 fn load_pem_or_path(value: &str) -> Result<Vec<u8>, HttpProxyError> {

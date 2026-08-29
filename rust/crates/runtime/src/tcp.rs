@@ -308,6 +308,7 @@ pub(super) async fn connect_tcp_outbound(
                 config.ipv6,
                 state.clock(),
                 &config.trust_certificates,
+                config.dns.as_ref(),
                 direct_tcp_options(config),
             ) => result,
         };
@@ -346,6 +347,7 @@ pub(super) async fn connect_configured_proxy(
     allow_ipv6: bool,
     clock: Arc<rewrite_services::AdjustedClock>,
     custom_roots: &[String],
+    dns: Option<&rewrite_config::DnsConfig>,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let server = Destination {
@@ -372,6 +374,8 @@ pub(super) async fn connect_configured_proxy(
                 certificate: proxy.certificate.as_deref(),
                 private_key: proxy.private_key.as_deref(),
                 custom_roots,
+                ech_config: None,
+                alpn_protocols: &[],
             });
             rewrite_outbound::connect_http_with_options(
                 &server,
@@ -395,6 +399,8 @@ pub(super) async fn connect_configured_proxy(
                 certificate: proxy.certificate.as_deref(),
                 private_key: proxy.private_key.as_deref(),
                 custom_roots,
+                ech_config: None,
+                alpn_protocols: &[],
             });
             rewrite_outbound::connect_socks5_with_options(
                 &server,
@@ -408,25 +414,81 @@ pub(super) async fn connect_configured_proxy(
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
         }
-        ProxyKind::Shadowsocks => rewrite_outbound::connect_shadowsocks_with_plugin_options(
-            &server,
-            destination,
-            allow_ipv6,
-            proxy.password.as_deref().unwrap_or_default(),
-            proxy.cipher.as_deref().unwrap_or_default(),
-            rewrite_outbound::ShadowsocksTcpOptions {
-                socket: socket_options,
-                plugin: proxy.shadowsocks_plugin.as_ref(),
-                clock: Some(clock),
+        ProxyKind::Shadowsocks => {
+            connect_shadowsocks_proxy(
+                proxy,
+                destination,
+                allow_ipv6,
+                clock,
                 custom_roots,
-            },
-        )
-        .await
-        .map_err(|error| format!("Shadowsocks proxy connection failed: {error}")),
+                dns,
+                socket_options,
+            )
+            .await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+async fn connect_shadowsocks_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    dns: Option<&rewrite_config::DnsConfig>,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let resolved_ech = match proxy.shadowsocks_plugin.as_ref() {
+        Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+            ech: Some(rewrite_model::V2rayEchConfig::Dns { query_server_name }),
+            host,
+            ..
+        }) => {
+            let dns = dns.ok_or_else(|| {
+                "Shadowsocks v2ray-plugin ECH requires DNS configuration".to_owned()
+            })?;
+            let query = query_server_name.as_deref().unwrap_or(host);
+            Some(
+                rewrite_dns::resolve_proxy_ech(dns, query)
+                    .await
+                    .map_err(|error| format!("v2ray-plugin ECH lookup failed: {error}"))?,
+            )
+        }
+        _ => None,
+    };
+    let inline_ech = match proxy.shadowsocks_plugin.as_ref() {
+        Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
+            ech: Some(rewrite_model::V2rayEchConfig::Inline(bytes)),
+            ..
+        }) => Some(bytes.as_slice()),
+        _ => None,
+    };
+    rewrite_outbound::connect_shadowsocks_with_plugin_options(
+        &server,
+        destination,
+        allow_ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        rewrite_outbound::ShadowsocksTcpOptions {
+            socket: socket_options,
+            plugin: proxy.shadowsocks_plugin.as_ref(),
+            clock: Some(clock),
+            custom_roots,
+            ech_config: resolved_ech.as_deref().or(inline_ech),
+        },
+    )
+    .await
+    .map_err(|error| format!("Shadowsocks proxy connection failed: {error}"))
 }
 
 pub(super) fn group_retry_delay(attempt: usize) -> Duration {

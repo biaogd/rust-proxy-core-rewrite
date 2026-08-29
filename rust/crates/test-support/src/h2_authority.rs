@@ -56,6 +56,7 @@ impl SharedObservation {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let mut arguments = std::env::args_os().skip(1);
     let cert_path = arguments.next().ok_or("missing certificate path")?;
     let key_path = arguments.next().ok_or("missing private-key path")?;

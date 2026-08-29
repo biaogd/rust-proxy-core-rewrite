@@ -825,9 +825,9 @@ pub(super) async fn fetch_http_proxy_provider(
     trust_certificates: &[String],
     hosts: &rewrite_config::HostTable,
 ) -> Result<HttpProviderFetch, String> {
-    // reqwest deliberately uses rustls-no-provider so the workspace does not
-    // pull AWS-LC beside the ring-backed DNS/QUIC stack. Install ring before
-    // constructing its client; repeated installation is harmless.
+    // Reqwest deliberately uses rustls-no-provider so enabling AWS-LC for ECH
+    // does not make its provider selection ambiguous. Install ring before
+    // constructing the client; repeated installation is harmless.
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let url = url::Url::parse(raw_url).map_err(|error| error.to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {

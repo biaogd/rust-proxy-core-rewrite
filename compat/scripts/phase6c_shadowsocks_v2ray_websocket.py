@@ -41,12 +41,15 @@ def start_authority(
     path: str = PATH,
     certificate: pathlib.Path | None = None,
     private_key: pathlib.Path | None = None,
+    options: pathlib.Path | None = None,
 ):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
     command = [str(binary), f"127.0.0.1:{port}", PASSWORD, CIPHER, host, path]
     if certificate is not None and private_key is not None:
         command.extend((str(certificate), str(private_key)))
+    if options is not None:
+        command.append(str(options))
     process = subprocess.Popen(
         command,
         cwd=scratch,

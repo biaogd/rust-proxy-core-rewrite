@@ -131,8 +131,14 @@ fn updater_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn updater_client() -> Result<reqwest::Client, ServiceError> {
+/// Selects the normal Ring provider when Rustls is built with both Ring and
+/// AWS-LC (the latter is used only by per-connection ECH configs).
+pub fn install_default_crypto_provider() {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+}
+
+fn updater_client() -> Result<reqwest::Client, ServiceError> {
+    install_default_crypto_provider();
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(90))

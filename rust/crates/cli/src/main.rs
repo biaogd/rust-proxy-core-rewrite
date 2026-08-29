@@ -168,6 +168,7 @@ impl ConfigInput {
 
 #[tokio::main]
 async fn main() {
+    rewrite_services::install_default_crypto_provider();
     let raw_arguments: Vec<_> = std::env::args_os().collect();
     if raw_arguments.get(1).and_then(|value| value.to_str()) == Some("generate") {
         if let Err(error) = run_generate_subcommand(&raw_arguments[2..]) {

@@ -151,9 +151,24 @@ pub async fn wrap_client_tls(
         certificate: None,
         private_key: None,
         custom_roots,
+        ech_config: None,
+        alpn_protocols: &[],
     };
+    wrap_client_tls_with_options(stream, tls, clock).await
+}
+
+/// Wraps an established outbound stream using the complete shared TLS option set.
+///
+/// # Errors
+///
+/// Returns configuration, server-name or TLS handshake failures.
+pub async fn wrap_client_tls_with_options(
+    stream: BoxedOutboundStream,
+    tls: HttpProxyTls<'_>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<BoxedOutboundStream, HttpProxyError> {
     let config = client_config(tls, clock)?;
-    let server_name = ServerName::try_from(server_name.to_owned())
+    let server_name = ServerName::try_from(tls.server_name.to_owned())
         .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
     let stream = TlsConnector::from(Arc::new(config))
         .connect(server_name, stream)
