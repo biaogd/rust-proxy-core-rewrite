@@ -87,13 +87,21 @@ def exercise_tcp_cipher(
     scratch: pathlib.Path,
     cipher: str,
     password: str,
+    *,
+    authority_password: str | None = None,
+    authority_user_key: str | None = None,
 ) -> dict[str, bool]:
     tcp_echo = start_server(EchoHandler)
     half_close_server = start_server(HalfCloseHandler)
     mixed_port = reserve_port()
     authority_port = reserve_port()
     authority_process, authority_stdout, authority_stderr = start_authority(
-        authority, scratch, authority_port, cipher, password
+        authority,
+        scratch,
+        authority_port,
+        cipher,
+        authority_password or password,
+        authority_user_key,
     )
     config = scratch / "config.yaml"
     config.write_text(

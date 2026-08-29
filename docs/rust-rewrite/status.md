@@ -144,12 +144,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-G Shadowsocks legacy stream ciphers | Complete in declared shared-library scope | AES-CTR×3, AES-CFB×3, RC4-MD5 and ChaCha20-IETF each pass config plus domain/large/half-close TCP and IPv4/domain native UDP wire comparison; Go-only extra methods remain rejected |
 | Phase 6C-H Shadowsocks extra AEAD ciphers | Complete in declared shared-library scope | XChaCha20-Poly1305, AES-128/256-CCM and AES-128/256-GCM-SIV each pass config plus domain/large/half-close TCP and IPv4/domain native UDP wire comparison; remaining Go-only methods stay explicit gaps |
 | Phase 6C-I Shadowsocks 2022 TCP | Complete in declared standard single-PSK TCP scope | Three standard methods pass exact base64 key validation plus domain/large/half-close TCP wire comparison; 2022 UDP remains disabled after the pinned Go client panicked on an official Rust authority response |
+| Phase 6C-J Shadowsocks 2022 EIH | Complete in declared AES single-hop TCP scope | AES-128/256 accept exactly `iPSK:uPSK`, reject malformed keys and unsupported ChaCha EIH, and pass domain/large/half-close TCP wire comparison; multi-hop and UDP remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented | Phase 1–6C-F Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented | Phase 1–6C-J Python gates are assigned to fail-independent GitHub Actions matrix shards; local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5070,6 +5071,30 @@ The UDP gate was attempted but is not claimed: the pinned Go
 authority. Rust rejects 2022 UDP until this cross-implementation boundary can
 be verified without weakening the oracle. EIH, 2022-extra, plugins, IPv6 UDP
 and server direction remain open.
+
+## Phase 6C-J Shadowsocks 2022 single-hop EIH evidence
+
+AES-128-GCM and AES-256-GCM 2022 configurations now accept one EIH identity
+key followed by one user PSK as `iPSK:uPSK`. Both components must be standard
+base64 and decode to the method's exact key length. ChaCha20-2022 EIH and AES
+chains longer than one identity hop remain rejected, so this slice does not
+silently claim the broader EIH chain protocol.
+
+Focused Darwin arm64 evidence on 2026-08-29:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml -p rewrite-config parses_phase6c_shadowsocks_2022_single_hop_eih_scope --all-features --target-dir /Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-2022-eih
+PHASE6CSS2022EIH_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6c-shadowsocks-2022-eih python3 compat/scripts/phase6c_shadowsocks_2022_eih.py
+```
+
+The fixed Go oracle and Rust agree on valid AES-128/256 chains, malformed
+identity keys and unsupported ChaCha EIH. Each AES method then passes domain
+TCP, 128 KiB IPv4 TCP, half-close delivery and process-survival comparison
+against an official-library multi-user authority. The gate is included in the
+default controller/outbound Actions shard; Linux evidence remains pending.
+
+Multi-hop EIH, native 2022 UDP, 2022-extra ciphers, plugins, IPv6 UDP and server
+direction remain open.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

@@ -1584,6 +1584,55 @@ fn parses_phase6c_shadowsocks_2022_scope() {
 }
 
 #[test]
+fn parses_phase6c_shadowsocks_2022_single_hop_eih_scope() {
+    for (cipher, password) in [
+        (
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw==",
+        ),
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: {password}\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6C Shadowsocks 2022 EIH config");
+        assert_eq!(config.proxies[0].password.as_deref(), Some(password));
+    }
+    for (cipher, password) in [
+        (
+            "2022-blake3-chacha20-poly1305",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        ),
+        (
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw==:ICEiIyQlJicoKSorLC0uLw==",
+        ),
+        (
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        ),
+        (
+            "2022-blake3-aes-128-gcm",
+            "AAECAwQFBgcICQoLDA0ODw==:not-base64",
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: {password}\n"
+        );
+        assert!(
+            matches!(
+                Config::from_yaml(&source),
+                Err(ConfigError::UnsupportedProxy(_))
+            ),
+            "unexpectedly accepted {cipher} password {password}"
+        );
+    }
+}
+
+#[test]
 fn parses_phase6c_shadowsocks_legacy_stream_scope() {
     for cipher in [
         "aes-128-ctr",

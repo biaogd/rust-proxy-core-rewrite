@@ -45,11 +45,15 @@ def start_authority(
     port: int,
     cipher: str = CIPHER,
     password: str = PASSWORD,
+    eih_user_key: str | None = None,
 ):
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
+    command = [str(binary), f"127.0.0.1:{port}", password, cipher]
+    if eih_user_key is not None:
+        command.append(eih_user_key)
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{port}", password, cipher],
+        command,
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,

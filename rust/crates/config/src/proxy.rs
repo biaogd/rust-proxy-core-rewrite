@@ -246,13 +246,24 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => Some(32),
         _ => None,
     };
-    if let Some(expected_key_length) = expected_key_length
-        && STANDARD
-            .decode(&password)
-            .ok()
-            .is_none_or(|key| key.len() != expected_key_length)
-    {
-        return Err(ConfigError::UnsupportedProxy(name));
+    if let Some(expected_key_length) = expected_key_length {
+        let keys = password.split(':').collect::<Vec<_>>();
+        let maximum_keys = if cipher == "2022-blake3-chacha20-poly1305" {
+            1
+        } else {
+            2
+        };
+        if keys.is_empty()
+            || keys.len() > maximum_keys
+            || keys.iter().any(|key| {
+                STANDARD
+                    .decode(key)
+                    .ok()
+                    .is_none_or(|key| key.len() != expected_key_length)
+            })
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
     }
     if expected_key_length.is_some() && proxy.udp.unwrap_or(false) {
         return Err(ConfigError::UnsupportedProxy(name));

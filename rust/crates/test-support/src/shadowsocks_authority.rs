@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shadowsocks::ProxyListener;
-use shadowsocks::config::{ServerConfig, ServerType};
+use shadowsocks::config::{ServerConfig, ServerType, ServerUser, ServerUserManager};
 use shadowsocks::context::Context;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::relay::socks5::Address;
@@ -22,12 +22,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .parse::<SocketAddr>()?;
     let password = arguments.next().ok_or("missing password")?;
     let cipher = arguments.next().ok_or("missing cipher")?;
+    let user_key = arguments.next();
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
 
     let method = CipherKind::from_str(&cipher).map_err(|_| "unsupported cipher")?;
-    let server = ServerConfig::new(listen, password, method)?;
+    let mut server = ServerConfig::new(listen, password, method)?;
+    if let Some(user_key) = user_key {
+        let mut users = ServerUserManager::new();
+        users.add_user(ServerUser::with_encoded_key("phase6c-eih", &user_key)?);
+        server.set_user_manager(users);
+    }
     let context = Context::new_shared(ServerType::Server);
     let listener = ProxyListener::bind(Arc::clone(&context), &server).await?;
     let udp = Arc::new(ProxySocket::bind(context, &server).await?);

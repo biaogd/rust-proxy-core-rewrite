@@ -1667,6 +1667,24 @@ until a deterministic cross-implementation oracle can verify the path. The
 2022-extra methods, EIH, plugins, IPv6 UDP and server direction remain separate
 gates.
 
+### Phase 6C-J accepted scope
+
+The Shadowsocks 2022 client adds single-hop Extensible Identity Headers for
+the AES-128-GCM and AES-256-GCM methods. Configuration accepts exactly
+`iPSK:uPSK`; both standard-base64 components must decode to the method's exact
+16- or 32-byte key length. The existing official Shadowsocks library owns EIH
+framing and cryptography behind the tested outbound adapter boundary.
+
+`compat/scripts/phase6c_shadowsocks_2022_eih.py` compares the pinned Go oracle
+and Rust config decisions, then runs both AES methods against an independent
+official-library authority configured with the server PSK and one named user.
+Domain TCP, 128 KiB IPv4 TCP, half-close delivery and process survival must
+match.
+
+ChaCha20-2022 EIH and AES chains with more than one identity key remain
+rejected. Multi-hop EIH, native 2022 UDP, 2022-extra methods, plugins, IPv6 UDP
+and server direction remain separate gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
