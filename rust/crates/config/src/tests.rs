@@ -1892,7 +1892,10 @@ fn parses_shadowsocks_shadow_tls_production_plugin_opts() {
         "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      skip-cert-verify: true\n      name-cert-verify: camouflage.example\n      fingerprint: \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"\n      alpn:\n        - http/1.1\n"
     );
     let config = Config::from_yaml(&source).expect("shadow-tls production opts");
-    assert_eq!(config.proxies[0].client_fingerprint.as_deref(), Some("chrome"));
+    assert_eq!(
+        config.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
     assert_eq!(
         config.proxies[0].shadowsocks_plugin,
         Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {

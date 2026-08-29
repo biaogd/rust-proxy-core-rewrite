@@ -247,15 +247,9 @@ async fn apply_v2ray_websocket_plugin(
         stream
     };
     let stream = if *http_upgrade {
-        crate::connect_v2ray_http_upgrade(
-            stream,
-            host,
-            path,
-            headers,
-            *http_upgrade_fast_open,
-        )
-        .await
-        .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
+        crate::connect_v2ray_http_upgrade(stream, host, path, headers, *http_upgrade_fast_open)
+            .await
+            .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
     } else {
         crate::connect_v2ray_websocket(stream, host, server.port, path, headers)
             .await
@@ -285,9 +279,9 @@ async fn apply_shadowsocks_plugin(
     options: ShadowsocksTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
     match options.plugin {
-        Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => {
-            Ok(Box::new(HttpObfsClient::new(stream, host.clone(), server.port)))
-        }
+        Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => Ok(Box::new(
+            HttpObfsClient::new(stream, host.clone(), server.port),
+        )),
         Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
             Ok(Box::new(TlsObfsClient::new(stream, host.clone())))
         }

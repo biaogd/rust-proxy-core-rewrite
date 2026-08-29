@@ -200,9 +200,7 @@ fn parse_remote_proxy(
             .filter(|value| !value.is_empty())
             .map(|value| resolve_controller_pem(value, home_directory))
             .transpose()?,
-        client_fingerprint: proxy
-            .client_fingerprint
-            .filter(|value| !value.is_empty()),
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
@@ -274,9 +272,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: proxy
-            .client_fingerprint
-            .filter(|value| !value.is_empty()),
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
