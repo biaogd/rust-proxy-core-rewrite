@@ -4782,11 +4782,10 @@ oracle's AEAD cipher list and rejects plugins/transport options outside this
 slice at parse time. Runtime mixed-TCP dispatch, controller adapter views and
 delay measurement are wired.
 
-Local differential scripts `compat/scripts/phase6c_shadowsocks_contract.py` (CI)
-and `compat/scripts/phase6c_shadowsocks.py` (local-only round-trip, requires
-`ssserver` or `PHASE6CSS_SKIP_ROUNDTRIP=1`) are wired into the Rust rewrite
-CI shard for the contract case only. The outbound round-trip script remains
-out of CI until a portable upstream SS fixture exists.
+Local differential scripts `compat/scripts/phase6c_shadowsocks.py` and
+`compat/scripts/phase6c_shadowsocks_contract.py` run in CI. The round-trip
+script uses a second Go-oracle process with a `listeners.shadowsocks` inbound
+(sing-shadowsocks AEAD, `MATCH,DIRECT`) as the upstream fixture.
 
 ShadowsocksR remains deferred. In-tree SSR stub code is not claimed in this slice.
 
