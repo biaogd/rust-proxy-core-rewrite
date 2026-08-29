@@ -1,36 +1,57 @@
 #!/usr/bin/env python3
-"""Local Shadowsocks/ShadowsocksR upstream fixtures for Phase 6C differentials."""
+"""Local Shadowsocks upstream fixtures for Phase 6C differentials."""
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
+from phase1 import reserve_port
+
 ROOT = Path(__file__).resolve().parents[2]
-HELPERS = ROOT / "compat" / "helpers"
-ARTIFACTS = ROOT / "compat" / "artifacts"
 
 
-class GoFixtureServer:
-    """Wraps a Go oracle helper that prints its listen address on stdout."""
+class SsserverFixture:
+    """Runs shadowsocks-rust ssserver on an ephemeral port."""
 
-    def __init__(self, helper: Path, *args: str) -> None:
+    def __init__(self, password: str, *, cipher: str = "aes-256-gcm") -> None:
         self.observations: list[dict[str, Any]] = []
-        self.process = subprocess.Popen(
-            [str(helper), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
+        self.password = password
+        self.cipher = cipher
+        self._scratch = tempfile.TemporaryDirectory(prefix="phase6c-ssserver-")
+        listen_port = reserve_port()
+        config_path = Path(self._scratch.name) / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "servers": [
+                        {
+                            "server": "127.0.0.1",
+                            "server_port": listen_port,
+                            "password": password,
+                            "method": cipher,
+                        }
+                    ],
+                }
+            )
         )
-        line = self.process.stdout.readline().strip() if self.process.stdout else ""
-        if self.process.stdout:
-            self.process.stdout.close()
-        if not line or self.process.poll() is not None:
-            raise RuntimeError("fixture server failed to start")
-        self.address = line
-        self.port = int(self.address.rsplit(":", 1)[-1])
+        ssserver = shutil.which("ssserver")
+        if ssserver is None:
+            raise RuntimeError("ssserver not found; install shadowsocks-rust locally")
+        self.process = subprocess.Popen(
+            [ssserver, "-c", str(config_path), "-v"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.address = f"127.0.0.1:{listen_port}"
+        self.port = listen_port
+        if self.process.poll() is not None:
+            raise RuntimeError("ssserver failed to start")
 
     def close(self) -> None:
         if self.process.poll() is None:
@@ -40,54 +61,7 @@ class GoFixtureServer:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
+        self._scratch.cleanup()
 
 
-def _helper(name: str) -> Path:
-    suffix = ".exe" if sys.platform == "win32" else ""
-    source = HELPERS / name / "main.go"
-    if not source.exists():
-        raise FileNotFoundError(source)
-    binary = ARTIFACTS / f"{name}{suffix}"
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    if not binary.exists() or binary.stat().st_mtime < source.stat().st_mtime:
-        subprocess.run(
-            ["go", "build", "-trimpath", "-o", str(binary), str(source.parent)],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        )
-    return binary
-
-
-class ShadowsocksAeadServer(GoFixtureServer):
-    def __init__(self, password: str, *, cipher: str = "aes-256-gcm") -> None:
-        super().__init__(
-            _helper("phase6c-ss-server"),
-            "-password",
-            password,
-            "-cipher",
-            cipher,
-        )
-        self.password = password
-
-
-class ShadowsocksRServer(GoFixtureServer):
-    def __init__(
-        self,
-        password: str,
-        *,
-        cipher: str = "aes-256-cfb",
-        protocol: str = "origin",
-    ) -> None:
-        super().__init__(
-            _helper("phase6c-ssr-server"),
-            "-password",
-            password,
-            "-cipher",
-            cipher,
-            "-protocol",
-            protocol,
-        )
-        self.password = password
-        self.cipher = cipher
-        self.protocol = protocol
+ShadowsocksAeadServer = SsserverFixture
