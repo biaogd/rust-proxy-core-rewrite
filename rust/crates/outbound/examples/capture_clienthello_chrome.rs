@@ -12,11 +12,8 @@ use std::time::Duration;
 
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::ClientHelloFingerprint;
-use tokio_rustls::rustls::client::EchGreaseConfig;
 use tokio_rustls::rustls::crypto::CryptoProvider;
 use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
-use tokio_rustls::rustls::crypto::aws_lc_rs::hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
-use tokio_rustls::rustls::crypto::hpke::Hpke;
 use tokio_rustls::rustls::pki_types::ServerName;
 
 fn main() {
@@ -49,13 +46,6 @@ fn main() {
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     config.client_hello_fingerprint = Some(ClientHelloFingerprint::Chrome);
     config.client_hello_fingerprint_mlkem = true;
-    let (placeholder_key, _) = DH_KEM_X25519_HKDF_SHA256_AES_128
-        .generate_key_pair()
-        .expect("hpke key");
-    config.enable_ech_grease(EchGreaseConfig::new(
-        DH_KEM_X25519_HKDF_SHA256_AES_128,
-        placeholder_key,
-    ));
     config.enable_sni = true;
 
     let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");

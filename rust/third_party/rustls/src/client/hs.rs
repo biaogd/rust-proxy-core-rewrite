@@ -398,7 +398,8 @@ fn emit_client_hello_for_retry(
                     &mut exts,
                     &mut cipher_suites,
                     config.client_hello_fingerprint_mlkem,
-                );
+                    config.provider.secure_random,
+                )?;
             }
         }
     }

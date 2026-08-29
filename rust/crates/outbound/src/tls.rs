@@ -6,11 +6,8 @@ use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
-use tokio_rustls::rustls::client::{EchConfig, EchGreaseConfig, EchMode};
-use tokio_rustls::rustls::crypto::aws_lc_rs::hpke::{
-    ALL_SUPPORTED_SUITES, DH_KEM_X25519_HKDF_SHA256_AES_128,
-};
-use tokio_rustls::rustls::crypto::hpke::Hpke;
+use tokio_rustls::rustls::client::{EchConfig, EchMode};
+use tokio_rustls::rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES;
 use tokio_rustls::rustls::crypto::{
     WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
 };
@@ -332,26 +329,16 @@ pub(crate) fn client_config(
     }?;
     apply_alpn(&mut config, tls.alpn_protocols);
     if chrome {
-        apply_chrome_client_hello(&mut config, tls.client_hello_fingerprint_mlkem)?;
+        apply_chrome_client_hello(&mut config, tls.client_hello_fingerprint_mlkem);
     }
     Ok(config)
 }
 
-fn apply_chrome_client_hello(
-    config: &mut ClientConfig,
-    include_mlkem: bool,
-) -> Result<(), HttpProxyError> {
+fn apply_chrome_client_hello(config: &mut ClientConfig, include_mlkem: bool) {
     config.client_hello_fingerprint = Some(tokio_rustls::rustls::ClientHelloFingerprint::Chrome);
     config.client_hello_fingerprint_mlkem = include_mlkem;
-    // Chrome 133 always offers GREASE ECH; enable without forcing TLS 1.3-only.
-    let (placeholder_key, _) = DH_KEM_X25519_HKDF_SHA256_AES_128
-        .generate_key_pair()
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
-    config.enable_ech_grease(EchGreaseConfig::new(
-        DH_KEM_X25519_HKDF_SHA256_AES_128,
-        placeholder_key,
-    ));
-    Ok(())
+    // BoringGREASEECH is emitted inside apply_chrome_fingerprint as an
+    // extra_extension (do not also enable rustls EchMode::Grease).
 }
 
 fn apply_alpn(config: &mut ClientConfig, protocols: &[&[u8]]) {
@@ -483,7 +470,7 @@ mod chrome_fingerprint_tests {
         capture.join().expect("join")
     }
 
-    fn parse_client_hello(raw: &[u8]) -> (Vec<u16>, Vec<u16>) {
+    fn parse_client_hello(raw: &[u8]) -> (Vec<u16>, Vec<u16>, Option<Vec<u8>>) {
         assert_eq!(raw[0], 0x16);
         let rec_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
         let hs = &raw[5..5 + rec_len];
@@ -497,7 +484,7 @@ mod chrome_fingerprint_tests {
         p = &p[2..];
         let mut ciphers = Vec::new();
         for i in (0..cs_len).step_by(2) {
-            ciphers.push(normalize_grease(u16::from_be_bytes([p[i], p[i + 1]])));
+            ciphers.push(u16::from_be_bytes([p[i], p[i + 1]]));
         }
         p = &p[cs_len..];
         let comp_len = p[0] as usize;
@@ -505,36 +492,69 @@ mod chrome_fingerprint_tests {
         let ext_len = u16::from_be_bytes([p[0], p[1]]) as usize;
         p = &p[2..2 + ext_len];
         let mut extensions = Vec::new();
+        let mut ech_body = None;
         let mut q = p;
         while q.len() >= 4 {
             let typ = u16::from_be_bytes([q[0], q[1]]);
             let len = u16::from_be_bytes([q[2], q[3]]) as usize;
-            extensions.push(normalize_grease(typ));
+            if typ == 0xfe0d {
+                ech_body = Some(q[4..4 + len].to_vec());
+            }
+            extensions.push(typ);
             q = &q[4 + len..];
         }
-        (ciphers, extensions)
+        (ciphers, extensions, ech_body)
     }
 
     #[test]
     fn chrome_fingerprint_matches_utls_chrome133_cipher_and_extension_set() {
-        // Remaining documented mismatches vs Go uTLS chrome:
-        // - Middle extension *order* is fixed here; Go ShuffleChromeTLSExtensions randomizes it.
-        // - Exact GREASE codepoints differ per dial (we use 0x0a0a / 0x1a1a); values are grease-class.
-        // - ECH GREASE payload bytes / HPKE details differ from BoringGREASEECH internals.
-        // - Other Clash fingerprints (firefox/safari/…) stay rustls-default leftovers.
+        // Remaining documented leftovers vs Go uTLS:
+        // - Non-chrome fingerprints (firefox/safari/ios/edge/android/360/qq/…) stay
+        //   rustls-default; full parrots are not cheap to port in one pass.
+        // - ECH GREASE encapsulated-key bytes are random 32-byte stand-ins (Go runs
+        //   real X25519 HPKE SetupSender against a dummy pubkey); length/suite/payload
+        //   candidates match BoringGREASEECH.
         let raw = capture_client_hello(Some("chrome"));
-        let (ciphers, extensions) = parse_client_hello(&raw);
+        let (ciphers_raw, extensions_raw, ech_body) = parse_client_hello(&raw);
 
+        assert!(is_grease(ciphers_raw[0]), "leading GREASE cipher");
+        let ciphers: Vec<u16> = ciphers_raw.iter().copied().map(normalize_grease).collect();
         assert_eq!(ciphers, CHROME_CIPHERS, "cipher suite list");
-        assert!(is_grease(extensions[0]) || extensions[0] == 0x0a0a);
-        assert_eq!(*extensions.last().expect("exts"), 0x0a0a, "trailing GREASE");
-        assert!(extensions.contains(&0xfe0d), "missing GREASE ECH");
-        assert!(extensions.contains(&0x44cd), "missing ALPS new");
 
-        let mut have: Vec<u16> = extensions
+        assert!(is_grease(extensions_raw[0]), "leading GREASE extension");
+        assert!(
+            is_grease(*extensions_raw.last().expect("exts")),
+            "trailing GREASE extension"
+        );
+        // Two distinct GREASE extension codepoints (BoringSSL / uTLS rule).
+        let grease_exts: Vec<u16> = extensions_raw
             .iter()
             .copied()
-            .filter(|t| *t != 0x0a0a)
+            .filter(|t| is_grease(*t))
+            .collect();
+        assert_eq!(grease_exts.len(), 2);
+        assert_ne!(grease_exts[0], grease_exts[1]);
+
+        let ech = ech_body.expect("missing GREASE ECH");
+        assert_eq!(ech[0], 0x00, "ECH outer type");
+        assert_eq!(
+            &ech[1..5],
+            &[0x00, 0x01, 0x00, 0x01],
+            "HKDF-SHA256 + AES-128-GCM"
+        );
+        let enc_len = u16::from_be_bytes([ech[6], ech[7]]) as usize;
+        assert_eq!(enc_len, 32, "X25519 encapsulated key length");
+        let payload_len = u16::from_be_bytes([ech[8 + enc_len], ech[9 + enc_len]]) as usize;
+        assert!(
+            [144_usize, 176, 208, 240].contains(&payload_len),
+            "BoringGREASEECH payload len {payload_len}"
+        );
+
+        let mut have: Vec<u16> = extensions_raw
+            .iter()
+            .copied()
+            .filter(|t| !is_grease(*t))
+            .map(normalize_grease)
             .collect();
         have.sort_unstable();
         have.dedup();
@@ -544,10 +564,49 @@ mod chrome_fingerprint_tests {
     }
 
     #[test]
+    fn chrome_middle_extension_order_shuffles_across_dials() {
+        let mut orders = std::collections::BTreeSet::new();
+        for _ in 0..12 {
+            let raw = capture_client_hello(Some("chrome"));
+            let (_, extensions, _) = parse_client_hello(&raw);
+            let middle: Vec<u16> = extensions[1..extensions.len() - 1].to_vec();
+            orders.insert(middle);
+        }
+        assert!(
+            orders.len() > 1,
+            "expected ShuffleChromeTLSExtensions-style middle variance"
+        );
+    }
+
+    #[test]
     fn default_fingerprint_is_not_chrome_shaped() {
         let raw = capture_client_hello(None);
-        let (ciphers, _) = parse_client_hello(&raw);
-        assert_ne!(ciphers, CHROME_CIPHERS);
+        let (ciphers, _, _) = parse_client_hello(&raw);
         assert!(!ciphers.iter().any(|c| is_grease(*c)));
+        let normalized: Vec<u16> = ciphers.iter().copied().map(normalize_grease).collect();
+        assert_ne!(normalized, CHROME_CIPHERS);
+    }
+
+    #[test]
+    fn non_chrome_fingerprint_names_stay_rustls_default() {
+        // Go maps these via uTLS parrots; we accept the labels without shaping
+        // (Clash still dials; ClientHello stays rustls-default).
+        for name in [
+            "firefox",
+            "safari",
+            "ios",
+            "android",
+            "edge",
+            "360",
+            "qq",
+            "chrome120",
+        ] {
+            let raw = capture_client_hello(Some(name));
+            let (ciphers, _, _) = parse_client_hello(&raw);
+            assert!(
+                !ciphers.iter().any(|c| is_grease(*c)),
+                "{name} should not get chrome GREASE shaping"
+            );
+        }
     }
 }

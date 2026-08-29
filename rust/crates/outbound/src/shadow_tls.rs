@@ -54,9 +54,12 @@ pub struct ShadowTlsConnectOptions<'a> {
     ///
     /// Go Clash feeds this into uTLS (`UClient` / `GetFingerprint`). When set to
     /// `chrome`, the vendored rustls `ClientHello` is reshaped to match uTLS
-    /// `HelloChrome_Auto` (cipher list, GREASE, extension set). Other named
-    /// profiles are accepted as no-ops until implemented. Empty/`none` keeps
-    /// the default rustls `ClientHello`. Session-id HMAC for v3 is independent.
+    /// `HelloChrome_Auto` (cipher list, `BoringSSL` GREASE, shuffled middle
+    /// extensions, `BoringGREASEECH`). Other Clash/uTLS names (`firefox`, `safari`,
+    /// `ios`, `edge`, `android`, `360`, `qq`, `chrome120`, …) are accepted but
+    /// leave the default rustls `ClientHello` until dedicated parrots exist.
+    /// Empty/`none` keeps the default rustls `ClientHello`. Session-id HMAC for
+    /// v3 is independent.
     pub client_fingerprint: Option<&'a str>,
 }
 
@@ -734,7 +737,11 @@ impl VerifiedStream {
     }
 
     fn read_fail(&mut self, cx: &mut Context<'_>, error: io::Error) -> Poll<io::Result<()>> {
-        send_alert(Pin::new(&mut self.inner), cx);
+        // Go verifiedConn: timeout-class errors do not send a TLS alert
+        // (`TestV3InterruptedReadDoesNotSendAlert`).
+        if !is_timeout_like(&error) {
+            send_alert(Pin::new(&mut self.inner), cx);
+        }
         Poll::Ready(Err(error))
     }
 }
@@ -915,6 +922,13 @@ fn send_alert(mut writer: Pin<&mut BoxedOutboundStream>, cx: &mut Context<'_>) {
             _ => break,
         }
     }
+}
+
+fn is_timeout_like(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+    )
 }
 
 fn drain_write_state(
@@ -1397,5 +1411,92 @@ mod tests {
         let read = peer.read(&mut alert).await.expect("read alert");
         assert_eq!(read, 31);
         assert_eq!(alert[0], ALERT);
+    }
+
+    #[tokio::test]
+    async fn verified_stream_write_nil_does_not_advance_hmac_or_emit() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [1_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(client),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        let before = stream.hmac_add.clone().finalize().into_bytes();
+        let written = tokio::io::AsyncWriteExt::write(&mut stream, &[])
+            .await
+            .expect("write");
+        assert_eq!(written, 0);
+        let after = stream.hmac_add.clone().finalize().into_bytes();
+        assert_eq!(before.as_slice(), after.as_slice());
+        let mut buf = [0_u8; 8];
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), peer.read(&mut buf)).await;
+        assert!(
+            matches!(result, Err(_) | Ok(Ok(0))),
+            "Write(nil) must not emit a TLS frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_stream_timeout_read_does_not_send_alert() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [1_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(client),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        assert!(is_timeout_like(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "deadline"
+        )));
+        assert!(!is_timeout_like(&io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "eof"
+        )));
+
+        peer.write_all(&[APPLICATION_DATA, 3])
+            .await
+            .expect("partial");
+        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+        let mut scratch = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut scratch);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf),
+            Poll::Pending
+        ));
+        let mut alert_probe = [0_u8; 8];
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            peer.read(&mut alert_probe),
+        )
+        .await;
+        assert!(
+            matches!(probe, Err(_) | Ok(Ok(0))),
+            "interrupted partial header must not send alert"
+        );
     }
 }

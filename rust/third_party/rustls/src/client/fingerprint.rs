@@ -1,19 +1,17 @@
 //! ClientHello fingerprint profiles for camouflage (ShadowTLS / uTLS parity).
 //!
-//! These profiles only reshape the *offered* ClientHello. Negotiation still
-//! requires a suite/group the configured [`CryptoProvider`] can actually use.
-//!
 //! Chrome shape targets metacubex/utls `HelloChrome_Auto` (= `HelloChrome_133`):
-//! cipher suite list, GREASE, extension set, and a stable contiguous extension
-//! order. Go still runs `ShuffleChromeTLSExtensions` on the middle extensions;
-//! we keep a fixed order so differentials are stable (documented mismatch).
+//! cipher suite list, BoringSSL GREASE, extension set, middle-extension shuffle
+//! (GREASE bookends fixed), and BoringGREASEECH payload shape.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::crypto::SecureRandom;
 use crate::enums::{
     CertificateCompressionAlgorithm, CipherSuite, ProtocolVersion, SignatureScheme,
 };
+use crate::error::Error;
 use crate::msgs::base::PayloadU8;
 use crate::msgs::enums::{ExtensionType, NamedGroup};
 use crate::msgs::handshake::{
@@ -28,18 +26,24 @@ pub enum ClientHelloFingerprint {
     Chrome,
 }
 
-const GREASE_CIPHER: CipherSuite = CipherSuite::Unknown(0x0a0a);
-const GREASE_GROUP: NamedGroup = NamedGroup::Unknown(0x0a0a);
-const GREASE_VERSION: ProtocolVersion = ProtocolVersion::Unknown(0x0a0a);
-const GREASE_EXT_A: ExtensionType = ExtensionType::Unknown(0x0a0a);
-const GREASE_EXT_B: ExtensionType = ExtensionType::Unknown(0x1a1a);
+/// BoringSSL GREASE seed indices (metacubex/utls `ssl_grease_*`).
+const GREASE_CIPHER_IDX: usize = 0;
+const GREASE_GROUP_IDX: usize = 1;
+const GREASE_EXT1_IDX: usize = 2;
+const GREASE_EXT2_IDX: usize = 3;
+const GREASE_VERSION_IDX: usize = 4;
+const GREASE_SEED_LEN: usize = 5;
+
 /// ALPS "new" codepoint used by Chrome (`utls` `ApplicationSettingsExtensionNew`).
 const ALPS_NEW: ExtensionType = ExtensionType::Unknown(17613);
 
-/// Chrome 133 cipher suite order from metacubex/utls `HelloChrome_133`.
-pub(super) fn chrome_cipher_suites() -> Vec<CipherSuite> {
+/// BoringGREASEECH candidate plaintext lengths (ciphertext = len + 16 for AES-GCM).
+const ECH_GREASE_PAYLOAD_PLAIN_LENS: [u16; 4] = [128, 160, 192, 224];
+
+/// Chrome 133 cipher suite order from metacubex/utls `HelloChrome_133` (GREASE slot first).
+fn chrome_cipher_suites(grease_cipher: CipherSuite) -> Vec<CipherSuite> {
     vec![
-        GREASE_CIPHER,
+        grease_cipher,
         CipherSuite::TLS13_AES_128_GCM_SHA256,
         CipherSuite::TLS13_AES_256_GCM_SHA384,
         CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -85,6 +89,87 @@ fn encode_alpn_list(protocols: &[&str]) -> Vec<u8> {
     out
 }
 
+/// BoringSSL GREASE: `0xωaωa` from a per-index seed (utls `GetBoringGREASEValue`).
+pub(super) fn boring_grease_value(seed: u16) -> u16 {
+    let mut ret = seed;
+    ret = (ret & 0xf0) | 0x0a;
+    ret | (ret << 8)
+}
+
+fn fill_grease_seeds(rng: &dyn SecureRandom) -> Result<[u16; GREASE_SEED_LEN], Error> {
+    let mut bytes = [0_u8; GREASE_SEED_LEN * 2];
+    rng.fill(&mut bytes)?;
+    let mut seeds = [0_u16; GREASE_SEED_LEN];
+    for (i, seed) in seeds.iter_mut().enumerate() {
+        *seed = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+    }
+    // Extension GREASE values must differ (utls ApplyPreset).
+    if boring_grease_value(seeds[GREASE_EXT1_IDX]) == boring_grease_value(seeds[GREASE_EXT2_IDX]) {
+        seeds[GREASE_EXT2_IDX] ^= 0x1010;
+    }
+    Ok(seeds)
+}
+
+/// Shuffle middle extensions; keep GREASE / padding / PSK bookends fixed
+/// (utls `ShuffleChromeTLSExtensions`).
+pub(super) fn shuffle_chrome_extensions(
+    exts: &mut [ExtensionType],
+    rng: &dyn SecureRandom,
+) -> Result<(), Error> {
+    if exts.len() < 3 {
+        return Ok(());
+    }
+    let skip = |typ: ExtensionType| match typ {
+        ExtensionType::PreSharedKey => true,
+        ExtensionType::Unknown(v) if is_grease_u16(v) => true,
+        _ => false,
+    };
+    // Fisher–Yates over indices, skipping invariant positions like Go's Shuffle.
+    for i in (1..exts.len()).rev() {
+        let mut buf = [0_u8; 8];
+        rng.fill(&mut buf)?;
+        let j = (u64::from_le_bytes(buf) as usize) % (i + 1);
+        if skip(exts[i]) || skip(exts[j]) {
+            continue;
+        }
+        exts.swap(i, j);
+    }
+    Ok(())
+}
+
+fn is_grease_u16(v: u16) -> bool {
+    v & 0x0f0f == 0x0a0a
+}
+
+/// BoringGREASEECH extension body (type/length added by encoder).
+///
+/// Matches metacubex/utls `BoringGREASEECH`: HKDF-SHA256 + AES-128-GCM, X25519-sized
+/// encapsulated key (32 bytes), payload length from `{128,160,192,224}+16`.
+fn build_boring_grease_ech(rng: &dyn SecureRandom) -> Result<Vec<u8>, Error> {
+    let mut config_id = [0_u8; 1];
+    rng.fill(&mut config_id)?;
+    let mut pick = [0_u8; 1];
+    rng.fill(&mut pick)?;
+    let plain = ECH_GREASE_PAYLOAD_PLAIN_LENS[pick[0] as usize % ECH_GREASE_PAYLOAD_PLAIN_LENS.len()];
+    let payload_len = usize::from(plain) + 16;
+
+    let mut enc = vec![0_u8; 32];
+    rng.fill(&mut enc)?;
+    let mut payload = vec![0_u8; payload_len];
+    rng.fill(&mut payload)?;
+
+    let mut out = Vec::with_capacity(1 + 4 + 1 + 2 + enc.len() + 2 + payload.len());
+    out.push(0x00); // Outer ClientHello
+    out.extend_from_slice(&0x0001_u16.to_be_bytes()); // HKDF_SHA256
+    out.extend_from_slice(&0x0001_u16.to_be_bytes()); // AES_128_GCM
+    out.push(config_id[0]);
+    out.extend_from_slice(&(enc.len() as u16).to_be_bytes());
+    out.extend_from_slice(&enc);
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
 /// Apply Chrome ClientHello shaping to extensions + cipher list.
 ///
 /// `include_mlkem` mirrors Go: v3 keeps X25519MLKEM768; v2 strips it.
@@ -92,10 +177,18 @@ pub(super) fn apply_chrome_fingerprint(
     exts: &mut ClientExtensions<'_>,
     cipher_suites: &mut Vec<CipherSuite>,
     include_mlkem: bool,
-) {
-    *cipher_suites = chrome_cipher_suites();
+    secure_random: &'static dyn SecureRandom,
+) -> Result<(), Error> {
+    let seeds = fill_grease_seeds(secure_random)?;
+    let grease_cipher = CipherSuite::Unknown(boring_grease_value(seeds[GREASE_CIPHER_IDX]));
+    let grease_group = NamedGroup::Unknown(boring_grease_value(seeds[GREASE_GROUP_IDX]));
+    let grease_version = ProtocolVersion::Unknown(boring_grease_value(seeds[GREASE_VERSION_IDX]));
+    let grease_ext_a = ExtensionType::Unknown(boring_grease_value(seeds[GREASE_EXT1_IDX]));
+    let grease_ext_b = ExtensionType::Unknown(boring_grease_value(seeds[GREASE_EXT2_IDX]));
 
-    let mut groups = vec![GREASE_GROUP];
+    *cipher_suites = chrome_cipher_suites(grease_cipher);
+
+    let mut groups = vec![grease_group];
     if include_mlkem {
         groups.push(NamedGroup::X25519MLKEM768);
     }
@@ -110,7 +203,7 @@ pub(super) fn apply_chrome_fingerprint(
     exts.supported_versions = Some(SupportedProtocolVersions {
         tls13: true,
         tls12: true,
-        grease: Some(GREASE_VERSION),
+        grease: Some(grease_version),
     });
     exts.session_ticket = Some(ClientSessionTicket::Request);
     exts.renegotiation_info = Some(PayloadU8::new(Vec::new()));
@@ -125,7 +218,6 @@ pub(super) fn apply_chrome_fingerprint(
     exts.certificate_compression_algorithms =
         Some(vec![CertificateCompressionAlgorithm::Brotli]);
 
-    // Chrome parrot ALPN when the caller did not configure any.
     if exts.protocols.is_none() {
         exts.protocols = Some(vec![
             ProtocolName::from(b"h2".to_vec()),
@@ -133,15 +225,16 @@ pub(super) fn apply_chrome_fingerprint(
         ]);
     }
 
-    // Not part of the Chrome ClientHello parrot.
     exts.certificate_authority_names = None;
     exts.ticket_request = None;
     exts.early_data_request = None;
     exts.client_certificate_types = None;
     exts.server_certificate_types = None;
+    // Chrome GREASE ECH is an extra_extension; do not also set typed ECH / EchMode.
+    exts.encrypted_client_hello = None;
+    exts.encrypted_client_hello_outer = None;
 
-    // Prepend GREASE key share (one zero byte, matching uTLS Chrome parrot).
-    let mut shares = vec![KeyShareEntry::new(GREASE_GROUP, vec![0])];
+    let mut shares = vec![KeyShareEntry::new(grease_group, vec![0])];
     if let Some(existing) = exts.key_shares.take() {
         for share in existing {
             if !include_mlkem && share.group == NamedGroup::X25519MLKEM768 {
@@ -152,20 +245,17 @@ pub(super) fn apply_chrome_fingerprint(
     }
     exts.key_shares = Some(shares);
 
-    // Extra extensions Chrome offers that rustls does not model as first-class fields.
-    // First GREASE body empty; last GREASE body a single zero (BoringSSL / uTLS).
+    let ech_body = build_boring_grease_ech(secure_random)?;
     exts.extra_extensions = vec![
-        (GREASE_EXT_A, Vec::new()),
+        (grease_ext_a, Vec::new()),
         (ExtensionType::SCT, Vec::new()),
         (ALPS_NEW, encode_alpn_list(&["h2"])),
-        (GREASE_EXT_B, vec![0x00]),
+        (ExtensionType::EncryptedClientHello, ech_body),
+        (grease_ext_b, vec![0x00]),
     ];
 
-    // Contiguous order for known + extra types. ECH GREASE (when enabled on the
-    // ClientConfig) slots before the trailing GREASE, matching Chrome 133.
-    // Middle extensions are not shuffled here (Go's ShuffleChromeTLSExtensions does).
-    exts.contiguous_extensions = vec![
-        GREASE_EXT_A,
+    let mut order = vec![
+        grease_ext_a,
         ExtensionType::ServerName,
         ExtensionType::ExtendedMasterSecret,
         ExtensionType::RenegotiationInfo,
@@ -182,8 +272,10 @@ pub(super) fn apply_chrome_fingerprint(
         ExtensionType::CompressCertificate,
         ALPS_NEW,
         ExtensionType::EncryptedClientHello,
-        GREASE_EXT_B,
+        grease_ext_b,
     ];
-    // Disable random bucket so contiguous order wins.
+    shuffle_chrome_extensions(&mut order, secure_random)?;
+    exts.contiguous_extensions = order;
     exts.order_seed = 0;
+    Ok(())
 }

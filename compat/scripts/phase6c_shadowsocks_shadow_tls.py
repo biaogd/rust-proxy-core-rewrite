@@ -182,6 +182,7 @@ def exercise_wire(
             binary, authority, scratch, VERSION, "0", "wire-tls12-camouflage"
         ),
         **exercise_wire_variant(binary, authority, scratch, 2, None, "wire-v2"),
+        **exercise_wire_variant(binary, authority, scratch, 1, None, "wire-v1"),
     }
 
 
