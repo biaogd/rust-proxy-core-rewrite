@@ -452,6 +452,7 @@ pub(super) async fn measure_http_delay(
                             clock: None,
                             custom_roots: &config.trust_certificates,
                             ech_config: resolved_ech.as_deref().or(inline_ech),
+                            client_fingerprint: proxy.client_fingerprint.as_deref(),
                         },
                     )
                     .await

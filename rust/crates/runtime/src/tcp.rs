@@ -489,6 +489,7 @@ async fn connect_shadowsocks_proxy(
             clock: Some(clock),
             custom_roots,
             ech_config: resolved_ech.as_deref().or(inline_ech),
+            client_fingerprint: proxy.client_fingerprint.as_deref(),
         },
     )
     .await

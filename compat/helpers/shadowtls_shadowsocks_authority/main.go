@@ -48,8 +48,8 @@ func (relayHandler) NewError(_ context.Context, err error) {
 }
 
 func main() {
-	if len(os.Args) != 6 {
-		panic("usage: shadowtls-shadowsocks-authority LISTEN PASSWORD CIPHER PLUGIN_PASSWORD VERSION")
+	if len(os.Args) != 6 && len(os.Args) != 7 {
+		panic("usage: shadowtls-shadowsocks-authority LISTEN PASSWORD CIPHER PLUGIN_PASSWORD VERSION [STRICT]")
 	}
 	listen := os.Args[1]
 	password := os.Args[2]
@@ -59,12 +59,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	strictMode := version == 3
+	if len(os.Args) == 7 {
+		strictMode = os.Args[6] != "0"
+	}
 
-	camouflageAddr, err := startCamouflageServer(version == 1)
+	camouflageAddr, err := startCamouflageServer(version == 1 || (version == 3 && !strictMode))
 	if err != nil {
 		panic(err)
 	}
-	serverConfig, err := newServerConfig(version, pluginPassword, camouflageAddr)
+	serverConfig, err := newServerConfig(version, pluginPassword, camouflageAddr, strictMode)
 	if err != nil {
 		panic(err)
 	}
@@ -148,7 +152,7 @@ func startCamouflageServer(tls12Only bool) (string, error) {
 	return listener.Addr().String(), nil
 }
 
-func newServerConfig(version int, pluginPassword, camouflageAddr string) (*shadowtls.ServerConfig, error) {
+func newServerConfig(version int, pluginPassword, camouflageAddr string, strictMode bool) (*shadowtls.ServerConfig, error) {
 	handshake := shadowtls.HandshakeConfig{
 		Server: camouflageAddr,
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -165,7 +169,7 @@ func newServerConfig(version int, pluginPassword, camouflageAddr string) (*shado
 		users,
 		handshake,
 		nil,
-		version == 3,
+		strictMode,
 		shadowtls.WildcardSNIOff,
 	)
 }

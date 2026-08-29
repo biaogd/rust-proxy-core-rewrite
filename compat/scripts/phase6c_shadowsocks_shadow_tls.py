@@ -139,18 +139,23 @@ def start_shadowtls_authority(
     binary: pathlib.Path,
     scratch: pathlib.Path,
     port: int,
+    version: int = VERSION,
+    strict: str | None = None,
 ) -> tuple[Any, Any, Any]:
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
+    command = [
+        str(binary),
+        f"127.0.0.1:{port}",
+        KEY_256,
+        CIPHER,
+        PLUGIN_PASSWORD,
+        str(version),
+    ]
+    if strict is not None:
+        command.append(strict)
     process = subprocess.Popen(
-        [
-            str(binary),
-            f"127.0.0.1:{port}",
-            KEY_256,
-            CIPHER,
-            PLUGIN_PASSWORD,
-            str(VERSION),
-        ],
+        command,
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
@@ -171,14 +176,33 @@ def start_shadowtls_authority(
 def exercise_wire(
     binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
 ) -> dict[str, bool]:
+    return {
+        **exercise_wire_variant(binary, authority, scratch, VERSION, None, "wire"),
+        **exercise_wire_variant(
+            binary, authority, scratch, VERSION, "0", "wire-tls12-camouflage"
+        ),
+        **exercise_wire_variant(binary, authority, scratch, 2, None, "wire-v2"),
+    }
+
+
+def exercise_wire_variant(
+    binary: pathlib.Path,
+    authority: pathlib.Path,
+    scratch: pathlib.Path,
+    version: int,
+    strict: str | None,
+    label: str,
+) -> dict[str, bool]:
     tcp_echo = start_server(EchoHandler)
     half_close_server = start_server(HalfCloseHandler)
     mixed_port = reserve_port()
     authority_port = reserve_port()
+    variant_scratch = scratch / label
+    variant_scratch.mkdir(parents=True, exist_ok=True)
     authority_process, authority_stdout, authority_stderr = start_shadowtls_authority(
-        authority, scratch, authority_port
+        authority, variant_scratch, authority_port, version, strict
     )
-    config = scratch / "config.yaml"
+    config = variant_scratch / "config.yaml"
     config.write_text(
         f"""mixed-port: {mixed_port}
 mode: rule
@@ -195,13 +219,14 @@ proxies:
     plugin-opts:
       host: {HOST}
       password: {PLUGIN_PASSWORD}
-      version: {VERSION}
+      version: {version}
       skip-cert-verify: true
 rules:
   - MATCH,local-ss
 """
     )
-    process, stdout, stderr = launch(binary, config, scratch)
+    process, stdout, stderr = launch(binary, config, variant_scratch)
+    prefix = f"{label}:"
     try:
         wait_ready(process, mixed_port)
         wait_route(process, mixed_port, tcp_echo.port)
@@ -210,12 +235,12 @@ rules:
         except (EOFError, OSError):
             half_close_result = False
         return {
-            "tcp-domain": echo(mixed_port, "localhost", tcp_echo.port, b"domain"),
-            "tcp-ipv4-large": echo(
+            f"{prefix}tcp-domain": echo(mixed_port, "localhost", tcp_echo.port, b"domain"),
+            f"{prefix}tcp-ipv4-large": echo(
                 mixed_port, "127.0.0.1", tcp_echo.port, LARGE_PAYLOAD
             ),
-            "tcp-half-close": half_close_result,
-            "process-alive": process.poll() is None,
+            f"{prefix}tcp-half-close": half_close_result,
+            f"{prefix}process-alive": process.poll() is None,
         }
     finally:
         stop(process)

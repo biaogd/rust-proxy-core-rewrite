@@ -50,24 +50,30 @@ pub struct ShadowTlsConnectOptions<'a> {
     pub private_key: Option<&'a str>,
     pub custom_roots: &'a [String],
     pub alpn: &'a [String],
+    /// Browser fingerprint label from the proxy-level `client-fingerprint` field.
+    /// Reserved for future uTLS parity; rustls currently ignores this value.
+    pub client_fingerprint: Option<&'a str>,
 }
 
-/// Completes the ShadowTLS camouflage handshake, then returns the post-handshake
+/// Completes the `ShadowTLS` camouflage handshake, then returns the post-handshake
 /// stream that carries inner Shadowsocks bytes.
+///
+/// # Errors
+///
+/// Returns [`ShadowTlsError`] when the protocol version is unsupported, TLS
+/// configuration or handshake fails, or the camouflage server rejects the session.
 pub async fn connect_shadow_tls(
     stream: BoxedOutboundStream,
     options: ShadowTlsConnectOptions<'_>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<BoxedOutboundStream, ShadowTlsError> {
-    match options.version {
-        1 | 2 | 3 => {}
-        _ => {
-            return Err(ShadowTlsError::Protocol(format!(
-                "unknown protocol version: {}",
-                options.version
-            )));
-        }
+    if !matches!(options.version, 1..=3) {
+        return Err(ShadowTlsError::Protocol(format!(
+            "unknown protocol version: {}",
+            options.version
+        )));
     }
+    let _ = options.client_fingerprint;
     let alpn: Vec<Vec<u8>> = options
         .alpn
         .iter()
@@ -86,7 +92,7 @@ pub async fn connect_shadow_tls(
             ech_config: None,
             alpn_protocols: &alpn_refs,
             tls12_only: options.version == 1,
-            tls13_only: options.version == 3,
+            tls13_only: false,
         },
         clock,
     )?);
@@ -118,10 +124,23 @@ pub async fn connect_shadow_tls(
 }
 
 enum ReadPhase {
+    Header {
+        header: [u8; TLS_HEADER_SIZE],
+        filled: usize,
+    },
     Body {
         header: [u8; TLS_HEADER_SIZE],
         buf: Vec<u8>,
         filled: usize,
+    },
+}
+
+enum WriteState {
+    Idle,
+    Active {
+        frame: Vec<u8>,
+        offset: usize,
+        consumed: usize,
     },
 }
 
@@ -164,14 +183,12 @@ impl ShadowTlsIo {
     fn finish(self, version: u8) -> Result<BoxedOutboundStream, ShadowTlsError> {
         match version {
             1 => Ok(Box::new(self.inner)),
-            2 => Ok(Box::new(V2ClientStream {
-                inner: self.inner,
-                hash: self
-                    .read_hash
+            2 => Ok(Box::new(V2ClientStream::new(
+                self.inner,
+                self.read_hash
                     .map(|mac| mac.finalize().into_bytes()[..8].to_vec())
                     .unwrap_or_default(),
-                sent_prefix: false,
-            })),
+            ))),
             3 => {
                 if !self.authorized {
                     return Err(ShadowTlsError::Protocol("traffic hijacked".to_owned()));
@@ -195,6 +212,7 @@ impl ShadowTlsIo {
                     pending: Vec::new(),
                     read_buffer: None,
                     read_offset: 0,
+                    write_state: WriteState::Idle,
                 }))
             }
             _ => unreachable!("validated above"),
@@ -213,65 +231,63 @@ impl ShadowTlsIo {
 
     fn process_server_frame(&mut self, frame: Vec<u8>) -> Result<Vec<u8>, io::Error> {
         if self.version == 3 {
-            match frame.first().copied() {
-                Some(HANDSHAKE) => {
-                    if frame.len() >= SERVER_RANDOM_INDEX + 32
-                        && frame[TLS_HEADER_SIZE] == SERVER_HELLO
-                        && self.read_hmac.is_none()
-                    {
-                        let mut server_random = [0_u8; 32];
-                        server_random
-                            .copy_from_slice(&frame[SERVER_RANDOM_INDEX..SERVER_RANDOM_INDEX + 32]);
-                        self.server_random = Some(server_random);
-                        let mut read_hmac = HmacSha1::new_from_slice(self.password.as_bytes())
-                            .map_err(|error| {
-                                io::Error::new(io::ErrorKind::InvalidData, error.to_string())
-                            })?;
-                        read_hmac.update(&server_random);
-                        self.read_hmac = Some(read_hmac);
-                        self.read_hmac_key = Some(kdf(&self.password, &server_random));
-                        self.is_tls13 = is_server_hello_tls13(&frame);
-                        self.authorized = !self.is_tls13;
-                    }
-                }
-                Some(APPLICATION_DATA) => {
-                    self.authorized = false;
-                    if frame.len() > TLS_HMAC_HEADER_SIZE {
-                        if let Some(read_hmac) = self.read_hmac.as_mut() {
-                            let payload = &frame[TLS_HMAC_HEADER_SIZE..];
-                            read_hmac.update(payload);
-                            let expected = read_hmac.clone().finalize().into_bytes();
-                            let expected = &expected[..HMAC_SIZE];
-                            let got = &frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE];
-                            if expected != got {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "shadow-tls v3: HMAC mismatch, possible data corruption",
-                                ));
-                            }
-                            let mut payload = payload.to_vec();
-                            if let Some(key) = self.read_hmac_key.as_ref() {
-                                xor_slice(&mut payload, key);
-                            }
-                            let mut unwrapped = Vec::with_capacity(TLS_HEADER_SIZE + payload.len());
-                            unwrapped.extend_from_slice(&frame[..TLS_HEADER_SIZE]);
-                            unwrapped.extend_from_slice(&payload);
-                            let length = unwrapped.len() - TLS_HEADER_SIZE;
-                            unwrapped[3] = (length >> 8) as u8;
-                            unwrapped[4] = length as u8;
-                            self.authorized = true;
-                            return Ok(unwrapped);
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return Ok(frame);
+            return self.process_server_frame_v3(frame);
         }
-        if self.version == 2 {
-            if let Some(read_hash) = self.read_hash.as_mut() {
-                read_hash.update(&frame);
+        if self.version == 2
+            && let Some(read_hash) = self.read_hash.as_mut()
+        {
+            read_hash.update(&frame);
+        }
+        Ok(frame)
+    }
+
+    fn process_server_frame_v3(&mut self, frame: Vec<u8>) -> Result<Vec<u8>, io::Error> {
+        match frame.first().copied() {
+            Some(HANDSHAKE)
+                if frame.len() >= SERVER_RANDOM_INDEX + 32
+                    && frame[TLS_HEADER_SIZE] == SERVER_HELLO
+                    && self.read_hmac.is_none() =>
+            {
+                let mut server_random = [0_u8; 32];
+                server_random.copy_from_slice(&frame[SERVER_RANDOM_INDEX..SERVER_RANDOM_INDEX + 32]);
+                self.server_random = Some(server_random);
+                let mut read_hmac = HmacSha1::new_from_slice(self.password.as_bytes()).map_err(
+                    |error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()),
+                )?;
+                read_hmac.update(&server_random);
+                self.read_hmac = Some(read_hmac);
+                self.read_hmac_key = Some(kdf(&self.password, &server_random));
+                self.is_tls13 = is_server_hello_tls13(&frame);
+                self.authorized = !self.is_tls13;
             }
+            Some(APPLICATION_DATA)
+                if frame.len() > TLS_HMAC_HEADER_SIZE
+                    && let Some(read_hmac) = self.read_hmac.as_mut() =>
+            {
+                self.authorized = false;
+                let payload = &frame[TLS_HMAC_HEADER_SIZE..];
+                read_hmac.update(payload);
+                let expected = read_hmac.clone().finalize().into_bytes();
+                let expected = &expected[..HMAC_SIZE];
+                let got = &frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE];
+                if expected != got {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "shadow-tls v3: HMAC mismatch, possible data corruption",
+                    ));
+                }
+                let mut payload = payload.to_vec();
+                if let Some(key) = self.read_hmac_key.as_ref() {
+                    xor_slice(&mut payload, key);
+                }
+                let mut unwrapped = Vec::with_capacity(TLS_HEADER_SIZE + payload.len());
+                unwrapped.extend_from_slice(&frame[..TLS_HEADER_SIZE]);
+                unwrapped.extend_from_slice(&payload);
+                set_tls_record_length(&mut unwrapped, payload.len())?;
+                self.authorized = true;
+                return Ok(unwrapped);
+            }
+            _ => {}
         }
         Ok(frame)
     }
@@ -280,14 +296,35 @@ impl ShadowTlsIo {
         loop {
             match self.read_phase.take() {
                 None => {
-                    let mut header = [0_u8; TLS_HEADER_SIZE];
-                    let mut filled = 0;
+                    self.read_phase = Some(ReadPhase::Header {
+                        header: [0_u8; TLS_HEADER_SIZE],
+                        filled: 0,
+                    });
+                }
+                Some(ReadPhase::Header { mut header, mut filled }) => {
                     while filled < TLS_HEADER_SIZE {
                         let mut buf = ReadBuf::new(&mut header[filled..]);
-                        ready!(Pin::new(&mut self.inner).poll_read(cx, &mut buf))?;
-                        filled += buf.filled().len();
-                        if buf.filled().is_empty() {
-                            return Poll::Ready(Ok(None));
+                        match Pin::new(&mut self.inner).poll_read(cx, &mut buf) {
+                            Poll::Ready(Ok(())) => {
+                                let read = buf.filled().len();
+                                if read == 0 {
+                                    return if filled == 0 {
+                                        Poll::Ready(Ok(None))
+                                    } else {
+                                        self.read_phase = Some(ReadPhase::Header { header, filled });
+                                        Poll::Ready(Err(io::Error::new(
+                                            io::ErrorKind::UnexpectedEof,
+                                            "shadow-tls: truncated TLS header",
+                                        )))
+                                    };
+                                }
+                                filled += read;
+                            }
+                            Poll::Pending => {
+                                self.read_phase = Some(ReadPhase::Header { header, filled });
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         }
                     }
                     let length = u16::from_be_bytes([header[3], header[4]]) as usize;
@@ -304,15 +341,31 @@ impl ShadowTlsIo {
                 }) => {
                     while filled < buf.len() {
                         let mut read_buf = ReadBuf::new(&mut buf[filled..]);
-                        ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf))?;
-                        filled += read_buf.filled().len();
-                        if read_buf.filled().is_empty() {
-                            self.read_phase = Some(ReadPhase::Body {
-                                header,
-                                buf,
-                                filled,
-                            });
-                            return Poll::Pending;
+                        match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
+                            Poll::Ready(Ok(())) => {
+                                let read = read_buf.filled().len();
+                                if read == 0 {
+                                    self.read_phase = Some(ReadPhase::Body {
+                                        header,
+                                        buf,
+                                        filled,
+                                    });
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "shadow-tls: truncated TLS body",
+                                    )));
+                                }
+                                filled += read;
+                            }
+                            Poll::Pending => {
+                                self.read_phase = Some(ReadPhase::Body {
+                                    header,
+                                    buf,
+                                    filled,
+                                });
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                         }
                     }
                     let mut frame = Vec::with_capacity(TLS_HEADER_SIZE + buf.len());
@@ -372,7 +425,36 @@ impl AsyncWrite for ShadowTlsIo {
 struct V2ClientStream {
     inner: BoxedOutboundStream,
     hash: Vec<u8>,
-    sent_prefix: bool,
+    prefix_sent: bool,
+    write_state: WriteState,
+    read_remaining: usize,
+    read_header: [u8; TLS_HEADER_SIZE],
+    read_header_filled: usize,
+}
+
+impl V2ClientStream {
+    fn new(inner: BoxedOutboundStream, hash: Vec<u8>) -> Self {
+        Self {
+            inner,
+            hash,
+            prefix_sent: false,
+            write_state: WriteState::Idle,
+            read_remaining: 0,
+            read_header: [0_u8; TLS_HEADER_SIZE],
+            read_header_filled: 0,
+        }
+    }
+
+    fn encode_tls_record(payload: &[u8]) -> io::Result<Vec<u8>> {
+        let mut frame = Vec::with_capacity(TLS_HEADER_SIZE + payload.len());
+        frame.resize(TLS_HEADER_SIZE, 0);
+        frame[0] = APPLICATION_DATA;
+        frame[1] = 3;
+        frame[2] = 3;
+        set_tls_record_length(&mut frame, payload.len())?;
+        frame.extend_from_slice(payload);
+        Ok(frame)
+    }
 }
 
 impl AsyncRead for V2ClientStream {
@@ -381,26 +463,129 @@ impl AsyncRead for V2ClientStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        let this = self.as_mut().get_mut();
+        if this.read_remaining > 0 {
+            let limit = buf.remaining().min(this.read_remaining);
+            let mut scratch = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
+            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut scratch))?;
+            let read = scratch.filled().len();
+            if read == 0 {
+                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+            }
+            buf.advance(read);
+            this.read_remaining -= read;
+            return Poll::Ready(Ok(()));
+        }
+        while this.read_header_filled < TLS_HEADER_SIZE {
+            let mut header_buf =
+                ReadBuf::new(&mut this.read_header[this.read_header_filled..TLS_HEADER_SIZE]);
+            match Pin::new(&mut this.inner).poll_read(cx, &mut header_buf) {
+                Poll::Ready(Ok(())) => {
+                    let read = header_buf.filled().len();
+                    if read == 0 {
+                        return if this.read_header_filled == 0 {
+                            Poll::Ready(Ok(()))
+                        } else {
+                            Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "shadow-tls v2: truncated TLS header",
+                            )))
+                        };
+                    }
+                    this.read_header_filled += read;
+                }
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            }
+        }
+        if this.read_header[0] != APPLICATION_DATA {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "shadow-tls v2: unexpected TLS record type: {}",
+                    this.read_header[0]
+                ),
+            )));
+        }
+        let length = u16::from_be_bytes([this.read_header[3], this.read_header[4]]) as usize;
+        this.read_header_filled = 0;
+        let limit = buf.remaining().min(length);
+        let mut body_buf = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
+        ready!(Pin::new(&mut this.inner).poll_read(cx, &mut body_buf))?;
+        let read = body_buf.filled().len();
+        if read == 0 {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "shadow-tls v2: truncated TLS body",
+            )));
+        }
+        buf.advance(read);
+        this.read_remaining = length - read;
+        Poll::Ready(Ok(()))
     }
 }
 
 impl AsyncWrite for V2ClientStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.sent_prefix {
-            return Pin::new(&mut self.inner).poll_write(cx, data);
-        }
-        self.sent_prefix = true;
-        let mut prefixed = Vec::with_capacity(8 + data.len());
-        prefixed.extend_from_slice(&self.hash);
-        prefixed.extend_from_slice(data);
-        match Pin::new(&mut self.inner).poll_write(cx, &prefixed) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(data.len())),
-            other => other,
+        let this = self.get_mut();
+        loop {
+            if let WriteState::Active {
+                frame,
+                offset,
+                consumed,
+            } = std::mem::replace(&mut this.write_state, WriteState::Idle)
+            {
+                let written =
+                    ready!(poll_write_all(Pin::new(&mut this.inner), cx, &frame, offset))?;
+                if written < frame.len() {
+                    this.write_state = WriteState::Active {
+                        frame,
+                        offset: written,
+                        consumed,
+                    };
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Ok(consumed));
+            }
+            if data.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            let chunk = if this.prefix_sent {
+                data.len().min(MAX_TLS_PLAINTEXT)
+            } else {
+                data.len().min(MAX_TLS_PLAINTEXT.saturating_sub(this.hash.len()))
+            };
+            let payload = if this.prefix_sent {
+                &data[..chunk]
+            } else {
+                this.prefix_sent = true;
+                let mut prefixed = Vec::with_capacity(this.hash.len() + chunk);
+                prefixed.extend_from_slice(&this.hash);
+                prefixed.extend_from_slice(&data[..chunk]);
+                let frame = match Self::encode_tls_record(&prefixed) {
+                    Ok(frame) => frame,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                this.write_state = WriteState::Active {
+                    frame,
+                    offset: 0,
+                    consumed: chunk,
+                };
+                continue;
+            };
+            let frame = match Self::encode_tls_record(payload) {
+                Ok(frame) => frame,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            this.write_state = WriteState::Active {
+                frame,
+                offset: 0,
+                consumed: chunk,
+            };
         }
     }
 
@@ -421,6 +606,7 @@ struct VerifiedStream {
     pending: Vec<u8>,
     read_buffer: Option<Vec<u8>>,
     read_offset: usize,
+    write_state: WriteState,
 }
 
 impl VerifiedStream {
@@ -443,13 +629,14 @@ impl VerifiedStream {
         while self.read_offset < TLS_HEADER_SIZE {
             let mut read_buf = ReadBuf::new(&mut buffer[self.read_offset..TLS_HEADER_SIZE]);
             ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf))?;
-            self.read_offset += read_buf.filled().len();
-            if read_buf.filled().is_empty() {
+            let read = read_buf.filled().len();
+            if read == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "shadow-tls: unexpected EOF reading record header",
                 )));
             }
+            self.read_offset += read;
         }
         let length = u16::from_be_bytes([buffer[3], buffer[4]]) as usize;
         if buffer.len() < TLS_HEADER_SIZE + length {
@@ -459,18 +646,24 @@ impl VerifiedStream {
             let mut read_buf =
                 ReadBuf::new(&mut buffer[self.read_offset..TLS_HEADER_SIZE + length]);
             ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read_buf))?;
-            self.read_offset += read_buf.filled().len();
-            if read_buf.filled().is_empty() {
+            let read = read_buf.filled().len();
+            if read == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "shadow-tls: unexpected EOF reading record body",
                 )));
             }
+            self.read_offset += read;
         }
         let frame = buffer.clone();
         self.read_buffer = None;
         self.read_offset = 0;
         Poll::Ready(Ok(frame))
+    }
+
+    fn read_fail(&mut self, cx: &mut Context<'_>, error: io::Error) -> Poll<io::Result<()>> {
+        send_alert(Pin::new(&mut self.inner), cx);
+        Poll::Ready(Err(error))
     }
 }
 
@@ -484,42 +677,58 @@ impl AsyncRead for VerifiedStream {
             return self.take_pending(buf);
         }
         loop {
-            let frame = ready!(self.poll_read_record(cx))?;
+            let frame = match self.poll_read_record(cx) {
+                Poll::Ready(Ok(frame)) => frame,
+                Poll::Ready(Err(error)) => {
+                    return self.read_fail(cx, error);
+                }
+                Poll::Pending => return Poll::Pending,
+            };
             match frame.first().copied() {
                 Some(ALERT) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "shadow-tls: remote alert",
-                    )));
+                    return self.read_fail(
+                        cx,
+                        io::Error::new(io::ErrorKind::ConnectionAborted, "shadow-tls: remote alert"),
+                    );
                 }
                 Some(APPLICATION_DATA) => {
-                    if let Some(hmac_ignore) = self.hmac_ignore.as_mut() {
-                        if verify_application_data(&frame, hmac_ignore, false) {
-                            continue;
-                        }
+                    let ignore_frame = self
+                        .hmac_ignore
+                        .as_mut()
+                        .is_some_and(|hmac_ignore| verify_application_data(&frame, hmac_ignore, false));
+                    if ignore_frame {
+                        continue;
+                    }
+                    if self.hmac_ignore.is_some() {
                         self.hmac_ignore = None;
                     }
                     if !verify_application_data(&frame, &mut self.hmac_verify, true) {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "shadow-tls: application data verification failed",
-                        )));
+                        return self.read_fail(
+                            cx,
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "shadow-tls: application data verification failed",
+                            ),
+                        );
                     }
                     self.pending
                         .extend_from_slice(&frame[TLS_HMAC_HEADER_SIZE..]);
                     return self.take_pending(buf);
                 }
                 Some(other) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("shadow-tls: unexpected TLS record type: {other}"),
-                    )));
+                    return self.read_fail(
+                        cx,
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("shadow-tls: unexpected TLS record type: {other}"),
+                        ),
+                    );
                 }
                 None => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "shadow-tls: empty TLS record",
-                    )));
+                    return self.read_fail(
+                        cx,
+                        io::Error::new(io::ErrorKind::InvalidData, "shadow-tls: empty TLS record"),
+                    );
                 }
             }
         }
@@ -528,27 +737,45 @@ impl AsyncRead for VerifiedStream {
 
 impl AsyncWrite for VerifiedStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if data.is_empty() {
-            return Poll::Ready(Ok(0));
+        let this = self.get_mut();
+        loop {
+            if let WriteState::Active {
+                frame,
+                offset,
+                consumed,
+            } = std::mem::replace(&mut this.write_state, WriteState::Idle)
+            {
+                let written =
+                    ready!(poll_write_all(Pin::new(&mut this.inner), cx, &frame, offset))?;
+                if written < frame.len() {
+                    this.write_state = WriteState::Active {
+                        frame,
+                        offset: written,
+                        consumed,
+                    };
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Ok(consumed));
+            }
+            if data.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            let chunk = data.len().min(MAX_TLS_PLAINTEXT);
+            let frame =
+                match encode_application_data_frame(&mut this.hmac_add, &data[..chunk]) {
+                    Ok(frame) => frame,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+            this.write_state = WriteState::Active {
+                frame,
+                offset: 0,
+                consumed: chunk,
+            };
         }
-        let chunk = data.len().min(MAX_TLS_PLAINTEXT);
-        let mut header = [0_u8; TLS_HMAC_HEADER_SIZE];
-        header[0] = APPLICATION_DATA;
-        header[1] = 3;
-        header[2] = 3;
-        header[3] = ((HMAC_SIZE + chunk) >> 8) as u8;
-        header[4] = (HMAC_SIZE + chunk) as u8;
-        self.hmac_add.update(&data[..chunk]);
-        let hmac_hash = self.hmac_add.clone().finalize().into_bytes()[..HMAC_SIZE].to_vec();
-        self.hmac_add.update(&hmac_hash);
-        header[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE].copy_from_slice(&hmac_hash);
-        ready!(Pin::new(&mut self.inner).poll_write(cx, &header))?;
-        ready!(Pin::new(&mut self.inner).poll_write(cx, &data[..chunk]))?;
-        Poll::Ready(Ok(chunk))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -558,6 +785,56 @@ impl AsyncWrite for VerifiedStream {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
+}
+
+fn set_tls_record_length(header: &mut [u8], payload_len: usize) -> io::Result<()> {
+    let length = u16::try_from(payload_len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "TLS record too large"))?;
+    header[3] = (length >> 8) as u8;
+    header[4] = (length & 0xff) as u8;
+    Ok(())
+}
+
+fn poll_write_all(
+    mut inner: Pin<&mut BoxedOutboundStream>,
+    cx: &mut Context<'_>,
+    buffer: &[u8],
+    offset: usize,
+) -> Poll<io::Result<usize>> {
+    if offset >= buffer.len() {
+        return Poll::Ready(Ok(offset));
+    }
+    let written = ready!(inner.as_mut().poll_write(cx, &buffer[offset..]))?;
+    if written == 0 {
+        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+    }
+    Poll::Ready(Ok(offset + written))
+}
+
+fn send_alert(mut writer: Pin<&mut BoxedOutboundStream>, cx: &mut Context<'_>) {
+    const RECORD_SIZE: usize = 31;
+    let mut record = [0_u8; RECORD_SIZE];
+    record[0] = ALERT;
+    record[1] = 3;
+    record[2] = 3;
+    record[4] = 26;
+    rand::rng().fill(&mut record[TLS_HEADER_SIZE..]);
+    let _ = writer.as_mut().poll_write(cx, &record);
+}
+
+fn encode_application_data_frame(hmac_add: &mut HmacSha1, payload: &[u8]) -> io::Result<Vec<u8>> {
+    let mut frame = Vec::with_capacity(TLS_HMAC_HEADER_SIZE + payload.len());
+    frame.resize(TLS_HMAC_HEADER_SIZE, 0);
+    frame[0] = APPLICATION_DATA;
+    frame[1] = 3;
+    frame[2] = 3;
+    set_tls_record_length(&mut frame, HMAC_SIZE + payload.len())?;
+    hmac_add.update(payload);
+    let hmac_hash = hmac_add.clone().finalize().into_bytes()[..HMAC_SIZE].to_vec();
+    hmac_add.update(&hmac_hash);
+    frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE].copy_from_slice(&hmac_hash);
+    frame.extend_from_slice(payload);
+    Ok(frame)
 }
 
 fn generate_session_id_bytes(password: &str, client_hello: &[u8]) -> [u8; 32] {
@@ -609,16 +886,16 @@ fn is_server_hello_tls13(frame: &[u8]) -> bool {
     let extensions = &frame[offset..offset + extensions_length];
     let mut cursor = extensions;
     while cursor.len() >= 4 {
-        let extension_type = u16::from_be_bytes([cursor[0], cursor[1]]);
-        let extension_length = u16::from_be_bytes([cursor[2], cursor[3]]) as usize;
+        let ext_type = u16::from_be_bytes([cursor[0], cursor[1]]);
+        let ext_len = u16::from_be_bytes([cursor[2], cursor[3]]) as usize;
         cursor = &cursor[4..];
-        if extension_length > cursor.len() {
+        if ext_len > cursor.len() {
             return false;
         }
-        if extension_type == 43 {
-            return extension_length == 2 && cursor[0] == 0x03 && cursor[1] == 0x04;
+        if ext_type == 43 {
+            return ext_len == 2 && cursor[0] == 0x03 && cursor[1] == 0x04;
         }
-        cursor = &cursor[extension_length..];
+        cursor = &cursor[ext_len..];
     }
     false
 }
@@ -641,15 +918,232 @@ fn verify_application_data(frame: &[u8], hmac: &mut HmacSha1, update: bool) -> b
 
 #[cfg(test)]
 mod tests {
+    use futures_util::FutureExt;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+
     use super::*;
 
     #[test]
-    fn generate_session_id_matches_go_oracle_layout() {
+    fn generate_session_id_hmac_tail_matches_password_binding() {
         let mut client_hello = vec![0_u8; 120];
-        client_hello[0] = 1;
-        client_hello[38] = TLS_SESSION_ID_SIZE as u8;
+        client_hello[0] = HANDSHAKE;
+        client_hello[38] = u8::try_from(TLS_SESSION_ID_SIZE).expect("session id size");
         client_hello[39..39 + TLS_SESSION_ID_SIZE].fill(0);
         let session_id = generate_session_id_bytes("phase6c-shadow-tls-password", &client_hello);
         assert_ne!(session_id[..TLS_SESSION_ID_SIZE - HMAC_SIZE], [0_u8; 28]);
+        let mut session_id_for_hmac = [0_u8; TLS_SESSION_ID_SIZE];
+        session_id_for_hmac[..TLS_SESSION_ID_SIZE - HMAC_SIZE]
+            .copy_from_slice(&session_id[..TLS_SESSION_ID_SIZE - HMAC_SIZE]);
+        let mut mac = HmacSha1::new_from_slice(b"phase6c-shadow-tls-password").expect("HMAC key");
+        mac.update(&client_hello[..SESSION_ID_START]);
+        mac.update(&session_id_for_hmac);
+        mac.update(&client_hello[SESSION_ID_START + TLS_SESSION_ID_SIZE..]);
+        assert_eq!(
+            session_id[TLS_SESSION_ID_SIZE - HMAC_SIZE..],
+            mac.finalize().into_bytes()[..HMAC_SIZE]
+        );
+    }
+
+    #[test]
+    fn tls12_server_hello_authorizes_v3_handshake() {
+        let mut frame = vec![0_u8; 90];
+        frame[0] = HANDSHAKE;
+        frame[5] = SERVER_HELLO;
+        frame[SERVER_RANDOM_INDEX..SERVER_RANDOM_INDEX + 32].fill(7);
+        frame[SESSION_ID_LENGTH_INDEX] = 0;
+        let mut io = ShadowTlsIo {
+            inner: Box::new(tokio::io::empty()),
+            version: 3,
+            password: "pw".to_owned(),
+            pending_read: Vec::new(),
+            server_random: None,
+            read_hmac: None,
+            read_hmac_key: None,
+            is_tls13: false,
+            authorized: false,
+            read_hash: None,
+            read_phase: None,
+        };
+        let processed = io.process_server_frame(frame).expect("process frame");
+        assert!(io.authorized);
+        assert!(!io.is_tls13);
+        assert_eq!(processed.len(), 90);
+    }
+
+    struct LimitedWriter {
+        inner: tokio::io::DuplexStream,
+        max_write: usize,
+    }
+
+    impl AsyncRead for LimitedWriter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for LimitedWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let limit = buf.len().min(self.max_write);
+            Pin::new(&mut self.inner).poll_write(cx, &buf[..limit])
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[test]
+    fn verified_stream_write_flushes_full_frame_before_reporting_progress() {
+        use std::task::{Context, Poll};
+
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [9_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(LimitedWriter {
+                inner: client,
+                max_write: 1,
+            }),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let payload = b"abc";
+        let mut consumed = 0;
+        while consumed < payload.len() {
+            match Pin::new(&mut stream).poll_write(&mut cx, &payload[consumed..]) {
+                Poll::Ready(Ok(0)) => break,
+                Poll::Ready(Ok(written)) => consumed += written,
+                Poll::Ready(Err(error)) => panic!("write failed: {error}"),
+                Poll::Pending => {
+                    let mut drain = [0_u8; 64];
+                    let _ = std::future::poll_fn(|cx| {
+                        Pin::new(&mut peer).poll_read(cx, &mut ReadBuf::new(&mut drain))
+                    })
+                    .now_or_never();
+                }
+            }
+        }
+        assert_eq!(consumed, payload.len());
+    }
+
+    #[tokio::test]
+    async fn poll_read_frame_survives_partial_header_read() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let payload = b"abc";
+        let mut frame = vec![0_u8; TLS_HEADER_SIZE + payload.len()];
+        frame[0] = APPLICATION_DATA;
+        frame[1] = 3;
+        frame[2] = 3;
+        set_tls_record_length(&mut frame, payload.len()).expect("length");
+        frame[TLS_HEADER_SIZE..].copy_from_slice(payload);
+        client.write_all(&frame[..2]).await.expect("partial header");
+        let mut io = ShadowTlsIo {
+            inner: Box::new(server),
+            version: 2,
+            password: String::new(),
+            pending_read: Vec::new(),
+            server_random: None,
+            read_hmac: None,
+            read_hmac_key: None,
+            is_tls13: false,
+            authorized: false,
+            read_hash: Some(HmacSha1::new_from_slice(b"x").expect("HMAC key")),
+            read_phase: None,
+        };
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0_u8; 32];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut cx, &mut read_buf),
+            Poll::Pending
+        ));
+        client.write_all(&frame[2..]).await.expect("rest of frame");
+        read_buf = ReadBuf::new(&mut buf);
+        for _ in 0..8 {
+            if matches!(
+                Pin::new(&mut io).poll_read(&mut cx, &mut read_buf),
+                Poll::Ready(Ok(()))
+            ) {
+                break;
+            }
+        }
+        assert!(read_buf.filled().len() >= payload.len());
+        assert!(
+            read_buf
+                .filled()
+                .windows(payload.len())
+                .any(|window| window == payload)
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_stream_sends_alert_on_hmac_failure() {
+        let (client, peer) = tokio::io::duplex(4096);
+        let server_random = [1_u8; 32];
+        let mut hmac_add =
+            HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify =
+            HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(client),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+        };
+        let mut bad = vec![0_u8; TLS_HMAC_HEADER_SIZE + 4];
+        bad[0] = APPLICATION_DATA;
+        bad[1] = 3;
+        bad[2] = 3;
+        set_tls_record_length(&mut bad, HMAC_SIZE + 4).expect("length");
+        let mut peer = peer;
+        peer.write_all(&bad).await.expect("write bad frame");
+        let result = tokio::io::AsyncReadExt::read(&mut stream, &mut [0_u8; 1]).await;
+        assert!(result.is_err());
+        let mut alert = [0_u8; 31];
+        let read = peer.read(&mut alert).await.expect("read alert");
+        assert_eq!(read, 31);
+        assert_eq!(alert[0], ALERT);
     }
 }

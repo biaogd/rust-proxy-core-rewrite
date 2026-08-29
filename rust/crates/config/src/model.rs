@@ -204,6 +204,7 @@ pub struct ProxyConfig {
     pub fingerprint: Option<String>,
     pub certificate: Option<String>,
     pub private_key: Option<String>,
+    pub client_fingerprint: Option<String>,
     pub udp: bool,
     pub udp_over_tcp: bool,
     pub udp_over_tcp_version: u8,
