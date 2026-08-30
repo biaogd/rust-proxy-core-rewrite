@@ -30,6 +30,10 @@ name = "rewrite-shadowsocks-client"
 path = "src/shadowsocks_client.rs"
 
 [[bin]]
+name = "rewrite-shadowsocks-udp-client"
+path = "src/shadowsocks_udp_client.rs"
+
+[[bin]]
 name = "rewrite-shadowsocks-websocket-authority"
 path = "src/shadowsocks_websocket_authority.rs"
 
