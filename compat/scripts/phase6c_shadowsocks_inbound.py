@@ -53,6 +53,8 @@ STLS_PASSWORD = "phase6c-shadow-tls-plugin-password"
 TCP_STLS_PAYLOAD = "phase6c-ss-inbound-shadow-tls"
 KEY_2022_EIH_USER = "EBESExQVFhcYGRobHB0eHw=="
 TCP_2022_EIH_PAYLOAD = "phase6c-ss-inbound-2022-eih"
+TCP_UOT_V1_PAYLOAD = "phase6c-ss-inbound-uot-v1"
+TCP_UOT_V2_PAYLOAD = "phase6c-ss-inbound-uot-v2"
 
 
 def client_binary() -> pathlib.Path:
@@ -65,6 +67,12 @@ def udp_client_binary() -> pathlib.Path:
     target = cargo_target_path("PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
     suffix = ".exe" if os.name == "nt" else ""
     return target / "debug" / f"rewrite-shadowsocks-udp-client{suffix}"
+
+
+def uot_client_binary() -> pathlib.Path:
+    target = cargo_target_path("PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
+    suffix = ".exe" if os.name == "nt" else ""
+    return target / "debug" / f"rewrite-shadowsocks-uot-client{suffix}"
 
 
 def authority_binary() -> pathlib.Path:
@@ -144,6 +152,63 @@ def wait_ss_route(
             pass
         time.sleep(0.02)
     raise TimeoutError("Shadowsocks inbound route did not become ready")
+
+
+def proxied_uot(
+    client: pathlib.Path,
+    ss_port: int,
+    echo_port: int,
+    payload: str,
+    version: int,
+    cipher: str = CIPHER,
+    password: str = PASSWORD,
+) -> bool:
+    command = [
+        str(client),
+        f"127.0.0.1:{ss_port}",
+        password,
+        cipher,
+        "127.0.0.1",
+        str(echo_port),
+        payload,
+        str(version),
+    ]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
+        return completed.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def wait_ss_uot_route(
+    process: subprocess.Popen[bytes],
+    client: pathlib.Path,
+    ss_port: int,
+    echo_port: int,
+    payload: str,
+    version: int,
+    cipher: str = CIPHER,
+    password: str = PASSWORD,
+) -> None:
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during UoT readiness with {process.returncode}")
+        try:
+            if proxied_uot(
+                client,
+                ss_port,
+                echo_port,
+                payload,
+                version,
+                cipher,
+                password,
+            ):
+                return
+        except (AssertionError, OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(0.02)
+    raise TimeoutError("Shadowsocks inbound UoT route did not become ready")
 
 
 def proxied_udp(
@@ -550,6 +615,69 @@ rules:
         echo.close()
 
 
+def exercise_uot_listener(
+    binary: pathlib.Path,
+    uot_client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    udp_echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
+    udp_thread.start()
+    udp_port = int(udp_echo.server_address[1])
+    ss_port = reserve_port()
+    config = scratch / "uot-listener-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_uot_route(
+            process,
+            uot_client,
+            ss_port,
+            udp_port,
+            payload=TCP_UOT_V1_PAYLOAD,
+            version=1,
+        )
+        wait_ss_uot_route(
+            process,
+            uot_client,
+            ss_port,
+            udp_port,
+            payload=TCP_UOT_V2_PAYLOAD,
+            version=2,
+        )
+        return {
+            "inbound-uot-v1": proxied_uot(
+                uot_client,
+                ss_port,
+                udp_port,
+                payload=TCP_UOT_V1_PAYLOAD,
+                version=1,
+            ),
+            "inbound-uot-v2": proxied_uot(
+                uot_client,
+                ss_port,
+                udp_port,
+                payload=TCP_UOT_V2_PAYLOAD,
+                version=2,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        udp_echo.shutdown()
+        udp_echo.server_close()
+        udp_thread.join(timeout=1)
+
+
 def start_camouflage_tls(scratch: pathlib.Path) -> tuple[Any, int]:
     certificate = scratch / "camouflage.pem"
     private_key = scratch / "camouflage.key"
@@ -824,6 +952,7 @@ def main() -> int:
         binaries = build_binaries(root, "PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
         client = client_binary()
         udp_client = udp_client_binary()
+        uot_client = uot_client_binary()
         authority = authority_binary()
         try:
             for name, binary in binaries.items():
@@ -838,6 +967,7 @@ def main() -> int:
                     **exercise_obfs_http_listener(binary, client, scratch),
                     **exercise_obfs_tls_listener(binary, client, scratch),
                     **exercise_shadow_tls_listener(binary, client, scratch),
+                    **exercise_uot_listener(binary, uot_client, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }

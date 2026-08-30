@@ -20,6 +20,7 @@ use shadowsocks::context::Context as SsContext;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::net::UdpSocket as SsUdpSocket;
 use shadowsocks::relay::socks5::Address;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -250,6 +251,24 @@ pub(super) async fn run_shadowsocks_listener(
                             }
                         }
                     };
+                    if let Some(uot_version) = shadowsocks_uot_version(&destination) {
+                        let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
+                        metadata.network = Network::Udp;
+                        metadata.source_ip = Some(unmap_ip(peer.ip()));
+                        metadata.source_port = peer.port();
+                        metadata.inbound_port = local.port();
+                        connection_inbound_name.clone_into(&mut metadata.inbound_name);
+                        serve_shadowsocks_inbound_uot(
+                            &mut inbound,
+                            uot_version,
+                            metadata,
+                            &connection_config,
+                            &connection_state,
+                            &connection_shutdown,
+                        )
+                        .await;
+                        return;
+                    }
                     let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
                     metadata.network = Network::Tcp;
                     metadata.source_ip = Some(unmap_ip(peer.ip()));
@@ -569,6 +588,209 @@ async fn send_shadowsocks_udp_reply(
         .send_to(peer, &Address::SocketAddress(remote), payload)
         .await
         .is_ok()
+}
+
+fn shadowsocks_uot_version(destination: &Destination) -> Option<u8> {
+    match &destination.host {
+        Host::Domain(domain) if destination.port == 0 => match domain.as_str() {
+            "sp.udp-over-tcp.arpa" => Some(1),
+            "sp.v2.udp-over-tcp.arpa" => Some(2),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+async fn serve_shadowsocks_inbound_uot<S>(
+    stream: &mut S,
+    version: u8,
+    metadata: Metadata,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if version == 2 {
+        let is_connect = match stream.read_u8().await {
+            Ok(value) => value,
+            Err(error) => {
+                state.log(
+                    "error",
+                    format!("shadowsocks inbound UoT v2 header failed: {error}"),
+                );
+                return;
+            }
+        };
+        if is_connect != 0 {
+            state.log(
+                "error",
+                "shadowsocks inbound UoT v2 connect mode is not supported",
+            );
+            return;
+        }
+        if let Err(error) = Address::read_from(stream).await {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT v2 destination failed: {error}"),
+            );
+            return;
+        }
+    }
+
+    let outbound = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(socket) => socket,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT bind failed: {error}"),
+            );
+            return;
+        }
+    };
+    let tracker = state.register(&metadata, "DIRECT", Some("MATCH"));
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    loop {
+        let destination = tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = read_inbound_uot_destination(stream) => match result {
+                Ok(destination) => destination,
+                Err(_) => break,
+            }
+        };
+        let length = match stream.read_u16().await {
+            Ok(length) => length as usize,
+            Err(_) => break,
+        };
+        let mut payload = vec![0_u8; length];
+        if stream.read_exact(&mut payload).await.is_err() {
+            break;
+        }
+        uploaded = uploaded.saturating_add(payload.len() as u64);
+        let mut packet_metadata = metadata.clone();
+        packet_metadata.destination = destination.clone();
+        packet_metadata.network = Network::Udp;
+        let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+        let decision = mode_decision(config, state)
+            .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
+        let Some((decision, outbound_target, _)) =
+            resolve_rematch_target(decision, &mut packet_metadata, config, state)
+        else {
+            continue;
+        };
+        let route = resolved_route(&outbound_target, config);
+        if matches!(route, Route::Reject | Route::RejectDrop) {
+            continue;
+        }
+        if route != Route::Direct {
+            state.log(
+                "error",
+                format!(
+                    "shadowsocks inbound UoT target {} is unsupported",
+                    decision.target
+                ),
+            );
+            continue;
+        }
+        let target = match resolve_udp_target(
+            &packet_metadata,
+            fake_host.as_deref(),
+            config,
+        )
+        .await
+        {
+            Ok(target) => target,
+            Err(error) => {
+                state.log(
+                    "error",
+                    format!("shadowsocks inbound UoT resolution failed: {error}"),
+                );
+                continue;
+            }
+        };
+        if outbound.send_to(&payload, target).await.is_err() {
+            break;
+        }
+        let mut response = vec![0_u8; 65_536];
+        let (response_length, source) = tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response)) => {
+                match result {
+                    Ok(Ok(value)) => value,
+                    _ => continue,
+                }
+            }
+        };
+        if write_inbound_uot_address(stream, source).await.is_err() {
+            break;
+        }
+        let Ok(encoded_length) = u16::try_from(response_length) else {
+            continue;
+        };
+        if stream.write_u16(encoded_length).await.is_err() {
+            break;
+        }
+        if stream.write_all(&response[..response_length]).await.is_err() {
+            break;
+        }
+        if stream.flush().await.is_err() {
+            break;
+        }
+        downloaded = downloaded.saturating_add(response_length as u64);
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+async fn read_inbound_uot_destination<S>(stream: &mut S) -> std::io::Result<Destination>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let host = match stream.read_u8().await? {
+        0 => {
+            let mut octets = [0_u8; 4];
+            stream.read_exact(&mut octets).await?;
+            Host::Ip(std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)))
+        }
+        1 => {
+            let mut octets = [0_u8; 16];
+            stream.read_exact(&mut octets).await?;
+            Host::Ip(std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets)))
+        }
+        2 => {
+            let length = stream.read_u8().await? as usize;
+            let mut domain = vec![0_u8; length];
+            stream.read_exact(&mut domain).await?;
+            Host::Domain(String::from_utf8(domain).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UoT domain")
+            })?)
+        }
+        kind => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid UoT address type {kind}"),
+            ));
+        }
+    };
+    let port = stream.read_u16().await?;
+    Ok(Destination { host, port })
+}
+
+async fn write_inbound_uot_address<S>(stream: &mut S, address: SocketAddr) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    match address.ip() {
+        std::net::IpAddr::V4(address) => {
+            stream.write_u8(0).await?;
+            stream.write_all(&address.octets()).await?;
+        }
+        std::net::IpAddr::V6(address) => {
+            stream.write_u8(1).await?;
+            stream.write_all(&address.octets()).await?;
+        }
+    }
+    stream.write_u16(address.port()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -961,7 +1183,12 @@ fn address_to_destination(address: &Address) -> Result<Destination, &'static str
             port: socket.port(),
         }),
         Address::DomainNameAddress(domain, port) => {
-            if *port == 0 {
+            if *port == 0
+                && !matches!(
+                    domain.as_str(),
+                    "sp.udp-over-tcp.arpa" | "sp.v2.udp-over-tcp.arpa"
+                )
+            {
                 return Err("domain destination requires a nonzero port");
             }
             Ok(Destination {
