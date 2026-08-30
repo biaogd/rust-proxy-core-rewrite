@@ -2184,3 +2184,17 @@ fn loads_legacy_shadowsocks_inbound_from_ss_config() {
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18390)));
 }
+
+#[test]
+fn loads_shadowsocks_2022_inbound_from_ss_config() {
+    let config = Config::from_yaml(
+        "ss-config: ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@127.0.0.1:18394\nmode: rule\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect("ss-config inbound");
+    let inbound = config
+        .shadowsocks_inbound
+        .as_ref()
+        .expect("shadowsocks inbound");
+    assert_eq!(inbound.cipher, "2022-blake3-aes-128-gcm");
+    assert!(!inbound.udp);
+}

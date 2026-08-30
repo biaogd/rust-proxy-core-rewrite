@@ -4,7 +4,9 @@ use url::Url;
 
 use crate::ConfigError;
 use crate::model::ShadowsocksInboundConfig;
-use crate::proxy::supported_shadowsocks_cipher;
+use crate::proxy::{
+    shadowsocks_2022_cipher, supported_shadowsocks_cipher, validate_shadowsocks_inbound_key,
+};
 
 impl ShadowsocksInboundConfig {
     /// Parses a legacy `ss-config:` URI (`ss://cipher:password@host:port`).
@@ -22,7 +24,8 @@ impl ShadowsocksInboundConfig {
                 "ss-config must not be empty when declared".to_owned(),
             ));
         }
-        let url = Url::parse(value).map_err(|error| {
+        let value = normalize_ss_config_uri(value, allow_lan);
+        let url = Url::parse(&value).map_err(|error| {
             ConfigError::InvalidInbound(format!("invalid ss-config URI: {error}"))
         })?;
         if url.scheme() != "ss" {
@@ -49,13 +52,34 @@ impl ShadowsocksInboundConfig {
                 "unsupported shadowsocks inbound cipher: {cipher}"
             )));
         }
+        validate_shadowsocks_inbound_key(&cipher, &password)?;
+        let udp = !shadowsocks_2022_cipher(&cipher);
         Ok(Self {
             cipher,
             password,
             listen,
-            udp: true,
+            udp,
         })
     }
+}
+
+fn normalize_ss_config_uri(value: &str, allow_lan: bool) -> String {
+    let Some(rest) = value.strip_prefix("ss://") else {
+        return value.to_owned();
+    };
+    let Some(at) = rest.rfind('@') else {
+        return value.to_owned();
+    };
+    let host_part = &rest[at + 1..];
+    if !host_part.starts_with(':') {
+        return value.to_owned();
+    }
+    let port = &host_part[1..];
+    if !port.chars().all(|character| character.is_ascii_digit()) {
+        return value.to_owned();
+    }
+    let host = if allow_lan { "0.0.0.0" } else { "127.0.0.1" };
+    format!("ss://{}@{host}:{port}", &rest[..at])
 }
 
 fn percent_decode(value: &str) -> String {
@@ -144,5 +168,29 @@ mod tests {
         .expect("parse");
         assert_eq!(config.listen.port(), 18389);
         assert_eq!(config.listen.ip().to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn parses_2022_ss_config_uri_without_udp() {
+        let config = ShadowsocksInboundConfig::parse_ss_url(
+            "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@127.0.0.1:18392",
+            false,
+            "*",
+        )
+        .expect("parse");
+        assert_eq!(config.cipher, "2022-blake3-aes-128-gcm");
+        assert_eq!(config.password, "AAECAwQFBgcICQoLDA0ODw==");
+        assert!(!config.udp);
+    }
+
+    #[test]
+    fn rejects_invalid_2022_ss_config_key() {
+        let error = ShadowsocksInboundConfig::parse_ss_url(
+            "ss://2022-blake3-aes-128-gcm:not-base64@127.0.0.1:18393",
+            false,
+            "*",
+        )
+        .expect_err("invalid key");
+        assert!(matches!(error, ConfigError::InvalidInbound(_)));
     }
 }

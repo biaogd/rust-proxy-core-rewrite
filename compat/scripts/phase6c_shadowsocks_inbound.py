@@ -36,6 +36,9 @@ LEGACY_TCP_PAYLOAD = "phase6c-ss-inbound-legacy-tcp"
 UDP_PAYLOAD = "phase6c-ss-inbound-udp"
 UDP_REUSE_PAYLOAD = "phase6c-ss-inbound-udp-reuse-" + ("x" * 4096)
 PROXY_UDP_PAYLOAD = "phase6c-ss-inbound-proxy-udp"
+KEY_2022 = "AAECAwQFBgcICQoLDA0ODw=="
+CIPHER_2022 = "2022-blake3-aes-128-gcm"
+TCP_2022_PAYLOAD = "phase6c-ss-inbound-2022-tcp"
 
 
 def client_binary() -> pathlib.Path:
@@ -56,11 +59,18 @@ def authority_binary() -> pathlib.Path:
     return target / "debug" / f"rewrite-shadowsocks-authority{suffix}"
 
 
-def proxied_echo(client: pathlib.Path, ss_port: int, echo_port: int, cipher: str = CIPHER, payload: str = TCP_PAYLOAD) -> bool:
+def proxied_echo(
+    client: pathlib.Path,
+    ss_port: int,
+    echo_port: int,
+    cipher: str = CIPHER,
+    password: str = PASSWORD,
+    payload: str = TCP_PAYLOAD,
+) -> bool:
     command = [
         str(client),
         f"127.0.0.1:{ss_port}",
-        PASSWORD,
+        password,
         cipher,
         "127.0.0.1",
         str(echo_port),
@@ -79,6 +89,7 @@ def wait_ss_route(
     ss_port: int,
     echo_port: int,
     cipher: str = CIPHER,
+    password: str = PASSWORD,
     payload: str = TCP_PAYLOAD,
 ) -> None:
     deadline = time.monotonic() + IO_DEADLINE
@@ -86,7 +97,7 @@ def wait_ss_route(
         if process.poll() is not None:
             raise RuntimeError(f"proxy exited during readiness with {process.returncode}")
         try:
-            if proxied_echo(client, ss_port, echo_port, cipher, payload):
+            if proxied_echo(client, ss_port, echo_port, cipher, password, payload):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
             pass
@@ -212,6 +223,7 @@ rules:
             ss_port,
             echo.port,
             cipher=LEGACY_CIPHER,
+            password=PASSWORD,
             payload=LEGACY_TCP_PAYLOAD,
         )
         return {
@@ -220,7 +232,53 @@ rules:
                 ss_port,
                 echo.port,
                 cipher=LEGACY_CIPHER,
+                password=PASSWORD,
                 payload=LEGACY_TCP_PAYLOAD,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
+def exercise_2022_tcp(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    ss_port = reserve_port()
+    config = scratch / "2022-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER_2022}:{KEY_2022}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            cipher=CIPHER_2022,
+            password=KEY_2022,
+            payload=TCP_2022_PAYLOAD,
+        )
+        return {
+            "2022-tcp": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                cipher=CIPHER_2022,
+                password=KEY_2022,
+                payload=TCP_2022_PAYLOAD,
             ),
         }
     finally:
@@ -309,6 +367,7 @@ def main() -> int:
                 observations[name] = {
                     **exercise(binary, client, udp_client, scratch),
                     **exercise_legacy_tcp(binary, client, scratch),
+                    **exercise_2022_tcp(binary, client, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                 }
         except Exception as error:

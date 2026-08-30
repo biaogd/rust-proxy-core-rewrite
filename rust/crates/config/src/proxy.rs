@@ -307,6 +307,22 @@ fn validate_shadow_tls_client_fingerprint(
     Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()))
 }
 
+pub(crate) fn shadowsocks_2022_cipher(cipher: &str) -> bool {
+    SHADOWSOCKS_2022_CIPHERS.contains(&cipher)
+}
+
+pub(crate) fn validate_shadowsocks_inbound_key(
+    cipher: &str,
+    password: &str,
+) -> Result<(), ConfigError> {
+    validate_shadowsocks_key("ss-config", cipher, password, false).map_err(|error| match error {
+        ConfigError::UnsupportedProxy(_) => ConfigError::InvalidInbound(format!(
+            "invalid shadowsocks inbound key for cipher {cipher}"
+        )),
+        other => other,
+    })
+}
+
 fn validate_shadowsocks_key(
     name: &str,
     cipher: &str,
