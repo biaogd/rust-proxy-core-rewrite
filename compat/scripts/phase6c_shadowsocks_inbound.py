@@ -55,6 +55,8 @@ KEY_2022_EIH_USER = "EBESExQVFhcYGRobHB0eHw=="
 TCP_2022_EIH_PAYLOAD = "phase6c-ss-inbound-2022-eih"
 TCP_UOT_V1_PAYLOAD = "phase6c-ss-inbound-uot-v1"
 TCP_UOT_V2_PAYLOAD = "phase6c-ss-inbound-uot-v2"
+TCP_UOT_SOCKS5_PAYLOAD = "phase6c-ss-inbound-uot-socks5"
+TCP_UOT_PROXY_PAYLOAD = "phase6c-ss-inbound-uot-proxy"
 
 
 def client_binary() -> pathlib.Path:
@@ -678,6 +680,125 @@ rules:
         udp_thread.join(timeout=1)
 
 
+def exercise_uot_socks5(
+    binary: pathlib.Path,
+    uot_client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    relay = RelayServer()
+    control = ControlServer(relay)
+    ss_port = reserve_port()
+    destination_port = 32_011
+    config = scratch / "uot-socks5-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: relay-socks5
+    type: socks5
+    server: 127.0.0.1
+    port: {control.port}
+    username: udp-user
+    password: udp-pass
+    udp: true
+rules:
+  - MATCH,relay-socks5
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_uot_route(
+            process,
+            uot_client,
+            ss_port,
+            destination_port,
+            payload=TCP_UOT_SOCKS5_PAYLOAD,
+            version=1,
+        )
+        return {
+            "inbound-uot-socks5": proxied_uot(
+                uot_client,
+                ss_port,
+                destination_port,
+                payload=TCP_UOT_SOCKS5_PAYLOAD,
+                version=1,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        relay.close()
+        control.close()
+
+
+def exercise_uot_proxied(
+    binary: pathlib.Path,
+    uot_client: pathlib.Path,
+    authority: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    udp_echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
+    udp_thread.start()
+    udp_port = int(udp_echo.server_address[1])
+    authority_port = reserve_port()
+    authority_process, authority_stdout, authority_stderr = start_authority(
+        authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
+    )
+    time.sleep(0.2)
+    ss_port = reserve_port()
+    config = scratch / "uot-proxy-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: relay-ss
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {OUTBOUND_PASSWORD}
+    udp: true
+rules:
+  - MATCH,relay-ss
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_uot_route(
+            process,
+            uot_client,
+            ss_port,
+            udp_port,
+            payload=TCP_UOT_PROXY_PAYLOAD,
+            version=1,
+        )
+        return {
+            "inbound-uot-proxy": proxied_uot(
+                uot_client,
+                ss_port,
+                udp_port,
+                payload=TCP_UOT_PROXY_PAYLOAD,
+                version=1,
+            ),
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        udp_echo.shutdown()
+        udp_echo.server_close()
+        udp_thread.join(timeout=1)
+
+
 def start_camouflage_tls(scratch: pathlib.Path) -> tuple[Any, int]:
     certificate = scratch / "camouflage.pem"
     private_key = scratch / "camouflage.key"
@@ -968,6 +1089,8 @@ def main() -> int:
                     **exercise_obfs_tls_listener(binary, client, scratch),
                     **exercise_shadow_tls_listener(binary, client, scratch),
                     **exercise_uot_listener(binary, uot_client, scratch),
+                    **exercise_uot_socks5(binary, uot_client, scratch),
+                    **exercise_uot_proxied(binary, uot_client, authority, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }

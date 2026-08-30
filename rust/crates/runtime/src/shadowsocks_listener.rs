@@ -264,6 +264,7 @@ pub(super) async fn run_shadowsocks_listener(
                             metadata,
                             &connection_config,
                             &connection_state,
+                            &connection_dns_service,
                             &connection_shutdown,
                         )
                         .await;
@@ -607,6 +608,7 @@ async fn serve_shadowsocks_inbound_uot<S>(
     metadata: Metadata,
     config: &Config,
     state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -638,7 +640,194 @@ async fn serve_shadowsocks_inbound_uot<S>(
         }
     }
 
-    let outbound = match UdpSocket::bind("0.0.0.0:0").await {
+    let Some((first_destination, first_payload)) =
+        read_inbound_uot_packet(stream, shutdown).await
+    else {
+        return;
+    };
+    let mut packet_metadata = metadata.clone();
+    packet_metadata.destination = first_destination.clone();
+    packet_metadata.network = Network::Udp;
+    let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+    let decision = mode_decision(config, state)
+        .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
+    let Some((decision, outbound_target, _)) =
+        resolve_rematch_target(decision, &mut packet_metadata, config, state)
+    else {
+        return;
+    };
+    let route = resolved_route(&outbound_target, config);
+    if matches!(route, Route::Reject | Route::RejectDrop) {
+        return;
+    }
+    let Some(mode) = udp_session_mode(&outbound_target, config) else {
+        state.log(
+            "error",
+            format!(
+                "shadowsocks inbound UoT target {} is unsupported",
+                decision.target
+            ),
+        );
+        return;
+    };
+    state.log(
+        "info",
+        format!(
+            "[UDP] {} --> {} match {} using {} (UoT)",
+            packet_metadata.source_port,
+            packet_metadata.destination.authority(),
+            decision.matched_kind.as_deref().unwrap_or("none"),
+            decision.target
+        ),
+    );
+    match mode {
+        UdpSessionMode::Direct => {
+            serve_inbound_uot_direct(
+                stream,
+                packet_metadata,
+                fake_host,
+                first_payload,
+                decision,
+                config,
+                state,
+                shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Dns => {
+            serve_inbound_uot_dns(
+                stream,
+                packet_metadata,
+                first_payload,
+                decision,
+                config,
+                state,
+                dns_service,
+                shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Socks5(proxy) => {
+            serve_inbound_uot_socks5(
+                stream,
+                packet_metadata,
+                fake_host,
+                first_payload,
+                proxy,
+                decision,
+                config,
+                state,
+                shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Shadowsocks(proxy) => {
+            serve_inbound_uot_shadowsocks(
+                stream,
+                packet_metadata,
+                fake_host,
+                first_payload,
+                proxy,
+                decision,
+                config,
+                state,
+                shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::ShadowsocksUot(proxy) => {
+            serve_inbound_uot_shadowsocks_uot(
+                stream,
+                packet_metadata,
+                fake_host,
+                first_payload,
+                proxy,
+                decision,
+                config,
+                state,
+                shutdown,
+            )
+            .await;
+        }
+    }
+}
+
+async fn read_inbound_uot_packet<S>(
+    stream: &mut S,
+    shutdown: &CancellationToken,
+) -> Option<(Destination, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let destination = tokio::select! {
+        () = shutdown.cancelled() => return None,
+        result = read_inbound_uot_destination(stream) => result.ok()?,
+    };
+    let length = stream.read_u16().await.ok()? as usize;
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).await.ok()?;
+    Some((destination, payload))
+}
+
+async fn write_inbound_uot_packet<S>(
+    stream: &mut S,
+    source: SocketAddr,
+    payload: &[u8],
+) -> bool
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let Ok(encoded_length) = u16::try_from(payload.len()) else {
+        return false;
+    };
+    if write_inbound_uot_address(stream, source).await.is_err() {
+        return false;
+    }
+    if stream.write_u16(encoded_length).await.is_err() {
+        return false;
+    }
+    if stream.write_all(payload).await.is_err() {
+        return false;
+    }
+    stream.flush().await.is_ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_inbound_uot_direct<S>(
+    stream: &mut S,
+    first_metadata: Metadata,
+    first_fake_host: Option<String>,
+    first_payload: Vec<u8>,
+    decision: Decision,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let target = match resolve_udp_target(
+        &first_metadata,
+        first_fake_host.as_deref(),
+        config,
+    )
+    .await
+    {
+        Ok(target) => target,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT resolution failed: {error}"),
+            );
+            return;
+        }
+    };
+    let outbound = match UdpSocket::bind(if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    })
+    .await
+    {
         Ok(socket) => socket,
         Err(error) => {
             state.log(
@@ -648,96 +837,376 @@ async fn serve_shadowsocks_inbound_uot<S>(
             return;
         }
     };
-    let tracker = state.register(&metadata, "DIRECT", Some("MATCH"));
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = first_payload.len() as u64;
+    let mut downloaded = 0_u64;
+    if outbound.send_to(&first_payload, target).await.is_err() {
+        tracker.finish(uploaded, downloaded);
+        return;
+    }
+    loop {
+        let mut response = vec![0_u8; 65_536];
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            received = outbound.recv_from(&mut response) => {
+                let Ok((length, source)) = received else { break };
+                if !write_inbound_uot_packet(stream, source, &response[..length]).await {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(length as u64);
+            }
+            packet = read_inbound_uot_packet(stream, shutdown) => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                let target = match resolve_udp_target(
+                    &packet_metadata,
+                    fake_host.as_deref(),
+                    config,
+                )
+                .await
+                {
+                    Ok(target) => target,
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!("shadowsocks inbound UoT resolution failed: {error}"),
+                        );
+                        continue;
+                    }
+                };
+                if outbound.send_to(&payload, target).await.is_err() {
+                    break;
+                }
+                uploaded = uploaded.saturating_add(payload.len() as u64);
+            }
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_inbound_uot_dns<S>(
+    stream: &mut S,
+    first_metadata: Metadata,
+    first_payload: Vec<u8>,
+    decision: Decision,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
     let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
+    let mut current = Some((first_metadata.clone(), first_payload));
     loop {
-        let destination = tokio::select! {
-            () = shutdown.cancelled() => break,
-            result = read_inbound_uot_destination(stream) => match result {
-                Ok(destination) => destination,
-                Err(_) => break,
-            }
-        };
-        let length = match stream.read_u16().await {
-            Ok(length) => length as usize,
-            Err(_) => break,
-        };
-        let mut payload = vec![0_u8; length];
-        if stream.read_exact(&mut payload).await.is_err() {
-            break;
-        }
-        uploaded = uploaded.saturating_add(payload.len() as u64);
-        let mut packet_metadata = metadata.clone();
-        packet_metadata.destination = destination.clone();
-        packet_metadata.network = Network::Udp;
-        let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
-        let decision = mode_decision(config, state)
-            .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
-        let Some((decision, outbound_target, _)) =
-            resolve_rematch_target(decision, &mut packet_metadata, config, state)
-        else {
-            continue;
-        };
-        let route = resolved_route(&outbound_target, config);
-        if matches!(route, Route::Reject | Route::RejectDrop) {
-            continue;
-        }
-        if route != Route::Direct {
-            state.log(
-                "error",
-                format!(
-                    "shadowsocks inbound UoT target {} is unsupported",
-                    decision.target
-                ),
-            );
-            continue;
-        }
-        let target = match resolve_udp_target(
-            &packet_metadata,
-            fake_host.as_deref(),
-            config,
-        )
-        .await
-        {
-            Ok(target) => target,
-            Err(error) => {
-                state.log(
-                    "error",
-                    format!("shadowsocks inbound UoT resolution failed: {error}"),
-                );
-                continue;
-            }
-        };
-        if outbound.send_to(&payload, target).await.is_err() {
-            break;
-        }
-        let mut response = vec![0_u8; 65_536];
-        let (response_length, source) = tokio::select! {
-            () = shutdown.cancelled() => break,
-            result = tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response)) => {
-                match result {
-                    Ok(Ok(value)) => value,
-                    _ => continue,
+        if let Some((packet_metadata, payload)) = current.take() {
+            uploaded = uploaded.saturating_add(payload.len() as u64);
+            match dns_service.relay_query(config, state, &payload).await {
+                Ok(response) => {
+                    let remote = dns_adapter_response_addr(&packet_metadata);
+                    if !write_inbound_uot_packet(stream, remote, &response).await {
+                        break;
+                    }
+                    downloaded = downloaded.saturating_add(response.len() as u64);
+                }
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound UoT DNS relay failed: {error}"),
+                    );
                 }
             }
-        };
-        if write_inbound_uot_address(stream, source).await.is_err() {
-            break;
         }
-        let Ok(encoded_length) = u16::try_from(response_length) else {
-            continue;
-        };
-        if stream.write_u16(encoded_length).await.is_err() {
-            break;
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            packet = read_inbound_uot_packet(stream, shutdown) => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                current = Some((packet_metadata, payload));
+            }
         }
-        if stream.write_all(&response[..response_length]).await.is_err() {
-            break;
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_inbound_uot_socks5<S>(
+    stream: &mut S,
+    first_metadata: Metadata,
+    first_fake_host: Option<String>,
+    first_payload: Vec<u8>,
+    proxy_name: String,
+    decision: Decision,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let Some(proxy) = configured_proxy(config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let tls = proxy.tls.then_some(HttpProxyTls {
+        server_name: &proxy.server,
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: proxy.fingerprint.as_deref(),
+        certificate: proxy.certificate.as_deref(),
+        private_key: proxy.private_key.as_deref(),
+        custom_roots: &config.trust_certificates,
+        ech_config: None,
+        alpn_protocols: &[],
+        tls12_only: false,
+        tls13_only: false,
+        client_hello_fingerprint: None,
+        client_hello_fingerprint_mlkem: true,
+    });
+    let association = match rewrite_outbound::associate_socks5_udp_with_options(
+        &server,
+        config.ipv6,
+        proxy.socks5_credentials(),
+        tls,
+        Some(state.clock()),
+        direct_tcp_options(config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT SOCKS5 association failed: {error}"),
+            );
+            return;
         }
-        if stream.flush().await.is_err() {
-            break;
+    };
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let mut current = Some((first_metadata.clone(), first_fake_host, first_payload));
+    loop {
+        if let Some((packet_metadata, fake_host, payload)) = current.take() {
+            let destination = inbound_udp_destination(&packet_metadata, fake_host.as_deref());
+            if association.send(&destination, &payload).await.is_err() {
+                break;
+            }
+            uploaded = uploaded.saturating_add(payload.len() as u64);
         }
-        downloaded = downloaded.saturating_add(response_length as u64);
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            packet = read_inbound_uot_packet(stream, shutdown) => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                current = Some((packet_metadata, fake_host, payload));
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                if !write_inbound_uot_packet(stream, remote, &payload).await {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+            }
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_inbound_uot_shadowsocks<S>(
+    stream: &mut S,
+    first_metadata: Metadata,
+    first_fake_host: Option<String>,
+    first_payload: Vec<u8>,
+    proxy_name: String,
+    decision: Decision,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let Some(proxy) = configured_proxy(config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
+        &server,
+        config.ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        direct_tcp_options(config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT SS association failed: {error}"),
+            );
+            return;
+        }
+    };
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let mut current = Some((first_metadata.clone(), first_fake_host, first_payload));
+    loop {
+        if let Some((packet_metadata, fake_host, payload)) = current.take() {
+            let destination = inbound_udp_destination(&packet_metadata, fake_host.as_deref());
+            if association.send(&destination, &payload).await.is_err() {
+                break;
+            }
+            uploaded = uploaded.saturating_add(payload.len() as u64);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            packet = read_inbound_uot_packet(stream, shutdown) => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                current = Some((packet_metadata, fake_host, payload));
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                if !write_inbound_uot_packet(stream, remote, &payload).await {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+            }
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_inbound_uot_shadowsocks_uot<S>(
+    stream: &mut S,
+    first_metadata: Metadata,
+    first_fake_host: Option<String>,
+    first_payload: Vec<u8>,
+    proxy_name: String,
+    decision: Decision,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let Some(proxy) = configured_proxy(config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let mut association = match rewrite_outbound::associate_shadowsocks_uot_with_options(
+        &server,
+        config.ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        proxy.udp_over_tcp_version,
+        direct_tcp_options(config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound UoT nested association failed: {error}"),
+            );
+            return;
+        }
+    };
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let mut current = Some((first_metadata.clone(), first_fake_host, first_payload));
+    loop {
+        if let Some((packet_metadata, fake_host, payload)) = current.take() {
+            let destination = inbound_udp_destination(&packet_metadata, fake_host.as_deref());
+            if association.send(&destination, &payload).await.is_err() {
+                break;
+            }
+            uploaded = uploaded.saturating_add(payload.len() as u64);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            packet = read_inbound_uot_packet(stream, shutdown) => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                current = Some((packet_metadata, fake_host, payload));
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                if !write_inbound_uot_packet(stream, remote, &payload).await {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+            }
+        }
     }
     tracker.finish(uploaded, downloaded);
 }
