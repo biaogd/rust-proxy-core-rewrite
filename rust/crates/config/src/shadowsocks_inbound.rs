@@ -55,10 +55,12 @@ impl ShadowsocksInboundConfig {
         validate_shadowsocks_inbound_key(&cipher, &password)?;
         let udp = !shadowsocks_2022_cipher(&cipher);
         Ok(Self {
+            name: "DEFAULT-SHADOWSOCKS".to_owned(),
             cipher,
             password,
             listen,
             udp,
+            simple_obfs: None,
         })
     }
 }
@@ -94,7 +96,7 @@ fn percent_decode(value: &str) -> String {
         .collect()
 }
 
-fn resolve_ss_listen_host(
+pub(crate) fn resolve_ss_listen_host(
     host: Option<&str>,
     port: Option<u16>,
     allow_lan: bool,
@@ -152,10 +154,12 @@ mod tests {
             "*",
         )
         .expect("parse");
+        assert_eq!(config.name, "DEFAULT-SHADOWSOCKS");
         assert_eq!(config.cipher, "aes-128-gcm");
         assert_eq!(config.password, "phase6c-password");
         assert_eq!(config.listen, "127.0.0.1:18388".parse().expect("addr"));
         assert!(config.udp);
+        assert!(config.simple_obfs.is_none());
     }
 
     #[test]

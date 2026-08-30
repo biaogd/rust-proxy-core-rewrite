@@ -86,7 +86,7 @@ pub struct ConfigSpec {
     pub rule_providers: BTreeMap<String, RuleProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
-    pub shadowsocks_inbound: Option<ShadowsocksInboundConfig>,
+    pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -149,7 +149,7 @@ pub struct Config {
     pub(crate) raw_rules: Vec<String>,
     pub(crate) raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub(crate) rematches: Vec<RematchSpec>,
-    pub shadowsocks_inbound: Option<ShadowsocksInboundConfig>,
+    pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -732,11 +732,18 @@ pub struct NormalizedConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksSimpleObfsConfig {
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadowsocksInboundConfig {
+    pub name: String,
     pub cipher: String,
     pub password: String,
     pub listen: SocketAddr,
     pub udp: bool,
+    pub simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

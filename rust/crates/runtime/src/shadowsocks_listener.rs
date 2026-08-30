@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use rewrite_config::{Config, ShadowsocksInboundConfig};
+use rewrite_config::{Config, ShadowsocksInboundConfig, ShadowsocksSimpleObfsConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
-use rewrite_outbound::HttpProxyTls;
+use rewrite_outbound::{HttpObfsServer, HttpProxyTls, TlsObfsServer};
 use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
@@ -48,6 +48,8 @@ fn inbound_udp_destination(metadata: &Metadata, fake_host: Option<&str>) -> Dest
 pub(crate) struct ShadowsocksListener {
     inner: ProxyListener,
     udp: Option<Arc<ProxySocket<SsUdpSocket>>>,
+    inbound_name: String,
+    simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
 }
 
 impl ShadowsocksListener {
@@ -74,7 +76,12 @@ impl ShadowsocksListener {
         } else {
             None
         };
-        Ok(Self { inner, udp })
+        Ok(Self {
+            inner,
+            udp,
+            inbound_name: config.name.clone(),
+            simple_obfs: config.simple_obfs.clone(),
+        })
     }
 }
 
@@ -145,14 +152,26 @@ pub(super) async fn run_shadowsocks_listener(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
 ) {
-    let ShadowsocksListener { inner, udp } = listener;
+    let ShadowsocksListener {
+        inner,
+        udp,
+        inbound_name,
+        simple_obfs,
+    } = listener;
+    let obfs_mode = simple_obfs.as_ref().map(|config| config.mode.as_str());
     let mut connections = JoinSet::new();
     let mut udp_sessions = ShadowsocksUdpSessions::default();
     let mut datagram = vec![0_u8; 65_536];
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = inner.accept() => {
+            accepted = inner.accept_map(|stream| -> rewrite_outbound::BoxedOutboundStream {
+                match obfs_mode {
+                    Some("http") => Box::new(HttpObfsServer::new(stream, None)),
+                    Some("tls") => Box::new(TlsObfsServer::new(stream, None)),
+                    _ => Box::new(stream),
+                }
+            }) => {
                 let Ok((mut inbound, peer)) = accepted else {
                     state.log("error", "shadowsocks inbound accept failed");
                     break;
@@ -162,6 +181,7 @@ pub(super) async fn run_shadowsocks_listener(
                 let connection_state = Arc::clone(&state);
                 let connection_dns_service = Arc::clone(&dns_service);
                 let connection_shutdown = shutdown.child_token();
+                let connection_inbound_name = inbound_name.clone();
                 connections.spawn(async move {
                     if !connection_config.permits_inbound(peer.ip()) {
                         return;
@@ -200,7 +220,7 @@ pub(super) async fn run_shadowsocks_listener(
                     metadata.source_ip = Some(unmap_ip(peer.ip()));
                     metadata.source_port = peer.port();
                     metadata.inbound_port = local.port();
-                    metadata.inbound_name = "DEFAULT-SHADOWSOCKS".to_owned();
+                    connection_inbound_name.clone_into(&mut metadata.inbound_name);
                     let client: BoxedInboundStream =
                         Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
                     serve_shadowsocks_connection(
@@ -229,6 +249,7 @@ pub(super) async fn run_shadowsocks_listener(
                         inbound_port,
                         &destination,
                         datagram[..length].to_vec(),
+                        &inbound_name,
                         &connection_config,
                         &state,
                     ) else {
@@ -420,6 +441,7 @@ fn prepare_shadowsocks_udp_packet(
     inbound_port: u16,
     destination: &Address,
     payload: Vec<u8>,
+    inbound_name: &str,
     config: &Config,
     state: &Arc<RuntimeState>,
 ) -> Option<ShadowsocksUdpPacket> {
@@ -441,7 +463,7 @@ fn prepare_shadowsocks_udp_packet(
     metadata.source_ip = Some(unmap_ip(peer.ip()));
     metadata.source_port = peer.port();
     metadata.inbound_port = inbound_port;
-    "DEFAULT-SHADOWSOCKS".clone_into(&mut metadata.inbound_name);
+    inbound_name.clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state.as_ref());
     Some(ShadowsocksUdpPacket {
         metadata,

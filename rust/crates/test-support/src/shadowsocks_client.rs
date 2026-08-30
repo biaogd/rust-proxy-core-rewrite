@@ -1,8 +1,10 @@
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 
-use rewrite_model::{Destination, Host};
-use rewrite_outbound::{DirectTcpOptions, connect_shadowsocks_with_options};
+use rewrite_model::{Destination, Host, ShadowsocksPluginConfig};
+use rewrite_outbound::{
+    DirectTcpOptions, ShadowsocksTcpOptions, connect_shadowsocks_with_plugin_options,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
@@ -20,6 +22,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("missing target port")?
         .parse::<u16>()?;
     let payload = arguments.next().ok_or("missing payload")?;
+    let obfs_mode = arguments.next();
+    let obfs_host = arguments.next();
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
@@ -36,13 +40,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
         port: target_port,
     };
-    let mut stream = connect_shadowsocks_with_options(
+    let plugin = match obfs_mode.as_deref() {
+        Some("http") => Some(ShadowsocksPluginConfig::SimpleObfsHttp {
+            host: obfs_host.unwrap_or_else(|| "bing.com".to_owned()),
+        }),
+        Some("tls") => Some(ShadowsocksPluginConfig::SimpleObfsTls {
+            host: obfs_host.unwrap_or_else(|| "bing.com".to_owned()),
+        }),
+        None => None,
+        Some(value) => return Err(format!("unsupported obfs mode: {value}").into()),
+    };
+    let mut stream = connect_shadowsocks_with_plugin_options(
         &server,
         &target,
         false,
         &password,
         &cipher,
-        DirectTcpOptions::default(),
+        ShadowsocksTcpOptions {
+            plugin: plugin.as_ref(),
+            socket: DirectTcpOptions::default(),
+            ..ShadowsocksTcpOptions::default()
+        },
     )
     .await?;
     stream.write_all(payload.as_bytes()).await?;

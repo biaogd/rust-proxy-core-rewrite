@@ -2172,8 +2172,8 @@ fn loads_legacy_shadowsocks_inbound_from_ss_config() {
     )
     .expect("ss-config inbound");
     let inbound = config
-        .shadowsocks_inbound
-        .as_ref()
+        .shadowsocks_listeners
+        .first()
         .expect("shadowsocks inbound");
     assert_eq!(inbound.cipher, "aes-128-gcm");
     assert_eq!(inbound.password, "phase6c-inbound-password");
@@ -2192,9 +2192,40 @@ fn loads_shadowsocks_2022_inbound_from_ss_config() {
     )
     .expect("ss-config inbound");
     let inbound = config
-        .shadowsocks_inbound
-        .as_ref()
+        .shadowsocks_listeners
+        .first()
         .expect("shadowsocks inbound");
     assert_eq!(inbound.cipher, "2022-blake3-aes-128-gcm");
     assert!(!inbound.udp);
+}
+
+#[test]
+fn loads_named_shadowsocks_obfs_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-obfs
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18398
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    simple-obfs:
+      enable: true
+      mode: http
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-obfs");
+    assert_eq!(inbound.listen, "127.0.0.1:18398".parse().expect("listen"));
+    assert_eq!(
+        inbound.simple_obfs.as_ref().map(|obfs| obfs.mode.as_str()),
+        Some("http")
+    );
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18398)));
 }

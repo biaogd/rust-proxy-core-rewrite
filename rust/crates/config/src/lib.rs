@@ -4,6 +4,7 @@ mod load;
 mod model;
 mod proxy;
 mod raw;
+mod named_listeners;
 mod shadowsocks_inbound;
 
 pub use error::ConfigError;

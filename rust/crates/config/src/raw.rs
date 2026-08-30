@@ -12,6 +12,7 @@ pub(crate) struct RawConfig {
     pub(crate) tproxy_port: Option<i64>,
     pub(crate) mixed_port: Option<i64>,
     pub(crate) ss_config: Option<String>,
+    pub(crate) listeners: Option<Vec<Mapping>>,
     pub(crate) allow_lan: Option<bool>,
     pub(crate) bind_address: Option<String>,
     pub(crate) skip_auth_prefixes: Option<Vec<String>>,

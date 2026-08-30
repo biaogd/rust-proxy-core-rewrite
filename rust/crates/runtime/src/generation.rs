@@ -42,8 +42,7 @@ pub(super) async fn apply_generation(
         .iter()
         .map(|&(kind, port)| {
             if kind == ListenerKind::Shadowsocks {
-                next.shadowsocks_listen_address()
-                    .map(|address| (kind, port, address))
+                Ok((kind, port, next.shadowsocks_listen_address(port)?))
             } else {
                 next.listener_address(port)
                     .map(|address| (kind, port, address))
@@ -72,7 +71,7 @@ pub(super) async fn apply_generation(
         }
 
         if kind == ListenerKind::Shadowsocks {
-            let Some(shadowsocks) = next.shadowsocks_inbound.as_ref() else {
+            let Some(shadowsocks) = next.shadowsocks_listener_for_port(port) else {
                 continue;
             };
             let listener = ShadowsocksListener::bind(shadowsocks).await?;
