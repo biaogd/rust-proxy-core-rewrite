@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::listener::run_listener;
+use crate::shadowsocks_listener::{run_shadowsocks_listener, ShadowsocksListener};
 use crate::services::hydrate_http_proxy_providers;
 use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
@@ -36,11 +37,17 @@ pub(super) async fn apply_generation(
     let desired_dns = next.dns.as_ref().map(|config| config.listen);
 
     let mut prepared_listeners = Vec::new();
+    let mut prepared_shadowsocks_listeners = Vec::new();
     let desired_listener_keys = desired_listeners
         .iter()
         .map(|&(kind, port)| {
-            next.listener_address(port)
-                .map(|address| (kind, port, address))
+            if kind == ListenerKind::Shadowsocks {
+                next.shadowsocks_listen_address()
+                    .map(|address| (kind, port, address))
+            } else {
+                next.listener_address(port)
+                    .map(|address| (kind, port, address))
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     for &(kind, port, address) in &desired_listener_keys {
@@ -54,12 +61,23 @@ pub(super) async fn apply_generation(
         // listener before recreating it, so mirror that boundary here.
         let conflicting = listeners
             .keys()
-            .find(|(current_kind, current_port, _)| *current_kind == kind && *current_port == port)
+            .find(|(current_kind, current_port, _)| {
+                *current_kind == kind && *current_port == port
+            })
             .copied();
         if let Some(conflicting) = conflicting
             && let Some(task) = listeners.remove(&conflicting)
         {
             stop_task(task).await;
+        }
+
+        if kind == ListenerKind::Shadowsocks {
+            let Some(shadowsocks) = next.shadowsocks_inbound.as_ref() else {
+                continue;
+            };
+            let listener = ShadowsocksListener::bind(shadowsocks).await?;
+            prepared_shadowsocks_listeners.push((key, listener));
+            continue;
         }
 
         let dual_stack = next.allow_lan && next.bind_address == "*";
@@ -138,6 +156,31 @@ pub(super) async fn apply_generation(
                 kind,
                 listener,
                 udp,
+                task_config,
+                task_state,
+                task_dns_service,
+                child_shutdown,
+            )
+            .await;
+        });
+        listeners.insert(
+            (kind, port, address),
+            RuntimeTask {
+                shutdown: task_shutdown,
+                handle,
+            },
+        );
+    }
+
+    for ((kind, port, address), listener) in prepared_shadowsocks_listeners {
+        let task_shutdown = CancellationToken::new();
+        let child_shutdown = task_shutdown.clone();
+        let task_config = config_receiver.clone();
+        let task_state = Arc::clone(state);
+        let task_dns_service = Arc::clone(dns_service);
+        let handle = tokio::spawn(async move {
+            run_shadowsocks_listener(
+                listener,
                 task_config,
                 task_state,
                 task_dns_service,

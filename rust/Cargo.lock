@@ -2990,6 +2990,7 @@ dependencies = [
  "rewrite-rules",
  "rewrite-services",
  "rewrite-state",
+ "shadowsocks",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",

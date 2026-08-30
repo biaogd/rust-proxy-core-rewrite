@@ -34,6 +34,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
+        ListenerKind::Shadowsocks => return,
     };
     let authentication = if config.skips_inbound_auth(peer.ip()) {
         &[]
@@ -75,6 +76,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => "DEFAULT-HTTP",
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
+        ListenerKind::Shadowsocks => return,
     }
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
@@ -145,6 +147,81 @@ pub(super) async fn serve_connection(
         return;
     }
 
+    relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn serve_shadowsocks_connection(
+    client: BoxedInboundStream,
+    mut metadata: Metadata,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) {
+    if let Ok(peer) = client.peer_addr() {
+        metadata.source_ip = Some(unmap_ip(peer.ip()));
+        metadata.source_port = peer.port();
+    }
+    if let Ok(local) = client.local_addr() {
+        metadata.inbound_port = local.port();
+    }
+    if metadata.inbound_name.is_empty() {
+        metadata.inbound_name = "DEFAULT-SHADOWSOCKS".to_owned();
+    }
+    let fake_host = apply_host_mapping(&mut metadata, config, state);
+    let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+    let Some((decision, outbound_target, traversed_groups)) =
+        resolve_rematch_target(decision, &mut metadata, config, state)
+    else {
+        return;
+    };
+    let route = resolved_route(&outbound_target, config);
+    state.log(
+        "info",
+        format!(
+            "[TCP] {} --> {} match {} using {}",
+            metadata.source_port,
+            metadata.destination.authority(),
+            decision.matched_kind.as_deref().unwrap_or("none"),
+            decision.target
+        ),
+    );
+    let tracker = state.register(
+        &metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    if route == Route::Reject {
+        return;
+    }
+    if route == Route::RejectDrop {
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_mins(1)) => {}
+        }
+        return;
+    }
+    let Some(remote) = connect_tcp_outbound(
+        &metadata,
+        fake_host.as_deref(),
+        &decision.target,
+        (outbound_target, traversed_groups),
+        config,
+        state,
+        shutdown,
+    )
+    .await
+    else {
+        return;
+    };
+    if matches!(remote, TcpOutbound::Dns) {
+        relay_dns_tcp(client, &[], config, state, dns_service, tracker, shutdown).await;
+        return;
+    }
+    let TcpOutbound::Stream(remote) = remote else {
+        unreachable!("DNS outbound was handled")
+    };
     relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
 }
 

@@ -46,6 +46,13 @@ const SHADOWSOCKS_2022_CIPHERS: [&str; 4] = [
     "2022-blake3-chacha8-poly1305",
 ];
 
+pub(crate) fn supported_shadowsocks_cipher(cipher: &str) -> bool {
+    SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_2022_CIPHERS.contains(&cipher)
+}
+
 pub(crate) fn parse_proxies(
     proxies: Vec<RawProxy>,
     allow_http_tls: bool,
@@ -244,12 +251,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let cipher = proxy
         .cipher
-        .filter(|cipher| {
-            SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_2022_CIPHERS.contains(&cipher.as_str())
-        })
+        .filter(|cipher| supported_shadowsocks_cipher(cipher))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
     let client_fingerprint = proxy.client_fingerprint.filter(|value| !value.is_empty());

@@ -107,6 +107,7 @@ impl From<&Metadata> for MetadataSnapshot {
             InboundProtocol::Https => "HTTPS",
             InboundProtocol::Socks4 => "Socks4",
             InboundProtocol::Socks5 => "Socks5",
+            InboundProtocol::Shadowsocks => "Shadowsocks",
         };
         let network = match metadata.network {
             Network::Tcp => "tcp",

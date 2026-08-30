@@ -15,6 +15,7 @@ use crate::error::ConfigError;
 use crate::model::{
     Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls, ListenerKind, LogLevel, Mode,
     NormalizedConfig, NtpConfig, ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle,
+    ShadowsocksInboundConfig,
 };
 use crate::proxy::{
     expand_proxy_group, load_proxy_provider_file, parse_proxies, parse_proxy_groups,
@@ -184,6 +185,15 @@ impl ConfigSpec {
             "lan-disallowed-ips",
         )?;
 
+        let allow_lan = raw.allow_lan.unwrap_or(false);
+        let bind_address = raw.bind_address.clone().unwrap_or_else(|| "*".to_owned());
+        let shadowsocks_inbound = raw
+            .ss_config
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| ShadowsocksInboundConfig::parse_ss_url(value, allow_lan, &bind_address))
+            .transpose()?;
+
         Ok(Self {
             port: raw.port.unwrap_or(0),
             socks_port: raw.socks_port.unwrap_or(0),
@@ -246,6 +256,7 @@ impl ConfigSpec {
             rule_providers,
             proxy_groups,
             rules,
+            shadowsocks_inbound,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
             home_directory: provider_directory.map(Path::to_path_buf),
@@ -406,6 +417,7 @@ impl TryFrom<ConfigSpec> for Config {
             raw_rules: spec.raw_rules,
             raw_sub_rules: spec.raw_sub_rules,
             rematches: spec.rematches,
+            shadowsocks_inbound: spec.shadowsocks_inbound,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
         })
@@ -745,10 +757,25 @@ impl Config {
                 .ok_or(ConfigError::InvalidRuntimePort(value))?;
             listeners.push((kind, port));
         }
+        if let Some(shadowsocks) = &self.shadowsocks_inbound {
+            listeners.push((ListenerKind::Shadowsocks, shadowsocks.listen.port()));
+        }
         if listeners.is_empty() && self.dns.is_none() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
         Ok(listeners)
+    }
+
+    /// Returns the bind address for the legacy Shadowsocks inbound listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInbound`] when no Shadowsocks inbound is configured.
+    pub fn shadowsocks_listen_address(&self) -> Result<SocketAddr, ConfigError> {
+        self.shadowsocks_inbound
+            .as_ref()
+            .map(|config| config.listen)
+            .ok_or_else(|| ConfigError::InvalidInbound("shadowsocks inbound is not configured".to_owned()))
     }
 
     /// Resolves the fixed local listener bind address for one configured port.

@@ -2,6 +2,7 @@ mod generation;
 mod lifecycle;
 mod listener;
 mod services;
+mod shadowsocks_listener;
 mod tcp;
 mod types;
 

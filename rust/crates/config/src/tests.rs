@@ -2164,3 +2164,23 @@ fn parses_fixed_listener_lan_policy() {
         )
     );
 }
+
+#[test]
+fn loads_legacy_shadowsocks_inbound_from_ss_config() {
+    let config = Config::from_yaml(
+        "ss-config: ss://aes-128-gcm:phase6c-inbound-password@127.0.0.1:18390\nmode: rule\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect("ss-config inbound");
+    let inbound = config
+        .shadowsocks_inbound
+        .as_ref()
+        .expect("shadowsocks inbound");
+    assert_eq!(inbound.cipher, "aes-128-gcm");
+    assert_eq!(inbound.password, "phase6c-inbound-password");
+    assert_eq!(
+        inbound.listen,
+        "127.0.0.1:18390".parse().expect("listen address")
+    );
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18390)));
+}

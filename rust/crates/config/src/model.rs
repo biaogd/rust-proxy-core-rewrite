@@ -86,6 +86,7 @@ pub struct ConfigSpec {
     pub rule_providers: BTreeMap<String, RuleProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
+    pub shadowsocks_inbound: Option<ShadowsocksInboundConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -148,6 +149,7 @@ pub struct Config {
     pub(crate) raw_rules: Vec<String>,
     pub(crate) raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub(crate) rematches: Vec<RematchSpec>,
+    pub shadowsocks_inbound: Option<ShadowsocksInboundConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -729,11 +731,20 @@ pub struct NormalizedConfig {
     pub sub_rules: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksInboundConfig {
+    pub cipher: String,
+    pub password: String,
+    pub listen: SocketAddr,
+    pub udp: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
     Socks,
     Mixed,
+    Shadowsocks,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {
