@@ -45,7 +45,9 @@ KEY_2022 = "AAECAwQFBgcICQoLDA0ODw=="
 CIPHER_2022 = "2022-blake3-aes-128-gcm"
 TCP_2022_PAYLOAD = "phase6c-ss-inbound-2022-tcp"
 OBFS_HOST = "phase6c-inbound.example"
+OBFS_TLS_HOST = "phase6c-inbound-tls.example"
 TCP_OBFS_PAYLOAD = "phase6c-ss-inbound-obfs-http"
+TCP_OBFS_TLS_PAYLOAD = "phase6c-ss-inbound-obfs-tls"
 
 
 def client_binary() -> pathlib.Path:
@@ -478,6 +480,61 @@ rules:
         echo.close()
 
 
+def exercise_obfs_tls_listener(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    ss_port = reserve_port()
+    config = scratch / "obfs-tls-listener-config.yaml"
+    config.write_text(
+        f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-obfs-tls-inbound
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER}
+    password: {PASSWORD}
+    udp: false
+    simple-obfs:
+      enable: true
+      mode: tls
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_OBFS_TLS_PAYLOAD,
+            obfs_mode="tls",
+            obfs_host=OBFS_TLS_HOST,
+        )
+        return {
+            "named-obfs-tls-tcp": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                payload=TCP_OBFS_TLS_PAYLOAD,
+                obfs_mode="tls",
+                obfs_host=OBFS_TLS_HOST,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
 def exercise_config_validation(
     binary: pathlib.Path,
     scratch: pathlib.Path,
@@ -593,6 +650,7 @@ def main() -> int:
                     **exercise_dns_udp(binary, udp_client, scratch),
                     **exercise_socks5_udp(binary, udp_client, scratch),
                     **exercise_obfs_http_listener(binary, client, scratch),
+                    **exercise_obfs_tls_listener(binary, client, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }

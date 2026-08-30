@@ -2229,3 +2229,31 @@ rules: ['MATCH,DIRECT']
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18398)));
 }
+
+#[test]
+fn loads_named_shadowsocks_obfs_tls_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-obfs-tls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18399
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    simple-obfs:
+      enable: true
+      mode: tls
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks tls listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-obfs-tls");
+    assert_eq!(
+        inbound.simple_obfs.as_ref().map(|obfs| obfs.mode.as_str()),
+        Some("tls")
+    );
+}
