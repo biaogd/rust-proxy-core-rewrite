@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rewrite_config::{Config, ConfigError, ListenerKind, ProxyGroupKind};
+use rewrite_config::{Config, ConfigError, ListenerKind, ProxyGroupKind, ShadowsocksInboundConfig};
 use rewrite_state::RuntimeState;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, watch};
@@ -42,15 +42,22 @@ pub(super) async fn apply_generation(
         .iter()
         .map(|&(kind, port)| {
             if kind == ListenerKind::Shadowsocks {
-                Ok((kind, port, next.shadowsocks_listen_address(port)?))
+                let address = next.shadowsocks_listen_address(port)?;
+                let identity = next
+                    .shadowsocks_listener_for_port(port)
+                    .map_or_else(String::new, ShadowsocksInboundConfig::reload_identity);
+                Ok((kind, port, address, identity))
             } else {
                 next.listener_address(port)
-                    .map(|address| (kind, port, address))
+                    .map(|address| (kind, port, address, String::new()))
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    for &(kind, port, address) in &desired_listener_keys {
-        let key = (kind, port, address);
+    for (kind, port, address, identity) in &desired_listener_keys {
+        let kind = *kind;
+        let port = *port;
+        let address = *address;
+        let key = (kind, port, address, identity.clone());
         if listeners.contains_key(&key) {
             continue;
         }
@@ -58,12 +65,13 @@ pub(super) async fn apply_generation(
         // A wildcard/specific-address change on the same port cannot be
         // prepared while the old socket owns that port. Go closes this fixed
         // listener before recreating it, so mirror that boundary here.
+        // Shadowsocks also rebinds when cipher/password/plugin identity changes.
         let conflicting = listeners
             .keys()
-            .find(|(current_kind, current_port, _)| {
+            .find(|(current_kind, current_port, _, _)| {
                 *current_kind == kind && *current_port == port
             })
-            .copied();
+            .cloned();
         if let Some(conflicting) = conflicting
             && let Some(task) = listeners.remove(&conflicting)
         {
@@ -144,12 +152,13 @@ pub(super) async fn apply_generation(
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
 
-    for ((kind, port, address), listener, udp) in prepared_listeners {
+    for (key, listener, udp) in prepared_listeners {
         let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config_receiver.clone();
         let task_state = Arc::clone(state);
         let task_dns_service = Arc::clone(dns_service);
+        let kind = key.0;
         let handle = tokio::spawn(async move {
             run_listener(
                 kind,
@@ -163,7 +172,7 @@ pub(super) async fn apply_generation(
             .await;
         });
         listeners.insert(
-            (kind, port, address),
+            key,
             RuntimeTask {
                 shutdown: task_shutdown,
                 handle,
@@ -171,7 +180,7 @@ pub(super) async fn apply_generation(
         );
     }
 
-    for ((kind, port, address), listener) in prepared_shadowsocks_listeners {
+    for (key, listener) in prepared_shadowsocks_listeners {
         let task_shutdown = CancellationToken::new();
         let child_shutdown = task_shutdown.clone();
         let task_config = config_receiver.clone();
@@ -188,7 +197,7 @@ pub(super) async fn apply_generation(
             .await;
         });
         listeners.insert(
-            (kind, port, address),
+            key,
             RuntimeTask {
                 shutdown: task_shutdown,
                 handle,
@@ -221,7 +230,7 @@ pub(super) async fn apply_generation(
     let obsolete: Vec<_> = listeners
         .keys()
         .filter(|key| !desired.contains(key))
-        .copied()
+        .cloned()
         .collect();
     for key in obsolete {
         if let Some(task) = listeners.remove(&key) {

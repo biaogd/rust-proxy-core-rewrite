@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import pathlib
+import signal
 import socketserver
 import subprocess
 import tempfile
@@ -32,6 +33,7 @@ from phase6c_shadowsocks import PASSWORD as OUTBOUND_PASSWORD, start_authority
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6c-shadowsocks-inbound-diff.json"
 PASSWORD = "phase6c-inbound-password"
+PASSWORD_RELOADED = "phase6c-inbound-password-reloaded"
 CIPHER = "aes-128-gcm"
 LEGACY_CIPHER = "aes-128-ctr"
 TCP_PAYLOAD = "phase6c-ss-inbound-tcp"
@@ -59,6 +61,7 @@ TCP_UOT_V2_PAYLOAD = "phase6c-ss-inbound-uot-v2"
 TCP_UOT_SOCKS5_PAYLOAD = "phase6c-ss-inbound-uot-socks5"
 TCP_UOT_PROXY_PAYLOAD = "phase6c-ss-inbound-uot-proxy"
 TCP_UOT_PROXY_UOT_PAYLOAD = "phase6c-ss-inbound-uot-proxy-uot"
+TCP_RELOAD_PAYLOAD = "phase6c-ss-inbound-reload"
 
 
 def client_binary() -> pathlib.Path:
@@ -1265,6 +1268,74 @@ rules:
         udp_thread.join(timeout=1)
 
 
+def exercise_password_reload(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    ss_port = reserve_port()
+    config = scratch / "reload-password-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_RELOAD_PAYLOAD,
+        )
+        config.write_text(
+            f"""ss-config: ss://{CIPHER}:{PASSWORD_RELOADED}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+        )
+        os.kill(process.pid, signal.SIGHUP)
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            password=PASSWORD_RELOADED,
+            payload=TCP_RELOAD_PAYLOAD,
+        )
+        old_password_rejected = not proxied_echo(
+            client,
+            ss_port,
+            echo.port,
+            password=PASSWORD,
+            payload=TCP_RELOAD_PAYLOAD,
+        )
+        new_password_accepted = proxied_echo(
+            client,
+            ss_port,
+            echo.port,
+            password=PASSWORD_RELOADED,
+            payload=TCP_RELOAD_PAYLOAD,
+        )
+        return {
+            "reload-password": old_password_rejected and new_password_accepted,
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
 def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-inbound-") as temporary:
@@ -1294,6 +1365,7 @@ def main() -> int:
                     **exercise_uot_proxied_uot(binary, uot_client, authority, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_proxied_udp_uot(binary, udp_client, authority, scratch),
+                    **exercise_password_reload(binary, client, scratch),
                     **exercise_config_validation(binary, scratch),
                 }
             # Go Clash cannot listen with `server:user` 2022 PSK (decode psk fails).

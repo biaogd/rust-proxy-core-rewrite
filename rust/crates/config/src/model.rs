@@ -768,6 +768,23 @@ pub struct ShadowsocksInboundConfig {
     pub shadow_tls: Option<ShadowsocksShadowTlsConfig>,
 }
 
+impl ShadowsocksInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|cipher={}|password={}|listen={}|udp={}|obfs={:?}|shadow-tls={:?}",
+            self.name,
+            self.cipher,
+            self.password,
+            self.listen,
+            self.udp,
+            self.simple_obfs,
+            self.shadow_tls
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
