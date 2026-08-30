@@ -24,13 +24,17 @@ from phase1 import (
 )
 from phase3 import UdpEchoHandler, launch, stop
 from phase5b1a import build_binaries, debug_files
+from phase6c_shadowsocks import PASSWORD as OUTBOUND_PASSWORD, start_authority
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6c-shadowsocks-inbound-diff.json"
 PASSWORD = "phase6c-inbound-password"
 CIPHER = "aes-128-gcm"
+LEGACY_CIPHER = "aes-128-ctr"
 TCP_PAYLOAD = "phase6c-ss-inbound-tcp"
+LEGACY_TCP_PAYLOAD = "phase6c-ss-inbound-legacy-tcp"
 UDP_PAYLOAD = "phase6c-ss-inbound-udp"
+PROXY_UDP_PAYLOAD = "phase6c-ss-inbound-proxy-udp"
 
 
 def client_binary() -> pathlib.Path:
@@ -45,27 +49,43 @@ def udp_client_binary() -> pathlib.Path:
     return target / "debug" / f"rewrite-shadowsocks-udp-client{suffix}"
 
 
-def proxied_echo(client: pathlib.Path, ss_port: int, echo_port: int) -> bool:
+def authority_binary() -> pathlib.Path:
+    target = cargo_target_path("PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
+    suffix = ".exe" if os.name == "nt" else ""
+    return target / "debug" / f"rewrite-shadowsocks-authority{suffix}"
+
+
+def proxied_echo(client: pathlib.Path, ss_port: int, echo_port: int, cipher: str = CIPHER, payload: str = TCP_PAYLOAD) -> bool:
     command = [
         str(client),
         f"127.0.0.1:{ss_port}",
         PASSWORD,
-        CIPHER,
+        cipher,
         "127.0.0.1",
         str(echo_port),
-        TCP_PAYLOAD,
+        payload,
     ]
-    completed = subprocess.run(command, check=False, capture_output=True)
-    return completed.returncode == 0
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
+        return completed.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
-def wait_ss_route(process: subprocess.Popen[bytes], client: pathlib.Path, ss_port: int, echo_port: int) -> None:
+def wait_ss_route(
+    process: subprocess.Popen[bytes],
+    client: pathlib.Path,
+    ss_port: int,
+    echo_port: int,
+    cipher: str = CIPHER,
+    payload: str = TCP_PAYLOAD,
+) -> None:
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"proxy exited during readiness with {process.returncode}")
         try:
-            if proxied_echo(client, ss_port, echo_port):
+            if proxied_echo(client, ss_port, echo_port, cipher, payload):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
             pass
@@ -73,18 +93,27 @@ def wait_ss_route(process: subprocess.Popen[bytes], client: pathlib.Path, ss_por
     raise TimeoutError("Shadowsocks inbound route did not become ready")
 
 
-def proxied_udp(client: pathlib.Path, ss_port: int, echo_port: int) -> bool:
+def proxied_udp(
+    client: pathlib.Path,
+    ss_port: int,
+    echo_port: int,
+    payload: str = UDP_PAYLOAD,
+    cipher: str = CIPHER,
+) -> bool:
     command = [
         str(client),
         f"127.0.0.1:{ss_port}",
         PASSWORD,
-        CIPHER,
+        cipher,
         "127.0.0.1",
         str(echo_port),
-        UDP_PAYLOAD,
+        payload,
     ]
-    completed = subprocess.run(command, check=False, capture_output=True)
-    return completed.returncode == 0
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
+        return completed.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def wait_ss_udp_route(
@@ -92,13 +121,15 @@ def wait_ss_udp_route(
     client: pathlib.Path,
     ss_port: int,
     echo_port: int,
+    payload: str = UDP_PAYLOAD,
+    cipher: str = CIPHER,
 ) -> None:
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"proxy exited during UDP readiness with {process.returncode}")
         try:
-            if proxied_udp(client, ss_port, echo_port):
+            if proxied_udp(client, ss_port, echo_port, payload, cipher):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
             pass
@@ -146,6 +177,113 @@ rules:
         udp_thread.join(timeout=1)
 
 
+def exercise_legacy_tcp(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    ss_port = reserve_port()
+    config = scratch / "legacy-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{LEGACY_CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            cipher=LEGACY_CIPHER,
+            payload=LEGACY_TCP_PAYLOAD,
+        )
+        return {
+            "legacy-tcp": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                cipher=LEGACY_CIPHER,
+                payload=LEGACY_TCP_PAYLOAD,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
+def exercise_proxied_udp(
+    binary: pathlib.Path,
+    udp_client: pathlib.Path,
+    authority: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    udp_echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
+    udp_thread.start()
+    udp_port = int(udp_echo.server_address[1])
+    authority_port = reserve_port()
+    authority_process, authority_stdout, authority_stderr = start_authority(
+        authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
+    )
+    time.sleep(0.2)
+    ss_port = reserve_port()
+    config = scratch / "proxy-udp-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: relay-ss
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {OUTBOUND_PASSWORD}
+    udp: true
+rules:
+  - MATCH,relay-ss
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    time.sleep(0.2)
+    try:
+        wait_ss_udp_route(
+            process,
+            udp_client,
+            ss_port,
+            udp_port,
+            payload=PROXY_UDP_PAYLOAD,
+        )
+        return {
+            "proxy-udp": proxied_udp(
+                udp_client,
+                ss_port,
+                udp_port,
+                payload=PROXY_UDP_PAYLOAD,
+            ),
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        udp_echo.shutdown()
+        udp_echo.server_close()
+        udp_thread.join(timeout=1)
+
+
 def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-inbound-") as temporary:
@@ -153,11 +291,16 @@ def main() -> int:
         binaries = build_binaries(root, "PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
         client = client_binary()
         udp_client = udp_client_binary()
+        authority = authority_binary()
         try:
             for name, binary in binaries.items():
                 scratch = root / name
                 scratch.mkdir()
-                observations[name] = exercise(binary, client, udp_client, scratch)
+                observations[name] = {
+                    **exercise(binary, client, udp_client, scratch),
+                    **exercise_legacy_tcp(binary, client, scratch),
+                    **exercise_proxied_udp(binary, udp_client, authority, scratch),
+                }
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

@@ -9,6 +9,7 @@ use std::time::Duration;
 use rewrite_config::{Config, ShadowsocksInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
+use rewrite_outbound::HttpProxyTls;
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
@@ -22,10 +23,25 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::listener::{resolved_route, resolve_udp_target};
-use crate::tcp::{apply_host_mapping, mode_decision, resolve_rematch_target};
-use crate::tcp::serve_shadowsocks_connection;
+use crate::listener::{
+    dns_adapter_response_addr, resolved_route, resolve_udp_response_source, resolve_udp_target,
+    udp_session_mode, UdpSessionMode,
+};
+use crate::tcp::{
+    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
+    resolve_rematch_target, serve_shadowsocks_connection,
+};
 use crate::types::RuntimeError;
+
+fn inbound_udp_destination(metadata: &Metadata, fake_host: Option<&str>) -> Destination {
+    fake_host.map_or_else(
+        || metadata.destination.clone(),
+        |host| Destination {
+            host: Host::Domain(host.to_owned()),
+            port: metadata.destination.port,
+        },
+    )
+}
 
 pub(crate) struct ShadowsocksListener {
     inner: ProxyListener,
@@ -204,6 +220,7 @@ pub(super) async fn run_shadowsocks_listener(
                         continue;
                     };
                     let inbound_socket = Arc::clone(inbound_socket);
+                    let connection_dns_service = Arc::clone(&dns_service);
                     let connection_shutdown = shutdown.child_token();
                     connections.spawn(async move {
                         handle_shadowsocks_udp_packet(
@@ -214,6 +231,7 @@ pub(super) async fn run_shadowsocks_listener(
                             payload,
                             &connection_config,
                             &connection_state,
+                            &connection_dns_service,
                             &connection_shutdown,
                         )
                         .await;
@@ -259,6 +277,7 @@ async fn handle_shadowsocks_udp_packet(
     payload: Vec<u8>,
     config: &Config,
     state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
 ) {
     if !config.permits_inbound(peer.ip()) {
@@ -307,76 +326,253 @@ async fn handle_shadowsocks_udp_packet(
     if matches!(route, Route::Reject | Route::RejectDrop) {
         return;
     }
-    if !matches!(route, Route::Direct) && decision.target != "DIRECT" {
+    let Some(mode) = udp_session_mode(&decision.target, config) else {
         state.log(
             "error",
             format!(
-                "shadowsocks inbound UDP outbound {} is not implemented yet",
+                "shadowsocks inbound UDP target {} is unsupported",
                 decision.target
             ),
         );
         return;
-    }
-    let target = match resolve_udp_target(&metadata, fake_host.as_deref(), config).await {
-        Ok(target) => target,
-        Err(error) => {
-            state.log(
-                "error",
-                format!("shadowsocks inbound UDP resolution failed: {error}"),
-            );
-            return;
-        }
-    };
-    let bind_address = if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let outbound = match rewrite_platform::bind_outbound_udp(
-        bind_address.parse().expect("static UDP bind address"),
-        &config.interface_name,
-        config.routing_mark,
-    )
-    .and_then(UdpSocket::from_std)
-    {
-        Ok(socket) => socket,
-        Err(error) => {
-            state.log(
-                "error",
-                format!("shadowsocks inbound UDP bind failed: {error}"),
-            );
-            return;
-        }
     };
     let uploaded = payload.len() as u64;
-    if tokio::select! {
-        () = shutdown.cancelled() => return,
-        () = tracker.cancelled() => return,
-        result = outbound.send_to(&payload, target) => result.is_err(),
-    } {
-        return;
+    let downloaded;
+    match mode {
+        UdpSessionMode::Direct => {
+            let target = match resolve_udp_target(&metadata, fake_host.as_deref(), config).await {
+                Ok(target) => target,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound UDP resolution failed: {error}"),
+                    );
+                    return;
+                }
+            };
+            let bind_address = if target.is_ipv6() {
+                "[::]:0"
+            } else {
+                "0.0.0.0:0"
+            };
+            let outbound = match rewrite_platform::bind_outbound_udp(
+                bind_address.parse().expect("static UDP bind address"),
+                &config.interface_name,
+                config.routing_mark,
+            )
+            .and_then(UdpSocket::from_std)
+            {
+                Ok(socket) => socket,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound UDP bind failed: {error}"),
+                    );
+                    return;
+                }
+            };
+            if tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tracker.cancelled() => return,
+                result = outbound.send_to(&payload, target) => result.is_err(),
+            } {
+                return;
+            }
+            let mut response = vec![0_u8; 65_535];
+            let received = tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tracker.cancelled() => return,
+                result = tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response)) => result,
+            };
+            let Ok(Ok((length, remote))) = received else {
+                return;
+            };
+            downloaded = length as u64;
+            if inbound
+                .send_to(
+                    peer,
+                    &Address::SocketAddress(remote),
+                    &response[..length],
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        UdpSessionMode::Dns => {
+            match dns_service
+                .relay_query(config, state.as_ref(), &payload)
+                .await
+            {
+                Ok(response) => {
+                    downloaded = response.len() as u64;
+                    let remote = dns_adapter_response_addr(&metadata);
+                    if inbound
+                        .send_to(
+                            peer,
+                            &Address::SocketAddress(remote),
+                            &response,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound UDP DNS relay failed: {error}"),
+                    );
+                    return;
+                }
+            }
+        }
+        UdpSessionMode::Socks5(proxy_name) => {
+            let Some(proxy) = configured_proxy(config, &proxy_name) else {
+                return;
+            };
+            let server = Destination {
+                host: proxy
+                    .server
+                    .parse()
+                    .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+                port: proxy.port,
+            };
+            let tls = proxy.tls.then_some(HttpProxyTls {
+                server_name: &proxy.server,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots: &config.trust_certificates,
+                ech_config: None,
+                alpn_protocols: &[],
+                tls12_only: false,
+                tls13_only: false,
+                client_hello_fingerprint: None,
+                client_hello_fingerprint_mlkem: true,
+            });
+            let association = match rewrite_outbound::associate_socks5_udp_with_options(
+                &server,
+                config.ipv6,
+                proxy.socks5_credentials(),
+                tls,
+                Some(state.clock()),
+                direct_tcp_options(config),
+            )
+            .await
+            {
+                Ok(association) => association,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound SOCKS5 UDP association failed: {error}"),
+                    );
+                    return;
+                }
+            };
+            let destination = inbound_udp_destination(&metadata, fake_host.as_deref());
+            if association
+                .send(&destination, &payload)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let response = tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tracker.cancelled() => return,
+                result = association.recv() => result,
+            };
+            let Ok((remote, response)) = response else {
+                return;
+            };
+            let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                return;
+            };
+            downloaded = response.len() as u64;
+            if inbound
+                .send_to(
+                    peer,
+                    &Address::SocketAddress(remote),
+                    &response,
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        UdpSessionMode::Shadowsocks(proxy_name) => {
+            let Some(proxy) = configured_proxy(config, &proxy_name) else {
+                return;
+            };
+            let server = Destination {
+                host: proxy
+                    .server
+                    .parse()
+                    .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+                port: proxy.port,
+            };
+            let association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
+                &server,
+                config.ipv6,
+                proxy.password.as_deref().unwrap_or_default(),
+                proxy.cipher.as_deref().unwrap_or_default(),
+                direct_tcp_options(config),
+            )
+            .await
+            {
+                Ok(association) => association,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("shadowsocks inbound Shadowsocks UDP association failed: {error}"),
+                    );
+                    return;
+                }
+            };
+            let destination = inbound_udp_destination(&metadata, fake_host.as_deref());
+            if association
+                .send(&destination, &payload)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let response = tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tracker.cancelled() => return,
+                result = association.recv() => result,
+            };
+            let Ok((remote, response)) = response else {
+                return;
+            };
+            let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                return;
+            };
+            downloaded = response.len() as u64;
+            if inbound
+                .send_to(
+                    peer,
+                    &Address::SocketAddress(remote),
+                    &response,
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        UdpSessionMode::ShadowsocksUot(_) => {
+            state.log("error", "shadowsocks inbound UDP over TCP is not supported yet");
+            return;
+        }
     }
-    let mut response = vec![0_u8; 65_535];
-    let received = tokio::select! {
-        () = shutdown.cancelled() => return,
-        () = tracker.cancelled() => return,
-        result = tokio::time::timeout(Duration::from_secs(5), outbound.recv_from(&mut response)) => result,
-    };
-    let Ok(Ok((length, remote))) = received else {
-        return;
-    };
-    if inbound
-        .send_to(
-            peer,
-            &Address::SocketAddress(remote),
-            &response[..length],
-        )
-        .await
-        .is_err()
-    {
-        return;
-    }
-    tracker.finish(uploaded, length as u64);
+    tracker.finish(uploaded, downloaded);
 }
 
 fn address_to_destination(address: &Address) -> Result<Destination, &'static str> {
