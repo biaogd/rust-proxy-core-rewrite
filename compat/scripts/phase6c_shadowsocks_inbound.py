@@ -34,6 +34,7 @@ LEGACY_CIPHER = "aes-128-ctr"
 TCP_PAYLOAD = "phase6c-ss-inbound-tcp"
 LEGACY_TCP_PAYLOAD = "phase6c-ss-inbound-legacy-tcp"
 UDP_PAYLOAD = "phase6c-ss-inbound-udp"
+UDP_REUSE_PAYLOAD = "phase6c-ss-inbound-udp-reuse-" + ("x" * 4096)
 PROXY_UDP_PAYLOAD = "phase6c-ss-inbound-proxy-udp"
 
 
@@ -99,6 +100,7 @@ def proxied_udp(
     echo_port: int,
     payload: str = UDP_PAYLOAD,
     cipher: str = CIPHER,
+    reuse_payload: str | None = None,
 ) -> bool:
     command = [
         str(client),
@@ -109,6 +111,8 @@ def proxied_udp(
         str(echo_port),
         payload,
     ]
+    if reuse_payload is not None:
+        command.append(reuse_payload)
     try:
         completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
         return completed.returncode == 0
@@ -166,6 +170,12 @@ rules:
         return {
             "domain-aead-tcp": proxied_echo(client, ss_port, echo.port),
             "domain-aead-udp": proxied_udp(udp_client, ss_port, udp_port),
+            "same-client-udp-session-reuse": proxied_udp(
+                udp_client,
+                ss_port,
+                udp_port,
+                reuse_payload=UDP_REUSE_PAYLOAD,
+            ),
         }
     finally:
         stop(process)
