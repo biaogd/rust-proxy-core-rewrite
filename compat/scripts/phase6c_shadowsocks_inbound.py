@@ -39,6 +39,7 @@ LEGACY_TCP_PAYLOAD = "phase6c-ss-inbound-legacy-tcp"
 UDP_PAYLOAD = "phase6c-ss-inbound-udp"
 UDP_REUSE_PAYLOAD = "phase6c-ss-inbound-udp-reuse-" + ("x" * 4096)
 PROXY_UDP_PAYLOAD = "phase6c-ss-inbound-proxy-udp"
+PROXY_UDP_UOT_PAYLOAD = "phase6c-ss-inbound-proxy-udp-uot"
 SOCKS5_UDP_PAYLOAD = "phase6c-ss-inbound-socks5-udp"
 DNS_QUERY_ID = 0x6A10
 KEY_2022 = "AAECAwQFBgcICQoLDA0ODw=="
@@ -1066,6 +1067,72 @@ rules:
         udp_thread.join(timeout=1)
 
 
+def exercise_proxied_udp_uot(
+    binary: pathlib.Path,
+    udp_client: pathlib.Path,
+    authority: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    udp_echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
+    udp_thread.start()
+    udp_port = int(udp_echo.server_address[1])
+    authority_port = reserve_port()
+    authority_process, authority_stdout, authority_stderr = start_authority(
+        authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
+    )
+    time.sleep(0.2)
+    ss_port = reserve_port()
+    config = scratch / "proxy-udp-uot-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: relay-ss-uot
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {OUTBOUND_PASSWORD}
+    udp: true
+    udp-over-tcp: true
+    udp-over-tcp-version: 1
+rules:
+  - MATCH,relay-ss-uot
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    time.sleep(0.2)
+    try:
+        wait_ss_udp_route(
+            process,
+            udp_client,
+            ss_port,
+            udp_port,
+            payload=PROXY_UDP_UOT_PAYLOAD,
+        )
+        return {
+            "proxy-udp-uot": proxied_udp(
+                udp_client,
+                ss_port,
+                udp_port,
+                payload=PROXY_UDP_UOT_PAYLOAD,
+            ),
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        udp_echo.shutdown()
+        udp_echo.server_close()
+        udp_thread.join(timeout=1)
+
+
 def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase6c-shadowsocks-inbound-") as temporary:
@@ -1092,6 +1159,7 @@ def main() -> int:
                     **exercise_uot_socks5(binary, uot_client, scratch),
                     **exercise_uot_proxied(binary, uot_client, authority, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
+                    **exercise_proxied_udp_uot(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }
             # Go Clash cannot listen with `server:user` 2022 PSK (decode psk fails).

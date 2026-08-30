@@ -573,8 +573,11 @@ async fn run_shadowsocks_inbound_udp_session(
             )
             .await;
         }
-        UdpSessionMode::ShadowsocksUot(_) => {
-            state.log("error", "shadowsocks inbound UDP over TCP is not supported yet");
+        UdpSessionMode::ShadowsocksUot(proxy) => {
+            run_shadowsocks_uot_udp_session(
+                inbound, peer, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
         }
     }
 }
@@ -1565,6 +1568,98 @@ async fn run_shadowsocks_proxy_udp_session(
             state.log(
                 "error",
                 format!("shadowsocks inbound Shadowsocks UDP association failed: {error}"),
+            );
+            return;
+        }
+    };
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload).await {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn run_shadowsocks_uot_udp_session(
+    inbound: Arc<ProxySocket<SsUdpSocket>>,
+    peer: SocketAddr,
+    first: ShadowsocksUdpPacket,
+    mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let mut association = match rewrite_outbound::associate_shadowsocks_uot_with_options(
+        &server,
+        config.ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        proxy.udp_over_tcp_version,
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("shadowsocks inbound Shadowsocks UoT association failed: {error}"),
             );
             return;
         }
