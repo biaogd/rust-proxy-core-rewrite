@@ -39,7 +39,7 @@ repository = "https://github.com/rustls/tokio-rustls"
 
 [features]
 aws-lc-rs = ["aws_lc_rs"]
-aws_lc_rs = ["rustls/aws_lc_rs"]
+aws_lc_rs = ["rustls/aws_lc_rs", "rustls/prefer-post-quantum"]
 brotli = ["rustls/brotli"]
 default = [
     "logging",

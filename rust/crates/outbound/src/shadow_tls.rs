@@ -1499,4 +1499,85 @@ mod tests {
             "interrupted partial header must not send alert"
         );
     }
+
+    #[tokio::test]
+    async fn connect_shadow_tls_chrome_v3_emits_client_hello() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let capture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut header = [0_u8; 5];
+            stream
+                .read_exact(&mut header)
+                .await
+                .expect("client hello header");
+            header.to_vec()
+        });
+
+        let stream = Box::new(
+            tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect"),
+        ) as BoxedOutboundStream;
+        let _ = connect_shadow_tls(
+            stream,
+            ShadowTlsConnectOptions {
+                host: "phase6c-shadow-tls.example",
+                password: "phase6c-shadow-tls-plugin-password",
+                version: 3,
+                skip_certificate_verification: true,
+                verification_name: None,
+                certificate_fingerprint: None,
+                certificate: None,
+                private_key: None,
+                custom_roots: &[],
+                alpn: &["h2".to_owned(), "http/1.1".to_owned()],
+                client_fingerprint: Some("chrome"),
+            },
+            None,
+        )
+        .await;
+
+        let header = capture.await.expect("capture join");
+        assert_eq!(header.first().copied(), Some(HANDSHAKE), "TLS handshake record type");
+    }
+
+    #[tokio::test]
+    async fn connect_shadow_tls_chrome_v3_handshakes_with_authority() {
+        let Some(port) = std::env::var("PHASE6C_SHADOWTLS_AUTHORITY_PORT")
+            .ok()
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        let stream = Box::new(
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .expect("connect authority"),
+        ) as BoxedOutboundStream;
+        connect_shadow_tls(
+            stream,
+            ShadowTlsConnectOptions {
+                host: "phase6c-shadow-tls.example",
+                password: "phase6c-shadow-tls-plugin-password",
+                version: 3,
+                skip_certificate_verification: true,
+                verification_name: None,
+                certificate_fingerprint: None,
+                certificate: None,
+                private_key: None,
+                custom_roots: &[],
+                alpn: &["h2".to_owned(), "http/1.1".to_owned()],
+                client_fingerprint: Some("chrome"),
+            },
+            None,
+        )
+        .await
+        .expect("shadow-tls chrome v3 handshake against authority");
+    }
 }

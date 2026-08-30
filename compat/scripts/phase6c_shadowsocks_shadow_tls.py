@@ -9,6 +9,7 @@ import pathlib
 import socket
 import subprocess
 import tempfile
+import textwrap
 import time
 from typing import Any
 
@@ -141,6 +142,7 @@ def start_shadowtls_authority(
     port: int,
     version: int = VERSION,
     strict: str | None = None,
+    client_ca: pathlib.Path | None = None,
 ) -> tuple[Any, Any, Any]:
     stdout = (scratch / "authority-stdout.log").open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
@@ -154,6 +156,8 @@ def start_shadowtls_authority(
     ]
     if strict is not None:
         command.append(strict)
+    if client_ca is not None:
+        command.append(str(client_ca))
     process = subprocess.Popen(
         command,
         cwd=scratch,
@@ -183,26 +187,129 @@ def exercise_wire(
         ),
         **exercise_wire_variant(binary, authority, scratch, 2, None, "wire-v2"),
         **exercise_wire_variant(binary, authority, scratch, 1, None, "wire-v1"),
+        **exercise_wire_variant(
+            binary,
+            authority,
+            scratch,
+            2,
+            None,
+            "wire-v2-chrome-wsalpn",
+            client_fingerprint="chrome",
+            extra_plugin_opts="      alpn:\n        - http/1.1\n",
+        ),
+        **exercise_wire_variant(
+            binary,
+            authority,
+            scratch,
+            VERSION,
+            None,
+            "wire-v3-chrome",
+            client_fingerprint="chrome",
+        ),
     }
 
 
-def exercise_wire_variant(
-    binary: pathlib.Path,
-    authority: pathlib.Path,
-    scratch: pathlib.Path,
-    version: int,
-    strict: str | None,
-    label: str,
+def generate_client_identity(scratch: pathlib.Path) -> tuple[str, str, pathlib.Path]:
+    root_certificate = scratch / "client-root.pem"
+    root_key = scratch / "client-root-key.pem"
+    certificate = scratch / "client.pem"
+    private_key = scratch / "client-key.pem"
+    request = scratch / "client.csr"
+    extensions = scratch / "client.ext"
+    extensions.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=clientAuth\n"
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=phase6c-shadowtls-client-root",
+            "-days",
+            "2",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+            "-keyout",
+            str(root_key),
+            "-out",
+            str(root_certificate),
+        ],
+        cwd=scratch,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=IO_DEADLINE,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=phase6c-shadowtls-client",
+            "-keyout",
+            str(private_key),
+            "-out",
+            str(request),
+        ],
+        cwd=scratch,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=IO_DEADLINE,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "x509",
+            "-req",
+            "-in",
+            str(request),
+            "-CA",
+            str(root_certificate),
+            "-CAkey",
+            str(root_key),
+            "-CAcreateserial",
+            "-days",
+            "2",
+            "-extfile",
+            str(extensions),
+            "-out",
+            str(certificate),
+        ],
+        cwd=scratch,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=IO_DEADLINE,
+    )
+    return certificate.read_text().strip(), private_key.read_text().strip(), root_certificate
+
+
+def exercise_mtls(
+    binary: pathlib.Path, authority: pathlib.Path, scratch: pathlib.Path
 ) -> dict[str, bool]:
     tcp_echo = start_server(EchoHandler)
-    half_close_server = start_server(HalfCloseHandler)
     mixed_port = reserve_port()
     authority_port = reserve_port()
-    variant_scratch = scratch / label
+    variant_scratch = scratch / "wire-mtls"
     variant_scratch.mkdir(parents=True, exist_ok=True)
+    certificate_pem, private_key_pem, client_ca = generate_client_identity(variant_scratch)
     authority_process, authority_stdout, authority_stderr = start_shadowtls_authority(
-        authority, variant_scratch, authority_port, version, strict
+        authority, variant_scratch, authority_port, VERSION, None, client_ca
     )
+    cert_yaml = textwrap.indent(certificate_pem, "          ")
+    key_yaml = textwrap.indent(private_key_pem, "          ")
     config = variant_scratch / "config.yaml"
     config.write_text(
         f"""mixed-port: {mixed_port}
@@ -216,13 +323,81 @@ proxies:
     port: {authority_port}
     cipher: {CIPHER}
     password: {KEY_256}
+    client-fingerprint: chrome
     plugin: shadow-tls
+    plugin-opts:
+      host: {HOST}
+      password: {PLUGIN_PASSWORD}
+      version: {VERSION}
+      skip-cert-verify: true
+      certificate: |-
+{cert_yaml}
+      private-key: |-
+{key_yaml}
+rules:
+  - MATCH,local-ss
+"""
+    )
+    process, stdout, stderr = launch(binary, config, variant_scratch)
+    try:
+        wait_ready(process, mixed_port)
+        wait_route(process, mixed_port, tcp_echo.port)
+        return {
+            "wire-mtls:tcp-ipv4": echo(mixed_port, "127.0.0.1", tcp_echo.port, b"mtls"),
+            "wire-mtls:process-alive": process.poll() is None,
+        }
+    finally:
+        stop(process)
+        stop(authority_process)
+        stdout.close()
+        stderr.close()
+        authority_stdout.close()
+        authority_stderr.close()
+        tcp_echo.close()
+
+
+def exercise_wire_variant(
+    binary: pathlib.Path,
+    authority: pathlib.Path,
+    scratch: pathlib.Path,
+    version: int,
+    strict: str | None,
+    label: str,
+    client_fingerprint: str | None = None,
+    extra_plugin_opts: str = "",
+) -> dict[str, bool]:
+    tcp_echo = start_server(EchoHandler)
+    half_close_server = start_server(HalfCloseHandler)
+    mixed_port = reserve_port()
+    authority_port = reserve_port()
+    variant_scratch = scratch / label
+    variant_scratch.mkdir(parents=True, exist_ok=True)
+    authority_process, authority_stdout, authority_stderr = start_shadowtls_authority(
+        authority, variant_scratch, authority_port, version, strict
+    )
+    config = variant_scratch / "config.yaml"
+    fingerprint_line = (
+        f"    client-fingerprint: {client_fingerprint}\n" if client_fingerprint else ""
+    )
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: local-ss
+    type: ss
+    server: 127.0.0.1
+    port: {authority_port}
+    cipher: {CIPHER}
+    password: {KEY_256}
+{fingerprint_line}    plugin: shadow-tls
     plugin-opts:
       host: {HOST}
       password: {PLUGIN_PASSWORD}
       version: {version}
       skip-cert-verify: true
-rules:
+{extra_plugin_opts}rules:
   - MATCH,local-ss
 """
     )
@@ -324,6 +499,7 @@ def exercise(
         "config": validate(binary, validation),
         "wire": exercise_wire(binary, authority, wire),
         "hostile": exercise_hostile(binary, authority, hostile),
+        "mtls": exercise_mtls(binary, authority, scratch / "mtls"),
     }
 
 

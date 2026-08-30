@@ -511,9 +511,6 @@ mod chrome_fingerprint_tests {
         // Remaining documented leftovers vs Go uTLS:
         // - Non-chrome fingerprints (firefox/safari/ios/edge/android/360/qq/…) stay
         //   rustls-default; full parrots are not cheap to port in one pass.
-        // - ECH GREASE encapsulated-key bytes are random 32-byte stand-ins (Go runs
-        //   real X25519 HPKE SetupSender against a dummy pubkey); length/suite/payload
-        //   candidates match BoringGREASEECH.
         let raw = capture_client_hello(Some("chrome"));
         let (ciphers_raw, extensions_raw, ech_body) = parse_client_hello(&raw);
 
@@ -561,6 +558,261 @@ mod chrome_fingerprint_tests {
         let mut want: Vec<u16> = CHROME_EXT_TYPES.to_vec();
         want.sort_unstable();
         assert_eq!(have, want, "extension type set");
+    }
+
+    #[test]
+    fn chrome_mlkem_key_share_lengths_match_hybrid_spec() {
+        for mlkem in [false, true] {
+            let raw = capture_client_hello_with_mlkem(Some("chrome"), mlkem);
+            let shares = extract_key_shares(&raw);
+            if mlkem {
+                assert!(
+                    shares.iter().any(|(group, len)| *group == 0x11ec && *len == 1216),
+                    "expected X25519MLKEM768 share len 1216, got {shares:?}"
+                );
+            } else {
+                assert!(
+                    !shares.iter().any(|(group, _)| *group == 0x11ec),
+                    "v2-style chrome must omit X25519MLKEM768, got {shares:?}"
+                );
+            }
+        }
+    }
+
+    fn capture_client_hello_with_mlkem(
+        fingerprint: Option<&str>,
+        mlkem: bool,
+    ) -> Vec<u8> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let capture = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(800)))
+                .ok();
+            let mut header = [0_u8; 5];
+            stream.read_exact(&mut header).expect("header");
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut body = vec![0_u8; len];
+            stream.read_exact(&mut body).expect("body");
+            let mut record = header.to_vec();
+            record.extend_from_slice(&body);
+            record
+        });
+
+        let config = Arc::new(
+            client_config(
+                HttpProxyTls {
+                    server_name: "phase6c-shadow-tls.example",
+                    verification_name: None,
+                    skip_certificate_verification: true,
+                    fingerprint: None,
+                    certificate: None,
+                    private_key: None,
+                    custom_roots: &[],
+                    ech_config: None,
+                    alpn_protocols: &[b"h2", b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                    client_hello_fingerprint: fingerprint,
+                    client_hello_fingerprint_mlkem: mlkem,
+                },
+                None,
+            )
+            .expect("config"),
+        );
+        let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
+        let mut conn = ClientConnection::new(config, server_name).expect("conn");
+        let mut sock = TcpStream::connect(addr).expect("connect");
+        {
+            let mut tls = Stream::new(&mut conn, &mut sock);
+            let _ = tls.write(b"x");
+        }
+        let _ = sock.shutdown(Shutdown::Both);
+        capture.join().expect("join")
+    }
+
+    fn extract_key_shares(raw: &[u8]) -> Vec<(u16, usize)> {
+        let rec_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
+        let hs = &raw[5..5 + rec_len];
+        let body_len = ((hs[1] as usize) << 16) | ((hs[2] as usize) << 8) | hs[3] as usize;
+        let mut p = &hs[4..4 + body_len];
+        p = &p[34..];
+        let sid_len = p[0] as usize;
+        p = &p[1 + sid_len..];
+        let cs_len = u16::from_be_bytes([p[0], p[1]]) as usize;
+        p = &p[2 + cs_len..];
+        let comp_len = p[0] as usize;
+        p = &p[1 + comp_len..];
+        let ext_len = u16::from_be_bytes([p[0], p[1]]) as usize;
+        p = &p[2..2 + ext_len];
+        let mut shares = Vec::new();
+        while p.len() >= 4 {
+            let typ = u16::from_be_bytes([p[0], p[1]]);
+            let len = u16::from_be_bytes([p[2], p[3]]) as usize;
+            if typ == 0x0033 {
+                let body = &p[4..4 + len];
+                let list_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                let mut q = &body[2..2 + list_len];
+                while q.len() >= 4 {
+                    let group = u16::from_be_bytes([q[0], q[1]]);
+                    let share_len = u16::from_be_bytes([q[2], q[3]]) as usize;
+                    shares.push((group, share_len));
+                    q = &q[4 + share_len..];
+                }
+            }
+            p = &p[4 + len..];
+        }
+        shares
+    }
+
+    #[test]
+    fn chrome_mlkem_with_session_id_generator_emits_client_hello() {
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let capture = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(800)))
+                .ok();
+            let mut header = [0_u8; 5];
+            match stream.read_exact(&mut header) {
+                Ok(()) => {
+                    let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+                    let mut body = vec![0_u8; len];
+                    stream.read_exact(&mut body).expect("body");
+                    header.to_vec()
+                }
+                Err(error) => panic!("expected ClientHello record, got: {error}"),
+            }
+        });
+
+        let config = Arc::new(
+            client_config(
+                HttpProxyTls {
+                    server_name: "phase6c-shadow-tls.example",
+                    verification_name: None,
+                    skip_certificate_verification: true,
+                    fingerprint: None,
+                    certificate: None,
+                    private_key: None,
+                    custom_roots: &[],
+                    ech_config: None,
+                    alpn_protocols: &[b"h2", b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                    client_hello_fingerprint: Some("chrome"),
+                    client_hello_fingerprint_mlkem: true,
+                },
+                None,
+            )
+            .expect("config"),
+        );
+        let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
+        let mut conn = ClientConnection::new_with_session_id_generator(
+            config,
+            server_name,
+            |_client_hello| [7_u8; 32],
+        )
+        .expect("conn");
+        let mut sock = TcpStream::connect(addr).expect("connect");
+        {
+            let mut tls = Stream::new(&mut conn, &mut sock);
+            let _ = tls.write(b"x");
+        }
+        let _ = sock.shutdown(Shutdown::Both);
+        let header = capture.join().expect("join");
+        assert_eq!(header[0], 0x16, "TLS handshake record");
+    }
+
+    #[test]
+    fn chrome_ws_alpn_offers_http11_only() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let capture = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(800)))
+                .ok();
+            let mut header = [0_u8; 5];
+            stream.read_exact(&mut header).expect("header");
+            let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut body = vec![0_u8; len];
+            stream.read_exact(&mut body).expect("body");
+            let mut record = header.to_vec();
+            record.extend_from_slice(&body);
+            record
+        });
+
+        let config = Arc::new(
+            client_config(
+                HttpProxyTls {
+                    server_name: "phase6c-shadow-tls.example",
+                    verification_name: None,
+                    skip_certificate_verification: true,
+                    fingerprint: None,
+                    certificate: None,
+                    private_key: None,
+                    custom_roots: &[],
+                    ech_config: None,
+                    alpn_protocols: &[b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                    client_hello_fingerprint: Some("chrome"),
+                    client_hello_fingerprint_mlkem: false,
+                },
+                None,
+            )
+            .expect("config"),
+        );
+        let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
+        let mut conn = ClientConnection::new(config, server_name).expect("conn");
+        let mut sock = TcpStream::connect(addr).expect("connect");
+        {
+            let mut tls = Stream::new(&mut conn, &mut sock);
+            let _ = tls.write(b"x");
+        }
+        let _ = sock.shutdown(Shutdown::Both);
+        let raw = capture.join().expect("join");
+        let (_, extensions, _) = parse_client_hello(&raw);
+        assert!(extensions.contains(&0x0010), "ALPN extension present");
+        let alpn = extract_alpn_protocols(&raw).expect("alpn");
+        assert_eq!(alpn, vec![b"http/1.1".to_vec()]);
+    }
+
+    fn extract_alpn_protocols(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let rec_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
+        let hs = &raw[5..5 + rec_len];
+        let body_len = ((hs[1] as usize) << 16) | ((hs[2] as usize) << 8) | hs[3] as usize;
+        let mut p = &hs[4..4 + body_len];
+        p = &p[34..];
+        let sid_len = p[0] as usize;
+        p = &p[1 + sid_len..];
+        let cs_len = u16::from_be_bytes([p[0], p[1]]) as usize;
+        p = &p[2 + cs_len..];
+        let comp_len = p[0] as usize;
+        p = &p[1 + comp_len..];
+        let ext_len = u16::from_be_bytes([p[0], p[1]]) as usize;
+        p = &p[2..2 + ext_len];
+        while p.len() >= 4 {
+            let typ = u16::from_be_bytes([p[0], p[1]]);
+            let len = u16::from_be_bytes([p[2], p[3]]) as usize;
+            if typ == 0x0010 {
+                let body = &p[4..4 + len];
+                let list_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+                let mut alpn = Vec::new();
+                let mut q = &body[2..2 + list_len];
+                while !q.is_empty() {
+                    let plen = q[0] as usize;
+                    alpn.push(q[1..1 + plen].to_vec());
+                    q = &q[1 + plen..];
+                }
+                return Some(alpn);
+            }
+            p = &p[4 + len..];
+        }
+        None
     }
 
     #[test]

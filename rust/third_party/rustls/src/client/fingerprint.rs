@@ -8,6 +8,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::crypto::SecureRandom;
+use crate::crypto::aws_lc_rs::hpke::DH_KEM_X25519_HKDF_SHA256_AES_128;
+use crate::crypto::hpke::{Hpke, HpkePublicKey};
 use crate::enums::{
     CertificateCompressionAlgorithm, CipherSuite, ProtocolVersion, SignatureScheme,
 };
@@ -39,6 +41,12 @@ const ALPS_NEW: ExtensionType = ExtensionType::Unknown(17613);
 
 /// BoringGREASEECH candidate plaintext lengths (ciphertext = len + 16 for AES-GCM).
 const ECH_GREASE_PAYLOAD_PLAIN_LENS: [u16; 4] = [128, 160, 192, 224];
+
+/// Fixed dummy X25519 public key used by uTLS/cloudflare-go GREASE ECH (`dummyX25519PublicKey`).
+const DUMMY_X25519_PUBLIC_KEY: [u8; 32] = [
+    143, 38, 37, 36, 12, 6, 229, 30, 140, 27, 167, 73, 26, 100, 203, 107, 216, 81, 163, 222, 52,
+    211, 54, 210, 46, 37, 78, 216, 157, 97, 241, 244,
+];
 
 /// Chrome 133 cipher suite order from metacubex/utls `HelloChrome_133` (GREASE slot first).
 fn chrome_cipher_suites(grease_cipher: CipherSuite) -> Vec<CipherSuite> {
@@ -153,8 +161,9 @@ fn build_boring_grease_ech(rng: &dyn SecureRandom) -> Result<Vec<u8>, Error> {
     let plain = ECH_GREASE_PAYLOAD_PLAIN_LENS[pick[0] as usize % ECH_GREASE_PAYLOAD_PLAIN_LENS.len()];
     let payload_len = usize::from(plain) + 16;
 
-    let mut enc = vec![0_u8; 32];
-    rng.fill(&mut enc)?;
+    let pub_key = HpkePublicKey(DUMMY_X25519_PUBLIC_KEY.to_vec());
+    let (enc, _sealer) = DH_KEM_X25519_HKDF_SHA256_AES_128.setup_sealer(&[], &pub_key)?;
+    let enc = enc.0;
     let mut payload = vec![0_u8; payload_len];
     rng.fill(&mut payload)?;
 

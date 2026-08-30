@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -48,8 +49,8 @@ func (relayHandler) NewError(_ context.Context, err error) {
 }
 
 func main() {
-	if len(os.Args) != 6 && len(os.Args) != 7 {
-		panic("usage: shadowtls-shadowsocks-authority LISTEN PASSWORD CIPHER PLUGIN_PASSWORD VERSION [STRICT]")
+	if len(os.Args) != 6 && len(os.Args) != 7 && len(os.Args) != 8 {
+		panic("usage: shadowtls-shadowsocks-authority LISTEN PASSWORD CIPHER PLUGIN_PASSWORD VERSION [STRICT] [CLIENT_CA_PEM]")
 	}
 	listen := os.Args[1]
 	password := os.Args[2]
@@ -60,11 +61,18 @@ func main() {
 		panic(err)
 	}
 	strictMode := version == 3
-	if len(os.Args) == 7 {
+	if len(os.Args) >= 7 {
 		strictMode = os.Args[6] != "0"
 	}
+	var clientCAPEM []byte
+	if len(os.Args) == 8 {
+		clientCAPEM, err = os.ReadFile(os.Args[7])
+		if err != nil {
+			panic(err)
+		}
+	}
 
-	camouflageAddr, err := startCamouflageServer(version == 1 || (version == 3 && !strictMode))
+	camouflageAddr, err := startCamouflageServer(version == 1 || (version == 3 && !strictMode), clientCAPEM)
 	if err != nil {
 		panic(err)
 	}
@@ -115,7 +123,7 @@ func serve(raw net.Conn, serverConfig *shadowtls.ServerConfig, service ss.Servic
 	}
 }
 
-func startCamouflageServer(tls12Only bool) (string, error) {
+func startCamouflageServer(tls12Only bool, clientCAPEM []byte) (string, error) {
 	certificatePEM, privateKeyPEM, _, err := ca.NewRandomTLSKeyPair(ca.KeyPairTypeP256)
 	if err != nil {
 		return "", err
@@ -131,6 +139,14 @@ func startCamouflageServer(tls12Only bool) (string, error) {
 	}
 	if tls12Only {
 		config.MaxVersion = tls.VersionTLS12
+	}
+	if len(clientCAPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(clientCAPEM) {
+			return "", fmt.Errorf("invalid client CA PEM")
+		}
+		config.ClientCAs = pool
+		config.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
