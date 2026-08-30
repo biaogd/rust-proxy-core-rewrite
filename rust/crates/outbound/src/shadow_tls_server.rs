@@ -8,14 +8,13 @@ use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
-use crate::BoxedOutboundStream;
-
-use super::{
+use crate::shadow_tls::{
     APPLICATION_DATA, HANDSHAKE, HMAC_SIZE, SERVER_HELLO, SERVER_RANDOM_INDEX,
     SESSION_ID_LENGTH_INDEX, ShadowTlsError, TLS_HEADER_SIZE, TLS_HMAC_HEADER_SIZE,
     TLS_SESSION_ID_SIZE, VerifiedStream, is_server_hello_tls13, kdf, set_tls_record_length,
     verify_application_data, xor_slice,
 };
+use crate::BoxedOutboundStream;
 
 type HmacSha1 = Hmac<Sha1>;
 

@@ -2294,3 +2294,29 @@ rules: ['MATCH,DIRECT']
     assert_eq!(shadow_tls.users.len(), 1);
     assert_eq!(shadow_tls.users[0].name, "phase6c-user");
 }
+
+#[test]
+fn loads_named_shadowsocks_2022_eih_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-eih
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18401
+    cipher: 2022-blake3-aes-128-gcm
+    password: AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw==
+    udp: false
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks 2022 eih listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-eih");
+    assert_eq!(
+        inbound.password,
+        "AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw=="
+    );
+    assert!(!inbound.udp);
+}

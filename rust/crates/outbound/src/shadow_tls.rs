@@ -17,16 +17,16 @@ use crate::{BoxedOutboundStream, HttpProxyError};
 
 type HmacSha1 = Hmac<Sha1>;
 
-const TLS_HEADER_SIZE: usize = 5;
-const TLS_SESSION_ID_SIZE: usize = 32;
-const HMAC_SIZE: usize = 4;
-const TLS_HMAC_HEADER_SIZE: usize = TLS_HEADER_SIZE + HMAC_SIZE;
-const HANDSHAKE: u8 = 22;
-const APPLICATION_DATA: u8 = 23;
+pub(crate) const TLS_HEADER_SIZE: usize = 5;
+pub(crate) const TLS_SESSION_ID_SIZE: usize = 32;
+pub(crate) const HMAC_SIZE: usize = 4;
+pub(crate) const TLS_HMAC_HEADER_SIZE: usize = TLS_HEADER_SIZE + HMAC_SIZE;
+pub(crate) const HANDSHAKE: u8 = 22;
+pub(crate) const APPLICATION_DATA: u8 = 23;
 const ALERT: u8 = 21;
-const SERVER_HELLO: u8 = 2;
-const SERVER_RANDOM_INDEX: usize = TLS_HEADER_SIZE + 1 + 3 + 2;
-const SESSION_ID_LENGTH_INDEX: usize = TLS_HEADER_SIZE + 1 + 3 + 2 + 32;
+pub(crate) const SERVER_HELLO: u8 = 2;
+pub(crate) const SERVER_RANDOM_INDEX: usize = TLS_HEADER_SIZE + 1 + 3 + 2;
+pub(crate) const SESSION_ID_LENGTH_INDEX: usize = TLS_HEADER_SIZE + 1 + 3 + 2 + 32;
 const SESSION_ID_START: usize = 1 + 3 + 2 + 32 + 1;
 const MAX_TLS_PLAINTEXT: usize = 16_384;
 
@@ -707,7 +707,7 @@ impl AsyncWrite for V2ClientStream {
 
 const TLS_ALERT_RECORD_SIZE: usize = 31;
 
-struct VerifiedStream {
+pub(crate) struct VerifiedStream {
     inner: BoxedOutboundStream,
     hmac_add: HmacSha1,
     hmac_verify: HmacSha1,
@@ -722,6 +722,27 @@ struct VerifiedStream {
 }
 
 impl VerifiedStream {
+    pub(crate) fn from_server(
+        inner: BoxedOutboundStream,
+        hmac_add: HmacSha1,
+        hmac_verify: HmacSha1,
+        pending: Vec<u8>,
+    ) -> Self {
+        Self {
+            inner,
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending,
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
+            read_error: None,
+        }
+    }
+
     fn take_pending(&mut self, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         if self.pending.is_empty() {
             return Poll::Pending;
@@ -1020,7 +1041,7 @@ impl AsyncWrite for VerifiedStream {
     }
 }
 
-fn set_tls_record_length(header: &mut [u8], payload_len: usize) -> io::Result<()> {
+pub(crate) fn set_tls_record_length(header: &mut [u8], payload_len: usize) -> io::Result<()> {
     let length = u16::try_from(payload_len)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "TLS record too large"))?;
     header[3] = (length >> 8) as u8;
@@ -1140,20 +1161,20 @@ fn generate_session_id_bytes(password: &str, client_hello: &[u8]) -> [u8; 32] {
     session_id
 }
 
-fn kdf(password: &str, server_random: &[u8; 32]) -> Vec<u8> {
+pub(crate) fn kdf(password: &str, server_random: &[u8; 32]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     hasher.update(server_random);
     hasher.finalize().to_vec()
 }
 
-fn xor_slice(data: &mut [u8], key: &[u8]) {
+pub(crate) fn xor_slice(data: &mut [u8], key: &[u8]) {
     for (index, byte) in data.iter_mut().enumerate() {
         *byte ^= key[index % key.len()];
     }
 }
 
-fn is_server_hello_tls13(frame: &[u8]) -> bool {
+pub(crate) fn is_server_hello_tls13(frame: &[u8]) -> bool {
     if frame.len() <= SESSION_ID_LENGTH_INDEX || frame.first() != Some(&HANDSHAKE) {
         return false;
     }
@@ -1188,7 +1209,7 @@ fn is_server_hello_tls13(frame: &[u8]) -> bool {
     false
 }
 
-fn verify_application_data(frame: &[u8], hmac: &mut HmacSha1, update: bool) -> bool {
+pub(crate) fn verify_application_data(frame: &[u8], hmac: &mut HmacSha1, update: bool) -> bool {
     if frame.len() < TLS_HMAC_HEADER_SIZE
         || frame[0] != APPLICATION_DATA
         || frame[1] != 3

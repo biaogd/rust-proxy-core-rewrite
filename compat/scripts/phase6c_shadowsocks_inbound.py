@@ -51,6 +51,8 @@ TCP_OBFS_TLS_PAYLOAD = "phase6c-ss-inbound-obfs-tls"
 STLS_HOST = "phase6c-shadow-tls.example"
 STLS_PASSWORD = "phase6c-shadow-tls-plugin-password"
 TCP_STLS_PAYLOAD = "phase6c-ss-inbound-shadow-tls"
+KEY_2022_EIH_USER = "EBESExQVFhcYGRobHB0eHw=="
+TCP_2022_EIH_PAYLOAD = "phase6c-ss-inbound-2022-eih"
 
 
 def client_binary() -> pathlib.Path:
@@ -664,6 +666,61 @@ rules:
         camouflage.wait(timeout=1)
 
 
+def exercise_2022_eih_tcp(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    """Rust SS2022 EIH inbound smoke (Go Clash cannot listen with server:user PSK)."""
+    echo = start_server(EchoHandler)
+    ss_port = reserve_port()
+    password = f"{KEY_2022}:{KEY_2022_EIH_USER}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    config = scratch / "2022-eih-config.yaml"
+    config.write_text(
+        f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-2022-eih
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER_2022}
+    password: "{password}"
+    udp: false
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            cipher=CIPHER_2022,
+            password=password,
+            payload=TCP_2022_EIH_PAYLOAD,
+        )
+        return {
+            "named-2022-eih-tcp": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                cipher=CIPHER_2022,
+                password=password,
+                payload=TCP_2022_EIH_PAYLOAD,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+
+
 def exercise_config_validation(
     binary: pathlib.Path,
     scratch: pathlib.Path,
@@ -784,6 +841,18 @@ def main() -> int:
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }
+            # Go Clash cannot listen with `server:user` 2022 PSK (decode psk fails).
+            # Exercise Rust EIH inbound separately so Go/Rust observations stay aligned.
+            rust_eih_scratch = root / "rust-eih"
+            rust_eih_scratch.mkdir()
+            rust_eih = exercise_2022_eih_tcp(
+                binaries["rust"],
+                client,
+                rust_eih_scratch,
+            )
+            if not rust_eih.get("named-2022-eih-tcp"):
+                raise RuntimeError(f"Rust SS2022 EIH inbound failed: {rust_eih}")
+            observations["rust-eih"] = rust_eih
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

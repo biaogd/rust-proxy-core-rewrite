@@ -15,7 +15,7 @@ use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
 use shadowsocks::ProxySocket;
-use shadowsocks::config::{ServerConfig, ServerType};
+use shadowsocks::config::{ServerConfig, ServerType, ServerUser, ServerUserManager, method_support_eih};
 use shadowsocks::context::Context as SsContext;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::net::UdpSocket as SsUdpSocket;
@@ -61,9 +61,33 @@ impl ShadowsocksListener {
                 config.cipher
             )))
         })?;
-        let server = ServerConfig::new(config.listen, &config.password, method).map_err(|error| {
-            RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(error.to_string()))
-        })?;
+        let (server_password, user_keys) = split_shadowsocks_inbound_password(&config.password);
+        if !user_keys.is_empty() && !method_support_eih(method) {
+            return Err(RuntimeError::Config(
+                rewrite_config::ConfigError::InvalidInbound(format!(
+                    "shadowsocks inbound cipher {} does not support EIH users",
+                    config.cipher
+                )),
+            ));
+        }
+        let mut server =
+            ServerConfig::new(config.listen, server_password, method).map_err(|error| {
+                RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(error.to_string()))
+            })?;
+        if !user_keys.is_empty() {
+            let mut users = ServerUserManager::new();
+            for (index, user_key) in user_keys.iter().enumerate() {
+                let name = format!("eih-user-{index}");
+                users.add_user(
+                    ServerUser::with_encoded_key(name, user_key).map_err(|error| {
+                        RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(
+                            error.to_string(),
+                        ))
+                    })?,
+                );
+            }
+            server.set_user_manager(users);
+        }
         let context = SsContext::new_shared(ServerType::Server);
         let inner = ProxyListener::bind(context.clone(), &server)
             .await
@@ -743,8 +767,6 @@ async fn run_shadowsocks_socks5_udp_session(
         alpn_protocols: &[],
         tls12_only: false,
         tls13_only: false,
-        client_hello_fingerprint: None,
-        client_hello_fingerprint_mlkem: true,
     });
     let association = match rewrite_outbound::associate_socks5_udp_with_options(
         &server,
@@ -917,6 +939,19 @@ fn shadow_tls_server_config(config: &ShadowsocksShadowTlsConfig) -> ShadowTlsSer
         handshake_dest: config.handshake.dest.clone(),
         strict_mode: config.strict_mode,
     }
+}
+
+/// Splits an inbound password into the server PSK and optional EIH user keys.
+///
+/// Single-hop EIH uses `server_key:user_key`. Extra `:`-separated segments become
+/// additional users (AES-128/256 GCM only).
+fn split_shadowsocks_inbound_password(password: &str) -> (String, Vec<String>) {
+    let mut parts = password.split(':').map(str::to_owned).collect::<Vec<_>>();
+    if parts.len() <= 1 {
+        return (password.to_owned(), Vec::new());
+    }
+    let server_password = parts.remove(0);
+    (server_password, parts)
 }
 
 fn address_to_destination(address: &Address) -> Result<Destination, &'static str> {

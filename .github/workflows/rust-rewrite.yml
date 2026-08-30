@@ -386,11 +386,8 @@ jobs:
             compat/scripts/phase6c_shadowsocks_obfs_tls.py \
             compat/scripts/phase6c_shadowsocks_v2ray_plugin.py \
             compat/scripts/phase6c_shadowsocks_shadow_tls.py \
-<<<<<<< HEAD
             compat/scripts/phase6c_shadowtls_clienthello_regression.py \
-=======
             compat/scripts/phase6c_shadowsocks_inbound.py \
->>>>>>> e062f860 (Complete SS inbound differential coverage and wire CI)
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \
