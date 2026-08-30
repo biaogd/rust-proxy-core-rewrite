@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use rewrite_config::{Config, ShadowsocksInboundConfig, ShadowsocksSimpleObfsConfig};
+use rewrite_config::{Config, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
-use rewrite_outbound::{HttpObfsServer, HttpProxyTls, TlsObfsServer};
+use rewrite_outbound::{HttpObfsServer, HttpProxyTls, ShadowTlsServer, ShadowTlsServerConfig, TlsObfsServer};
 use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
@@ -50,6 +50,7 @@ pub(crate) struct ShadowsocksListener {
     udp: Option<Arc<ProxySocket<SsUdpSocket>>>,
     inbound_name: String,
     simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
+    shadow_tls: Option<ShadowsocksShadowTlsConfig>,
 }
 
 impl ShadowsocksListener {
@@ -81,6 +82,7 @@ impl ShadowsocksListener {
             udp,
             inbound_name: config.name.clone(),
             simple_obfs: config.simple_obfs.clone(),
+            shadow_tls: config.shadow_tls.clone(),
         })
     }
 }
@@ -157,20 +159,29 @@ pub(super) async fn run_shadowsocks_listener(
         udp,
         inbound_name,
         simple_obfs,
+        shadow_tls,
     } = listener;
     let obfs_mode = simple_obfs.as_ref().map(|config| config.mode.as_str());
+    let shadow_tls_config = shadow_tls.as_ref().map(shadow_tls_server_config);
     let mut connections = JoinSet::new();
     let mut udp_sessions = ShadowsocksUdpSessions::default();
     let mut datagram = vec![0_u8; 65_536];
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = inner.accept_map(|stream| -> rewrite_outbound::BoxedOutboundStream {
+            accepted = inner.accept_map({
+                let shadow_tls_config = shadow_tls_config.clone();
+                move |stream| -> rewrite_outbound::BoxedOutboundStream {
+                if let Some(config) = shadow_tls_config {
+                    Box::new(ShadowTlsServer::new(stream, config))
+                } else {
                 match obfs_mode {
                     Some("http") => Box::new(HttpObfsServer::new(stream, None)),
                     Some("tls") => Box::new(TlsObfsServer::new(stream, None)),
                     _ => Box::new(stream),
                 }
+                }
+            }
             }) => {
                 let Ok((mut inbound, peer)) = accepted else {
                     state.log("error", "shadowsocks inbound accept failed");
@@ -892,6 +903,20 @@ async fn run_shadowsocks_proxy_udp_session(
         }
     }
     tracker.finish(uploaded, downloaded);
+}
+
+fn shadow_tls_server_config(config: &ShadowsocksShadowTlsConfig) -> ShadowTlsServerConfig {
+    ShadowTlsServerConfig {
+        version: config.version,
+        password: config.password.clone().unwrap_or_default(),
+        users: config
+            .users
+            .iter()
+            .map(|user| (user.name.clone(), user.password.clone()))
+            .collect(),
+        handshake_dest: config.handshake.dest.clone(),
+        strict_mode: config.strict_mode,
+    }
 }
 
 fn address_to_destination(address: &Address) -> Result<Destination, &'static str> {

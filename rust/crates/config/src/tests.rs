@@ -2257,3 +2257,40 @@ rules: ['MATCH,DIRECT']
         Some("tls")
     );
 }
+
+#[test]
+fn loads_named_shadowsocks_shadow_tls_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks shadow-tls listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-stls");
+    let shadow_tls = inbound
+        .shadow_tls
+        .as_ref()
+        .expect("shadow-tls config");
+    assert_eq!(shadow_tls.version, 3);
+    assert_eq!(shadow_tls.handshake.dest, "127.0.0.1:9443");
+    assert_eq!(shadow_tls.users.len(), 1);
+    assert_eq!(shadow_tls.users[0].name, "phase6c-user");
+}

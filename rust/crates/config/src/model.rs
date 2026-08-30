@@ -737,6 +737,27 @@ pub struct ShadowsocksSimpleObfsConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowTlsUserConfig {
+    pub name: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowTlsHandshakeConfig {
+    pub dest: String,
+    pub proxy: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksShadowTlsConfig {
+    pub version: u8,
+    pub password: Option<String>,
+    pub users: Vec<ShadowTlsUserConfig>,
+    pub handshake: ShadowTlsHandshakeConfig,
+    pub strict_mode: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadowsocksInboundConfig {
     pub name: String,
     pub cipher: String,
@@ -744,6 +765,7 @@ pub struct ShadowsocksInboundConfig {
     pub listen: SocketAddr,
     pub udp: bool,
     pub simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
+    pub shadow_tls: Option<ShadowsocksShadowTlsConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

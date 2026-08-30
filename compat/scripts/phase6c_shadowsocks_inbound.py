@@ -48,6 +48,9 @@ OBFS_HOST = "phase6c-inbound.example"
 OBFS_TLS_HOST = "phase6c-inbound-tls.example"
 TCP_OBFS_PAYLOAD = "phase6c-ss-inbound-obfs-http"
 TCP_OBFS_TLS_PAYLOAD = "phase6c-ss-inbound-obfs-tls"
+STLS_HOST = "phase6c-shadow-tls.example"
+STLS_PASSWORD = "phase6c-shadow-tls-plugin-password"
+TCP_STLS_PAYLOAD = "phase6c-ss-inbound-shadow-tls"
 
 
 def client_binary() -> pathlib.Path:
@@ -77,6 +80,8 @@ def proxied_echo(
     payload: str = TCP_PAYLOAD,
     obfs_mode: str | None = None,
     obfs_host: str | None = None,
+    plugin_password: str | None = None,
+    plugin_version: int | None = None,
 ) -> bool:
     command = [
         str(client),
@@ -91,6 +96,10 @@ def proxied_echo(
         command.append(obfs_mode)
         if obfs_host is not None:
             command.append(obfs_host)
+        if plugin_password is not None:
+            command.append(plugin_password)
+        if plugin_version is not None:
+            command.append(str(plugin_version))
     try:
         completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
         return completed.returncode == 0
@@ -108,6 +117,8 @@ def wait_ss_route(
     payload: str = TCP_PAYLOAD,
     obfs_mode: str | None = None,
     obfs_host: str | None = None,
+    plugin_password: str | None = None,
+    plugin_version: int | None = None,
 ) -> None:
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
@@ -123,6 +134,8 @@ def wait_ss_route(
                 payload,
                 obfs_mode,
                 obfs_host,
+                plugin_password,
+                plugin_version,
             ):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
@@ -535,6 +548,122 @@ rules:
         echo.close()
 
 
+def start_camouflage_tls(scratch: pathlib.Path) -> tuple[Any, int]:
+    certificate = scratch / "camouflage.pem"
+    private_key = scratch / "camouflage.key"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            f"/CN={STLS_HOST}",
+            "-days",
+            "1",
+            "-keyout",
+            str(private_key),
+            "-out",
+            str(certificate),
+        ],
+        cwd=scratch,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=IO_DEADLINE,
+    )
+    port = reserve_port()
+    process = subprocess.Popen(
+        [
+            "openssl",
+            "s_server",
+            "-accept",
+            str(port),
+            "-cert",
+            str(certificate),
+            "-key",
+            str(private_key),
+            "-www",
+            "-tls1_2",
+            "-quiet",
+        ],
+        cwd=scratch,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.2)
+    return process, port
+
+
+def exercise_shadow_tls_listener(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    camouflage, camouflage_port = start_camouflage_tls(scratch)
+    ss_port = reserve_port()
+    config = scratch / "shadow-tls-listener-config.yaml"
+    config.write_text(
+        f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-shadow-tls-inbound
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER}
+    password: {PASSWORD}
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: {STLS_PASSWORD}
+      handshake:
+        dest: 127.0.0.1:{camouflage_port}
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
+        return {
+            "named-shadow-tls-tcp": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                payload=TCP_STLS_PAYLOAD,
+                obfs_mode="shadow-tls",
+                obfs_host=STLS_HOST,
+                plugin_password=STLS_PASSWORD,
+                plugin_version=3,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+        camouflage.terminate()
+        camouflage.wait(timeout=1)
+
+
 def exercise_config_validation(
     binary: pathlib.Path,
     scratch: pathlib.Path,
@@ -651,6 +780,7 @@ def main() -> int:
                     **exercise_socks5_udp(binary, udp_client, scratch),
                     **exercise_obfs_http_listener(binary, client, scratch),
                     **exercise_obfs_tls_listener(binary, client, scratch),
+                    **exercise_shadow_tls_listener(binary, client, scratch),
                     **exercise_proxied_udp(binary, udp_client, authority, scratch),
                     **exercise_config_validation(binary, scratch),
                 }

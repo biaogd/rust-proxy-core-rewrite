@@ -22,8 +22,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("missing target port")?
         .parse::<u16>()?;
     let payload = arguments.next().ok_or("missing payload")?;
-    let obfs_mode = arguments.next();
-    let obfs_host = arguments.next();
+    let plugin_mode = arguments.next();
+    let plugin_host = arguments.next();
+    let plugin_password = arguments.next();
+    let plugin_version = arguments.next();
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
@@ -40,15 +42,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
         port: target_port,
     };
-    let plugin = match obfs_mode.as_deref() {
+    let plugin = match plugin_mode.as_deref() {
         Some("http") => Some(ShadowsocksPluginConfig::SimpleObfsHttp {
-            host: obfs_host.unwrap_or_else(|| "bing.com".to_owned()),
+            host: plugin_host.unwrap_or_else(|| "bing.com".to_owned()),
         }),
         Some("tls") => Some(ShadowsocksPluginConfig::SimpleObfsTls {
-            host: obfs_host.unwrap_or_else(|| "bing.com".to_owned()),
+            host: plugin_host.unwrap_or_else(|| "bing.com".to_owned()),
+        }),
+        Some("shadow-tls") => Some(ShadowsocksPluginConfig::ShadowTls {
+            host: plugin_host.ok_or("missing shadow-tls host")?,
+            password: plugin_password.ok_or("missing shadow-tls password")?,
+            version: match plugin_version.as_deref() {
+                Some(value) => value.parse().map_err(|error: std::num::ParseIntError| -> Box<dyn Error> {
+                    error.into()
+                })?,
+                None => 3,
+            },
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            alpn: Vec::new(),
         }),
         None => None,
-        Some(value) => return Err(format!("unsupported obfs mode: {value}").into()),
+        Some(value) => return Err(format!("unsupported plugin mode: {value}").into()),
     };
     let mut stream = connect_shadowsocks_with_plugin_options(
         &server,

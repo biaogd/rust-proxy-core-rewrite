@@ -1,7 +1,10 @@
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::ConfigError;
-use crate::model::{ShadowsocksInboundConfig, ShadowsocksSimpleObfsConfig};
+use crate::model::{
+    ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
+    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig,
+};
 use crate::proxy::{
     shadowsocks_2022_cipher, supported_shadowsocks_cipher, validate_shadowsocks_inbound_key,
 };
@@ -77,6 +80,12 @@ pub(crate) fn parse_shadowsocks_listeners(
             .unwrap_or(true)
             && !shadowsocks_2022_cipher(&cipher);
         let simple_obfs = parse_simple_obfs(&mapping, &name)?;
+        let shadow_tls = parse_shadow_tls(&mapping, &name)?;
+        if simple_obfs.is_some() && shadow_tls.is_some() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} cannot enable both simple-obfs and shadow-tls"
+            )));
+        }
         parsed.push(ShadowsocksInboundConfig {
             name,
             cipher,
@@ -84,6 +93,7 @@ pub(crate) fn parse_shadowsocks_listeners(
             listen,
             udp,
             simple_obfs,
+            shadow_tls,
         });
     }
     Ok(parsed)
@@ -117,6 +127,114 @@ fn parse_simple_obfs(
         )));
     }
     Ok(Some(ShadowsocksSimpleObfsConfig { mode }))
+}
+
+fn parse_shadow_tls(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Option<ShadowsocksShadowTlsConfig>, ConfigError> {
+    let Some(value) = mapping.get(&Value::from("shadow-tls")) else {
+        return Ok(None);
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid shadow-tls configuration"
+        )));
+    };
+    let enabled = mapping
+        .get(&Value::from("enable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !enabled {
+        return Ok(None);
+    }
+    let version = mapping
+        .get(&Value::from("version"))
+        .and_then(Value::as_u64)
+        .map(|version| u8::try_from(version).map_err(|_| {
+            ConfigError::InvalidInbound(format!("listener {name} has invalid shadow-tls version"))
+        }))
+        .transpose()?
+        .unwrap_or(3);
+    if !(1..=3).contains(&version) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has unsupported shadow-tls version: {version}"
+        )));
+    }
+    let password = mapping_string(mapping, "password");
+    let users = parse_shadow_tls_users(mapping, name)?;
+    if version == 3 && users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} shadow-tls v3 requires at least one user"
+        )));
+    }
+    if version == 2 && password.is_none() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} shadow-tls v2 requires password"
+        )));
+    }
+    let handshake = mapping
+        .get(&Value::from("handshake"))
+        .and_then(Value::as_mapping)
+        .ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} shadow-tls is missing handshake configuration"
+            ))
+        })?;
+    let dest = mapping_string(handshake, "dest").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!(
+            "listener {name} shadow-tls handshake is missing dest"
+        ))
+    })?;
+    let proxy = mapping_string(handshake, "proxy");
+    let strict_mode = mapping
+        .get(&Value::from("strict-mode"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(Some(ShadowsocksShadowTlsConfig {
+        version,
+        password,
+        users,
+        handshake: ShadowTlsHandshakeConfig { dest, proxy },
+        strict_mode,
+    }))
+}
+
+fn parse_shadow_tls_users(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Vec<ShadowTlsUserConfig>, ConfigError> {
+    let Some(value) = mapping.get(&Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(sequence) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid shadow-tls users"
+        )));
+    };
+    let mut users = Vec::with_capacity(sequence.len());
+    for (index, entry) in sequence.iter().enumerate() {
+        let Some(mapping) = entry.as_mapping() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} shadow-tls user {index} is invalid"
+            )));
+        };
+        let user_name = mapping_string(mapping, "name").ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} shadow-tls user {index} is missing name"
+            ))
+        })?;
+        let user_password = mapping_string(mapping, "password").ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} shadow-tls user {index} is missing password"
+            ))
+        })?;
+        users.push(ShadowTlsUserConfig {
+            name: user_name,
+            password: user_password,
+        });
+    }
+    Ok(users)
 }
 
 fn mapping_string(mapping: &Mapping, key: &str) -> Option<String> {

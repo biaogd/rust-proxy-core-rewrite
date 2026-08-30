@@ -61,6 +61,7 @@ impl ShadowsocksInboundConfig {
             listen,
             udp,
             simple_obfs: None,
+            shadow_tls: None,
         })
     }
 }
