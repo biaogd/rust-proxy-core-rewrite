@@ -166,6 +166,7 @@ def proxied_uot(
     version: int,
     cipher: str = CIPHER,
     password: str = PASSWORD,
+    verify_dns: bool = False,
 ) -> bool:
     command = [
         str(client),
@@ -177,6 +178,8 @@ def proxied_uot(
         payload,
         str(version),
     ]
+    if verify_dns:
+        command.append("verify-dns")
     try:
         completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
         return completed.returncode == 0
@@ -193,6 +196,7 @@ def wait_ss_uot_route(
     version: int,
     cipher: str = CIPHER,
     password: str = PASSWORD,
+    verify_dns: bool = False,
 ) -> None:
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
@@ -207,6 +211,7 @@ def wait_ss_uot_route(
                 version,
                 cipher,
                 password,
+                verify_dns=verify_dns,
             ):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
@@ -680,6 +685,65 @@ rules:
         udp_echo.shutdown()
         udp_echo.server_close()
         udp_thread.join(timeout=1)
+
+
+def exercise_uot_dns(
+    binary: pathlib.Path,
+    uot_client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    dns_port = reserve_port()
+    ss_port = reserve_port()
+    query = dns_query("ss-inbound-uot.phase6c.test", DNS_QUERY_ID)
+    encoded_query = "b64:" + base64.b64encode(query).decode("ascii")
+    config = scratch / "uot-dns-config.yaml"
+    config.write_text(
+        f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+mode: rule
+log-level: info
+ipv6: false
+dns:
+  enable: true
+  listen: 127.0.0.1:{dns_port}
+  ipv6: false
+  use-hosts: false
+  use-system-hosts: false
+  enhanced-mode: redir-host
+  nameserver: [rcode://success]
+proxies:
+  - name: dns-local
+    type: dns
+rules:
+  - DST-PORT,53,dns-local
+  - MATCH,REJECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, dns_port)
+        wait_ss_uot_route(
+            process,
+            uot_client,
+            ss_port,
+            53,
+            payload=encoded_query,
+            version=1,
+            verify_dns=True,
+        )
+        return {
+            "inbound-uot-dns": proxied_uot(
+                uot_client,
+                ss_port,
+                53,
+                payload=encoded_query,
+                version=1,
+                verify_dns=True,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
 
 
 def exercise_uot_socks5(
@@ -1224,6 +1288,7 @@ def main() -> int:
                     **exercise_obfs_tls_listener(binary, client, scratch),
                     **exercise_shadow_tls_listener(binary, client, scratch),
                     **exercise_uot_listener(binary, uot_client, scratch),
+                    **exercise_uot_dns(binary, uot_client, scratch),
                     **exercise_uot_socks5(binary, uot_client, scratch),
                     **exercise_uot_proxied(binary, uot_client, authority, scratch),
                     **exercise_uot_proxied_uot(binary, uot_client, authority, scratch),
