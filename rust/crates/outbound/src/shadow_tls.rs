@@ -782,10 +782,34 @@ impl VerifiedStream {
     fn finish_read_fail(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.poll_drain_outbound(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(())) => Poll::Ready(Err(self
+            // Go ignores alert write failures and still returns the read/HMAC error.
+            Poll::Ready(Ok(()) | Err(_)) => Poll::Ready(Err(self
                 .read_error
                 .take()
                 .expect("read error must be queued before drain"))),
+        }
+    }
+
+    fn write_after_read_fail_error() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "shadow-tls: connection read failed",
+        )
+    }
+
+    fn poll_prepare_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.poll_drain_outbound(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => {
+                if self.read_error.is_some() {
+                    Poll::Ready(Err(Self::write_after_read_fail_error()))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            Poll::Ready(Err(_)) if self.read_error.is_some() => {
+                Poll::Ready(Err(Self::write_after_read_fail_error()))
+            }
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
@@ -931,13 +955,7 @@ impl AsyncWrite for VerifiedStream {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        ready!(this.poll_drain_outbound(cx))?;
-        if this.read_error.is_some() {
-            return Poll::Ready(Err(this
-                .read_error
-                .take()
-                .expect("read error after outbound drain")));
-        }
+        ready!(this.poll_prepare_write(cx)?);
         loop {
             if let WriteState::Active {
                 frame,
@@ -986,19 +1004,13 @@ impl AsyncWrite for VerifiedStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_drain_outbound(cx))?;
-        if let Some(error) = this.read_error.take() {
-            return Poll::Ready(Err(error));
-        }
+        ready!(this.poll_prepare_write(cx)?);
         Pin::new(&mut this.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        ready!(this.poll_drain_outbound(cx))?;
-        if let Some(error) = this.read_error.take() {
-            return Poll::Ready(Err(error));
-        }
+        ready!(this.poll_prepare_write(cx)?);
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
@@ -1656,6 +1668,10 @@ mod tests {
             }
         }
         assert!(got_error);
+        assert!(
+            stream.read_error.is_none(),
+            "read_error must be consumed by poll_read, not write paths"
+        );
         let mut accumulated = Vec::new();
         loop {
             let mut chunk = [0_u8; 64];
@@ -1672,10 +1688,14 @@ mod tests {
                 Poll::Ready(Err(error)) => panic!("peer read failed: {error}"),
             }
         }
-        assert!(
-            accumulated.iter().any(|byte| *byte == ALERT),
-            "expected TLS alert on wire, got {accumulated:?}"
+        assert_eq!(
+            accumulated.len(),
+            TLS_ALERT_RECORD_SIZE,
+            "expected one TLS alert record, got {accumulated:?}"
         );
+        assert_eq!(accumulated[0], ALERT);
+        assert_eq!(accumulated[3], 0);
+        assert_eq!(accumulated[4], 26);
     }
 
     #[test]
