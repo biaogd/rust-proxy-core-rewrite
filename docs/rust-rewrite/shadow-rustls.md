@@ -1,6 +1,6 @@
 # shadow-rustls dependency
 
-ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so we maintain a **fork** of rustls **0.23.43** and tokio-rustls **0.26.4** in the [`shadow-rustls`](../../shadow-rustls/) tree (canonical remote: `https://github.com/biaogd/shadow-rustls` once published).
+ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so we maintain a **fork** of rustls **0.23.43** and tokio-rustls **0.26.4** in the standalone repository [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls).
 
 ## Why fork, not patch-in-tree?
 
@@ -12,61 +12,35 @@ The old `rust/third_party/rustls` vendored copy duplicated the entire crate insi
 
 ```toml
 [patch.crates-io]
-rustls = { path = "../shadow-rustls/rustls" }
-tokio-rustls = { path = "../shadow-rustls/tokio-rustls" }
+rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
+tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
 ```
 
 Runtime use remains opt-in: only ShadowTLS / outbound TLS paths set `client_hello_fingerprint` or `connect_with_session_id_generator`.
 
-After publishing the standalone repo, prefer a git dependency:
+For local fork development, clone `shadow-rustls` next to this repo and temporarily switch to path patches:
 
 ```toml
-[patch.crates-io]
-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
-tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
+rustls = { path = "../shadow-rustls/rustls" }
+tokio-rustls = { path = "../shadow-rustls/tokio-rustls" }
 ```
 
-## Publish the standalone repository
+## Releases
 
-`biaogd/shadow-rustls` exists on GitHub but is still empty. The Cloud Agent (`cursor[bot]`) only has write access to `rust-proxy-core-rewrite`, not `shadow-rustls`. Publish from your machine (one command):
+| Tag | rustls base | tokio-rustls base |
+|-----|-------------|-------------------|
+| `rustls-0.23.43-shadow.1` | 0.23.43 | 0.26.4 |
 
-```bash
-# Option A — mirror the export branch (no local checkout of shadow-rustls needed)
-git clone --branch shadow-rustls-export --depth 1 \
-  https://github.com/biaogd/rust-proxy-core-rewrite.git /tmp/shadow-rustls-publish
-cd /tmp/shadow-rustls-publish
-git remote add origin https://github.com/biaogd/shadow-rustls.git
-git push -u origin shadow-rustls-export:main
-git tag -a rustls-0.23.43-shadow.1 -m "shadow-rustls release (rustls 0.23.43 base)"
-git push origin rustls-0.23.43-shadow.1
-```
-
-```bash
-# Option B — from a rust-proxy-core-rewrite checkout
-cd shadow-rustls
-chmod +x scripts/publish-to-github.sh
-./scripts/publish-to-github.sh
-```
-
-To let Cloud Agent push directly, configure the **Cursor GitHub App installation** (not only a collaborator invite):
-
-1. Open https://github.com/settings/installations
-2. Click **Cursor** → **Configure**
-3. **Repository access** → add `biaogd/shadow-rustls`
-4. Under **Permissions**, set **Contents** to **Read and write** → Save
-
-`git push` uses the App installation token (`cursor[bot]`). Collaborator-only access does not satisfy that path. Current status: read OK (`list_issues`), write still 403 (`contents` API).
-
-**CI mirror (no local clone):** add repository secret `SHADOW_RUSTLS_PUSH_TOKEN` (classic PAT with `repo` scope) to `rust-proxy-core-rewrite`, then run the **Sync shadow-rustls** workflow from the Actions tab (branch `cursor/ss-shadow-tls-a5b2` until merged). It pushes branch `shadow-rustls-export` to `biaogd/shadow-rustls` `main` and tags it.
-
-After the remote has content, bump `rust/Cargo.toml` to the git `tag`/`rev` below and delete the vendored `shadow-rustls/` directory (or convert it to a git submodule):
-
-```toml
-[patch.crates-io]
-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
-tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
-```
+Bump the `tag` in `rust/Cargo.toml` after publishing a new shadow-rustls release, then run `cargo update -p rustls -p tokio-rustls`.
 
 ## Patch summary
 
-See [`shadow-rustls/docs/PATCHES.md`](../../shadow-rustls/docs/PATCHES.md).
+See [shadow-rustls/docs/PATCHES.md](https://github.com/biaogd/shadow-rustls/blob/main/docs/PATCHES.md) on the fork repository.
+
+## Publishing updates
+
+1. Edit the fork on `github.com/biaogd/shadow-rustls`.
+2. Tag `rustls-<version>-shadow.<n>`.
+3. Bump the git `tag` in this repo's `[patch.crates-io]` section.
+
+The **Sync shadow-rustls** workflow (`.github/workflows/sync-shadow-rustls.yml`) can mirror branch `shadow-rustls-export` when secret `SHADOW_RUSTLS_PUSH_TOKEN` is configured; it is optional now that the remote is live.
