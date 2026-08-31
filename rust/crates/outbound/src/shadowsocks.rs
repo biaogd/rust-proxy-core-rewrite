@@ -43,6 +43,7 @@ pub struct ShadowsocksTcpOptions<'a> {
     pub clock: Option<Arc<rewrite_services::AdjustedClock>>,
     pub custom_roots: &'a [String],
     pub ech_config: Option<&'a [u8]>,
+    pub client_fingerprint: Option<&'a str>,
 }
 
 pub struct ShadowsocksUdpAssociation {
@@ -183,87 +184,7 @@ pub async fn connect_shadowsocks_with_plugin_options(
     let server_config = ServerConfig::new(destination_address(server), password, method)
         .map_err(|error| ShadowsocksProxyError::Configuration(error.to_string()))?;
     let stream = connect_with_options(server, allow_ipv6, options.socket).await?;
-    let stream: BoxedOutboundStream = match options.plugin {
-        Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => {
-            Box::new(HttpObfsClient::new(stream, host.clone(), server.port))
-        }
-        Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
-            Box::new(TlsObfsClient::new(stream, host.clone()))
-        }
-        Some(ShadowsocksPluginConfig::V2rayWebSocket {
-            host,
-            path,
-            headers,
-            tls,
-            skip_certificate_verification,
-            verification_name,
-            certificate_fingerprint,
-            certificate,
-            private_key,
-            mux,
-            http_upgrade,
-            http_upgrade_fast_open,
-            ..
-        }) => {
-            let stream = if *tls {
-                let server_name = headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-                    .map_or(host.as_str(), |(_, value)| value.as_str());
-                crate::wrap_client_tls_with_options(
-                    Box::new(stream),
-                    crate::HttpProxyTls {
-                        server_name,
-                        verification_name: verification_name.as_deref(),
-                        skip_certificate_verification: *skip_certificate_verification,
-                        fingerprint: certificate_fingerprint.as_deref(),
-                        certificate: certificate.as_deref(),
-                        private_key: private_key.as_deref(),
-                        custom_roots: options.custom_roots,
-                        ech_config: options.ech_config,
-                        alpn_protocols: &[b"http/1.1"],
-                    },
-                    options.clock,
-                )
-                .await
-                .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
-            } else {
-                Box::new(stream) as BoxedOutboundStream
-            };
-            let stream = if *http_upgrade {
-                crate::connect_v2ray_http_upgrade(
-                    stream,
-                    host,
-                    path,
-                    headers,
-                    *http_upgrade_fast_open,
-                )
-                .await
-                .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
-            } else {
-                crate::connect_v2ray_websocket(stream, host, server.port, path, headers)
-                    .await
-                    .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
-            };
-            if *mux {
-                Box::new(
-                    crate::V2rayMux::new(
-                        stream,
-                        &crate::V2rayMuxOptions {
-                            id: [0, 0],
-                            host: "127.0.0.1".to_owned(),
-                            port: 0,
-                            network: crate::V2rayMuxNetwork::Tcp,
-                        },
-                    )
-                    .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
-                )
-            } else {
-                stream
-            }
-        }
-        None => Box::new(stream),
-    };
+    let stream = apply_shadowsocks_plugin(Box::new(stream), server, options).await?;
     let context = Context::new_shared(ServerType::Local);
     let stream = ProxyClientStream::from_stream(
         context,
@@ -272,6 +193,132 @@ pub async fn connect_shadowsocks_with_plugin_options(
         destination_address(destination),
     );
     Ok(Box::new(stream))
+}
+
+async fn apply_v2ray_websocket_plugin(
+    stream: BoxedOutboundStream,
+    server: &Destination,
+    plugin: &ShadowsocksPluginConfig,
+    options: ShadowsocksTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
+    let ShadowsocksPluginConfig::V2rayWebSocket {
+        host,
+        path,
+        headers,
+        tls,
+        skip_certificate_verification,
+        verification_name,
+        certificate_fingerprint,
+        certificate,
+        private_key,
+        mux,
+        http_upgrade,
+        http_upgrade_fast_open,
+        ..
+    } = plugin
+    else {
+        unreachable!("apply_v2ray_websocket_plugin called with wrong plugin");
+    };
+    let stream = if *tls {
+        let server_name = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .map_or(host.as_str(), |(_, value)| value.as_str());
+        crate::wrap_client_tls_with_options(
+            stream,
+            crate::HttpProxyTls {
+                server_name,
+                verification_name: verification_name.as_deref(),
+                skip_certificate_verification: *skip_certificate_verification,
+                fingerprint: certificate_fingerprint.as_deref(),
+                certificate: certificate.as_deref(),
+                private_key: private_key.as_deref(),
+                custom_roots: options.custom_roots,
+                ech_config: options.ech_config,
+                alpn_protocols: &[b"http/1.1"],
+                tls12_only: false,
+                tls13_only: false,
+            },
+            options.clock,
+        )
+        .await
+        .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
+    } else {
+        stream
+    };
+    let stream = if *http_upgrade {
+        crate::connect_v2ray_http_upgrade(stream, host, path, headers, *http_upgrade_fast_open)
+            .await
+            .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
+    } else {
+        crate::connect_v2ray_websocket(stream, host, server.port, path, headers)
+            .await
+            .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?
+    };
+    Ok(if *mux {
+        Box::new(
+            crate::V2rayMux::new(
+                stream,
+                &crate::V2rayMuxOptions {
+                    id: [0, 0],
+                    host: "127.0.0.1".to_owned(),
+                    port: 0,
+                    network: crate::V2rayMuxNetwork::Tcp,
+                },
+            )
+            .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string()))?,
+        )
+    } else {
+        stream
+    })
+}
+
+async fn apply_shadowsocks_plugin(
+    stream: BoxedOutboundStream,
+    server: &Destination,
+    options: ShadowsocksTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
+    match options.plugin {
+        Some(ShadowsocksPluginConfig::SimpleObfsHttp { host }) => Ok(Box::new(
+            HttpObfsClient::new(stream, host.clone(), server.port),
+        )),
+        Some(ShadowsocksPluginConfig::SimpleObfsTls { host }) => {
+            Ok(Box::new(TlsObfsClient::new(stream, host.clone())))
+        }
+        Some(plugin @ ShadowsocksPluginConfig::V2rayWebSocket { .. }) => {
+            apply_v2ray_websocket_plugin(stream, server, plugin, options).await
+        }
+        Some(ShadowsocksPluginConfig::ShadowTls {
+            host,
+            password,
+            version,
+            skip_certificate_verification,
+            verification_name,
+            certificate_fingerprint,
+            certificate,
+            private_key,
+            alpn,
+        }) => crate::connect_shadow_tls(
+            stream,
+            crate::ShadowTlsConnectOptions {
+                host,
+                password,
+                version: *version,
+                skip_certificate_verification: *skip_certificate_verification,
+                verification_name: verification_name.as_deref(),
+                certificate_fingerprint: certificate_fingerprint.as_deref(),
+                certificate: certificate.as_deref(),
+                private_key: private_key.as_deref(),
+                custom_roots: options.custom_roots,
+                alpn,
+                client_fingerprint: options.client_fingerprint,
+            },
+            options.clock,
+        )
+        .await
+        .map_err(|error| ShadowsocksProxyError::Plugin(error.to_string())),
+        None => Ok(stream),
+    }
 }
 
 /// Opens a SIP004 UDP association while preserving the rewrite's platform

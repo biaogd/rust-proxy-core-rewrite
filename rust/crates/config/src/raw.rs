@@ -218,6 +218,8 @@ pub(crate) struct RawProxy {
     pub(crate) fingerprint: Option<String>,
     pub(crate) certificate: Option<String>,
     pub(crate) private_key: Option<String>,
+    #[serde(rename = "client-fingerprint")]
+    pub(crate) client_fingerprint: Option<String>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,

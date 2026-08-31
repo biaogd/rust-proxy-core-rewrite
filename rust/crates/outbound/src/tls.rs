@@ -21,6 +21,7 @@ use tokio_rustls::rustls::{
 use crate::http::HttpProxyError;
 
 #[derive(Clone, Copy, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct HttpProxyTls<'a> {
     pub server_name: &'a str,
     pub verification_name: Option<&'a str>,
@@ -31,6 +32,8 @@ pub struct HttpProxyTls<'a> {
     pub custom_roots: &'a [String],
     pub ech_config: Option<&'a [u8]>,
     pub alpn_protocols: &'a [&'a [u8]],
+    pub tls12_only: bool,
+    pub tls13_only: bool,
 }
 
 #[derive(Debug)]
@@ -197,11 +200,7 @@ impl ServerCertVerifier for FingerprintVerification {
     }
 }
 
-pub(crate) fn client_config(
-    tls: HttpProxyTls<'_>,
-    clock: Option<Arc<rewrite_services::AdjustedClock>>,
-) -> Result<ClientConfig, HttpProxyError> {
-    let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
+fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, HttpProxyError> {
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     for certificate in native.certs {
@@ -219,7 +218,7 @@ pub(crate) fn client_config(
             .add(certificate)
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
     }
-    for pem in tls.custom_roots {
+    for pem in custom_roots {
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
@@ -229,6 +228,15 @@ pub(crate) fn client_config(
                 .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
         }
     }
+    Ok(roots)
+}
+
+pub(crate) fn client_config(
+    tls: HttpProxyTls<'_>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<ClientConfig, HttpProxyError> {
+    let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
+    let roots = load_root_store(tls.custom_roots)?;
     let builder = if let Some(ech_config) = tls.ech_config {
         let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         let ech_config = EchConfig::new(EchConfigListBytes::from(ech_config), ALL_SUPPORTED_SUITES)
@@ -238,9 +246,19 @@ pub(crate) fn client_config(
             .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
     } else {
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-        ClientConfig::builder_with_details(provider, clock)
-            .with_safe_default_protocol_versions()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        if tls.tls12_only {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        } else if tls.tls13_only {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        } else {
+            ClientConfig::builder_with_details(provider, clock)
+                .with_safe_default_protocol_versions()
+                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+        }
     };
     let builder = if let Some(fingerprint) = tls.fingerprint {
         let normalized = fingerprint.trim().replace(':', "");

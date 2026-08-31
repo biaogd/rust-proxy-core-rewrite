@@ -374,6 +374,8 @@ pub(super) async fn measure_http_delay(
                         custom_roots: &config.trust_certificates,
                         ech_config: None,
                         alpn_protocols: &[],
+                        tls12_only: false,
+                        tls13_only: false,
                     });
                     rewrite_outbound::connect_http_with_options(
                         &server,
@@ -399,6 +401,8 @@ pub(super) async fn measure_http_delay(
                         custom_roots: &config.trust_certificates,
                         ech_config: None,
                         alpn_protocols: &[],
+                        tls12_only: false,
+                        tls13_only: false,
                     });
                     rewrite_outbound::connect_socks5_with_options(
                         &server,
@@ -448,6 +452,7 @@ pub(super) async fn measure_http_delay(
                             clock: None,
                             custom_roots: &config.trust_certificates,
                             ech_config: resolved_ech.as_deref().or(inline_ech),
+                            client_fingerprint: proxy.client_fingerprint.as_deref(),
                         },
                     )
                     .await

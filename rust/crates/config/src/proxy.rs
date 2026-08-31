@@ -200,6 +200,7 @@ fn parse_remote_proxy(
             .filter(|value| !value.is_empty())
             .map(|value| resolve_controller_pem(value, home_directory))
             .transpose()?,
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
@@ -251,6 +252,10 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
+    let client_fingerprint = proxy.client_fingerprint.filter(|value| !value.is_empty());
+    if let Some(ShadowsocksPluginConfig::ShadowTls { version, .. }) = &shadowsocks_plugin {
+        validate_shadow_tls_client_fingerprint(&name, client_fingerprint.as_deref(), *version)?;
+    }
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,
         2 => 2,
@@ -271,12 +276,33 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         fingerprint: None,
         certificate: None,
         private_key: None,
+        client_fingerprint,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
         shadowsocks_plugin,
         headers: BTreeMap::new(),
     })
+}
+
+fn validate_shadow_tls_client_fingerprint(
+    proxy_name: &str,
+    fingerprint: Option<&str>,
+    version: u8,
+) -> Result<(), ConfigError> {
+    let Some(raw) = fingerprint.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if raw.eq_ignore_ascii_case("none") {
+        return Ok(());
+    }
+    if version == 1 {
+        return Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()));
+    }
+    if raw.eq_ignore_ascii_case("chrome") {
+        return Ok(());
+    }
+    Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()))
 }
 
 fn validate_shadowsocks_key(
@@ -356,7 +382,79 @@ fn parse_shadowsocks_plugin(
                 .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
             Some(parse_v2ray_plugin(name, options)?)
         }
+        Some("shadow-tls") => {
+            let options = proxy
+                .plugin_opts
+                .as_ref()
+                .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+            Some(parse_shadow_tls_plugin(name, options)?)
+        }
         _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    })
+}
+
+fn parse_shadow_tls_plugin(
+    name: &str,
+    options: &BTreeMap<String, serde_yaml_ng::Value>,
+) -> Result<ShadowsocksPluginConfig, ConfigError> {
+    let host = plugin_string(options, "host")
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?
+        .to_owned();
+    let password = plugin_string(options, "password")
+        .unwrap_or_default()
+        .to_owned();
+    let version = match options.get("version") {
+        None => 2,
+        Some(value) => {
+            plugin_u8(value).ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?
+        }
+    };
+    if options.contains_key("skip-cert-verify")
+        && plugin_bool(options, "skip-cert-verify").is_none()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let alpn = match options.get("alpn") {
+        None => vec!["h2".to_owned(), "http/1.1".to_owned()],
+        Some(serde_yaml_ng::Value::Sequence(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .ok_or(())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| ConfigError::UnsupportedProxy(name.to_owned()))?,
+        Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    };
+    let verification_name = plugin_string(options, "name-cert-verify")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let certificate_fingerprint = plugin_string(options, "fingerprint")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let certificate = plugin_string(options, "certificate")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let private_key = plugin_string(options, "private-key")
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if certificate.is_some() != private_key.is_some() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(ShadowsocksPluginConfig::ShadowTls {
+        host,
+        password,
+        version,
+        skip_certificate_verification: plugin_bool(options, "skip-cert-verify").unwrap_or(false),
+        verification_name,
+        certificate_fingerprint,
+        certificate,
+        private_key,
+        alpn,
     })
 }
 
@@ -479,6 +577,16 @@ fn plugin_bool(options: &BTreeMap<String, serde_yaml_ng::Value>, key: &str) -> O
     })
 }
 
+fn plugin_u8(value: &serde_yaml_ng::Value) -> Option<u8> {
+    match value {
+        serde_yaml_ng::Value::Number(number) => {
+            number.as_u64().and_then(|value| u8::try_from(value).ok())
+        }
+        serde_yaml_ng::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
 fn plugin_headers(
     options: &BTreeMap<String, serde_yaml_ng::Value>,
     key: &str,
@@ -561,6 +669,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         fingerprint: None,
         certificate: None,
         private_key: None,
+        client_fingerprint: None,
         udp: true,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,

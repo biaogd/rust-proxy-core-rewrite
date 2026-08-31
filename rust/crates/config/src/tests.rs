@@ -1252,6 +1252,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 fingerprint: None,
                 certificate: None,
                 private_key: None,
+                client_fingerprint: None,
                 udp: false,
                 udp_over_tcp: false,
                 udp_over_tcp_version: 1,
@@ -1328,6 +1329,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             fingerprint: None,
             certificate: None,
             private_key: None,
+            client_fingerprint: None,
             udp: false,
             udp_over_tcp: false,
             udp_over_tcp_version: 1,
@@ -1846,6 +1848,121 @@ fn parses_phase6c_v2ray_plugin_dns_ech() {
         ech,
         &Some(rewrite_model::V2rayEchConfig::Dns {
             query_server_name: Some("ech.example".to_owned()),
+        })
+    );
+}
+
+#[test]
+fn parses_phase6c_shadowsocks_shadow_tls_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6C shadow-tls config");
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {
+            host: "phase6c-shadow-tls.example".to_owned(),
+            password: "phase6c-shadow-tls-plugin-password".to_owned(),
+            version: 3,
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
+        })
+    );
+    for extra in [
+        "plugin: shadow-tls\n",
+        "plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n    udp-over-tcp: true\n",
+    ] {
+        let invalid = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    {extra}"
+        );
+        assert!(matches!(
+            Config::from_yaml(&invalid),
+            Err(ConfigError::UnsupportedProxy(_))
+        ));
+    }
+}
+
+#[test]
+fn parses_shadowsocks_shadow_tls_production_plugin_opts() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      skip-cert-verify: true\n      name-cert-verify: camouflage.example\n      fingerprint: \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"\n      alpn:\n        - http/1.1\n"
+    );
+    let config = Config::from_yaml(&source).expect("shadow-tls production opts");
+    assert_eq!(
+        config.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {
+            host: "phase6c-shadow-tls.example".to_owned(),
+            password: "phase6c-shadow-tls-plugin-password".to_owned(),
+            version: 2,
+            skip_certificate_verification: true,
+            verification_name: Some("camouflage.example".to_owned()),
+            certificate_fingerprint: Some(
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_owned()
+            ),
+            certificate: None,
+            private_key: None,
+            alpn: vec!["http/1.1".to_owned()],
+        })
+    );
+}
+
+#[test]
+fn rejects_shadow_tls_v1_client_fingerprint_at_load_time() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 1\n      skip-cert-verify: true\n"
+    );
+    assert!(matches!(
+        Config::from_yaml(&source),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
+}
+
+#[test]
+fn rejects_unsupported_shadow_tls_client_fingerprint_at_load_time() {
+    for fingerprint in ["safari", "firefox", "chrome120"] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: {fingerprint}\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+        );
+        assert!(
+            matches!(
+                Config::from_yaml(&source),
+                Err(ConfigError::UnsupportedProxy(_))
+            ),
+            "expected reject for {fingerprint}"
+        );
+    }
+}
+
+#[test]
+fn accepts_shadow_tls_v3_chrome_client_fingerprint_at_load_time() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("v3 chrome fingerprint");
+    assert_eq!(
+        config.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {
+            host: "phase6c-shadow-tls.example".to_owned(),
+            password: "phase6c-shadow-tls-plugin-password".to_owned(),
+            version: 3,
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
         })
     );
 }

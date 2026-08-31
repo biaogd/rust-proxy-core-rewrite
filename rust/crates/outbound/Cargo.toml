@@ -18,7 +18,9 @@ httparse.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-services = { path = "../services" }
+hmac.workspace = true
 rand.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 shadowsocks.workspace = true
 rustls-native-certs.workspace = true
@@ -26,6 +28,8 @@ rustls-pemfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1", package = "rustls" }
+shadow-tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1", package = "tokio-rustls", default-features = false, features = ["aws_lc_rs", "brotli", "ring", "tls12"] }
 tokio-tungstenite.workspace = true
 url.workspace = true
 

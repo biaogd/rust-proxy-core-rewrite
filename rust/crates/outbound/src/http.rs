@@ -153,6 +153,8 @@ pub async fn wrap_client_tls(
         custom_roots,
         ech_config: None,
         alpn_protocols: &[],
+        tls12_only: false,
+        tls13_only: false,
     };
     wrap_client_tls_with_options(stream, tls, clock).await
 }
