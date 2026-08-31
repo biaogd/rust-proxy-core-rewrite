@@ -7,9 +7,9 @@ use hmac::{Hmac, Mac};
 use rand::RngExt;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use shadow_rustls::pki_types::ServerName;
 use shadow_tokio_rustls::TlsConnector;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::shadow_tls_config::shadow_client_config;
 use crate::tls::HttpProxyTls;
@@ -57,9 +57,8 @@ pub struct ShadowTlsConnectOptions<'a> {
     /// `chrome`, the vendored rustls `ClientHello` is reshaped toward uTLS
     /// `HelloChrome_Auto` (cipher list minus rustls-unsupported suites, GREASE,
     /// shuffled middle extensions, `BoringGREASEECH`). This is a **partial**
-    /// fingerprint vs full Chrome 133 (RSA/CBC suites omitted). Other Clash/uTLS
-    /// `ios`, `edge`, `android`, `360`, `qq`, `chrome120`, …) are accepted but
-    /// leave the default rustls `ClientHello` until dedicated parrots exist.
+    /// fingerprint vs full Chrome 133 (RSA/CBC suites omitted). Only `chrome` is
+    /// supported; any other non-empty label is rejected at TLS config time.
     /// Empty/`none` keeps the default rustls `ClientHello`. Session-id HMAC for
     /// v3 is independent.
     pub client_fingerprint: Option<&'a str>,

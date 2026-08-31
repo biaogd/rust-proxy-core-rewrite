@@ -49,7 +49,8 @@ fn main() {
     config.enable_sni = true;
 
     let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
-    let mut conn = shadow_rustls::ClientConnection::new(Arc::new(config), server_name).expect("conn");
+    let mut conn =
+        shadow_rustls::ClientConnection::new(Arc::new(config), server_name).expect("conn");
     let mut sock = TcpStream::connect(addr).expect("connect");
     {
         let mut tls = shadow_rustls::Stream::new(&mut conn, &mut sock);

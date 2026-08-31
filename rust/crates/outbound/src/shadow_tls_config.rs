@@ -273,8 +273,6 @@ pub(crate) fn shadow_client_config(
         clock: clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default())),
     });
     let roots = load_root_store(tls.custom_roots)?;
-    let chrome = client_hello_fingerprint
-        .is_some_and(|value| value.eq_ignore_ascii_case("chrome"));
     // Chrome fingerprint needs aws-lc so X25519MLKEM768 key shares can be offered.
     let provider = Arc::new(shadow_rustls::crypto::aws_lc_rs::default_provider());
     let builder = if tls.tls12_only {
@@ -345,10 +343,23 @@ pub(crate) fn shadow_client_config(
             "client certificate and private key must be configured together".to_owned(),
         )),
     }?;
-    config.alpn_protocols = tls.alpn_protocols.iter().map(|value| value.to_vec()).collect();
-    if chrome {
-        config.client_hello_fingerprint = Some(ClientHelloFingerprint::Chrome);
-        config.client_hello_fingerprint_mlkem = client_hello_fingerprint_mlkem;
+    config.alpn_protocols = tls
+        .alpn_protocols
+        .iter()
+        .map(|value| value.to_vec())
+        .collect();
+    match client_hello_fingerprint {
+        None | Some("") => {}
+        Some(value) if value.eq_ignore_ascii_case("none") => {}
+        Some(value) if value.eq_ignore_ascii_case("chrome") => {
+            config.client_hello_fingerprint = Some(ClientHelloFingerprint::Chrome);
+            config.client_hello_fingerprint_mlkem = client_hello_fingerprint_mlkem;
+        }
+        Some(value) => {
+            return Err(HttpProxyError::TlsConfiguration(format!(
+                "unsupported ShadowTLS client-fingerprint: {value}"
+            )));
+        }
     }
     Ok(config)
 }
@@ -545,7 +556,7 @@ mod chrome_fingerprint_tests {
     }
 
     #[test]
-    fn non_chrome_fingerprint_names_stay_rustls_default() {
+    fn unsupported_fingerprint_names_are_rejected() {
         for name in [
             "firefox",
             "safari",
@@ -555,12 +566,32 @@ mod chrome_fingerprint_tests {
             "360",
             "qq",
             "chrome120",
+            "random",
         ] {
-            let raw = capture_client_hello(Some(name));
-            let (ciphers, _, _) = parse_client_hello(&raw);
+            let error = shadow_client_config(
+                HttpProxyTls {
+                    server_name: "phase6c-shadow-tls.example",
+                    verification_name: None,
+                    skip_certificate_verification: true,
+                    fingerprint: None,
+                    certificate: None,
+                    private_key: None,
+                    custom_roots: &[],
+                    ech_config: None,
+                    alpn_protocols: &[b"h2", b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                },
+                Some(name),
+                true,
+                None,
+            )
+            .expect_err(name);
             assert!(
-                !ciphers.iter().any(|c| is_grease(*c)),
-                "{name} should not get chrome GREASE shaping"
+                error
+                    .to_string()
+                    .contains("unsupported ShadowTLS client-fingerprint"),
+                "{name}: {error}"
             );
         }
     }
