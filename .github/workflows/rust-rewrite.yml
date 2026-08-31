@@ -178,7 +178,7 @@ jobs:
           - shard: groups-providers
             regex: 'phase5c_[a-z0-9_]+\.py$'
           - shard: controller-services-outbound
-            regex: 'phase(5d|5e|6b|6c)_[a-z0-9_]+\.py$'
+            regex: 'phase(5d|5e|6b|6c|6d)_[a-z0-9_]+\.py$'
           - shard: local-runtime
             regex: 'phase5f_[a-z0-9_]+\.py$'
           - shard: builtins
@@ -264,6 +264,7 @@ jobs:
       PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DPROXIES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DTRANSPORT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target

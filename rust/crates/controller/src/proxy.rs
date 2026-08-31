@@ -458,6 +458,18 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Vmess => {
+                    let vmess = proxy.vmess.as_ref().ok_or(())?;
+                    rewrite_outbound::connect_vmess_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        &vmess.uuid,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -689,6 +701,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Http => "Http",
         rewrite_config::ProxyKind::Socks5 => "Socks5",
         rewrite_config::ProxyKind::Shadowsocks => "Shadowsocks",
+        rewrite_config::ProxyKind::Vmess => "Vmess",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -700,7 +713,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vmess => false,
     };
     json!({
         "alive": health.alive,
@@ -717,7 +730,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         "tfo": false,
         "type": kind,
         "udp": udp,
-        "uot": proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp,
+        "uot": proxy.kind == rewrite_config::ProxyKind::Vmess
+            || (proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp),
         "xudp": false,
     })
 }
@@ -845,7 +859,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vmess => false,
         };
     }
     let Some(group) = config

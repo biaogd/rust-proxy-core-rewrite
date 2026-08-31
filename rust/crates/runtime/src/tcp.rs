@@ -507,10 +507,35 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::Vmess => {
+            connect_vmess_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+async fn connect_vmess_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let vmess = proxy
+        .vmess
+        .as_ref()
+        .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
+    rewrite_outbound::connect_vmess_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        &vmess.uuid,
+        socket_options,
+    )
+    .await
+    .map_err(|error| format!("VMess proxy connection failed: {error}"))
 }
 
 async fn connect_shadowsocks_proxy(

@@ -2810,6 +2810,7 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.20",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2909,8 +2910,12 @@ dependencies = [
 name = "rewrite-outbound"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
  "base64 0.22.1",
  "bytes",
+ "chacha20poly1305 0.10.1",
+ "crc32fast",
  "fast-socks5",
  "futures-util",
  "hex",
@@ -2919,6 +2924,7 @@ dependencies = [
  "httparse",
  "hyper",
  "hyper-util",
+ "md-5 0.10.6",
  "rand 0.10.2",
  "rewrite-model",
  "rewrite-platform",
@@ -2928,12 +2934,14 @@ dependencies = [
  "rustls-pemfile",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "sha3",
  "shadowsocks",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
  "tokio-tungstenite",
+ "tokio-util",
  "url",
 ]
 

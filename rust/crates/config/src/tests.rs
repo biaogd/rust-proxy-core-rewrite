@@ -1257,6 +1257,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 udp_over_tcp: false,
                 udp_over_tcp_version: 1,
                 shadowsocks_plugin: None,
+                vmess: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1334,6 +1335,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             udp_over_tcp: false,
             udp_over_tcp_version: 1,
             shadowsocks_plugin: None,
+            vmess: None,
             headers: BTreeMap::new(),
         }],
     };
@@ -1473,6 +1475,56 @@ fn parses_phase6b_http_and_socks5_tls_options() {
         Config::from_yaml(&invalid_pair),
         Err(ConfigError::UnsupportedProxy(_))
     ));
+}
+
+#[test]
+fn parses_phase6d_a_vmess_native_tcp_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: tcp\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-A VMess config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vmess);
+    assert_eq!(proxy.server, "127.0.0.1");
+    assert_eq!(proxy.port, 10002);
+    assert_eq!(proxy.cipher.as_deref(), Some("auto"));
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| vmess.uuid),
+        Some([
+            0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
+            0x08, 0x11,
+        ])
+    );
+    assert!(!proxy.udp);
+}
+
+#[test]
+fn phase6d_a_vmess_rejects_fields_outside_native_tcp_scope() {
+    let base = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
+    );
+    for extra in [
+        "    alterId: 1\n",
+        "    cipher: none\n",
+        "    network: ws\n",
+        "    tls: true\n",
+        "    udp: true\n",
+        "    packet-addr: true\n",
+        "    uuid: invalid\n",
+    ] {
+        let source = if extra.starts_with("    uuid:") {
+            base.replace("    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n", extra)
+        } else {
+            format!("{base}{extra}")
+        };
+        assert!(
+            matches!(
+                Config::from_yaml(&source),
+                Err(ConfigError::UnsupportedProxy(_))
+            ),
+            "unexpectedly accepted {extra:?}"
+        );
+    }
 }
 
 #[test]

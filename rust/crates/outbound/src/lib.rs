@@ -11,6 +11,7 @@ mod simple_obfs;
 mod socks5;
 mod tls;
 mod v2ray_mux;
+mod vmess;
 mod websocket;
 
 pub use direct::{DirectError, DirectTcpOptions, connect, connect_with_options};
@@ -36,6 +37,7 @@ pub use socks5::{
 };
 pub use tls::HttpProxyTls;
 pub use v2ray_mux::{V2rayMux, V2rayMuxNetwork, V2rayMuxOptions};
+pub use vmess::{VmessProxyError, connect_vmess_with_options};
 pub use websocket::{WebSocketIo, connect_v2ray_websocket, connect_websocket};
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}

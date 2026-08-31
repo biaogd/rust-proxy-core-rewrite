@@ -13,6 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
+    VmessProxyConfig,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -129,6 +130,7 @@ pub(crate) fn parse_proxies(
                 )?);
             }
             Some("ss") => outbounds.push(parse_shadowsocks_proxy(name, proxy)?),
+            Some("vmess") => outbounds.push(parse_vmess_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -154,6 +156,9 @@ fn parse_remote_proxy(
         || proxy.target_sub_rule.is_some()
         || (!allow_tls && has_tls_options)
         || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -212,6 +217,7 @@ fn parse_remote_proxy(
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
+        vmess: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -220,6 +226,9 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
+        || proxy.uuid.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -283,6 +292,73 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
         shadowsocks_plugin,
+        vmess: None,
+        headers: BTreeMap::new(),
+    })
+}
+
+fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.tls.unwrap_or(false)
+        || proxy.udp.unwrap_or(false)
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.headers.is_some()
+        || proxy.alter_id.unwrap_or_default() != 0
+        || !matches!(proxy.network.as_deref(), None | Some("tcp"))
+        || proxy.cipher.as_deref().unwrap_or("auto") != "auto"
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let uuid = proxy
+        .uuid
+        .as_deref()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(|value| *value.as_bytes())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Vmess,
+        server,
+        port,
+        username: None,
+        password: None,
+        cipher: Some("auto".to_owned()),
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        udp: false,
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: Some(VmessProxyConfig { uuid }),
         headers: BTreeMap::new(),
     })
 }
@@ -656,6 +732,9 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.username.is_some()
         || proxy.password.is_some()
         || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()
@@ -692,6 +771,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
+        vmess: None,
         headers: BTreeMap::new(),
     }
 }
@@ -1050,6 +1130,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Http => "Http",
             ProxyKind::Socks5 => "Socks5",
             ProxyKind::Shadowsocks => "Shadowsocks",
+            ProxyKind::Vmess => "Vmess",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",

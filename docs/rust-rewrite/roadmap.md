@@ -1849,6 +1849,57 @@ an unimplemented behavior cannot be accepted silently. The common listener
 `proxy` gap is distinct from the implemented
 `shadow-tls.handshake.proxy` field.
 
+### Phase 6D-A accepted scope — VMess AEAD native-TCP client
+
+This slice changes inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, **VMess**,
+**Darwin arm64 — Phase 6D-A VMess AEAD native TCP** and
+**Linux amd64 — Phase 6D-A VMess AEAD native TCP**. `OUT-22` remains open:
+this phase deliberately does not add or claim a shared outer transport.
+
+The external path starts with a top-level YAML `type: vmess` proxy consumed
+directly and through one selector/file-provider path, enters through the
+existing mixed HTTP or SOCKS listener, selects the VMess member through an
+existing rule/group, and ends at an observable TCP echo result behind a local
+VMess AEAD authority. The accepted protocol/configuration scope is:
+
+- `server`, nonzero `port`, RFC 4122 `uuid`, `alterId: 0`, and
+  `cipher: auto`;
+- VMess AEAD request/response headers and AEAD body records over a native TCP
+  transport with no TLS or transport plugin;
+- domain and IPv4 destinations, binary small/large bidirectional relay,
+  connection failure, wrong credentials, server close and bounded process
+  shutdown;
+- fail-closed rejection of unsupported VMess fields and values, including
+  nonzero `alterId`, UDP, TLS, non-TCP `network`, transport/security options
+  and unknown fields;
+- exact controller capability fields and selector/provider membership already
+  shared by implemented adapters.
+
+`compat/scripts/phase6d_vmess_tcp.py` is the Go/Rust differential gate. Both
+clients run the same generated configuration against the same deterministic
+local authority. The authority independently opens the request header,
+validates the destination and records, and emits a conforming response; unit
+tests also pin KDF, Auth ID, header layout, address encoding, response
+verification and record nonces. Random Auth IDs, nonces, padding and timestamps
+are validated structurally rather than normalized into byte equality.
+
+No narrowly scoped, maintained embeddable VMess client crate was available at
+the phase boundary. Depending on an entire alternate proxy core would also
+import unrelated configuration, routing and transport policy. The product
+therefore keeps a small adapter boundary and uses maintained RustCrypto
+primitives (`aes`, `aes-gcm`, `chacha20poly1305`, `md-5`, `sha2`, `sha3`)
+rather than
+implementing cryptographic primitives. This decision must be revisited before
+expanding beyond the declared protocol core.
+
+This phase does not claim `cipher` modes beyond the oracle behavior selected by
+`auto`, legacy VMess headers or AlterID, UDP/XUDP/packet-address modes,
+authenticated-length/global-padding, TLS, WebSocket, HTTP, HTTP/2, gRPC,
+HTTPUpgrade, mKCP, Mekya, Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux,
+health-check breadth, VMess inbound/server behavior or cross-platform runtime
+parity. Every excluded field is rejected rather than silently ignored.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
