@@ -420,9 +420,11 @@ mod tests {
 
         let results = accept_task.await.expect("accept task");
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|result| matches!(result, ShadowTlsAcceptResult::FallbackCompleted)));
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result, ShadowTlsAcceptResult::FallbackCompleted))
+        );
         hs_task.await.expect("hs");
     }
 
@@ -442,9 +444,8 @@ mod tests {
         let relay_addr = relay_listener.local_addr().expect("addr");
         let relay_task = tokio::spawn(async move {
             let (mut inbound, _) = relay_listener.accept().await.expect("accept");
-            let mut upstream: BoxedOutboundStream = Box::new(
-                TcpStream::connect(hs_addr).await.expect("connect"),
-            );
+            let mut upstream: BoxedOutboundStream =
+                Box::new(TcpStream::connect(hs_addr).await.expect("connect"));
             relay_fallback(&mut inbound, &mut upstream, None).await
         });
 

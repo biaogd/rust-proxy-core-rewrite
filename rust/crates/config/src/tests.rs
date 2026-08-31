@@ -2293,6 +2293,66 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn rejects_unimplemented_named_shadowsocks_fields() {
+    for field in [
+        "rule: MATCH,DIRECT",
+        "proxy: DIRECT",
+        "routing-mark: 1",
+        "mux-option: {}",
+        "res-tls: {}",
+        "jls-config: {}",
+        "kcp-tun: {}",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18402\n    cipher: aes-128-gcm\n    password: phase6c-password\n    {field}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("unsupported field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected error for {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unimplemented_or_unknown_shadowsocks_plugin_fields() {
+    for field in [
+        "handshake-for-server-name: {}",
+        "wildcard-sni: example.com",
+        "unknown-shadow-option: true",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-stls-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18403\n    cipher: aes-128-gcm\n    password: phase6c-password\n    shadow-tls:\n      enable: true\n      version: 3\n      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n      handshake:\n        dest: 127.0.0.1:9443\n      {field}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("unsupported field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected error for {field}: {error}"
+        );
+    }
+
+    for nested in [
+        "      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n      handshake:\n        dest: 127.0.0.1:9443\n        unknown-handshake-option: true",
+        "      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n          unknown-user-option: true\n      handshake:\n        dest: 127.0.0.1:9443",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-stls-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18404\n    cipher: aes-128-gcm\n    password: phase6c-password\n    shadow-tls:\n      enable: true\n      version: 3\n{nested}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("nested unknown field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected nested error: {error}"
+        );
+    }
+
+    let obfs = Config::from_yaml(
+        "mode: rule\nlisteners:\n  - name: ss-obfs-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18405\n    cipher: aes-128-gcm\n    password: phase6c-password\n    simple-obfs:\n      enable: true\n      mode: http\n      host: ignored.example\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect_err("unknown simple-obfs field must be rejected");
+    assert!(obfs.to_string().contains("unsupported field"));
+}
+
+#[test]
 fn rejects_named_shadowsocks_shadow_tls_v1_at_load_time() {
     let error = Config::from_yaml(
         r"mode: rule

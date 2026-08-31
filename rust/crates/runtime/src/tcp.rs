@@ -638,31 +638,30 @@ pub(super) async fn dial_shadow_tls_handshake(
     let mut metadata = Metadata::new(destination, InboundProtocol::Inner);
     metadata.network = rewrite_model::Network::Tcp;
 
-    let (decision, outbound_target, traversed_groups) = if let Some(proxy_name) =
-        proxy.filter(|name| !name.is_empty())
-    {
-        let decision = rewrite_rules::Decision {
-            target: proxy_name.to_owned(),
-            matched_kind: None,
-            rematch_cycle: false,
-            rematch_name: String::new(),
-            special_rules: String::new(),
+    let (decision, outbound_target, traversed_groups) =
+        if let Some(proxy_name) = proxy.filter(|name| !name.is_empty()) {
+            let decision = rewrite_rules::Decision {
+                target: proxy_name.to_owned(),
+                matched_kind: None,
+                rematch_cycle: false,
+                rematch_name: String::new(),
+                special_rules: String::new(),
+            };
+            resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("shadow-tls handshake proxy not found: {proxy_name}"),
+                )
+            })?
+        } else {
+            let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+            resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "shadow-tls handshake routing failed",
+                )
+            })?
         };
-        resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("shadow-tls handshake proxy not found: {proxy_name}"),
-            )
-        })?
-    } else {
-        let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
-        resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "shadow-tls handshake routing failed",
-            )
-        })?
-    };
     let route = resolved_route(&outbound_target, config);
     if route == Route::Reject || matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
         return Err(std::io::Error::new(

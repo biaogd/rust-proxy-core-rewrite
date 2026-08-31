@@ -1744,10 +1744,7 @@ async fn handle_shadowsocks_inbound_tcp(
                 Ok(ShadowTlsAcceptResult::FallbackCompleted) => return,
                 Ok(ShadowTlsAcceptResult::Authenticated { stream, user }) => (stream, Some(user)),
                 Err(error) => {
-                    connection_state.log(
-                        "error",
-                        format!("shadow-tls accept failed: {error}"),
-                    );
+                    connection_state.log("error", format!("shadow-tls accept failed: {error}"));
                     return;
                 }
             }
@@ -1848,8 +1845,7 @@ async fn serve_shadowsocks_inbound_after_handshake(
     if let Some(user) = shadow_tls_user {
         metadata.inbound_user = user;
     }
-    let client: BoxedInboundStream =
-        Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
+    let client: BoxedInboundStream = Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
     serve_shadowsocks_connection(
         client,
         metadata,

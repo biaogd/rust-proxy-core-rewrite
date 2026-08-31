@@ -25,7 +25,7 @@ from phase1 import (
     wait_for_linux_signal_handlers,
     wait_ready,
 )
-from phase6b_http import ConnectProxyServer
+from phase6b_http import AUTHORIZATION, ConnectProxyServer
 from phase3 import UdpEchoHandler, launch, stop
 from phase4 import dns_query
 from phase5b1a import build_binaries, debug_files
@@ -1155,6 +1155,20 @@ def _shadow_tls_fallback_probe(ss_port: int) -> subprocess.Popen[bytes]:
     )
 
 
+def _observed_handshake_proxy(
+    upstream: ConnectProxyServer,
+    camouflage_port: int,
+) -> bool:
+    expected = f"127.0.0.1:{camouflage_port}"
+    return any(
+        observation.get("method") == "CONNECT"
+        and observation.get("target") == expected
+        and observation.get("host") == expected
+        and observation.get("authorization") == AUTHORIZATION
+        for observation in upstream.observations
+    )
+
+
 def exercise_shadow_tls_handshake_proxy_leaf(
     binary: pathlib.Path,
     client: pathlib.Path,
@@ -1210,17 +1224,20 @@ listeners:
             plugin_password=STLS_PASSWORD,
             plugin_version=3,
         )
+        upstream.observations.clear()
+        echoed = proxied_echo(
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
         return {
-            "shadow-tls-handshake-proxy-leaf": proxied_echo(
-                client,
-                ss_port,
-                echo.port,
-                payload=TCP_STLS_PAYLOAD,
-                obfs_mode="shadow-tls",
-                obfs_host=STLS_HOST,
-                plugin_password=STLS_PASSWORD,
-                plugin_version=3,
-            ),
+            "shadow-tls-handshake-proxy-leaf": echoed
+            and _observed_handshake_proxy(upstream, camouflage_port),
         }
     finally:
         stop(process)
@@ -1292,17 +1309,20 @@ listeners:
             plugin_password=STLS_PASSWORD,
             plugin_version=3,
         )
+        upstream.observations.clear()
+        echoed = proxied_echo(
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
         return {
-            "shadow-tls-handshake-proxy-group": proxied_echo(
-                client,
-                ss_port,
-                echo.port,
-                payload=TCP_STLS_PAYLOAD,
-                obfs_mode="shadow-tls",
-                obfs_host=STLS_HOST,
-                plugin_password=STLS_PASSWORD,
-                plugin_version=3,
-            ),
+            "shadow-tls-handshake-proxy-group": echoed
+            and _observed_handshake_proxy(upstream, camouflage_port),
         }
     finally:
         stop(process)
@@ -1344,7 +1364,8 @@ listeners:
       handshake:
         dest: 127.0.0.1:{camouflage_port}
 rules:
-  - IN-TYPE,INNER,DIRECT
+  - AND,((IN-TYPE,INNER),(DST-PORT,{camouflage_port})),DIRECT
+  - AND,((IN-TYPE,SHADOWSOCKS),(DST-PORT,{camouflage_port})),REJECT
   - IN-TYPE,SHADOWSOCKS,DIRECT
   - MATCH,REJECT
 """
@@ -1432,6 +1453,8 @@ rules:
         )
         probe = _shadow_tls_fallback_probe(ss_port)
         time.sleep(0.2)
+        if probe.poll() is not None:
+            raise RuntimeError("shadow-tls fallback probe exited before shutdown")
         shutdown_started = time.monotonic()
         if os.name == "nt":
             process.terminate()
@@ -1502,14 +1525,53 @@ rules:
         )
         probe = _shadow_tls_fallback_probe(ss_port)
         time.sleep(0.2)
+        if probe.poll() is not None:
+            raise RuntimeError("shadow-tls fallback probe exited before reload")
+        config.write_text(
+            f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-shadow-tls-fallback-reload
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER}
+    password: {PASSWORD_RELOADED}
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: {STLS_PASSWORD}
+      handshake:
+        dest: 127.0.0.1:{camouflage_port}
+rules:
+  - MATCH,DIRECT
+"""
+        )
         if os.name != "nt":
             wait_for_linux_signal_handlers(process)
         reload_started = time.monotonic()
         os.kill(process.pid, signal.SIGHUP)
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            password=PASSWORD_RELOADED,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
         reloaded = proxied_echo(
             client,
             ss_port,
             echo.port,
+            password=PASSWORD_RELOADED,
             payload=TCP_STLS_PAYLOAD,
             obfs_mode="shadow-tls",
             obfs_host=STLS_HOST,

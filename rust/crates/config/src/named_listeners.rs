@@ -21,6 +21,21 @@ pub(crate) fn parse_shadowsocks_listeners(
     let mut parsed = Vec::with_capacity(listeners.len());
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
+        validate_mapping_keys(
+            &mapping,
+            &[
+                "name",
+                "type",
+                "listen",
+                "port",
+                "cipher",
+                "password",
+                "udp",
+                "simple-obfs",
+                "shadow-tls",
+            ],
+            &format!("listener {index}"),
+        )?;
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
             ConfigError::InvalidInbound(format!("listener {index} is missing type"))
         })?;
@@ -109,6 +124,11 @@ fn parse_simple_obfs(
             "listener {name} has invalid simple-obfs configuration"
         )));
     };
+    validate_mapping_keys(
+        mapping,
+        &["enable", "mode"],
+        &format!("listener {name} simple-obfs"),
+    )?;
     let enabled = mapping
         .get(Value::from("enable"))
         .and_then(Value::as_bool)
@@ -139,6 +159,18 @@ fn parse_shadow_tls(
             "listener {name} has invalid shadow-tls configuration"
         )));
     };
+    validate_mapping_keys(
+        mapping,
+        &[
+            "enable",
+            "version",
+            "password",
+            "users",
+            "handshake",
+            "strict-mode",
+        ],
+        &format!("listener {name} shadow-tls"),
+    )?;
     let enabled = mapping
         .get(Value::from("enable"))
         .and_then(Value::as_bool)
@@ -183,6 +215,11 @@ fn parse_shadow_tls(
                 "listener {name} shadow-tls is missing handshake configuration"
             ))
         })?;
+    validate_mapping_keys(
+        handshake,
+        &["dest", "proxy"],
+        &format!("listener {name} shadow-tls handshake"),
+    )?;
     let dest = mapping_string(handshake, "dest").ok_or_else(|| {
         ConfigError::InvalidInbound(format!(
             "listener {name} shadow-tls handshake is missing dest"
@@ -221,6 +258,11 @@ fn parse_shadow_tls_users(
                 "listener {name} shadow-tls user {index} is invalid"
             )));
         };
+        validate_mapping_keys(
+            mapping,
+            &["name", "password"],
+            &format!("listener {name} shadow-tls user {index}"),
+        )?;
         let user_name = mapping_string(mapping, "name").ok_or_else(|| {
             ConfigError::InvalidInbound(format!(
                 "listener {name} shadow-tls user {index} is missing name"
@@ -244,6 +286,26 @@ fn mapping_string(mapping: &Mapping, key: &str) -> Option<String> {
         .get(Value::from(key))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn validate_mapping_keys(
+    mapping: &Mapping,
+    allowed: &[&str],
+    context: &str,
+) -> Result<(), ConfigError> {
+    for key in mapping.keys() {
+        let Some(key) = key.as_str() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "{context} contains a non-string configuration key"
+            )));
+        };
+        if !allowed.contains(&key) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "{context} has unsupported field: {key}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_shadowsocks_listener_ports(
