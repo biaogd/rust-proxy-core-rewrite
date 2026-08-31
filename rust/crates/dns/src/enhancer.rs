@@ -708,8 +708,7 @@ pub(crate) fn system_hosts_path() -> std::path::PathBuf {
 #[must_use]
 pub fn system_host_addresses(name: &str) -> Option<Vec<IpAddr>> {
     if std::env::var("DISABLE_SYSTEM_HOSTS")
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "t" | "true"))
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "t" | "true"))
     {
         return None;
     }
