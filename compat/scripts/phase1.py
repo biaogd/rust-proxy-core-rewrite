@@ -31,6 +31,7 @@ FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase1-diff.json"
 MIGRATION_PATH_PREFIXES = ("compat/", "docs/rust-rewrite/", "rust/")
 MIGRATION_PATHS = {
     ".github/workflows/rust-rewrite.yml",
+    ".github/workflows/sync-shadow-rustls.yml",
     ".gitignore",
     "AGENTS.md",
     "README.md",

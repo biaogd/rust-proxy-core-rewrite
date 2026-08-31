@@ -543,8 +543,6 @@ pub(super) async fn run_socks5_udp_session(
         alpn_protocols: &[],
         tls12_only: false,
         tls13_only: false,
-        client_hello_fingerprint: None,
-        client_hello_fingerprint_mlkem: true,
     });
     let association = match rewrite_outbound::associate_socks5_udp_with_options(
         &server,
