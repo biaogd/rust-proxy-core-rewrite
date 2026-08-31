@@ -8,13 +8,13 @@ use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
+use crate::BoxedOutboundStream;
 use crate::shadow_tls::{
     APPLICATION_DATA, HANDSHAKE, HMAC_SIZE, SERVER_HELLO, SERVER_RANDOM_INDEX,
     SESSION_ID_LENGTH_INDEX, ShadowTlsError, TLS_HEADER_SIZE, TLS_HMAC_HEADER_SIZE,
     TLS_SESSION_ID_SIZE, VerifiedStream, is_server_hello_tls13, kdf, set_tls_record_length,
     verify_application_data, xor_slice,
 };
-use crate::BoxedOutboundStream;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -35,7 +35,7 @@ pub struct ShadowTlsServer<S> {
 enum ServerState<S> {
     Initial(Option<S>),
     Handshaking(Pin<Box<dyn Future<Output = Result<VerifiedStream, ShadowTlsError>> + Send>>),
-    Ready(VerifiedStream),
+    Ready(Box<VerifiedStream>),
     Failed(io::Error),
 }
 
@@ -78,14 +78,17 @@ impl<S> ShadowTlsServer<S> {
         };
         match future.as_mut().poll(cx) {
             Poll::Ready(Ok(stream)) => {
-                self.state = ServerState::Ready(stream);
+                self.state = ServerState::Ready(Box::new(stream));
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {
                 let io_error = io::Error::new(io::ErrorKind::InvalidData, error.to_string());
                 let kind = io_error.kind();
                 self.state = ServerState::Failed(io_error);
-                Poll::Ready(Err(io::Error::new(kind, "shadow-tls server handshake failed")))
+                Poll::Ready(Err(io::Error::new(
+                    kind,
+                    "shadow-tls server handshake failed",
+                )))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -102,7 +105,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncRead for ShadowTls
             match &mut self.state {
                 ServerState::Initial(_) => {
                     self.start_handshake()?;
-                    continue;
                 }
                 ServerState::Handshaking(_) => ready!(self.poll_handshake(cx))?,
                 ServerState::Ready(stream) => return Pin::new(stream).poll_read(cx, buf),
@@ -124,7 +126,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for ShadowTl
             match &mut self.state {
                 ServerState::Initial(_) => {
                     self.start_handshake()?;
-                    continue;
                 }
                 ServerState::Handshaking(_) => ready!(self.poll_handshake(cx))?,
                 ServerState::Ready(stream) => return Pin::new(stream).poll_write(cx, buf),
@@ -310,10 +311,7 @@ async fn forward_server_frame(
     hmac_write: &mut HmacSha1,
 ) -> Result<(), ShadowTlsError> {
     if frame[0] != APPLICATION_DATA {
-        client
-            .write_all(frame)
-            .await
-            .map_err(ShadowTlsError::Io)?;
+        client.write_all(frame).await.map_err(ShadowTlsError::Io)?;
         return Ok(());
     }
     let mut modified = frame.to_vec();

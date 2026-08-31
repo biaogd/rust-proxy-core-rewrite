@@ -188,11 +188,8 @@ impl ConfigSpec {
 
         let allow_lan = raw.allow_lan.unwrap_or(false);
         let bind_address = raw.bind_address.clone().unwrap_or_else(|| "*".to_owned());
-        let mut shadowsocks_listeners = parse_shadowsocks_listeners(
-            raw.listeners.clone(),
-            allow_lan,
-            &bind_address,
-        )?;
+        let mut shadowsocks_listeners =
+            parse_shadowsocks_listeners(raw.listeners.clone(), allow_lan, &bind_address)?;
         if let Some(config) = raw
             .ss_config
             .as_deref()
@@ -776,6 +773,7 @@ impl Config {
         Ok(listeners)
     }
 
+    #[must_use]
     pub fn shadowsocks_listener_for_port(&self, port: u16) -> Option<&ShadowsocksInboundConfig> {
         self.shadowsocks_listeners
             .iter()

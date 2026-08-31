@@ -7,15 +7,21 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
-use rewrite_config::{Config, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig};
+use rewrite_config::{
+    Config, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig,
+};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
-use rewrite_outbound::{HttpObfsServer, HttpProxyTls, ShadowTlsServer, ShadowTlsServerConfig, TlsObfsServer};
+use rewrite_outbound::{
+    HttpObfsServer, HttpProxyTls, ShadowTlsServer, ShadowTlsServerConfig, TlsObfsServer,
+};
 use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
 use shadowsocks::ProxySocket;
-use shadowsocks::config::{ServerConfig, ServerType, ServerUser, ServerUserManager, method_support_eih};
+use shadowsocks::config::{
+    ServerConfig, ServerType, ServerUser, ServerUserManager, method_support_eih,
+};
 use shadowsocks::context::Context as SsContext;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::net::UdpSocket as SsUdpSocket;
@@ -27,8 +33,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::listener::{
-    dns_adapter_response_addr, resolved_route, resolve_udp_response_source, resolve_udp_target,
-    udp_session_mode, UdpSessionMode,
+    UdpSessionMode, dns_adapter_response_addr, resolve_udp_response_source, resolve_udp_target,
+    resolved_route, udp_session_mode,
 };
 use crate::tcp::{
     apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
@@ -73,7 +79,9 @@ impl ShadowsocksListener {
         }
         let mut server =
             ServerConfig::new(config.listen, server_password, method).map_err(|error| {
-                RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(error.to_string()))
+                RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(
+                    error.to_string(),
+                ))
             })?;
         if !user_keys.is_empty() {
             let mut users = ServerUserManager::new();
@@ -153,7 +161,10 @@ where
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -643,8 +654,7 @@ async fn serve_shadowsocks_inbound_uot<S>(
         }
     }
 
-    let Some((first_destination, first_payload)) =
-        read_inbound_uot_packet(stream, shutdown).await
+    let Some((first_destination, first_payload)) = read_inbound_uot_packet(stream, shutdown).await
     else {
         return;
     };
@@ -652,8 +662,8 @@ async fn serve_shadowsocks_inbound_uot<S>(
     packet_metadata.destination = first_destination.clone();
     packet_metadata.network = Network::Udp;
     let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
-    let decision = mode_decision(config, state)
-        .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
+    let decision =
+        mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
     let Some((decision, outbound_target, _)) =
         resolve_rematch_target(decision, &mut packet_metadata, config, state)
     else {
@@ -772,11 +782,7 @@ where
     Some((destination, payload))
 }
 
-async fn write_inbound_uot_packet<S>(
-    stream: &mut S,
-    source: SocketAddr,
-    payload: &[u8],
-) -> bool
+async fn write_inbound_uot_packet<S>(stream: &mut S, source: SocketAddr, payload: &[u8]) -> bool
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
@@ -808,12 +814,7 @@ async fn serve_inbound_uot_direct<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let target = match resolve_udp_target(
-        &first_metadata,
-        first_fake_host.as_deref(),
-        config,
-    )
-    .await
+    let target = match resolve_udp_target(&first_metadata, first_fake_host.as_deref(), config).await
     {
         Ok(target) => target,
         Err(error) => {
@@ -984,8 +985,6 @@ async fn serve_inbound_uot_socks5<S>(
         alpn_protocols: &[],
         tls12_only: false,
         tls13_only: false,
-        client_hello_fingerprint: None,
-        client_hello_fingerprint_mlkem: true,
     });
     let association = match rewrite_outbound::associate_socks5_udp_with_options(
         &server,
@@ -1494,7 +1493,8 @@ async fn run_shadowsocks_socks5_udp_session(
     let mut current = Some(first);
     loop {
         if let Some(request) = current.take() {
-            let destination = inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
+            let destination =
+                inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
             if association
                 .send(&destination, &request.payload)
                 .await
@@ -1585,7 +1585,8 @@ async fn run_shadowsocks_proxy_udp_session(
     let mut current = Some(first);
     loop {
         if let Some(request) = current.take() {
-            let destination = inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
+            let destination =
+                inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
             if association
                 .send(&destination, &request.payload)
                 .await
@@ -1677,7 +1678,8 @@ async fn run_shadowsocks_uot_udp_session(
     let mut current = Some(first);
     loop {
         if let Some(request) = current.take() {
-            let destination = inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
+            let destination =
+                inbound_udp_destination(&request.metadata, request.fake_host.as_deref());
             if association
                 .send(&destination, &request.payload)
                 .await

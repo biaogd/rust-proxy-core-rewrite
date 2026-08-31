@@ -74,10 +74,7 @@ async fn exchange(
     association.send(target, payload).await?;
     let (_, response) = association.recv().await?;
     if verify_dns {
-        if response.len() < 4
-            || response[0..2] != payload[0..2]
-            || response[3] & 0x0F != 0
-        {
+        if response.len() < 4 || response[0..2] != payload[0..2] || response[3] & 0x0F != 0 {
             return Err("invalid dns response".into());
         }
         return Ok(());

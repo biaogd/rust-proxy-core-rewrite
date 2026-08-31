@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::listener::run_listener;
-use crate::shadowsocks_listener::{run_shadowsocks_listener, ShadowsocksListener};
 use crate::services::hydrate_http_proxy_providers;
+use crate::shadowsocks_listener::{ShadowsocksListener, run_shadowsocks_listener};
 use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
 };

@@ -2285,10 +2285,7 @@ rules: ['MATCH,DIRECT']
     assert_eq!(config.shadowsocks_listeners.len(), 1);
     let inbound = &config.shadowsocks_listeners[0];
     assert_eq!(inbound.name, "ss-stls");
-    let shadow_tls = inbound
-        .shadow_tls
-        .as_ref()
-        .expect("shadow-tls config");
+    let shadow_tls = inbound.shadow_tls.as_ref().expect("shadow-tls config");
     assert_eq!(shadow_tls.version, 3);
     assert_eq!(shadow_tls.handshake.dest, "127.0.0.1:9443");
     assert_eq!(shadow_tls.users.len(), 1);

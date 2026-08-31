@@ -2,9 +2,9 @@ mod dns;
 mod error;
 mod load;
 mod model;
+mod named_listeners;
 mod proxy;
 mod raw;
-mod named_listeners;
 mod shadowsocks_inbound;
 
 pub use error::ConfigError;

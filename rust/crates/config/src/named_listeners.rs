@@ -57,25 +57,23 @@ pub(crate) fn parse_shadowsocks_listeners(
             }
         });
         let port = mapping
-            .get(&Value::from("port"))
+            .get(Value::from("port"))
             .and_then(Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
             .ok_or_else(|| {
                 ConfigError::InvalidInbound(format!("listener {name} is missing port"))
             })?;
-        let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+        let listen =
+            resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
         if shadowsocks_2022_cipher(&cipher)
-            && mapping
-                .get(&Value::from("udp"))
-                .and_then(Value::as_bool)
-                == Some(true)
+            && mapping.get(Value::from("udp")).and_then(Value::as_bool) == Some(true)
         {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener {name} cannot enable UDP for Shadowsocks 2022"
             )));
         }
         let udp = mapping
-            .get(&Value::from("udp"))
+            .get(Value::from("udp"))
             .and_then(Value::as_bool)
             .unwrap_or(true)
             && !shadowsocks_2022_cipher(&cipher);
@@ -103,7 +101,7 @@ fn parse_simple_obfs(
     mapping: &Mapping,
     name: &str,
 ) -> Result<Option<ShadowsocksSimpleObfsConfig>, ConfigError> {
-    let Some(value) = mapping.get(&Value::from("simple-obfs")) else {
+    let Some(value) = mapping.get(Value::from("simple-obfs")) else {
         return Ok(None);
     };
     let Some(mapping) = value.as_mapping() else {
@@ -112,7 +110,7 @@ fn parse_simple_obfs(
         )));
     };
     let enabled = mapping
-        .get(&Value::from("enable"))
+        .get(Value::from("enable"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
     if !enabled {
@@ -133,7 +131,7 @@ fn parse_shadow_tls(
     mapping: &Mapping,
     name: &str,
 ) -> Result<Option<ShadowsocksShadowTlsConfig>, ConfigError> {
-    let Some(value) = mapping.get(&Value::from("shadow-tls")) else {
+    let Some(value) = mapping.get(Value::from("shadow-tls")) else {
         return Ok(None);
     };
     let Some(mapping) = value.as_mapping() else {
@@ -142,18 +140,22 @@ fn parse_shadow_tls(
         )));
     };
     let enabled = mapping
-        .get(&Value::from("enable"))
+        .get(Value::from("enable"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
     if !enabled {
         return Ok(None);
     }
     let version = mapping
-        .get(&Value::from("version"))
+        .get(Value::from("version"))
         .and_then(Value::as_u64)
-        .map(|version| u8::try_from(version).map_err(|_| {
-            ConfigError::InvalidInbound(format!("listener {name} has invalid shadow-tls version"))
-        }))
+        .map(|version| {
+            u8::try_from(version).map_err(|_| {
+                ConfigError::InvalidInbound(format!(
+                    "listener {name} has invalid shadow-tls version"
+                ))
+            })
+        })
         .transpose()?
         .unwrap_or(3);
     if !(1..=3).contains(&version) {
@@ -174,7 +176,7 @@ fn parse_shadow_tls(
         )));
     }
     let handshake = mapping
-        .get(&Value::from("handshake"))
+        .get(Value::from("handshake"))
         .and_then(Value::as_mapping)
         .ok_or_else(|| {
             ConfigError::InvalidInbound(format!(
@@ -188,7 +190,7 @@ fn parse_shadow_tls(
     })?;
     let proxy = mapping_string(handshake, "proxy");
     let strict_mode = mapping
-        .get(&Value::from("strict-mode"))
+        .get(Value::from("strict-mode"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Ok(Some(ShadowsocksShadowTlsConfig {
@@ -204,7 +206,7 @@ fn parse_shadow_tls_users(
     mapping: &Mapping,
     name: &str,
 ) -> Result<Vec<ShadowTlsUserConfig>, ConfigError> {
-    let Some(value) = mapping.get(&Value::from("users")) else {
+    let Some(value) = mapping.get(Value::from("users")) else {
         return Ok(Vec::new());
     };
     let Some(sequence) = value.as_sequence() else {
@@ -239,7 +241,7 @@ fn parse_shadow_tls_users(
 
 fn mapping_string(mapping: &Mapping, key: &str) -> Option<String> {
     mapping
-        .get(&Value::from(key))
+        .get(Value::from(key))
         .and_then(Value::as_str)
         .map(str::to_owned)
 }

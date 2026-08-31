@@ -53,9 +53,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             host: plugin_host.ok_or("missing shadow-tls host")?,
             password: plugin_password.ok_or("missing shadow-tls password")?,
             version: match plugin_version.as_deref() {
-                Some(value) => value.parse().map_err(|error: std::num::ParseIntError| -> Box<dyn Error> {
-                    error.into()
-                })?,
+                Some(value) => value
+                    .parse()
+                    .map_err(|error: std::num::ParseIntError| -> Box<dyn Error> { error.into() })?,
                 None => 3,
             },
             skip_certificate_verification: true,
