@@ -387,9 +387,10 @@ mod chrome_fingerprint_tests {
     use super::*;
 
     /// uTLS `HelloChrome_133` cipher list with GREASE normalized to 0x0a0a.
+    /// RSA and ECDHE-RSA CBC suites are omitted because rustls aws-lc does not
+    /// implement them; advertising them would break handshakes.
     const CHROME_CIPHERS: &[u16] = &[
-        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
-        0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
     ];
 
     /// Extension types Chrome 133 offers (GREASE normalized; order not asserted).
@@ -509,6 +510,7 @@ mod chrome_fingerprint_tests {
     #[test]
     fn chrome_fingerprint_matches_utls_chrome133_cipher_and_extension_set() {
         // Remaining documented leftovers vs Go uTLS:
+        // - RSA and ECDHE-RSA CBC suites are omitted (rustls aws-lc cannot negotiate them).
         // - Non-chrome fingerprints (firefox/safari/ios/edge/android/360/qq/…) stay
         //   rustls-default; full parrots are not cheap to port in one pass.
         // - ECH GREASE encapsulated-key bytes are random 32-byte stand-ins (Go runs

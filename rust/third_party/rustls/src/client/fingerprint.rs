@@ -41,6 +41,9 @@ const ALPS_NEW: ExtensionType = ExtensionType::Unknown(17613);
 const ECH_GREASE_PAYLOAD_PLAIN_LENS: [u16; 4] = [128, 160, 192, 224];
 
 /// Chrome 133 cipher suite order from metacubex/utls `HelloChrome_133` (GREASE slot first).
+///
+/// Cipher suites that rustls aws-lc does not implement (RSA key exchange, ECDHE-RSA CBC)
+/// are omitted so the advertised list matches actual handshake capability.
 fn chrome_cipher_suites(grease_cipher: CipherSuite) -> Vec<CipherSuite> {
     vec![
         grease_cipher,
@@ -53,12 +56,6 @@ fn chrome_cipher_suites(grease_cipher: CipherSuite) -> Vec<CipherSuite> {
         CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
         CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-        CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-        CipherSuite::TLS_RSA_WITH_AES_128_GCM_SHA256,
-        CipherSuite::TLS_RSA_WITH_AES_256_GCM_SHA384,
-        CipherSuite::TLS_RSA_WITH_AES_128_CBC_SHA,
-        CipherSuite::TLS_RSA_WITH_AES_256_CBC_SHA,
     ]
 }
 
@@ -173,10 +170,14 @@ fn build_boring_grease_ech(rng: &dyn SecureRandom) -> Result<Vec<u8>, Error> {
 /// Apply Chrome ClientHello shaping to extensions + cipher list.
 ///
 /// `include_mlkem` mirrors Go: v3 keeps X25519MLKEM768; v2 strips it.
+/// `supported_versions` and `supported_cipher_suites` constrain the advertised
+/// list to match the configured rustls protocol/cipher capabilities.
 pub(super) fn apply_chrome_fingerprint(
     exts: &mut ClientExtensions<'_>,
     cipher_suites: &mut Vec<CipherSuite>,
     include_mlkem: bool,
+    supported_versions: &SupportedProtocolVersions,
+    supported_cipher_suites: &[CipherSuite],
     secure_random: &'static dyn SecureRandom,
 ) -> Result<(), Error> {
     let seeds = fill_grease_seeds(secure_random)?;
@@ -186,7 +187,13 @@ pub(super) fn apply_chrome_fingerprint(
     let grease_ext_a = ExtensionType::Unknown(boring_grease_value(seeds[GREASE_EXT1_IDX]));
     let grease_ext_b = ExtensionType::Unknown(boring_grease_value(seeds[GREASE_EXT2_IDX]));
 
-    *cipher_suites = chrome_cipher_suites(grease_cipher);
+    let chrome_suites = chrome_cipher_suites(grease_cipher);
+    *cipher_suites = chrome_suites
+        .into_iter()
+        .filter(|suite| {
+            matches!(suite, CipherSuite::Unknown(_)) || supported_cipher_suites.contains(suite)
+        })
+        .collect();
 
     let mut groups = vec![grease_group];
     if include_mlkem {
@@ -201,9 +208,13 @@ pub(super) fn apply_chrome_fingerprint(
 
     exts.signature_schemes = Some(chrome_signature_schemes());
     exts.supported_versions = Some(SupportedProtocolVersions {
-        tls13: true,
-        tls12: true,
-        grease: Some(grease_version),
+        tls13: supported_versions.tls13,
+        tls12: supported_versions.tls12,
+        grease: if supported_versions.tls13 || supported_versions.tls12 {
+            Some(grease_version)
+        } else {
+            None
+        },
     });
     exts.session_ticket = Some(ClientSessionTicket::Request);
     exts.renegotiation_info = Some(PayloadU8::new(Vec::new()));
