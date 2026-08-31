@@ -48,9 +48,16 @@ chmod +x scripts/publish-to-github.sh
 ./scripts/publish-to-github.sh
 ```
 
-To let Cloud Agent push directly in future runs, grant the Cursor GitHub App write access to `biaogd/shadow-rustls` (Settings → Collaborators and apps).
+To let Cloud Agent push directly, configure the **Cursor GitHub App installation** (not only a collaborator invite):
 
-**CI mirror (no local clone):** add repository secret `SHADOW_RUSTLS_PUSH_TOKEN` (classic PAT with `repo` scope) to `rust-proxy-core-rewrite`, then run the **Sync shadow-rustls** workflow from the Actions tab. It pushes branch `shadow-rustls-export` to `biaogd/shadow-rustls` `main` and tags it.
+1. Open https://github.com/settings/installations
+2. Click **Cursor** → **Configure**
+3. **Repository access** → add `biaogd/shadow-rustls`
+4. Under **Permissions**, set **Contents** to **Read and write** → Save
+
+`git push` uses the App installation token (`cursor[bot]`). Collaborator-only access does not satisfy that path. Current status: read OK (`list_issues`), write still 403 (`contents` API).
+
+**CI mirror (no local clone):** add repository secret `SHADOW_RUSTLS_PUSH_TOKEN` (classic PAT with `repo` scope) to `rust-proxy-core-rewrite`, then run the **Sync shadow-rustls** workflow from the Actions tab (branch `cursor/ss-shadow-tls-a5b2` until merged). It pushes branch `shadow-rustls-export` to `biaogd/shadow-rustls` `main` and tags it.
 
 After the remote has content, bump `rust/Cargo.toml` to the git `tag`/`rev` below and delete the vendored `shadow-rustls/` directory (or convert it to a git submodule):
 
