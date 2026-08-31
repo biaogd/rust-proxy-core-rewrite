@@ -635,7 +635,7 @@ pub(super) async fn dial_shadow_tls_handshake(
     shutdown: &CancellationToken,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, std::io::Error> {
     let destination = parse_handshake_dest(dest).map_err(std::io::Error::other)?;
-    let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
+    let mut metadata = Metadata::new(destination, InboundProtocol::Inner);
     metadata.network = rewrite_model::Network::Tcp;
 
     let (decision, outbound_target, traversed_groups) = if let Some(proxy_name) =

@@ -1736,7 +1736,11 @@ async fn handle_shadowsocks_inbound_tcp(
                 Arc::clone(&connection_state),
                 connection_shutdown.clone(),
             );
-            match accept_shadow_tls_v3(mapped, &config, &dial).await {
+            let accept_result = tokio::select! {
+                () = connection_shutdown.cancelled() => return,
+                result = accept_shadow_tls_v3(mapped, &config, &dial) => result,
+            };
+            match accept_result {
                 Ok(ShadowTlsAcceptResult::FallbackCompleted) => return,
                 Ok(ShadowTlsAcceptResult::Authenticated { stream, user }) => (stream, Some(user)),
                 Err(error) => {

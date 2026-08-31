@@ -185,6 +185,21 @@ fn matches_current_local_inbound_types_and_socks_alias() {
 }
 
 #[test]
+fn matches_inner_inbound_type_for_internal_routing() {
+    let rules = vec![
+        "IN-TYPE,INNER,DIRECT".to_owned(),
+        "IN-TYPE,SHADOWSOCKS,REJECT".to_owned(),
+        "MATCH,REJECT".to_owned(),
+    ];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("inner.test", 443);
+    input.inbound = InboundProtocol::Inner;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+    input.inbound = InboundProtocol::Shadowsocks;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+}
+
+#[test]
 fn matches_inbound_users_exactly() {
     let rules = vec![
         "IN-USER,alice/socks4,REJECT".to_owned(),

@@ -82,6 +82,7 @@ pub enum InboundProtocol {
     Socks4,
     Socks5,
     Shadowsocks,
+    Inner,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
