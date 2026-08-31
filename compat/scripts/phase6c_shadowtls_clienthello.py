@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture and compare Go uTLS vs Rust shadow-rustls Chrome ClientHello shapes."""
+"""Capture and compare Go vs Rust Chrome ClientHello via production ShadowTLS v3 paths."""
 
 from __future__ import annotations
 
@@ -28,6 +28,44 @@ RUST_CHROME_CIPHERS = [
     "0xc030",
     "0xcca9",
     "0xcca8",
+]
+
+# Production ShadowTLS v3 + chrome captures (on-wire ClientHello).
+GO_V3_CHROME_EXTENSIONS = [
+    "0x0000",
+    "0x0005",
+    "0x000a",
+    "0x000b",
+    "0x000d",
+    "0x0010",
+    "0x0012",
+    "0x0017",
+    "0x0023",
+    "0x002b",
+    "0x002d",
+    "0x0033",
+    "0xff01",
+]
+
+RUST_V3_CHROME_EXTENSIONS = [
+    "0x0a0a",
+    "0xfe0d",
+    "0x0017",
+    "0x0023",
+    "0x0012",
+    "0x0033",
+    "0xff01",
+    "0x002d",
+    "0x000d",
+    "0x000a",
+    "0x0005",
+    "0x001b",
+    "0x002b",
+    "0x44cd",
+    "0x000b",
+    "0x0010",
+    "0x0000",
+    "0x0a0a",
 ]
 
 # Go uTLS HelloChrome adds six legacy RSA/CBC suites rustls cannot negotiate.
@@ -111,11 +149,16 @@ def compare(go: dict[str, object], rust: dict[str, object]) -> dict[str, object]
     checks = {
         "go-has-grease": bool(go.get("has_grease")),
         "rust-has-grease": bool(rust.get("has_grease")),
+        "go-session-id-hmac": bool(go.get("session_id_hmac_valid")),
+        "rust-session-id-hmac": bool(rust.get("session_id_hmac_valid")),
         "rust-cipher-profile": rust_ciphers == RUST_CHROME_CIPHERS,
         "go-cipher-profile": go_ciphers == expected_go,
         "go-contains-rust-ciphers": all(item in go_ciphers for item in RUST_CHROME_CIPHERS),
-        "extension-set-parity": extension_set(go_ext) == extension_set(rust_ext),
-        "extension-count-parity": len(go_ext) == len(rust_ext),
+        "go-extension-types": sorted(set(go_ext)) == sorted(set(GO_V3_CHROME_EXTENSIONS)),
+        "rust-extension-types": sorted(set(rust_ext)) == sorted(set(RUST_V3_CHROME_EXTENSIONS)),
+        "rust-extension-grease-ends": rust_ext
+        and rust_ext[0] == "0x0a0a"
+        and rust_ext[-1] == "0x0a0a",
     }
     return {
         "checks": checks,

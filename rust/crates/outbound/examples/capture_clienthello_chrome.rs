@@ -1,73 +1,110 @@
-//! Capture shadow-rustls Chrome-shaped `ClientHello` for differential vs Go uTLS.
+//! Capture the first on-wire TLS `ClientHello` via the production `ShadowTLS` v3 path
+//! (`connect_shadow_tls` → `connect_with_session_id_generator`).
 //!
 //! ```text
 //! cargo run -p rewrite-outbound --example capture_clienthello_chrome
 //! ```
 
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::io;
 
-use shadow_rustls::ClientConfig;
-use shadow_rustls::ClientHelloFingerprint;
-use shadow_rustls::crypto::CryptoProvider;
-use shadow_rustls::crypto::aws_lc_rs::default_provider;
-use shadow_rustls::pki_types::ServerName;
+use hmac::Mac;
+use rewrite_outbound::{BoxedOutboundStream, ShadowTlsConnectOptions, connect_shadow_tls};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-fn main() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let capture = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        stream
-            .set_read_timeout(Some(Duration::from_millis(800)))
-            .ok();
-        let mut header = [0u8; 5];
-        stream.read_exact(&mut header).expect("header");
+const HOST: &str = "phase6c-shadow-tls.example";
+const PASSWORD: &str = "phase6c-shadow-tls-plugin-password";
+const SESSION_ID_START: usize = 1 + 3 + 2 + 32 + 1;
+const SESSION_ID_SIZE: usize = 32;
+const HMAC_SIZE: usize = 4;
+
+#[derive(Debug)]
+struct HelloShape {
+    cipher_suites: Vec<String>,
+    extensions: Vec<String>,
+    has_grease: bool,
+    session_id_hmac_valid: bool,
+}
+
+#[tokio::main]
+async fn main() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("local addr");
+
+    let capture = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut header = [0_u8; 5];
+        stream.read_exact(&mut header).await.expect("header");
         let len = u16::from_be_bytes([header[3], header[4]]) as usize;
-        let mut body = vec![0u8; len];
-        stream.read_exact(&mut body).expect("body");
+        let mut body = vec![0_u8; len];
+        stream.read_exact(&mut body).await.expect("body");
         let mut record = header.to_vec();
         record.extend_from_slice(&body);
+        let _ = stream.shutdown().await;
         record
     });
 
-    let provider = default_provider();
-    let _ = CryptoProvider::install_default(provider.clone());
+    let stream = TcpStream::connect(addr).await.expect("connect");
+    let boxed: BoxedOutboundStream = Box::new(stream);
+    let alpn = vec!["h2".to_owned(), "http/1.1".to_owned()];
+    let _ = connect_shadow_tls(
+        boxed,
+        ShadowTlsConnectOptions {
+            host: HOST,
+            password: PASSWORD,
+            version: 3,
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            custom_roots: &[],
+            alpn: &alpn,
+            client_fingerprint: Some("chrome"),
+        },
+        None,
+    )
+    .await;
 
-    let mut config = ClientConfig::builder_with_provider(provider.into())
-        .with_safe_default_protocol_versions()
-        .expect("versions")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerify))
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    config.client_hello_fingerprint = Some(ClientHelloFingerprint::Chrome);
-    config.client_hello_fingerprint_mlkem = true;
-    config.enable_sni = true;
+    let raw = capture.await.expect("capture join");
+    let shape = shape_from_client_hello(&raw).expect("parse ClientHello");
+    print_shape(&shape);
+}
 
-    let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
-    let mut conn =
-        shadow_rustls::ClientConnection::new(Arc::new(config), server_name).expect("conn");
-    let mut sock = TcpStream::connect(addr).expect("connect");
-    {
-        let mut tls = shadow_rustls::Stream::new(&mut conn, &mut sock);
-        let _ = tls.write(b"x");
+fn handshake_message(raw: &[u8]) -> Option<&[u8]> {
+    if raw.len() < 5 || raw[0] != 0x16 {
+        return None;
     }
-    let _ = sock.shutdown(Shutdown::Both);
-    let raw = capture.join().expect("join");
+    let rec_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
+    let hello = &raw[5..5 + rec_len.min(raw.len().saturating_sub(5))];
+    (hello.first() == Some(&0x01)).then_some(hello)
+}
 
-    let (ciphers, extensions) = parse_client_hello(&raw).expect("parse ClientHello");
+fn print_shape(shape: &HelloShape) {
     println!("{{");
-    println!("  \"cipher_suites\": [{}],", join_hex_u16(&ciphers));
-    println!("  \"extensions\": [{}],", join_hex_u16(&extensions));
+    println!("  \"cipher_suites\": [{}],", shape.cipher_suites.join(", "));
+    println!("  \"extensions\": [{}],", shape.extensions.join(", "));
+    println!("  \"has_grease\": {},", shape.has_grease);
     println!(
-        "  \"has_grease\": {}",
-        ciphers.iter().any(|v| is_grease(*v))
+        "  \"session_id_hmac_valid\": {}",
+        shape.session_id_hmac_valid
     );
     println!("}}");
+}
+
+fn shape_from_client_hello(raw: &[u8]) -> io::Result<HelloShape> {
+    let (ciphers, extensions) = parse_client_hello(raw)?;
+    Ok(HelloShape {
+        has_grease: ciphers.iter().any(|v| is_grease(*v)),
+        session_id_hmac_valid: verify_session_id_hmac(raw, PASSWORD),
+        cipher_suites: ciphers.iter().map(|v| format!("\"0x{v:04x}\"")).collect(),
+        extensions: extensions
+            .iter()
+            .map(|v| format!("\"0x{v:04x}\""))
+            .collect(),
+    })
 }
 
 fn is_grease(v: u16) -> bool {
@@ -78,26 +115,25 @@ fn normalize_grease(v: u16) -> u16 {
     if is_grease(v) { 0x0a0a } else { v }
 }
 
-fn join_hex_u16(vals: &[u16]) -> String {
-    vals.iter()
-        .map(|v| format!("\"0x{v:04x}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn parse_client_hello(raw: &[u8]) -> Result<(Vec<u16>, Vec<u16>), String> {
+fn parse_client_hello(raw: &[u8]) -> io::Result<(Vec<u16>, Vec<u16>)> {
     if raw.len() < 5 || raw[0] != 0x16 {
-        return Err(format!("not handshake record (len={})", raw.len()));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a handshake record",
+        ));
     }
     let rec_len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
-    let hs = &raw[5..5 + rec_len.min(raw.len() - 5)];
-    if hs.is_empty() || hs[0] != 0x01 {
-        return Err("not ClientHello".into());
+    let hs = &raw[5..5 + rec_len.min(raw.len().saturating_sub(5))];
+    if hs.first() != Some(&0x01) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not ClientHello",
+        ));
     }
     let body_len = ((hs[1] as usize) << 16) | ((hs[2] as usize) << 8) | hs[3] as usize;
-    let mut p = &hs[4..4 + body_len.min(hs.len() - 4)];
+    let mut p = &hs[4..4 + body_len.min(hs.len().saturating_sub(4))];
     if p.len() < 34 {
-        return Err("short body".into());
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "short body"));
     }
     p = &p[34..];
     let sid_len = p[0] as usize;
@@ -112,10 +148,10 @@ fn parse_client_hello(raw: &[u8]) -> Result<(Vec<u16>, Vec<u16>), String> {
     let comp_len = p[0] as usize;
     p = &p[1 + comp_len..];
     if p.len() < 2 {
-        return Err("no extensions".into());
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "no extensions"));
     }
     let ext_len = u16::from_be_bytes([p[0], p[1]]) as usize;
-    p = &p[2..2 + ext_len.min(p.len() - 2)];
+    p = &p[2..2 + ext_len.min(p.len().saturating_sub(2))];
     let mut extensions = Vec::new();
     let mut q = p;
     while q.len() >= 4 {
@@ -130,42 +166,26 @@ fn parse_client_hello(raw: &[u8]) -> Result<(Vec<u16>, Vec<u16>), String> {
     Ok((ciphers, extensions))
 }
 
-#[derive(Debug)]
-struct NoVerify;
-
-impl shadow_rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &shadow_rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[shadow_rustls::pki_types::CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: shadow_rustls::pki_types::UnixTime,
-    ) -> Result<shadow_rustls::client::danger::ServerCertVerified, shadow_rustls::Error> {
-        Ok(shadow_rustls::client::danger::ServerCertVerified::assertion())
+fn verify_session_id_hmac(raw: &[u8], password: &str) -> bool {
+    let Some(hello) = handshake_message(raw) else {
+        return false;
+    };
+    if hello.len() < SESSION_ID_START + SESSION_ID_SIZE {
+        return false;
     }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &shadow_rustls::pki_types::CertificateDer<'_>,
-        _dss: &shadow_rustls::DigitallySignedStruct,
-    ) -> Result<shadow_rustls::client::danger::HandshakeSignatureValid, shadow_rustls::Error> {
-        Ok(shadow_rustls::client::danger::HandshakeSignatureValid::assertion())
+    let session_id = &hello[SESSION_ID_START..SESSION_ID_START + SESSION_ID_SIZE];
+    if session_id[..SESSION_ID_SIZE - HMAC_SIZE] == [0_u8; SESSION_ID_SIZE - HMAC_SIZE] {
+        return false;
     }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &shadow_rustls::pki_types::CertificateDer<'_>,
-        _dss: &shadow_rustls::DigitallySignedStruct,
-    ) -> Result<shadow_rustls::client::danger::HandshakeSignatureValid, shadow_rustls::Error> {
-        Ok(shadow_rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<shadow_rustls::SignatureScheme> {
-        default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
+    let Ok(mut mac) = hmac::Hmac::<sha1::Sha1>::new_from_slice(password.as_bytes()) else {
+        return false;
+    };
+    mac.update(&hello[..SESSION_ID_START]);
+    let mut prefix = [0_u8; SESSION_ID_SIZE];
+    prefix[..SESSION_ID_SIZE - HMAC_SIZE]
+        .copy_from_slice(&session_id[..SESSION_ID_SIZE - HMAC_SIZE]);
+    mac.update(&prefix);
+    mac.update(&hello[SESSION_ID_START + SESSION_ID_SIZE..]);
+    let expected = mac.finalize().into_bytes();
+    session_id[SESSION_ID_SIZE - HMAC_SIZE..] == expected[..HMAC_SIZE]
 }

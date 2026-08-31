@@ -1,8 +1,11 @@
-// Captures the first TLS ClientHello from a uTLS chrome dial and prints
-// cipher suites + extension types as JSON for differential comparison.
+// Captures the first on-wire TLS ClientHello via the production ShadowTLS v3 path
+// (shadowtls.NewShadowTLS → uTLSHandshakeFunc with session-id HMAC).
 package main
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -11,14 +14,22 @@ import (
 	"os"
 	"time"
 
-	tlsC "github.com/metacubex/mihomo/component/tls"
-	utls "github.com/metacubex/utls"
+	"github.com/metacubex/mihomo/transport/shadowtls"
+)
+
+const (
+	host           = "phase6c-shadow-tls.example"
+	password       = "phase6c-shadow-tls-plugin-password"
+	sessionIDStart = 1 + 3 + 2 + 32 + 1
+	sessionIDSize  = 32
+	hmacSize       = 4
 )
 
 type helloShape struct {
-	CipherSuites []string `json:"cipher_suites"`
-	Extensions   []string `json:"extensions"`
-	HasGrease    bool     `json:"has_grease"`
+	CipherSuites        []string `json:"cipher_suites"`
+	Extensions          []string `json:"extensions"`
+	HasGrease           bool     `json:"has_grease"`
+	SessionIDHMACValid  bool     `json:"session_id_hmac_valid"`
 }
 
 func isGrease(v uint16) bool {
@@ -106,15 +117,46 @@ func parseClientHello(record []byte) (helloShape, error) {
 		}
 		offset += l
 	}
-	return helloShape{CipherSuites: ciphers, Extensions: exts, HasGrease: hasGrease}, nil
+	return helloShape{
+		CipherSuites:       ciphers,
+		Extensions:         exts,
+		HasGrease:          hasGrease,
+		SessionIDHMACValid: verifySessionIDHMAC(body, password),
+	}, nil
+}
+
+func verifySessionIDHMAC(handshake []byte, pluginPassword string) bool {
+	if len(handshake) < sessionIDStart+sessionIDSize {
+		return false
+	}
+	if handshake[0] != 1 {
+		return false
+	}
+	if int(handshake[sessionIDStart-1]) != sessionIDSize {
+		return false
+	}
+	sessionID := handshake[sessionIDStart : sessionIDStart+sessionIDSize]
+	allZeroPrefix := true
+	for _, b := range sessionID[:sessionIDSize-hmacSize] {
+		if b != 0 {
+			allZeroPrefix = false
+			break
+		}
+	}
+	if allZeroPrefix {
+		return false
+	}
+	var prefix [sessionIDSize]byte
+	copy(prefix[:sessionIDSize-hmacSize], sessionID[:sessionIDSize-hmacSize])
+	mac := hmac.New(sha1.New, []byte(pluginPassword))
+	_, _ = mac.Write(handshake[:sessionIDStart])
+	_, _ = mac.Write(prefix[:])
+	_, _ = mac.Write(handshake[sessionIDStart+sessionIDSize:])
+	expected := mac.Sum(nil)
+	return hmac.Equal(sessionID[sessionIDSize-hmacSize:], expected[:hmacSize])
 }
 
 func main() {
-	fingerprint := "chrome"
-	if len(os.Args) > 1 {
-		fingerprint = os.Args[1]
-	}
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic(err)
@@ -156,18 +198,17 @@ func main() {
 	}
 	defer raw.Close()
 
-	uconfig := &utls.Config{
-		ServerName:         "phase6c-shadow-tls.example",
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h2", "http/1.1"},
-		MinVersion:         utls.VersionTLS12,
+	_, err = shadowtls.NewShadowTLS(context.Background(), raw, &shadowtls.ShadowTLSOption{
+		Password:          password,
+		Host:              host,
+		ClientFingerprint: "chrome",
+		SkipCertVerify:    true,
+		Version:           3,
+		ALPN:              append([]string(nil), shadowtls.DefaultALPN...),
+	})
+	if err == nil {
+		panic("expected handshake failure against capture-only listener")
 	}
-	id, ok := tlsC.GetFingerprint(fingerprint)
-	if !ok {
-		panic("unknown fingerprint")
-	}
-	uconn := utls.UClient(raw, uconfig, id)
-	_ = uconn.Handshake()
 
 	res := <-done
 	if res.err != nil {
