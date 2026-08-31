@@ -82,7 +82,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Proxy groups and cycle/order validation | Oracle | Partial | Phase 5C completes configured select/fallback/URL-test/load-balance, cycles, ordered name/type filtering, include-all, empty fallback and current-adapter health/lifecycle gates; Phase 6C-D proves selector-controlled Shadowsocks TCP/UDP members from inline/file providers. Future adapter types and their protocol-specific validation remain |
 | Proxy providers and health checks | Oracle | Partial | Phase 5C completes inline/file/HTTP/HTTPS vehicles, HTTP/SOCKS5 parsing, filters/name transforms, real provider health, manual/interval/file-watch refresh, digest-bound ETag restart, caches, SIGHUP and concurrent rollback. Phases 6C-D/E add Shadowsocks parsing, controller membership and TCP/UDP consumption for inline/file/HTTP vehicles, including manual HTTP refresh, fresh-cache restart and real SS health probing. Named download proxies, general override expressions, encrypted payloads, SS-specific scheduled/ETag/rollback stress and later adapter types remain unclaimed |
 | Rules, sub-rules and rule providers | Oracle | Partial | Current rule core plus inline/file/HTTP/HTTPS rule providers, YAML/text/MRS, domain/IP/classical RULE-SET, REST and refresh lifecycle pass; geodata-mode GEOSITE/GEOIP/SRC-GEOIP mixed TCP routing and REST inventory pass in `phase5e_geo_rules.py`; MMDB/ASN breadth, later consumers and named provider download proxies remain |
-| Named listeners | Oracle | Not started | Type-specific accepted/rejected configs |
+| Named listeners | Oracle | Partial | Phase 6C-N proves named `shadowsocks` listeners with simple-obfs, shadow-tls v3 (fallback relay, concurrent accept, `IN-USER`, config v1/v2 rejection, routed `handshake.proxy`), 2022/EIH, UoT, password reload and validation corpus; remaining listener types stay open |
 | Hosts | Oracle | Partial | Phase 4B exact configured IP/CNAME plus native Darwin system-host subset; wildcard, `lan` and broad platform behavior are not started |
 | DNS and fake-IP configuration | Oracle | Partial | Phase 4A/4B classic/hosts, Phase 4C fake settings, Phase 4D1 policy, Phase 4D2 fallback and Phase 4D3A single local direct resolver; general fallback, proxy-server/respect-rules and encrypted DNS remain unclaimed |
 | TUN and route settings | Oracle | Not started | Per-OS parse/apply fixtures |
@@ -108,7 +108,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | TProxy | Yes | Linux-real semantics | Oracle | Not started | Linux network namespace tests |
 | Tunnel | Yes | Yes | Oracle | Not started | Fixed target and write-back tests |
 | TUN | Yes | Yes | Oracle | Not started | Per-stack/per-OS integration tests |
-| Shadowsocks | Yes | Yes | Oracle | Not started | Upstream interop matrix |
+| Shadowsocks | Yes | Yes | Oracle | Partial | Phase 6C-N proves ss-config named inbound TCP (AEAD, legacy, 2022/EIH, simple-obfs, shadow-tls v3 with fallback/`IN-USER`/concurrent accept) and UDP paths via `phase6c_shadowsocks_inbound.py`; full upstream interop matrix remains open |
 | Snell | Yes | Yes | Oracle | Not started | Version and UDP interop matrix |
 | VMess | Yes | Transport-dependent | Oracle | Not started | v2ray interop and transport matrix |
 | VLESS | Yes | Transport-dependent | Oracle | Not started | Interop, Vision/Reality/transports |
@@ -138,7 +138,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | DSCP and remaining metadata matchers | Oracle | **Partial** | Phases 5B2c and 5B UDP prove default DSCP `0` across current TCP/UDP listeners, nonzero miss, slash/reversed ranges, wildcard and invalid values above 63; capture of nonzero DSCP from transparent/TUN paths remains pending |
 | Process name/path variants and UID | Oracle | Not started | Per-OS process fixtures |
 | Phase 2 rematch-name pure metadata matcher | Oracle | **Parity** | Rematch mutation followed by `REMATCH-NAME` observation |
-| Inbound type/user/name matchers | Oracle | **Parity in current fixed local scope** | Phases 5B3a–5B3c plus 5B UDP prove fixed HTTP/SOCKS/mixed TCP+UDP metadata; both default UDP sockets report SOCKS5/`DEFAULT-SOCKS` and intentionally carry no TCP auth user; named listeners and future protocols remain pending |
+| Inbound type/user/name matchers | Oracle | **Partial** | Phases 5B3a–5B3c plus 5B UDP prove fixed HTTP/SOCKS/mixed TCP+UDP metadata; Phase 6C-N adds `IN-USER` on named Shadowsocks shadow-tls inbound via verified username metadata; both default UDP sockets report SOCKS5/`DEFAULT-SOCKS` and intentionally carry no TCP auth user; other named protocols remain pending |
 | GEOIP/GEOSITE/ASN | Oracle | **Partial** | `phase5e_geo_rules.py` proves geodata-mode GEOSITE/GEOIP/SRC-GEOIP loading, mixed TCP decisions and `/rules` inventory against pinned local protobuf fixtures; MMDB-mode GEOIP and ASN remain open |
 | RULE-SET/providers | Oracle | Not started | Classical/domain/IP formats and refresh |
 | SUB-RULE and AND/OR/NOT logic | Oracle | **Partial** | Phase 2 proves nested pure matching, missing references and cycles; Phases 5B3d/5B3f prove basic AND/OR/NOT and SUB-RULE mixed-TCP DIRECT/REJECT routing; lazy DNS/process helpers and the broader nested corpus remain pending |
@@ -411,6 +411,7 @@ separate build and runtime claim.
 | Linux amd64 — Phase 6C-M4 Shadowsocks v2ray-plugin WebSocket TLS | Oracle | Pending | Default controller/outbound shard includes custom-root/skip/untrusted certificate, SNI/Host/path and Rustls/Axum TCP/lifecycle gates; no native result is claimed before completion |
 | Linux amd64 — Phase 6C-M5 complete Shadowsocks v2ray-plugin TCP | Oracle | Pending | Default controller/outbound shard runs the unified config, mux/early-data/raw-upgrade, advanced TLS, mTLS, inline ECH and proxy-resolver DNS ECH differential; no native result is claimed before completion |
 | Linux amd64 — Phase 6C-M6 Shadowsocks shadow-tls v3 | Oracle | Pending | Default controller/outbound shard runs the shadow-tls config and SS2022 TCP wire differential; no native result is claimed before completion |
+| Linux amd64 — Phase 6C-N Shadowsocks ss-config inbound | Oracle | Pending | `local-runtime` shard runs `phase6c_shadowsocks_inbound.py` including shadow-tls v3 fallback concurrency and `IN-USER`; no native result is claimed before completion |
 | Linux amd64 — Phase 5A4a X25519 encrypted config | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4b X25519 age convert | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |
 | Linux amd64 — Phase 5A4c X25519 age encrypt/decrypt | Oracle | Pending | Default GitHub Actions differential is configured; no result is claimed before completion |

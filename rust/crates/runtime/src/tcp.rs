@@ -7,7 +7,7 @@ use rewrite_config::{
     Config, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy, Mode, ProxyGroupKind, ProxyKind,
 };
 use rewrite_inbound::{BoxedInboundStream, InboundCommand, ListenerProtocol};
-use rewrite_model::{Destination, Host, Metadata, unmap_ip};
+use rewrite_model::{Destination, Host, InboundProtocol, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
 use rewrite_state::{ConnectionGuard, RuntimeState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -167,7 +167,7 @@ pub(super) async fn serve_shadowsocks_connection(
         metadata.inbound_port = local.port();
     }
     if metadata.inbound_name.is_empty() {
-        metadata.inbound_name = "DEFAULT-SHADOWSOCKS".to_owned();
+        "DEFAULT-SHADOWSOCKS".clone_into(&mut metadata.inbound_name);
     }
     let fake_host = apply_host_mapping(&mut metadata, config, state);
     let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
@@ -635,41 +635,65 @@ pub(super) async fn dial_shadow_tls_handshake(
     shutdown: &CancellationToken,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, std::io::Error> {
     let destination = parse_handshake_dest(dest).map_err(std::io::Error::other)?;
-    if let Some(proxy_name) = proxy {
-        let proxy = configured_proxy(config, proxy_name).ok_or_else(|| {
+    let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
+    metadata.network = rewrite_model::Network::Tcp;
+
+    let (decision, outbound_target, traversed_groups) = if let Some(proxy_name) =
+        proxy.filter(|name| !name.is_empty())
+    {
+        let decision = rewrite_rules::Decision {
+            target: proxy_name.to_owned(),
+            matched_kind: None,
+            rematch_cycle: false,
+            rematch_name: String::new(),
+            special_rules: String::new(),
+        };
+        resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("unknown shadow-tls handshake proxy: {proxy_name}"),
+                format!("shadow-tls handshake proxy not found: {proxy_name}"),
             )
-        })?;
-        return tokio::select! {
-            () = shutdown.cancelled() => Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "shadow-tls handshake dial cancelled",
-            )),
-            result = connect_configured_proxy(
-                proxy,
-                &destination,
-                config.ipv6,
-                state.clock(),
-                &config.trust_certificates,
-                config.dns.as_ref(),
-                direct_tcp_options(config),
-            ) => result.map_err(std::io::Error::other),
-        };
+        })?
+    } else {
+        let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+        resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "shadow-tls handshake routing failed",
+            )
+        })?
+    };
+    let route = resolved_route(&outbound_target, config);
+    if route == Route::Reject || matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "shadow-tls handshake route rejected",
+        ));
     }
     tokio::select! {
         () = shutdown.cancelled() => Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "shadow-tls handshake dial cancelled",
         )),
-        result = rewrite_outbound::connect_with_options(
-            &destination,
-            config.ipv6,
-            direct_tcp_options(config),
-        ) => result
-            .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
-            .map_err(std::io::Error::other),
+        result = connect_tcp_outbound(
+            &metadata,
+            None,
+            &decision.target,
+            (outbound_target, traversed_groups),
+            config,
+            state,
+            shutdown,
+        ) => match result {
+            Some(TcpOutbound::Stream(stream)) => Ok(stream),
+            Some(TcpOutbound::Dns) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "shadow-tls handshake destination resolved to DNS outbound",
+            )),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "shadow-tls handshake outbound connection failed",
+            )),
+        }
     }
 }
 

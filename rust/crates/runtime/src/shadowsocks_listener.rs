@@ -211,7 +211,7 @@ pub(super) async fn run_shadowsocks_listener(
         simple_obfs,
         shadow_tls,
     } = listener;
-    let obfs_mode = simple_obfs.as_ref().map(|config| config.mode.as_str());
+    let obfs_mode = simple_obfs.as_ref().map(|config| config.mode.clone());
     let shadow_tls_template = shadow_tls.as_ref().map(shadow_tls_server_config);
     let shadow_tls_handshake = shadow_tls.as_ref().map(shadow_tls_handshake_target);
     let mut connections = JoinSet::new();
@@ -220,104 +220,29 @@ pub(super) async fn run_shadowsocks_listener(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = accept_shadowsocks_tcp(
-                &inner,
-                method,
-                key.clone(),
-                Arc::clone(&context),
-                user_manager.clone(),
-                obfs_mode,
-                shadow_tls_template.clone(),
-                shadow_tls_handshake.clone(),
-                Arc::clone(&config.borrow()),
-                Arc::clone(&state),
-                shutdown.child_token(),
-            ) => {
-                let Ok((mut inbound, peer, shadow_tls_user)) = accepted else {
-                    continue;
+            accepted = inner.get_ref().accept() => {
+                let Ok((tcp, peer)) = accepted else {
+                    state.log("error", "shadowsocks inbound accept failed");
+                    break;
                 };
                 let local = inner.local_addr().unwrap_or(peer);
-                let connection_config = Arc::clone(&config.borrow());
-                let connection_state = Arc::clone(&state);
-                let connection_dns_service = Arc::clone(&dns_service);
-                let connection_shutdown = shutdown.child_token();
-                let connection_inbound_name = inbound_name.clone();
-                connections.spawn(async move {
-                    if !connection_config.permits_inbound(peer.ip()) {
-                        return;
-                    }
-                    let destination = tokio::select! {
-                        () = connection_shutdown.cancelled() => return,
-                        result = tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            inbound.handshake(),
-                        ) => match result {
-                            Ok(Ok(destination)) => match address_to_destination(&destination) {
-                                Ok(destination) => destination,
-                                Err(error) => {
-                                    connection_state.log(
-                                        "error",
-                                        format!("shadowsocks inbound destination rejected: {error}"),
-                                    );
-                                    return;
-                                }
-                            },
-                            Ok(Err(error)) => {
-                                connection_state.log(
-                                    "error",
-                                    format!("shadowsocks inbound handshake failed: {error}"),
-                                );
-                                return;
-                            }
-                            Err(_) => {
-                                connection_state.log("error", "shadowsocks inbound handshake timed out");
-                                return;
-                            }
-                        }
-                    };
-                    if let Some(uot_version) = shadowsocks_uot_version(&destination) {
-                        let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
-                        metadata.network = Network::Udp;
-                        metadata.source_ip = Some(unmap_ip(peer.ip()));
-                        metadata.source_port = peer.port();
-                        metadata.inbound_port = local.port();
-                        connection_inbound_name.clone_into(&mut metadata.inbound_name);
-                        if let Some(user) = shadow_tls_user {
-                            metadata.inbound_user = user;
-                        }
-                        serve_shadowsocks_inbound_uot(
-                            &mut inbound,
-                            uot_version,
-                            metadata,
-                            &connection_config,
-                            &connection_state,
-                            &connection_dns_service,
-                            &connection_shutdown,
-                        )
-                        .await;
-                        return;
-                    }
-                    let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
-                    metadata.network = Network::Tcp;
-                    metadata.source_ip = Some(unmap_ip(peer.ip()));
-                    metadata.source_port = peer.port();
-                    metadata.inbound_port = local.port();
-                    connection_inbound_name.clone_into(&mut metadata.inbound_name);
-                    if let Some(user) = shadow_tls_user {
-                        metadata.inbound_user = user;
-                    }
-                    let client: BoxedInboundStream =
-                        Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
-                    serve_shadowsocks_connection(
-                        client,
-                        metadata,
-                        &connection_config,
-                        &connection_state,
-                        &connection_dns_service,
-                        &connection_shutdown,
-                    )
-                    .await;
-                });
+                connections.spawn(handle_shadowsocks_inbound_tcp(
+                    tcp,
+                    peer,
+                    local,
+                    method,
+                    key.clone(),
+                    Arc::clone(&context),
+                    user_manager.clone(),
+                    obfs_mode.clone(),
+                    shadow_tls_template.clone(),
+                    shadow_tls_handshake.clone(),
+                    Arc::clone(&config.borrow()),
+                    Arc::clone(&state),
+                    Arc::clone(&dns_service),
+                    shutdown.child_token(),
+                    inbound_name.clone(),
+                ));
             }
             result = udp_sessions.tasks.join_next(), if !udp_sessions.tasks.is_empty() => {
                 udp_sessions.reap(result.as_ref());
@@ -533,7 +458,7 @@ fn prepare_shadowsocks_udp_packet(
     if !config.permits_inbound(peer.ip()) {
         return None;
     }
-    let destination = match address_to_destination(&destination) {
+    let destination = match address_to_destination(destination) {
         Ok(destination) => destination,
         Err(error) => {
             state.log(
@@ -635,6 +560,7 @@ fn shadowsocks_uot_version(destination: &Destination) -> Option<u8> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve_shadowsocks_inbound_uot<S>(
     stream: &mut S,
     version: u8,
@@ -1779,56 +1705,156 @@ fn wrap_obfs_layer(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn accept_shadowsocks_tcp(
-    inner: &ProxyListener,
+async fn handle_shadowsocks_inbound_tcp(
+    tcp: tokio::net::TcpStream,
+    peer: SocketAddr,
+    local: SocketAddr,
     method: CipherKind,
     key: Box<[u8]>,
     context: SharedContext,
     user_manager: Option<Arc<ServerUserManager>>,
-    obfs_mode: Option<&str>,
+    obfs_mode: Option<String>,
     shadow_tls: Option<ShadowTlsServerConfig>,
     shadow_tls_handshake: Option<(String, Option<String>)>,
-    runtime_config: Arc<Config>,
-    state: Arc<RuntimeState>,
-    shutdown: CancellationToken,
-) -> std::io::Result<(
-    ProxyServerStream<rewrite_outbound::BoxedOutboundStream>,
-    SocketAddr,
-    Option<String>,
-)> {
-    let (tcp, peer) = inner.get_ref().accept().await?;
-    let mapped = wrap_obfs_layer(tcp, obfs_mode);
+    connection_config: Arc<Config>,
+    connection_state: Arc<RuntimeState>,
+    connection_dns_service: Arc<rewrite_dns::DnsService>,
+    connection_shutdown: CancellationToken,
+    connection_inbound_name: String,
+) {
+    if !connection_config.permits_inbound(peer.ip()) {
+        return;
+    }
 
-    let (stream, user) =
+    let mapped = wrap_obfs_layer(tcp, obfs_mode.as_deref());
+    let (stream, shadow_tls_user) =
         if let (Some(config), Some((dest, proxy))) = (shadow_tls, shadow_tls_handshake) {
-            let dial = shadow_tls_handshake_dial(dest, proxy, runtime_config, state, shutdown);
+            let dial = shadow_tls_handshake_dial(
+                dest,
+                proxy,
+                Arc::clone(&connection_config),
+                Arc::clone(&connection_state),
+                connection_shutdown.clone(),
+            );
             match accept_shadow_tls_v3(mapped, &config, &dial).await {
-                Ok(ShadowTlsAcceptResult::FallbackCompleted) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionAborted,
-                        "shadow-tls fallback completed",
-                    ));
-                }
+                Ok(ShadowTlsAcceptResult::FallbackCompleted) => return,
                 Ok(ShadowTlsAcceptResult::Authenticated { stream, user }) => (stream, Some(user)),
                 Err(error) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        error.to_string(),
-                    ));
+                    connection_state.log(
+                        "error",
+                        format!("shadow-tls accept failed: {error}"),
+                    );
+                    return;
                 }
             }
         } else {
             (mapped, None)
         };
 
-    let stream = ProxyServerStream::from_stream_with_user_manager(
+    let inbound = ProxyServerStream::from_stream_with_user_manager(
         context,
         stream,
         method,
         &key,
         user_manager,
     );
-    Ok((stream, peer, user))
+    serve_shadowsocks_inbound_after_handshake(
+        inbound,
+        peer,
+        local,
+        shadow_tls_user,
+        connection_config,
+        connection_state,
+        connection_dns_service,
+        connection_shutdown,
+        connection_inbound_name,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_shadowsocks_inbound_after_handshake(
+    mut inbound: ProxyServerStream<rewrite_outbound::BoxedOutboundStream>,
+    peer: SocketAddr,
+    local: SocketAddr,
+    shadow_tls_user: Option<String>,
+    connection_config: Arc<Config>,
+    connection_state: Arc<RuntimeState>,
+    connection_dns_service: Arc<rewrite_dns::DnsService>,
+    connection_shutdown: CancellationToken,
+    connection_inbound_name: String,
+) {
+    let destination = tokio::select! {
+        () = connection_shutdown.cancelled() => return,
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            inbound.handshake(),
+        ) => match result {
+            Ok(Ok(destination)) => match address_to_destination(&destination) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    connection_state.log(
+                        "error",
+                        format!("shadowsocks inbound destination rejected: {error}"),
+                    );
+                    return;
+                }
+            },
+            Ok(Err(error)) => {
+                connection_state.log(
+                    "error",
+                    format!("shadowsocks inbound handshake failed: {error}"),
+                );
+                return;
+            }
+            Err(_) => {
+                connection_state.log("error", "shadowsocks inbound handshake timed out");
+                return;
+            }
+        }
+    };
+    if let Some(uot_version) = shadowsocks_uot_version(&destination) {
+        let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
+        metadata.network = Network::Udp;
+        metadata.source_ip = Some(unmap_ip(peer.ip()));
+        metadata.source_port = peer.port();
+        metadata.inbound_port = local.port();
+        connection_inbound_name.clone_into(&mut metadata.inbound_name);
+        if let Some(user) = shadow_tls_user {
+            metadata.inbound_user = user;
+        }
+        serve_shadowsocks_inbound_uot(
+            &mut inbound,
+            uot_version,
+            metadata,
+            &connection_config,
+            &connection_state,
+            &connection_dns_service,
+            &connection_shutdown,
+        )
+        .await;
+        return;
+    }
+    let mut metadata = Metadata::new(destination, InboundProtocol::Shadowsocks);
+    metadata.network = Network::Tcp;
+    metadata.source_ip = Some(unmap_ip(peer.ip()));
+    metadata.source_port = peer.port();
+    metadata.inbound_port = local.port();
+    connection_inbound_name.clone_into(&mut metadata.inbound_name);
+    if let Some(user) = shadow_tls_user {
+        metadata.inbound_user = user;
+    }
+    let client: BoxedInboundStream =
+        Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
+    serve_shadowsocks_connection(
+        client,
+        metadata,
+        &connection_config,
+        &connection_state,
+        &connection_dns_service,
+        &connection_shutdown,
+    )
+    .await;
 }
 
 fn shadow_tls_handshake_target(config: &ShadowsocksShadowTlsConfig) -> (String, Option<String>) {

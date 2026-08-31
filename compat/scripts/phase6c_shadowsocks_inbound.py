@@ -1051,6 +1051,161 @@ rules:
         camouflage.wait(timeout=1)
 
 
+def exercise_shadow_tls_fallback_concurrency(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    echo = start_server(EchoHandler)
+    camouflage, camouflage_port = start_camouflage_tls(scratch)
+    ss_port = reserve_port()
+    config = scratch / "shadow-tls-fallback-config.yaml"
+    config.write_text(
+        f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-shadow-tls-fallback
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER}
+    password: {PASSWORD}
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: {STLS_PASSWORD}
+      handshake:
+        dest: 127.0.0.1:{camouflage_port}
+rules:
+  - MATCH,DIRECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
+        probe = subprocess.Popen(
+            [
+                "openssl",
+                "s_client",
+                "-connect",
+                f"127.0.0.1:{ss_port}",
+                "-servername",
+                STLS_HOST,
+                "-quiet",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.2)
+        concurrent_ss = proxied_echo(
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
+        if probe.stdin is not None:
+            probe.stdin.write(b"GET / HTTP/1.0\r\n\r\n")
+            probe.stdin.flush()
+        probe.wait(timeout=IO_DEADLINE)
+        return {"shadow-tls-fallback-concurrent-ss": concurrent_ss}
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+        camouflage.terminate()
+        camouflage.wait(timeout=1)
+
+
+def exercise_shadow_tls_in_user(
+    binary: pathlib.Path,
+    client: pathlib.Path,
+    scratch: pathlib.Path,
+) -> dict[str, bool]:
+    """Rust-only: Go sing-shadowsocks inbound does not attach shadow-tls user to IN-USER metadata yet."""
+    echo = start_server(EchoHandler)
+    camouflage, camouflage_port = start_camouflage_tls(scratch)
+    ss_port = reserve_port()
+    config = scratch / "shadow-tls-in-user-config.yaml"
+    config.write_text(
+        f"""mode: rule
+log-level: info
+ipv6: false
+listeners:
+  - name: ss-shadow-tls-in-user
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {ss_port}
+    cipher: {CIPHER}
+    password: {PASSWORD}
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: {STLS_PASSWORD}
+      handshake:
+        dest: 127.0.0.1:{camouflage_port}
+rules:
+  - DST-PORT,{camouflage_port},DIRECT
+  - IN-USER,phase6c-user,DIRECT
+  - MATCH,REJECT
+"""
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ss_route(
+            process,
+            client,
+            ss_port,
+            echo.port,
+            payload=TCP_STLS_PAYLOAD,
+            obfs_mode="shadow-tls",
+            obfs_host=STLS_HOST,
+            plugin_password=STLS_PASSWORD,
+            plugin_version=3,
+        )
+        return {
+            "shadow-tls-in-user": proxied_echo(
+                client,
+                ss_port,
+                echo.port,
+                payload=TCP_STLS_PAYLOAD,
+                obfs_mode="shadow-tls",
+                obfs_host=STLS_HOST,
+                plugin_password=STLS_PASSWORD,
+                plugin_version=3,
+            ),
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        echo.close()
+        camouflage.terminate()
+        camouflage.wait(timeout=1)
+
+
 def exercise_2022_eih_tcp(
     binary: pathlib.Path,
     client: pathlib.Path,
@@ -1358,6 +1513,7 @@ def main() -> int:
                     **exercise_obfs_http_listener(binary, client, scratch),
                     **exercise_obfs_tls_listener(binary, client, scratch),
                     **exercise_shadow_tls_listener(binary, client, scratch),
+                    **exercise_shadow_tls_fallback_concurrency(binary, client, scratch),
                     **exercise_uot_listener(binary, uot_client, scratch),
                     **exercise_uot_dns(binary, uot_client, scratch),
                     **exercise_uot_socks5(binary, uot_client, scratch),
@@ -1380,6 +1536,16 @@ def main() -> int:
             if not rust_eih.get("named-2022-eih-tcp"):
                 raise RuntimeError(f"Rust SS2022 EIH inbound failed: {rust_eih}")
             observations["rust-eih"] = rust_eih
+            rust_in_user_scratch = root / "rust-in-user"
+            rust_in_user_scratch.mkdir()
+            rust_in_user = exercise_shadow_tls_in_user(
+                binaries["rust"],
+                client,
+                rust_in_user_scratch,
+            )
+            if not rust_in_user.get("shadow-tls-in-user"):
+                raise RuntimeError(f"Rust shadow-tls IN-USER inbound failed: {rust_in_user}")
+            observations["rust-in-user"] = rust_in_user
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

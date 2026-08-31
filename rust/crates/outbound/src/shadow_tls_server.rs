@@ -139,24 +139,9 @@ where
             .await
             .map_err(ShadowTlsError::Io)?;
     }
-    let mut client_buffer = vec![0_u8; 16_384];
-    let mut handshake_buffer = vec![0_u8; 16_384];
-    loop {
-        tokio::select! {
-            read = client.read(&mut client_buffer) => {
-                match read.map_err(ShadowTlsError::Io)? {
-                    0 => break,
-                    count => handshake.write_all(&client_buffer[..count]).await.map_err(ShadowTlsError::Io)?,
-                }
-            }
-            read = handshake.read(&mut handshake_buffer) => {
-                match read.map_err(ShadowTlsError::Io)? {
-                    0 => break,
-                    count => client.write_all(&handshake_buffer[..count]).await.map_err(ShadowTlsError::Io)?,
-                }
-            }
-        }
-    }
+    tokio::io::copy_bidirectional(&mut client, handshake)
+        .await
+        .map_err(ShadowTlsError::Io)?;
     Ok(())
 }
 
@@ -316,8 +301,10 @@ fn reset_hmac_verify(hmac_verify: &mut HmacSha1, server_random: &[u8; 32], passw
 mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener as StdTcpListener};
+    use std::sync::Arc;
 
-    use tokio::net::TcpStream;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
 
@@ -376,6 +363,101 @@ mod tests {
         let result = accept_task.await.expect("accept task").expect("accept");
         assert!(matches!(result, ShadowTlsAcceptResult::FallbackCompleted));
         client_task.await.expect("client");
+        hs_task.await.expect("hs");
+    }
+
+    #[tokio::test]
+    async fn parallel_fallback_connections_complete_independently() {
+        let hs_listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
+        let hs_addr = hs_listener.local_addr().expect("addr");
+        let hs_task = tokio::task::spawn_blocking(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = hs_listener.accept().expect("accept");
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+            }
+        });
+
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server_addr = server.local_addr().expect("addr");
+        let config = ShadowTlsServerConfig {
+            version: 3,
+            password: String::new(),
+            users: vec![("alice".to_owned(), "secret".to_owned())],
+            handshake_dest: hs_addr.to_string(),
+            strict_mode: false,
+        };
+        let dial = local_dial(hs_addr);
+
+        let accept_task = tokio::spawn(async move {
+            let mut joins = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let (inbound, _) = server.accept().await.expect("accept");
+                let config = config.clone();
+                let dial = Arc::clone(&dial);
+                joins.spawn(async move { accept_shadow_tls_v3(inbound, &config, &dial).await });
+            }
+            let mut results = Vec::new();
+            while let Some(result) = joins.join_next().await {
+                results.push(result.expect("join").expect("accept"));
+            }
+            results
+        });
+
+        for _ in 0..2 {
+            let client = tokio::spawn(async move {
+                let mut stream = TcpStream::connect(server_addr).await.expect("connect");
+                stream
+                    .write_all(&[0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00])
+                    .await
+                    .expect("write");
+                stream.shutdown().await.ok();
+            });
+            client.await.expect("client");
+        }
+
+        let results = accept_task.await.expect("accept task");
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|result| matches!(result, ShadowTlsAcceptResult::FallbackCompleted)));
+        hs_task.await.expect("hs");
+    }
+
+    #[tokio::test]
+    async fn fallback_drains_server_response_after_half_close() {
+        let hs_listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
+        let hs_addr = hs_listener.local_addr().expect("addr");
+        let hs_task = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = hs_listener.accept().expect("accept");
+            stream.write_all(b"server-response").expect("write");
+            stream.shutdown(std::net::Shutdown::Write).ok();
+            let mut buf = [0_u8; 256];
+            while stream.read(&mut buf).unwrap_or(0) > 0 {}
+        });
+
+        let relay_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_addr = relay_listener.local_addr().expect("addr");
+        let relay_task = tokio::spawn(async move {
+            let (mut inbound, _) = relay_listener.accept().await.expect("accept");
+            let mut upstream: BoxedOutboundStream = Box::new(
+                TcpStream::connect(hs_addr).await.expect("connect"),
+            );
+            relay_fallback(&mut inbound, &mut upstream, None).await
+        });
+
+        let mut probe = TcpStream::connect(relay_addr).await.expect("connect");
+        probe.write_all(b"probe").await.expect("write");
+        probe.shutdown().await.ok();
+        let mut response = Vec::new();
+        probe
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        assert_eq!(response, b"server-response");
+        relay_task.await.expect("relay").expect("fallback");
         hs_task.await.expect("hs");
     }
 }

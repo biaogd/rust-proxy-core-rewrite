@@ -42,7 +42,7 @@ pub async fn run_with_reload(
     reloads: mpsc::Receiver<Config>,
     shutdown: CancellationToken,
 ) -> Result<(), RuntimeError> {
-    run_with_reload_inner(initial, reloads, shutdown, None).await
+    Box::pin(run_with_reload_inner(initial, reloads, shutdown, None)).await
 }
 
 /// Runs transactional generations with startup and shutdown-hook barriers.
@@ -63,7 +63,13 @@ pub async fn run_with_reload_lifecycle(
     shutdown: CancellationToken,
     lifecycle: LifecycleSignals,
 ) -> Result<(), RuntimeError> {
-    run_with_reload_inner(initial, reloads, shutdown, Some(lifecycle)).await
+    Box::pin(run_with_reload_inner(
+        initial,
+        reloads,
+        shutdown,
+        Some(lifecycle),
+    ))
+    .await
 }
 
 #[allow(clippy::too_many_lines)]
