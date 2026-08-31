@@ -1,6 +1,6 @@
 # shadow-rustls dependency
 
-ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so we maintain a **fork** of rustls **0.23.43** and tokio-rustls **0.26.4** in the standalone repository [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls).
+ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so we depend on the fork [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) (rustls **0.23.43** + tokio-rustls **0.26.4**) as a normal git dependency.
 
 ## Why fork, not patch-in-tree?
 
@@ -8,22 +8,16 @@ The old `rust/third_party/rustls` vendored copy duplicated the entire crate insi
 
 ## Consumer wiring
 
-`rust/Cargo.toml` patches crates.io workspace-wide:
+`rust/Cargo.toml` declares the fork in `[workspace.dependencies]` (not `[patch.crates-io]`):
 
 ```toml
-[patch.crates-io]
 rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
-tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
+tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1", default-features = false, features = ["aws_lc_rs", "brotli", "ring", "tls12"] }
 ```
 
-Runtime use remains opt-in: only ShadowTLS / outbound TLS paths set `client_hello_fingerprint` or `connect_with_session_id_generator`.
+Member crates use `rustls.workspace = true` / `tokio-rustls.workspace = true` where needed. Runtime use remains opt-in: only ShadowTLS / outbound TLS paths set `client_hello_fingerprint` or `connect_with_session_id_generator`.
 
-For local fork development, clone `shadow-rustls` next to this repo and temporarily switch to path patches:
-
-```toml
-rustls = { path = "../shadow-rustls/rustls" }
-tokio-rustls = { path = "../shadow-rustls/tokio-rustls" }
-```
+`reqwest` and `quinn` still pull their own crates.io `rustls` transitively; that is intentional — only our direct TLS stack uses the fork.
 
 ## Releases
 
@@ -31,7 +25,7 @@ tokio-rustls = { path = "../shadow-rustls/tokio-rustls" }
 |-----|-------------|-------------------|
 | `rustls-0.23.43-shadow.1` | 0.23.43 | 0.26.4 |
 
-Bump the `tag` in `rust/Cargo.toml` after publishing a new shadow-rustls release, then run `cargo update -p rustls -p tokio-rustls`.
+Bump the `tag` in `[workspace.dependencies]` after publishing a new shadow-rustls release, then run `cargo update`.
 
 ## Patch summary
 
@@ -41,6 +35,4 @@ See [shadow-rustls/docs/PATCHES.md](https://github.com/biaogd/shadow-rustls/blob
 
 1. Edit the fork on `github.com/biaogd/shadow-rustls`.
 2. Tag `rustls-<version>-shadow.<n>`.
-3. Bump the git `tag` in this repo's `[patch.crates-io]` section.
-
-The **Sync shadow-rustls** workflow (`.github/workflows/sync-shadow-rustls.yml`) can mirror branch `shadow-rustls-export` when secret `SHADOW_RUSTLS_PUSH_TOKEN` is configured; it is optional now that the remote is live.
+3. Bump the git `tag` in this repo's `[workspace.dependencies]`.
