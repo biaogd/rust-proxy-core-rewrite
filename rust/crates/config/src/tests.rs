@@ -2293,6 +2293,64 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn rejects_named_shadowsocks_shadow_tls_v1_at_load_time() {
+    let error = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    shadow-tls:
+      enable: true
+      version: 1
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect_err("v1 shadow-tls should be rejected");
+    assert!(
+        error.to_string().contains("not supported"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_named_shadowsocks_shadow_tls_v2_at_load_time() {
+    let error = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    shadow-tls:
+      enable: true
+      version: 2
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect_err("v2 shadow-tls should be rejected");
+    assert!(
+        error.to_string().contains("not supported"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn loads_named_shadowsocks_2022_eih_listener() {
     let config = Config::from_yaml(
         r"mode: rule

@@ -1,12 +1,11 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::BoxedOutboundStream;
 use crate::shadow_tls::{
@@ -18,6 +17,12 @@ use crate::shadow_tls::{
 
 type HmacSha1 = Hmac<Sha1>;
 
+pub type ShadowTlsHandshakeDial = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<BoxedOutboundStream, io::Error>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone, Debug)]
 pub struct ShadowTlsServerConfig {
     pub version: u8,
@@ -27,148 +32,49 @@ pub struct ShadowTlsServerConfig {
     pub strict_mode: bool,
 }
 
-pub struct ShadowTlsServer<S> {
-    config: ShadowTlsServerConfig,
-    state: ServerState<S>,
+/// Outcome of a completed `ShadowTLS` v3 accept attempt.
+pub enum ShadowTlsAcceptResult {
+    /// Camouflage TLS finished; inner stream carries post-handshake SS bytes.
+    Authenticated {
+        stream: BoxedOutboundStream,
+        user: String,
+    },
+    /// Client was relayed to the handshake destination (probe/wrong password/plain TLS).
+    FallbackCompleted,
 }
 
-enum ServerState<S> {
-    Initial(Option<S>),
-    Handshaking(Pin<Box<dyn Future<Output = Result<VerifiedStream, ShadowTlsError>> + Send>>),
-    Ready(Box<VerifiedStream>),
-    Failed(io::Error),
-}
-
-impl<S> ShadowTlsServer<S> {
-    pub fn new(inner: S, config: ShadowTlsServerConfig) -> Self {
-        Self {
-            config,
-            state: ServerState::Initial(Some(inner)),
-        }
-    }
-
-    fn start_handshake(&mut self) -> io::Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    {
-        let ServerState::Initial(inner) = &mut self.state else {
-            return Ok(());
-        };
-        let Some(inner) = inner.take() else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "shadow-tls server handshake already started",
-            ));
-        };
-        let config = self.config.clone();
-        self.state = ServerState::Handshaking(Box::pin(async move {
-            match config.version {
-                3 => accept_shadow_tls_v3(inner, &config).await,
-                other => Err(ShadowTlsError::Protocol(format!(
-                    "shadow-tls inbound version {other} is not supported yet"
-                ))),
-            }
-        }));
-        Ok(())
-    }
-
-    fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let ServerState::Handshaking(future) = &mut self.state else {
-            return Poll::Ready(Ok(()));
-        };
-        match future.as_mut().poll(cx) {
-            Poll::Ready(Ok(stream)) => {
-                self.state = ServerState::Ready(Box::new(stream));
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(error)) => {
-                let io_error = io::Error::new(io::ErrorKind::InvalidData, error.to_string());
-                let kind = io_error.kind();
-                self.state = ServerState::Failed(io_error);
-                Poll::Ready(Err(io::Error::new(
-                    kind,
-                    "shadow-tls server handshake failed",
-                )))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncRead for ShadowTlsServer<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        loop {
-            match &mut self.state {
-                ServerState::Initial(_) => {
-                    self.start_handshake()?;
-                }
-                ServerState::Handshaking(_) => ready!(self.poll_handshake(cx))?,
-                ServerState::Ready(stream) => return Pin::new(stream).poll_read(cx, buf),
-                ServerState::Failed(error) => {
-                    return Poll::Ready(Err(io::Error::new(error.kind(), error.to_string())));
-                }
-            }
-        }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for ShadowTlsServer<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            match &mut self.state {
-                ServerState::Initial(_) => {
-                    self.start_handshake()?;
-                }
-                ServerState::Handshaking(_) => ready!(self.poll_handshake(cx))?,
-                ServerState::Ready(stream) => return Pin::new(stream).poll_write(cx, buf),
-                ServerState::Failed(error) => {
-                    return Poll::Ready(Err(io::Error::new(error.kind(), error.to_string())));
-                }
-            }
-        }
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.state {
-            ServerState::Ready(stream) => Pin::new(stream).poll_flush(cx),
-            ServerState::Failed(error) => {
-                Poll::Ready(Err(io::Error::new(error.kind(), error.to_string())))
-            }
-            _ => Poll::Ready(Ok(())),
-        }
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match &mut self.state {
-            ServerState::Ready(stream) => Pin::new(stream).poll_shutdown(cx),
-            ServerState::Failed(error) => {
-                Poll::Ready(Err(io::Error::new(error.kind(), error.to_string())))
-            }
-            _ => Poll::Ready(Ok(())),
-        }
-    }
-}
-
-async fn accept_shadow_tls_v3<S>(
+/// Accept a `ShadowTLS` v3 inbound connection.
+///
+/// On authentication failure or post-handshake fallback, relays the client to the
+/// handshake destination and returns [`ShadowTlsAcceptResult::FallbackCompleted`].
+///
+/// # Errors
+///
+/// Returns [`ShadowTlsError`] when I/O fails or the TLS framing is invalid during
+/// an authenticated handshake.
+pub async fn accept_shadow_tls_v3<S>(
     mut client: S,
     config: &ShadowTlsServerConfig,
-) -> Result<VerifiedStream, ShadowTlsError>
+    handshake_dial: &ShadowTlsHandshakeDial,
+) -> Result<ShadowTlsAcceptResult, ShadowTlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    if config.version != 3 {
+        return Err(ShadowTlsError::Protocol(format!(
+            "shadow-tls inbound version {} is not supported yet",
+            config.version
+        )));
+    }
+
     let client_hello = read_tls_frame(&mut client).await?;
-    let user = verify_client_hello(&client_hello, &config.users)?;
-    let mut handshake = TcpStream::connect(&config.handshake_dest)
-        .await
-        .map_err(|error| ShadowTlsError::Protocol(format!("dial handshake server: {error}")))?;
+    let Ok(user) = verify_client_hello(&client_hello, &config.users) else {
+        let mut handshake = (handshake_dial)().await.map_err(ShadowTlsError::Io)?;
+        relay_fallback(client, &mut handshake, Some(client_hello)).await?;
+        return Ok(ShadowTlsAcceptResult::FallbackCompleted);
+    };
+
+    let mut handshake = (handshake_dial)().await.map_err(ShadowTlsError::Io)?;
     handshake
         .write_all(&client_hello)
         .await
@@ -178,18 +84,16 @@ where
         .write_all(&server_hello)
         .await
         .map_err(ShadowTlsError::Io)?;
+
     let Some(server_random) = extract_server_random(&server_hello) else {
-        relay_fallback(client, handshake, client_hello).await?;
-        return Err(ShadowTlsError::Protocol(
-            "shadow-tls: connection relayed to fallback".to_owned(),
-        ));
+        relay_fallback(client, &mut handshake, None).await?;
+        return Ok(ShadowTlsAcceptResult::FallbackCompleted);
     };
     if config.strict_mode && !is_server_hello_tls13(&server_hello) {
-        relay_fallback(client, handshake, client_hello).await?;
-        return Err(ShadowTlsError::Protocol(
-            "shadow-tls: connection relayed to fallback".to_owned(),
-        ));
+        relay_fallback(client, &mut handshake, None).await?;
+        return Ok(ShadowTlsAcceptResult::FallbackCompleted);
     }
+
     let mut hmac_write = HmacSha1::new_from_slice(user.1.as_bytes())
         .map_err(|error| ShadowTlsError::Protocol(format!("HMAC key: {error}")))?;
     hmac_write.update(&server_random);
@@ -210,23 +114,26 @@ where
         &mut hmac_verify,
     )
     .await?;
-    Ok(VerifiedStream::from_server(
-        Box::new(client) as BoxedOutboundStream,
-        hmac_add,
-        hmac_verify,
-        pending,
-    ))
+    Ok(ShadowTlsAcceptResult::Authenticated {
+        stream: Box::new(VerifiedStream::from_server(
+            Box::new(client) as BoxedOutboundStream,
+            hmac_add,
+            hmac_verify,
+            pending,
+        )) as BoxedOutboundStream,
+        user: user.0,
+    })
 }
 
 async fn relay_fallback<S>(
     mut client: S,
-    mut handshake: TcpStream,
-    prefix: Vec<u8>,
+    handshake: &mut BoxedOutboundStream,
+    prefix: Option<Vec<u8>>,
 ) -> Result<(), ShadowTlsError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    if !prefix.is_empty() {
+    if let Some(prefix) = prefix.filter(|data| !data.is_empty()) {
         handshake
             .write_all(&prefix)
             .await
@@ -255,7 +162,7 @@ where
 
 async fn relay_v3_handshake<S>(
     client: &mut S,
-    handshake: &mut TcpStream,
+    handshake: &mut BoxedOutboundStream,
     password: &str,
     server_random: &[u8; 32],
     hmac_write: &mut HmacSha1,
@@ -403,4 +310,72 @@ fn reset_hmac_verify(hmac_verify: &mut HmacSha1, server_random: &[u8; 32], passw
     *hmac_verify = HmacSha1::new_from_slice(password.as_bytes()).expect("HMAC key");
     hmac_verify.update(server_random);
     hmac_verify.update(b"C");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener as StdTcpListener};
+
+    use tokio::net::TcpStream;
+
+    use super::*;
+
+    fn local_dial(addr: SocketAddr) -> ShadowTlsHandshakeDial {
+        Arc::new(move || {
+            let addr = addr;
+            Box::pin(async move {
+                TcpStream::connect(addr)
+                    .await
+                    .map(|stream| Box::new(stream) as BoxedOutboundStream)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn hmac_mismatch_replays_client_hello_to_handshake_server() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
+        let hs_addr = listener.local_addr().expect("addr");
+        let hs_task = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0_u8; 4096];
+            let read = stream.read(&mut buf).expect("read");
+            assert!(read >= 5);
+            assert_eq!(buf[0], HANDSHAKE);
+            stream
+                .write_all(&[0x16, 0x03, 0x03, 0x00, 0x05, 0x02, 0x00, 0x00, 0x01, 0x00])
+                .ok();
+        });
+
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let server_addr = server.local_addr().expect("addr");
+        let accept_task = tokio::spawn(async move {
+            let (inbound, _) = server.accept().await.expect("accept");
+            let config = ShadowTlsServerConfig {
+                version: 3,
+                password: String::new(),
+                users: vec![("alice".to_owned(), "secret".to_owned())],
+                handshake_dest: hs_addr.to_string(),
+                strict_mode: false,
+            };
+            let dial = local_dial(hs_addr);
+            accept_shadow_tls_v3(inbound, &config, &dial).await
+        });
+
+        let client_task = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(server_addr).await.expect("connect");
+            stream
+                .write_all(&[0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00])
+                .await
+                .expect("write");
+            stream.shutdown().await.ok();
+        });
+
+        let result = accept_task.await.expect("accept task").expect("accept");
+        assert!(matches!(result, ShadowTlsAcceptResult::FallbackCompleted));
+        client_task.await.expect("client");
+        hs_task.await.expect("hs");
+    }
 }

@@ -13,7 +13,8 @@ use rewrite_config::{
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_outbound::{
-    HttpObfsServer, HttpProxyTls, ShadowTlsServer, ShadowTlsServerConfig, TlsObfsServer,
+    HttpObfsServer, HttpProxyTls, ShadowTlsAcceptResult, ShadowTlsHandshakeDial,
+    ShadowTlsServerConfig, TlsObfsServer, accept_shadow_tls_v3,
 };
 use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
@@ -22,10 +23,11 @@ use shadowsocks::ProxySocket;
 use shadowsocks::config::{
     ServerConfig, ServerType, ServerUser, ServerUserManager, method_support_eih,
 };
-use shadowsocks::context::Context as SsContext;
+use shadowsocks::context::{Context as SsContext, SharedContext};
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::net::UdpSocket as SsUdpSocket;
 use shadowsocks::relay::socks5::Address;
+use shadowsocks::relay::tcprelay::ProxyServerStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
@@ -37,8 +39,8 @@ use crate::listener::{
     resolved_route, udp_session_mode,
 };
 use crate::tcp::{
-    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
-    resolve_rematch_target, serve_shadowsocks_connection,
+    apply_host_mapping, configured_proxy, dial_shadow_tls_handshake, direct_tcp_options,
+    mode_decision, resolve_rematch_target, serve_shadowsocks_connection,
 };
 use crate::types::RuntimeError;
 
@@ -54,6 +56,10 @@ fn inbound_udp_destination(metadata: &Metadata, fake_host: Option<&str>) -> Dest
 
 pub(crate) struct ShadowsocksListener {
     inner: ProxyListener,
+    method: CipherKind,
+    key: Box<[u8]>,
+    context: SharedContext,
+    user_manager: Option<Arc<ServerUserManager>>,
     udp: Option<Arc<ProxySocket<SsUdpSocket>>>,
     inbound_name: String,
     simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
@@ -103,7 +109,7 @@ impl ShadowsocksListener {
             .map_err(|error| RuntimeError::Listener(std::io::Error::other(error)))?;
         let udp = if config.udp {
             Some(Arc::new(
-                ProxySocket::bind(context, &server)
+                ProxySocket::bind(context.clone(), &server)
                     .await
                     .map_err(|error| RuntimeError::Listener(std::io::Error::other(error)))?,
             ))
@@ -112,6 +118,10 @@ impl ShadowsocksListener {
         };
         Ok(Self {
             inner,
+            method: server.method(),
+            key: server.key().to_vec().into_boxed_slice(),
+            context,
+            user_manager: server.clone_user_manager(),
             udp,
             inbound_name: config.name.clone(),
             simple_obfs: config.simple_obfs.clone(),
@@ -192,36 +202,39 @@ pub(super) async fn run_shadowsocks_listener(
 ) {
     let ShadowsocksListener {
         inner,
+        method,
+        key,
+        context,
+        user_manager,
         udp,
         inbound_name,
         simple_obfs,
         shadow_tls,
     } = listener;
     let obfs_mode = simple_obfs.as_ref().map(|config| config.mode.as_str());
-    let shadow_tls_config = shadow_tls.as_ref().map(shadow_tls_server_config);
+    let shadow_tls_template = shadow_tls.as_ref().map(shadow_tls_server_config);
+    let shadow_tls_handshake = shadow_tls.as_ref().map(shadow_tls_handshake_target);
     let mut connections = JoinSet::new();
     let mut udp_sessions = ShadowsocksUdpSessions::default();
     let mut datagram = vec![0_u8; 65_536];
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = inner.accept_map({
-                let shadow_tls_config = shadow_tls_config.clone();
-                move |stream| -> rewrite_outbound::BoxedOutboundStream {
-                if let Some(config) = shadow_tls_config {
-                    Box::new(ShadowTlsServer::new(stream, config))
-                } else {
-                match obfs_mode {
-                    Some("http") => Box::new(HttpObfsServer::new(stream, None)),
-                    Some("tls") => Box::new(TlsObfsServer::new(stream, None)),
-                    _ => Box::new(stream),
-                }
-                }
-            }
-            }) => {
-                let Ok((mut inbound, peer)) = accepted else {
-                    state.log("error", "shadowsocks inbound accept failed");
-                    break;
+            accepted = accept_shadowsocks_tcp(
+                &inner,
+                method,
+                key.clone(),
+                Arc::clone(&context),
+                user_manager.clone(),
+                obfs_mode,
+                shadow_tls_template.clone(),
+                shadow_tls_handshake.clone(),
+                Arc::clone(&config.borrow()),
+                Arc::clone(&state),
+                shutdown.child_token(),
+            ) => {
+                let Ok((mut inbound, peer, shadow_tls_user)) = accepted else {
+                    continue;
                 };
                 let local = inner.local_addr().unwrap_or(peer);
                 let connection_config = Arc::clone(&config.borrow());
@@ -269,6 +282,9 @@ pub(super) async fn run_shadowsocks_listener(
                         metadata.source_port = peer.port();
                         metadata.inbound_port = local.port();
                         connection_inbound_name.clone_into(&mut metadata.inbound_name);
+                        if let Some(user) = shadow_tls_user {
+                            metadata.inbound_user = user;
+                        }
                         serve_shadowsocks_inbound_uot(
                             &mut inbound,
                             uot_version,
@@ -287,6 +303,9 @@ pub(super) async fn run_shadowsocks_listener(
                     metadata.source_port = peer.port();
                     metadata.inbound_port = local.port();
                     connection_inbound_name.clone_into(&mut metadata.inbound_name);
+                    if let Some(user) = shadow_tls_user {
+                        metadata.inbound_user = user;
+                    }
                     let client: BoxedInboundStream =
                         Box::new(ShadowsocksInboundStream::new(inbound, local, peer));
                     serve_shadowsocks_connection(
@@ -1727,6 +1746,96 @@ fn shadow_tls_server_config(config: &ShadowsocksShadowTlsConfig) -> ShadowTlsSer
         handshake_dest: config.handshake.dest.clone(),
         strict_mode: config.strict_mode,
     }
+}
+
+fn shadow_tls_handshake_dial(
+    dest: String,
+    proxy: Option<String>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) -> ShadowTlsHandshakeDial {
+    Arc::new(move || {
+        let dest = dest.clone();
+        let proxy = proxy.clone();
+        let config = Arc::clone(&config);
+        let state = Arc::clone(&state);
+        let shutdown = shutdown.child_token();
+        Box::pin(async move {
+            dial_shadow_tls_handshake(&dest, proxy.as_deref(), &config, &state, &shutdown).await
+        })
+    })
+}
+
+fn wrap_obfs_layer(
+    stream: tokio::net::TcpStream,
+    obfs_mode: Option<&str>,
+) -> rewrite_outbound::BoxedOutboundStream {
+    match obfs_mode {
+        Some("http") => Box::new(HttpObfsServer::new(stream, None)),
+        Some("tls") => Box::new(TlsObfsServer::new(stream, None)),
+        _ => Box::new(stream),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accept_shadowsocks_tcp(
+    inner: &ProxyListener,
+    method: CipherKind,
+    key: Box<[u8]>,
+    context: SharedContext,
+    user_manager: Option<Arc<ServerUserManager>>,
+    obfs_mode: Option<&str>,
+    shadow_tls: Option<ShadowTlsServerConfig>,
+    shadow_tls_handshake: Option<(String, Option<String>)>,
+    runtime_config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    shutdown: CancellationToken,
+) -> std::io::Result<(
+    ProxyServerStream<rewrite_outbound::BoxedOutboundStream>,
+    SocketAddr,
+    Option<String>,
+)> {
+    let (tcp, peer) = inner.get_ref().accept().await?;
+    let mapped = wrap_obfs_layer(tcp, obfs_mode);
+
+    let (stream, user) =
+        if let (Some(config), Some((dest, proxy))) = (shadow_tls, shadow_tls_handshake) {
+            let dial = shadow_tls_handshake_dial(dest, proxy, runtime_config, state, shutdown);
+            match accept_shadow_tls_v3(mapped, &config, &dial).await {
+                Ok(ShadowTlsAcceptResult::FallbackCompleted) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "shadow-tls fallback completed",
+                    ));
+                }
+                Ok(ShadowTlsAcceptResult::Authenticated { stream, user }) => (stream, Some(user)),
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error.to_string(),
+                    ));
+                }
+            }
+        } else {
+            (mapped, None)
+        };
+
+    let stream = ProxyServerStream::from_stream_with_user_manager(
+        context,
+        stream,
+        method,
+        &key,
+        user_manager,
+    );
+    Ok((stream, peer, user))
+}
+
+fn shadow_tls_handshake_target(config: &ShadowsocksShadowTlsConfig) -> (String, Option<String>) {
+    (
+        config.handshake.dest.clone(),
+        config.handshake.proxy.clone(),
+    )
 }
 
 /// Splits an inbound password into the server PSK and optional EIH user keys.

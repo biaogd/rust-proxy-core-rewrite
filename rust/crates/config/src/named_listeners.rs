@@ -163,16 +163,16 @@ fn parse_shadow_tls(
             "listener {name} has unsupported shadow-tls version: {version}"
         )));
     }
-    let password = mapping_string(mapping, "password");
-    let users = parse_shadow_tls_users(mapping, name)?;
-    if version == 3 && users.is_empty() {
+    if version != 3 {
         return Err(ConfigError::InvalidInbound(format!(
-            "listener {name} shadow-tls v3 requires at least one user"
+            "listener {name} shadow-tls version {version} is not supported; only v3 is implemented"
         )));
     }
-    if version == 2 && password.is_none() {
+    let password = mapping_string(mapping, "password");
+    let users = parse_shadow_tls_users(mapping, name)?;
+    if users.is_empty() {
         return Err(ConfigError::InvalidInbound(format!(
-            "listener {name} shadow-tls v2 requires password"
+            "listener {name} shadow-tls v3 requires at least one user"
         )));
     }
     let handshake = mapping

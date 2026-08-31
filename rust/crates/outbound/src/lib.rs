@@ -20,7 +20,9 @@ pub use http::{
 };
 pub use http_upgrade::connect_v2ray_http_upgrade;
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
-pub use shadow_tls_server::{ShadowTlsServer, ShadowTlsServerConfig};
+pub use shadow_tls_server::{
+    ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,
+};
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,

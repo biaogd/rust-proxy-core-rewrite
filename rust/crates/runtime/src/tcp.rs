@@ -608,6 +608,71 @@ pub(super) fn configured_proxy<'a>(
         .find(|proxy| proxy.name == name)
 }
 
+pub(super) fn parse_handshake_dest(dest: &str) -> Result<Destination, String> {
+    if let Ok(address) = dest.parse::<std::net::SocketAddr>() {
+        return Ok(Destination {
+            host: Host::Ip(address.ip()),
+            port: address.port(),
+        });
+    }
+    let (host, port) = dest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid handshake dest: {dest}"))?;
+    let port = port
+        .parse()
+        .map_err(|_| format!("invalid handshake dest port: {dest}"))?;
+    Ok(Destination {
+        host: Host::Domain(host.to_owned()),
+        port,
+    })
+}
+
+pub(super) async fn dial_shadow_tls_handshake(
+    dest: &str,
+    proxy: Option<&str>,
+    config: &Config,
+    state: &RuntimeState,
+    shutdown: &CancellationToken,
+) -> Result<rewrite_outbound::BoxedOutboundStream, std::io::Error> {
+    let destination = parse_handshake_dest(dest).map_err(std::io::Error::other)?;
+    if let Some(proxy_name) = proxy {
+        let proxy = configured_proxy(config, proxy_name).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("unknown shadow-tls handshake proxy: {proxy_name}"),
+            )
+        })?;
+        return tokio::select! {
+            () = shutdown.cancelled() => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "shadow-tls handshake dial cancelled",
+            )),
+            result = connect_configured_proxy(
+                proxy,
+                &destination,
+                config.ipv6,
+                state.clock(),
+                &config.trust_certificates,
+                config.dns.as_ref(),
+                direct_tcp_options(config),
+            ) => result.map_err(std::io::Error::other),
+        };
+    }
+    tokio::select! {
+        () = shutdown.cancelled() => Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "shadow-tls handshake dial cancelled",
+        )),
+        result = rewrite_outbound::connect_with_options(
+            &destination,
+            config.ipv6,
+            direct_tcp_options(config),
+        ) => result
+            .map(|stream| Box::new(stream) as rewrite_outbound::BoxedOutboundStream)
+            .map_err(std::io::Error::other),
+    }
+}
+
 pub(super) fn resolve_rematch_target(
     mut decision: rewrite_rules::Decision,
     metadata: &mut Metadata,
