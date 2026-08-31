@@ -24,15 +24,9 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Rustls is a modern TLS library written in Rust."
-homepage = "https://github.com/rustls/rustls"
-readme = "README.md"
-categories = [
-    "network-programming",
-    "cryptography",
-]
-license = "Apache-2.0 OR ISC OR MIT"
-repository = "https://github.com/rustls/rustls"
+description = "rustls fork with ShadowTLS ClientHello fingerprinting and session-id hooks."
+homepage = "https://github.com/biaogd/shadow-rustls"
+repository = "https://github.com/biaogd/shadow-rustls"
 
 [package.metadata.docs.rs]
 features = [

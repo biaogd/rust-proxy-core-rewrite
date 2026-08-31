@@ -27,6 +27,10 @@ test/config/cache*
 .vscode/
 .fleet/
 
+# shadow-rustls fork build artifacts (vendored until published as biaogd/shadow-rustls)
+/shadow-rustls/target/
+/shadow-rustls/**/target/
+
 # Rust rewrite build and compatibility-test artifacts
 /rust/target/
 /compat/artifacts/

@@ -104,5 +104,5 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 [patch.crates-io]
-rustls = { path = "third_party/rustls" }
-tokio-rustls = { path = "third_party/tokio-rustls" }
+rustls = { path = "../shadow-rustls/rustls" }
+tokio-rustls = { path = "../shadow-rustls/tokio-rustls" }
