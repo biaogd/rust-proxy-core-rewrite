@@ -103,6 +103,14 @@ pub async fn connect_shadow_tls(
             tls13_only: false,
         },
         if options.version == 1 {
+            if options
+                .client_fingerprint
+                .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+            {
+                return Err(ShadowTlsError::Tls(HttpProxyError::TlsConfiguration(
+                    "ShadowTLS v1 does not support client-fingerprint".to_owned(),
+                )));
+            }
             None
         } else {
             options.client_fingerprint

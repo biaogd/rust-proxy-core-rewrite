@@ -252,6 +252,10 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         })
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
+    let client_fingerprint = proxy.client_fingerprint.filter(|value| !value.is_empty());
+    if let Some(ShadowsocksPluginConfig::ShadowTls { version, .. }) = &shadowsocks_plugin {
+        validate_shadow_tls_client_fingerprint(&name, client_fingerprint.as_deref(), *version)?;
+    }
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,
         2 => 2,
@@ -272,13 +276,33 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        client_fingerprint,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
         shadowsocks_plugin,
         headers: BTreeMap::new(),
     })
+}
+
+fn validate_shadow_tls_client_fingerprint(
+    proxy_name: &str,
+    fingerprint: Option<&str>,
+    version: u8,
+) -> Result<(), ConfigError> {
+    let Some(raw) = fingerprint.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if raw.eq_ignore_ascii_case("none") {
+        return Ok(());
+    }
+    if version == 1 {
+        return Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()));
+    }
+    if raw.eq_ignore_ascii_case("chrome") {
+        return Ok(());
+    }
+    Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()))
 }
 
 fn validate_shadowsocks_key(

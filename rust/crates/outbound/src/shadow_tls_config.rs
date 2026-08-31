@@ -1,4 +1,4 @@
-//! TLS client configuration for ShadowTLS only (via the `shadow-rustls` fork).
+//! TLS client configuration for `ShadowTLS` only (via the `shadow-rustls` fork).
 
 use std::io::Cursor;
 use std::sync::Arc;
