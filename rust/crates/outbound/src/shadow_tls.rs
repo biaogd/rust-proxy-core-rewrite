@@ -1744,7 +1744,12 @@ mod tests {
         assert!(stream.read_error.is_some());
         assert!(stream.alert_out.is_some());
 
-        let (_sink_client, mut sink_peer) = tokio::io::duplex(1024);
+        let (mut upload_client, mut upload_peer) = tokio::io::duplex(1024);
+        upload_peer
+            .write_all(b"upload-chunk")
+            .await
+            .expect("seed upload data for write-first relay");
+
         let alert_task = tokio::spawn(async move {
             let mut alert = [0_u8; TLS_ALERT_RECORD_SIZE];
             peer.read_exact(&mut alert)
@@ -1752,7 +1757,8 @@ mod tests {
                 .expect("peer should receive TLS alert");
             alert
         });
-        let copy_result = copy_bidirectional(&mut stream, &mut sink_peer).await;
+        // Mirror production relay(client, remote): upload client first, VerifiedStream second.
+        let copy_result = copy_bidirectional(&mut upload_client, &mut stream).await;
         let alert = alert_task.await.expect("alert task join");
 
         let err = copy_result.expect_err("copy_bidirectional should fail on HMAC error");
@@ -1762,10 +1768,12 @@ mod tests {
         assert_eq!(alert[3], 0);
         assert_eq!(alert[4], 26);
 
-        if let Some(read_err) = stream.read_error.take() {
-            assert_eq!(read_err.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(read_err.to_string(), HMAC_FAIL_MSG);
-        }
+        let read_err = stream
+            .read_error
+            .as_ref()
+            .expect("read_error must remain after write-side failure");
+        assert_eq!(read_err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read_err.to_string(), HMAC_FAIL_MSG);
     }
 
     #[test]
