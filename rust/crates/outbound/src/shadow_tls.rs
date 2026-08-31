@@ -790,25 +790,23 @@ impl VerifiedStream {
         }
     }
 
-    fn write_after_read_fail_error() -> io::Error {
-        io::Error::new(
-            io::ErrorKind::ConnectionAborted,
-            "shadow-tls: connection read failed",
-        )
+    fn propagate_read_fail_error(read_error: &io::Error) -> io::Error {
+        io::Error::new(read_error.kind(), read_error.to_string())
     }
 
     fn poll_prepare_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.poll_drain_outbound(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(())) => {
-                if self.read_error.is_some() {
-                    Poll::Ready(Err(Self::write_after_read_fail_error()))
+                if let Some(error) = self.read_error.as_ref() {
+                    Poll::Ready(Err(Self::propagate_read_fail_error(error)))
                 } else {
                     Poll::Ready(Ok(()))
                 }
             }
             Poll::Ready(Err(_)) if self.read_error.is_some() => {
-                Poll::Ready(Err(Self::write_after_read_fail_error()))
+                let error = self.read_error.as_ref().expect("read error must be set");
+                Poll::Ready(Err(Self::propagate_read_fail_error(error)))
             }
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
@@ -1696,6 +1694,78 @@ mod tests {
         assert_eq!(accumulated[0], ALERT);
         assert_eq!(accumulated[3], 0);
         assert_eq!(accumulated[4], 26);
+    }
+
+    #[tokio::test]
+    async fn copy_bidirectional_preserves_hmac_error_after_pending_alert() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+
+        const HMAC_FAIL_MSG: &str = "shadow-tls: application data verification failed";
+
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [8_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(PendingOnceWriter {
+                inner: client,
+                pending_once: true,
+            }),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
+            read_error: None,
+        };
+        let mut bad = vec![0_u8; TLS_HMAC_HEADER_SIZE + 4];
+        bad[0] = APPLICATION_DATA;
+        bad[1] = 3;
+        bad[2] = 3;
+        set_tls_record_length(&mut bad, HMAC_SIZE + 4).expect("length");
+        peer.write_all(&bad).await.expect("write bad frame");
+
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut read_scratch = [0_u8; 1];
+        let mut read_buf = ReadBuf::new(&mut read_scratch);
+        assert!(matches!(
+            Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf),
+            Poll::Pending
+        ));
+        assert!(stream.read_error.is_some());
+        assert!(stream.alert_out.is_some());
+
+        let (_sink_client, mut sink_peer) = tokio::io::duplex(1024);
+        let alert_task = tokio::spawn(async move {
+            let mut alert = [0_u8; TLS_ALERT_RECORD_SIZE];
+            peer.read_exact(&mut alert)
+                .await
+                .expect("peer should receive TLS alert");
+            alert
+        });
+        let copy_result = copy_bidirectional(&mut stream, &mut sink_peer).await;
+        let alert = alert_task.await.expect("alert task join");
+
+        let err = copy_result.expect_err("copy_bidirectional should fail on HMAC error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), HMAC_FAIL_MSG);
+        assert_eq!(alert[0], ALERT);
+        assert_eq!(alert[3], 0);
+        assert_eq!(alert[4], 26);
+
+        if let Some(read_err) = stream.read_error.take() {
+            assert_eq!(read_err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(read_err.to_string(), HMAC_FAIL_MSG);
+        }
     }
 
     #[test]
