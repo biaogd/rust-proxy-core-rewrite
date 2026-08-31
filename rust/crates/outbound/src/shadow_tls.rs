@@ -53,9 +53,10 @@ pub struct ShadowTlsConnectOptions<'a> {
     /// Browser fingerprint label from the proxy-level `client-fingerprint` field.
     ///
     /// Go Clash feeds this into uTLS (`UClient` / `GetFingerprint`). When set to
-    /// `chrome`, the vendored rustls `ClientHello` is reshaped to match uTLS
-    /// `HelloChrome_Auto` (cipher list, `BoringSSL` GREASE, shuffled middle
-    /// extensions, `BoringGREASEECH`). Other Clash/uTLS names (`firefox`, `safari`,
+    /// `chrome`, the vendored rustls `ClientHello` is reshaped toward uTLS
+    /// `HelloChrome_Auto` (cipher list minus rustls-unsupported suites, GREASE,
+    /// shuffled middle extensions, `BoringGREASEECH`). This is a **partial**
+    /// fingerprint vs full Chrome 133 (RSA/CBC suites omitted). Other Clash/uTLS
     /// `ios`, `edge`, `android`, `360`, `qq`, `chrome120`, …) are accepted but
     /// leave the default rustls `ClientHello` until dedicated parrots exist.
     /// Empty/`none` keeps the default rustls `ClientHello`. Session-id HMAC for
@@ -232,6 +233,8 @@ impl ShadowTlsIo {
                     read_buffer,
                     read_offset,
                     write_state: WriteState::Idle,
+                    alert_out: None,
+                    alert_offset: 0,
                 }))
             }
             _ => unreachable!("validated above"),
@@ -291,7 +294,7 @@ impl ShadowTlsIo {
                 let expected = read_hmac.clone().finalize().into_bytes();
                 let expected = &expected[..HMAC_SIZE];
                 let got = &frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE];
-                if expected != got {
+                if !constant_time_eq(expected, got) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "shadow-tls v3: HMAC mismatch, possible data corruption",
@@ -511,74 +514,76 @@ impl AsyncRead for V2ClientStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
-        if !this.pending.is_empty() {
-            let to_copy = buf.remaining().min(this.pending.len());
-            buf.put_slice(&this.pending[..to_copy]);
-            this.pending.drain(..to_copy);
-            return Poll::Ready(Ok(()));
-        }
-        if this.read_remaining > 0 {
-            let limit = buf.remaining().min(this.read_remaining);
-            let mut scratch = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
-            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut scratch))?;
-            let read = scratch.filled().len();
+        loop {
+            if !this.pending.is_empty() {
+                let to_copy = buf.remaining().min(this.pending.len());
+                buf.put_slice(&this.pending[..to_copy]);
+                this.pending.drain(..to_copy);
+                return Poll::Ready(Ok(()));
+            }
+            if this.read_remaining > 0 {
+                let limit = buf.remaining().min(this.read_remaining);
+                let mut scratch = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
+                ready!(Pin::new(&mut this.inner).poll_read(cx, &mut scratch))?;
+                let read = scratch.filled().len();
+                if read == 0 {
+                    return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+                }
+                buf.advance(read);
+                this.read_remaining -= read;
+                return Poll::Ready(Ok(()));
+            }
+            while this.read_header_filled < TLS_HEADER_SIZE {
+                let mut header_buf =
+                    ReadBuf::new(&mut this.read_header[this.read_header_filled..TLS_HEADER_SIZE]);
+                match Pin::new(&mut this.inner).poll_read(cx, &mut header_buf) {
+                    Poll::Ready(Ok(())) => {
+                        let read = header_buf.filled().len();
+                        if read == 0 {
+                            return if this.read_header_filled == 0 {
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    "shadow-tls v2: truncated TLS header",
+                                )))
+                            };
+                        }
+                        this.read_header_filled += read;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                }
+            }
+            if this.read_header[0] != APPLICATION_DATA {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "shadow-tls v2: unexpected TLS record type: {}",
+                        this.read_header[0]
+                    ),
+                )));
+            }
+            let length = u16::from_be_bytes([this.read_header[3], this.read_header[4]]) as usize;
+            this.read_header_filled = 0;
+            if length == 0 {
+                // Go shadowConn returns (0, nil); AsyncRead must skip the empty record.
+                continue;
+            }
+            let limit = buf.remaining().min(length);
+            let mut body_buf = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
+            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut body_buf))?;
+            let read = body_buf.filled().len();
             if read == 0 {
-                return Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()));
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "shadow-tls v2: truncated TLS body",
+                )));
             }
             buf.advance(read);
-            this.read_remaining -= read;
+            this.read_remaining = length - read;
             return Poll::Ready(Ok(()));
         }
-        while this.read_header_filled < TLS_HEADER_SIZE {
-            let mut header_buf =
-                ReadBuf::new(&mut this.read_header[this.read_header_filled..TLS_HEADER_SIZE]);
-            match Pin::new(&mut this.inner).poll_read(cx, &mut header_buf) {
-                Poll::Ready(Ok(())) => {
-                    let read = header_buf.filled().len();
-                    if read == 0 {
-                        return if this.read_header_filled == 0 {
-                            Poll::Ready(Ok(()))
-                        } else {
-                            Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "shadow-tls v2: truncated TLS header",
-                            )))
-                        };
-                    }
-                    this.read_header_filled += read;
-                }
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            }
-        }
-        if this.read_header[0] != APPLICATION_DATA {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "shadow-tls v2: unexpected TLS record type: {}",
-                    this.read_header[0]
-                ),
-            )));
-        }
-        let length = u16::from_be_bytes([this.read_header[3], this.read_header[4]]) as usize;
-        this.read_header_filled = 0;
-        if length == 0 {
-            // Go shadowConn returns (0, nil) for zero-length application-data records.
-            return Poll::Ready(Ok(()));
-        }
-        let limit = buf.remaining().min(length);
-        let mut body_buf = ReadBuf::new(&mut buf.initialize_unfilled()[..limit]);
-        ready!(Pin::new(&mut this.inner).poll_read(cx, &mut body_buf))?;
-        let read = body_buf.filled().len();
-        if read == 0 {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "shadow-tls v2: truncated TLS body",
-            )));
-        }
-        buf.advance(read);
-        this.read_remaining = length - read;
-        Poll::Ready(Ok(()))
     }
 }
 
@@ -604,7 +609,7 @@ impl AsyncWrite for V2ClientStream {
                                 offset: written,
                                 consumed,
                             };
-                            return Poll::Pending;
+                            continue;
                         }
                         return Poll::Ready(Ok(consumed));
                     }
@@ -698,6 +703,8 @@ struct VerifiedStream {
     read_buffer: Option<Vec<u8>>,
     read_offset: usize,
     write_state: WriteState,
+    alert_out: Option<Vec<u8>>,
+    alert_offset: usize,
 }
 
 impl VerifiedStream {
@@ -756,9 +763,43 @@ impl VerifiedStream {
         // Go verifiedConn: timeout-class errors do not send a TLS alert
         // (`TestV3InterruptedReadDoesNotSendAlert`).
         if !is_timeout_like(&error) {
-            send_alert(Pin::new(&mut self.inner), cx);
+            self.queue_alert();
+            let _ = self.poll_drain_alert(cx);
         }
         Poll::Ready(Err(error))
+    }
+
+    fn queue_alert(&mut self) {
+        const RECORD_SIZE: usize = 31;
+        let mut record = vec![0_u8; RECORD_SIZE];
+        record[0] = ALERT;
+        record[1] = 3;
+        record[2] = 3;
+        record[4] = 26;
+        rand::rng().fill(&mut record[TLS_HEADER_SIZE..]);
+        self.alert_out = Some(record);
+        self.alert_offset = 0;
+    }
+
+    fn poll_drain_alert(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        loop {
+            let Some(record) = self.alert_out.as_ref() else {
+                return Poll::Ready(Ok(()));
+            };
+            let offset = self.alert_offset;
+            match poll_write_all(Pin::new(&mut self.inner), cx, record, offset) {
+                Poll::Ready(Ok(written)) if written < record.len() => {
+                    self.alert_offset = written;
+                }
+                Poll::Ready(Ok(_)) => {
+                    self.alert_out = None;
+                    self.alert_offset = 0;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
@@ -837,6 +878,7 @@ impl AsyncWrite for VerifiedStream {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        ready!(this.poll_drain_alert(cx))?;
         loop {
             if let WriteState::Active {
                 frame,
@@ -852,7 +894,7 @@ impl AsyncWrite for VerifiedStream {
                                 offset: written,
                                 consumed,
                             };
-                            return Poll::Pending;
+                            continue;
                         }
                         return Poll::Ready(Ok(consumed));
                     }
@@ -885,6 +927,7 @@ impl AsyncWrite for VerifiedStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        ready!(this.poll_drain_alert(cx))?;
         ready!(drain_write_state(
             &mut this.write_state,
             &mut this.inner,
@@ -895,6 +938,7 @@ impl AsyncWrite for VerifiedStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        ready!(this.poll_drain_alert(cx))?;
         ready!(drain_write_state(
             &mut this.write_state,
             &mut this.inner,
@@ -934,23 +978,6 @@ fn poll_write_all(
     }
 }
 
-fn send_alert(mut writer: Pin<&mut BoxedOutboundStream>, cx: &mut Context<'_>) {
-    const RECORD_SIZE: usize = 31;
-    let mut record = [0_u8; RECORD_SIZE];
-    record[0] = ALERT;
-    record[1] = 3;
-    record[2] = 3;
-    record[4] = 26;
-    rand::rng().fill(&mut record[TLS_HEADER_SIZE..]);
-    let mut offset = 0;
-    while offset < RECORD_SIZE {
-        match writer.as_mut().poll_write(cx, &record[offset..]) {
-            Poll::Ready(Ok(written)) if written > 0 => offset += written,
-            _ => break,
-        }
-    }
-}
-
 fn is_timeout_like(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -963,23 +990,24 @@ fn drain_write_state(
     inner: &mut BoxedOutboundStream,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>> {
-    if let WriteState::Active {
-        frame,
-        offset,
-        consumed,
-    } = std::mem::replace(write_state, WriteState::Idle)
-    {
+    loop {
+        let WriteState::Active {
+            frame,
+            offset,
+            consumed,
+        } = std::mem::replace(write_state, WriteState::Idle)
+        else {
+            return Poll::Ready(Ok(()));
+        };
         match poll_write_all(Pin::new(inner), cx, &frame, offset) {
-            Poll::Ready(Ok(written)) => {
-                if written < frame.len() {
-                    *write_state = WriteState::Active {
-                        frame,
-                        offset: written,
-                        consumed,
-                    };
-                    return Poll::Pending;
-                }
+            Poll::Ready(Ok(written)) if written < frame.len() => {
+                *write_state = WriteState::Active {
+                    frame,
+                    offset: written,
+                    consumed,
+                };
             }
+            Poll::Ready(Ok(_)) => return Poll::Ready(Ok(())),
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Pending => {
                 *write_state = WriteState::Active {
@@ -991,7 +1019,6 @@ fn drain_write_state(
             }
         }
     }
-    Poll::Ready(Ok(()))
 }
 
 fn read_phase_to_verified(phase: Option<ReadPhase>) -> (Option<Vec<u8>>, usize) {
@@ -1102,10 +1129,7 @@ fn verify_application_data(frame: &[u8], hmac: &mut HmacSha1, update: bool) -> b
     if update {
         hmac.update(&hmac_hash);
     }
-    constant_time_eq(
-        &hmac_hash,
-        &frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE],
-    )
+    constant_time_eq(&hmac_hash, &frame[TLS_HEADER_SIZE..TLS_HMAC_HEADER_SIZE])
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1270,6 +1294,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1304,6 +1330,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1327,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_stream_flush_drains_pending_frame_before_completing() {
+    fn verified_stream_flush_drains_preloaded_active_frame() {
         let (client, mut peer) = tokio::io::duplex(4096);
         let server_random = [3_u8; 32];
         let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
@@ -1336,6 +1364,7 @@ mod tests {
         let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
         hmac_verify.update(&server_random);
         hmac_verify.update(b"S");
+        let frame = encode_application_data_frame(&mut hmac_add, b"xy").expect("frame");
         let mut stream = VerifiedStream {
             inner: Box::new(LimitedWriter {
                 inner: client,
@@ -1347,15 +1376,16 @@ mod tests {
             pending: Vec::new(),
             read_buffer: None,
             read_offset: 0,
-            write_state: WriteState::Idle,
+            write_state: WriteState::Active {
+                frame,
+                offset: 1,
+                consumed: 2,
+            },
+            alert_out: None,
+            alert_offset: 0,
         };
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
-        assert!(matches!(
-            Pin::new(&mut stream).poll_write(&mut cx, b"xy"),
-            Poll::Pending
-        ));
-        assert!(matches!(stream.write_state, WriteState::Active { .. }));
         loop {
             match Pin::new(&mut stream).poll_flush(&mut cx) {
                 Poll::Ready(Ok(())) => break,
@@ -1400,6 +1430,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -1520,6 +1552,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let mut bad = vec![0_u8; TLS_HMAC_HEADER_SIZE + 4];
         bad[0] = APPLICATION_DATA;
@@ -1555,6 +1589,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let before = stream.hmac_add.clone().finalize().into_bytes();
         let written = tokio::io::AsyncWriteExt::write(&mut stream, &[])
@@ -1591,17 +1627,16 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         let alert = vec![ALERT, 3, 3, 0, 2, 2, 1, 0];
         peer.write_all(&alert).await.expect("write alert");
         let result = tokio::io::AsyncReadExt::read(&mut stream, &mut [0_u8; 1]).await;
         assert!(result.is_err());
         let mut probe = [0_u8; 8];
-        let probe_result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            peer.read(&mut probe),
-        )
-        .await;
+        let probe_result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), peer.read(&mut probe)).await;
         assert!(
             matches!(probe_result, Err(_) | Ok(Ok(0))),
             "remote alert must not trigger an outbound alert"
@@ -1609,15 +1644,19 @@ mod tests {
     }
 
     #[test]
-    fn v2_client_stream_read_accepts_zero_length_application_data_record() {
+    fn v2_client_stream_skips_zero_length_record_and_reads_next() {
         let (mut client, server) = tokio::io::duplex(4096);
         let mut stream = V2ClientStream::new(Box::new(server), Vec::new());
-        let frame = V2ClientStream::encode_tls_record(&[]).expect("empty record");
+        let empty = V2ClientStream::encode_tls_record(&[]).expect("empty record");
+        let payload = b"xy";
+        let data = V2ClientStream::encode_tls_record(payload).expect("data record");
+        let mut wire = empty;
+        wire.extend_from_slice(&data);
         let waker = futures_util::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut offset = 0;
-        while offset < frame.len() {
-            match Pin::new(&mut client).poll_write(&mut cx, &frame[offset..]) {
+        while offset < wire.len() {
+            match Pin::new(&mut client).poll_write(&mut cx, &wire[offset..]) {
                 Poll::Ready(Ok(written)) if written > 0 => offset += written,
                 Poll::Ready(Err(error)) => panic!("peer write failed: {error}"),
                 _ => break,
@@ -1629,7 +1668,48 @@ mod tests {
             Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf),
             Poll::Ready(Ok(()))
         ));
-        assert_eq!(read_buf.filled().len(), 0);
+        assert_eq!(read_buf.filled(), payload);
+    }
+
+    #[tokio::test]
+    async fn verified_stream_short_write_completes_frame_without_hang() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let server_random = [6_u8; 32];
+        let mut hmac_add = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_add.update(&server_random);
+        hmac_add.update(b"C");
+        let mut hmac_verify = HmacSha1::new_from_slice(b"pw").expect("HMAC key");
+        hmac_verify.update(&server_random);
+        hmac_verify.update(b"S");
+        let mut stream = VerifiedStream {
+            inner: Box::new(LimitedWriter {
+                inner: client,
+                max_write: 1,
+            }),
+            hmac_add,
+            hmac_verify,
+            hmac_ignore: None,
+            pending: Vec::new(),
+            read_buffer: None,
+            read_offset: 0,
+            write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
+        };
+        let payload = b"hello";
+        tokio::io::AsyncWriteExt::write_all(&mut stream, payload)
+            .await
+            .expect("write_all must complete without hang");
+        let mut received = [0_u8; 256];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(1), peer.read(&mut received))
+            .await
+            .expect("peer should receive frame without hang")
+            .expect("peer read");
+        assert!(
+            n > TLS_HMAC_HEADER_SIZE,
+            "peer must receive a full TLS frame, got {n} bytes"
+        );
+        assert_eq!(received[0], APPLICATION_DATA);
     }
 
     #[tokio::test]
@@ -1651,6 +1731,8 @@ mod tests {
             read_buffer: None,
             read_offset: 0,
             write_state: WriteState::Idle,
+            alert_out: None,
+            alert_offset: 0,
         };
         assert!(is_timeout_like(&io::Error::new(
             io::ErrorKind::TimedOut,

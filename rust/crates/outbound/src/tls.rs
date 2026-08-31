@@ -386,10 +386,10 @@ mod chrome_fingerprint_tests {
 
     use super::*;
 
-    /// uTLS `HelloChrome_133` cipher list with GREASE normalized to 0x0a0a.
-    /// RSA and ECDHE-RSA CBC suites are omitted because rustls aws-lc does not
-    /// implement them; advertising them would break handshakes.
-    const CHROME_CIPHERS: &[u16] = &[
+    /// Partial Chrome fingerprint cipher list (rustls aws-lc supported suites only).
+    /// Full uTLS HelloChrome_133 advertises 16 suites including RSA/CBC (`c013`,
+    /// `c014`, `009c`, `009d`, `002f`, `0035`); those are intentionally omitted.
+    const CHROME_CIPHERS_PARTIAL: &[u16] = &[
         0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
     ];
 
@@ -508,20 +508,16 @@ mod chrome_fingerprint_tests {
     }
 
     #[test]
-    fn chrome_fingerprint_matches_utls_chrome133_cipher_and_extension_set() {
-        // Remaining documented leftovers vs Go uTLS:
-        // - RSA and ECDHE-RSA CBC suites are omitted (rustls aws-lc cannot negotiate them).
-        // - Non-chrome fingerprints (firefox/safari/ios/edge/android/360/qq/…) stay
-        //   rustls-default; full parrots are not cheap to port in one pass.
-        // - ECH GREASE encapsulated-key bytes are random 32-byte stand-ins (Go runs
-        //   real X25519 HPKE SetupSender against a dummy pubkey); length/suite/payload
-        //   candidates match BoringGREASEECH.
+    fn chrome_partial_fingerprint_cipher_and_extension_set() {
+        // Self-check of the partial rustls Chrome shape — not a Go/Rust differential.
+        // Go/uTLS HelloChrome_133 still advertises six extra cipher suites that rustls
+        // aws-lc cannot negotiate; see CHROME_CIPHERS_PARTIAL above.
         let raw = capture_client_hello(Some("chrome"));
         let (ciphers_raw, extensions_raw, ech_body) = parse_client_hello(&raw);
 
         assert!(is_grease(ciphers_raw[0]), "leading GREASE cipher");
         let ciphers: Vec<u16> = ciphers_raw.iter().copied().map(normalize_grease).collect();
-        assert_eq!(ciphers, CHROME_CIPHERS, "cipher suite list");
+        assert_eq!(ciphers, CHROME_CIPHERS_PARTIAL, "cipher suite list");
 
         assert!(is_grease(extensions_raw[0]), "leading GREASE extension");
         assert!(
@@ -586,7 +582,7 @@ mod chrome_fingerprint_tests {
         let (ciphers, _, _) = parse_client_hello(&raw);
         assert!(!ciphers.iter().any(|c| is_grease(*c)));
         let normalized: Vec<u16> = ciphers.iter().copied().map(normalize_grease).collect();
-        assert_ne!(normalized, CHROME_CIPHERS);
+        assert_ne!(normalized, CHROME_CIPHERS_PARTIAL);
     }
 
     #[test]
