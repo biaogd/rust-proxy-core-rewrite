@@ -28,23 +28,37 @@ tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-
 
 ## Publish the standalone repository
 
-The Cloud Agent token cannot create new GitHub repositories. On a machine with `gh` authenticated as `biaogd`:
+`biaogd/shadow-rustls` exists on GitHub but is still empty. The Cloud Agent (`cursor[bot]`) only has write access to `rust-proxy-core-rewrite`, not `shadow-rustls`. Publish from your machine (one command):
 
 ```bash
+# Option A — mirror the export branch (no local checkout of shadow-rustls needed)
+git clone --branch shadow-rustls-export --depth 1 \
+  https://github.com/biaogd/rust-proxy-core-rewrite.git /tmp/shadow-rustls-publish
+cd /tmp/shadow-rustls-publish
+git remote add origin https://github.com/biaogd/shadow-rustls.git
+git push -u origin shadow-rustls-export:main
+git tag -a rustls-0.23.43-shadow.1 -m "shadow-rustls release (rustls 0.23.43 base)"
+git push origin rustls-0.23.43-shadow.1
+```
+
+```bash
+# Option B — from a rust-proxy-core-rewrite checkout
 cd shadow-rustls
 chmod +x scripts/publish-to-github.sh
 ./scripts/publish-to-github.sh
 ```
 
-Or manually:
+To let Cloud Agent push directly in future runs, grant the Cursor GitHub App write access to `biaogd/shadow-rustls` (Settings → Collaborators and apps).
 
-```bash
-gh repo create biaogd/shadow-rustls --public --source . --remote origin --push
-git tag rustls-0.23.43-shadow.1
-git push origin rustls-0.23.43-shadow.1
+**CI mirror (no local clone):** add repository secret `SHADOW_RUSTLS_PUSH_TOKEN` (classic PAT with `repo` scope) to `rust-proxy-core-rewrite`, then run the **Sync shadow-rustls** workflow from the Actions tab. It pushes branch `shadow-rustls-export` to `biaogd/shadow-rustls` `main` and tags it.
+
+After the remote has content, bump `rust/Cargo.toml` to the git `tag`/`rev` below and delete the vendored `shadow-rustls/` directory (or convert it to a git submodule):
+
+```toml
+[patch.crates-io]
+rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
+tokio-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1" }
 ```
-
-Then bump `rust/Cargo.toml` to the git `tag`/`rev` above and delete the vendored `shadow-rustls/` directory from this repo (or convert it to a git submodule).
 
 ## Patch summary
 

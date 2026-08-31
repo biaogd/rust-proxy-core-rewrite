@@ -1,0 +1,43 @@
+name: Sync shadow-rustls
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to create on shadow-rustls (e.g. rustls-0.23.43-shadow.1)"
+        required: true
+        default: rustls-0.23.43-shadow.1
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Mirror export branch to biaogd/shadow-rustls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require push token
+        env:
+          TOKEN: ${{ secrets.SHADOW_RUSTLS_PUSH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Add repository secret SHADOW_RUSTLS_PUSH_TOKEN (classic PAT with repo scope for biaogd/shadow-rustls)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: shadow-rustls-export
+          fetch-depth: 0
+
+      - name: Push to shadow-rustls
+        env:
+          TOKEN: ${{ secrets.SHADOW_RUSTLS_PUSH_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          git remote add shadow-rustls "https://x-access-token:${TOKEN}@github.com/biaogd/shadow-rustls.git"
+          git push shadow-rustls HEAD:main --force
+          git tag -a "$TAG" -m "shadow-rustls release (rustls 0.23.43 base)"
+          git push shadow-rustls "$TAG"
