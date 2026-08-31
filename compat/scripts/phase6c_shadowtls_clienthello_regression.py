@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Capture and compare Go vs Rust Chrome ClientHello via production ShadowTLS v3 paths."""
+"""Per-runtime partial Chrome ClientHello regression on production ShadowTLS v3 paths.
+
+Captures on-wire ClientHello bytes through the same production entry points used in
+live traffic (Go: ``shadowtls.NewShadowTLS``; Rust: ``connect_shadow_tls`` →
+``connect_with_session_id_generator``), then pins each runtime against its own
+documented partial-Chrome baseline.
+
+This is **not** a Go/Rust wire parity differential. Chrome fingerprint parity
+remains partial (Rust 10 cipher suites vs Go/uTLS 16; different extension order
+and counts). Protocol wire parity is covered separately by
+``phase6c_shadowsocks_shadow_tls.py``.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +19,14 @@ import os
 import pathlib
 import subprocess
 import sys
-import tempfile
 
 from phase1 import ROOT, RUST_ROOT, cargo_target_path
 
-FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6c-shadowtls-clienthello.json"
-TARGET_ENV = "PHASE6CSSSHADOWTLSCLIENTHELLO_CARGO_TARGET"
-TARGET_NAME = "phase6c-shadowtls-clienthello"
+FAILURE_ARTIFACT = (
+    ROOT / "compat" / "artifacts" / "phase6c-shadowtls-clienthello-regression.json"
+)
+TARGET_ENV = "PHASE6CSSSHADOWTLSCLIENTHELLO_REGRESSION_CARGO_TARGET"
+TARGET_NAME = "phase6c-shadowtls-clienthello-regression"
 
 # Documented partial Chrome profile in Rust (10 suites incl. leading GREASE).
 RUST_CHROME_CIPHERS = [
@@ -30,7 +42,17 @@ RUST_CHROME_CIPHERS = [
     "0xcca8",
 ]
 
-# Production ShadowTLS v3 + chrome captures (on-wire ClientHello).
+# Go uTLS HelloChrome_133 baseline (16 suites incl. leading GREASE).
+GO_CHROME_CIPHERS = RUST_CHROME_CIPHERS + [
+    "0xc013",
+    "0xc014",
+    "0x009c",
+    "0x009d",
+    "0x002f",
+    "0x0035",
+]
+
+# Production ShadowTLS v3 + chrome captures (on-wire ClientHello extension types).
 GO_V3_CHROME_EXTENSIONS = [
     "0x0000",
     "0x0005",
@@ -66,16 +88,6 @@ RUST_V3_CHROME_EXTENSIONS = [
     "0x0010",
     "0x0000",
     "0x0a0a",
-]
-
-# Go uTLS HelloChrome adds six legacy RSA/CBC suites rustls cannot negotiate.
-GO_EXTRA_CHROME_CIPHERS = [
-    "0xc013",
-    "0xc014",
-    "0x009c",
-    "0x009d",
-    "0x002f",
-    "0x0035",
 ]
 
 
@@ -135,35 +147,45 @@ def capture(binary: pathlib.Path) -> dict[str, object]:
     return json.loads(output)
 
 
-def extension_set(values: list[str]) -> set[str]:
-    return set(values)
-
-
-def compare(go: dict[str, object], rust: dict[str, object]) -> dict[str, object]:
-    go_ciphers = list(go["cipher_suites"])
-    rust_ciphers = list(rust["cipher_suites"])
-    go_ext = list(go["extensions"])
-    rust_ext = list(rust["extensions"])
-
-    expected_go = RUST_CHROME_CIPHERS + GO_EXTRA_CHROME_CIPHERS
+def regress_go(shape: dict[str, object]) -> dict[str, object]:
+    ciphers = list(shape["cipher_suites"])
+    extensions = list(shape["extensions"])
     checks = {
-        "go-has-grease": bool(go.get("has_grease")),
-        "rust-has-grease": bool(rust.get("has_grease")),
-        "go-session-id-hmac": bool(go.get("session_id_hmac_valid")),
-        "rust-session-id-hmac": bool(rust.get("session_id_hmac_valid")),
-        "rust-cipher-profile": rust_ciphers == RUST_CHROME_CIPHERS,
-        "go-cipher-profile": go_ciphers == expected_go,
-        "go-contains-rust-ciphers": all(item in go_ciphers for item in RUST_CHROME_CIPHERS),
-        "go-extension-types": sorted(set(go_ext)) == sorted(set(GO_V3_CHROME_EXTENSIONS)),
-        "rust-extension-types": sorted(set(rust_ext)) == sorted(set(RUST_V3_CHROME_EXTENSIONS)),
-        "rust-extension-grease-ends": rust_ext
-        and rust_ext[0] == "0x0a0a"
-        and rust_ext[-1] == "0x0a0a",
+        "has-grease": bool(shape.get("has_grease")),
+        "session-id-hmac": bool(shape.get("session_id_hmac_valid")),
+        "cipher-profile": ciphers == GO_CHROME_CIPHERS,
+        "extension-types": sorted(set(extensions)) == sorted(set(GO_V3_CHROME_EXTENSIONS)),
+        "extension-count": len(extensions) == len(GO_V3_CHROME_EXTENSIONS),
     }
     return {
+        "runtime": "go",
         "checks": checks,
-        "go": {"cipher_count": len(go_ciphers), "extension_count": len(go_ext)},
-        "rust": {"cipher_count": len(rust_ciphers), "extension_count": len(rust_ext)},
+        "cipher_count": len(ciphers),
+        "extension_count": len(extensions),
+        "passed": all(checks.values()),
+    }
+
+
+def regress_rust(shape: dict[str, object]) -> dict[str, object]:
+    ciphers = list(shape["cipher_suites"])
+    extensions = list(shape["extensions"])
+    checks = {
+        "has-grease": bool(shape.get("has_grease")),
+        "session-id-hmac": bool(shape.get("session_id_hmac_valid")),
+        "cipher-profile": ciphers == RUST_CHROME_CIPHERS,
+        "extension-types": sorted(set(extensions)) == sorted(set(RUST_V3_CHROME_EXTENSIONS)),
+        "extension-count": len(extensions) == len(RUST_V3_CHROME_EXTENSIONS),
+        "extension-grease-bookends": bool(
+            extensions
+            and extensions[0] == "0x0a0a"
+            and extensions[-1] == "0x0a0a"
+        ),
+    }
+    return {
+        "runtime": "rust",
+        "checks": checks,
+        "cipher_count": len(ciphers),
+        "extension_count": len(extensions),
         "passed": all(checks.values()),
     }
 
@@ -173,33 +195,48 @@ def main() -> int:
         go_binary, rust_binary = build_tools()
         go_shape = capture(go_binary)
         rust_shape = capture(rust_binary)
-        result = compare(go_shape, rust_shape)
+        go_result = regress_go(go_shape)
+        rust_result = regress_rust(rust_shape)
+        result = {
+            "mode": "per-runtime-regression",
+            "go": go_result,
+            "rust": rust_result,
+            "passed": go_result["passed"] and rust_result["passed"],
+        }
     except Exception as error:
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(
             json.dumps({"error": f"{type(error).__name__}: {error}"}, indent=2)
         )
-        print(f"Phase 6C-M6 ShadowTLS ClientHello differential failed: {error}", file=sys.stderr)
+        print(
+            "Phase 6C-M6 ShadowTLS ClientHello regression failed: "
+            f"{error}",
+            file=sys.stderr,
+        )
         return 1
 
     if not result["passed"]:
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(
             json.dumps(
-                {"go": go_shape, "rust": rust_shape, "result": result},
+                {
+                    "go_shape": go_shape,
+                    "rust_shape": rust_shape,
+                    "result": result,
+                },
                 indent=2,
                 sort_keys=True,
             )
         )
         print(
-            "Phase 6C-M6 ShadowTLS ClientHello differential failed:",
+            "Phase 6C-M6 ShadowTLS ClientHello regression failed:",
             json.dumps(result, indent=2),
             file=sys.stderr,
         )
         return 1
 
     FAILURE_ARTIFACT.unlink(missing_ok=True)
-    print("Phase 6C-M6 ShadowTLS ClientHello differential passed")
+    print("Phase 6C-M6 ShadowTLS ClientHello regression passed")
     return 0
 
 
