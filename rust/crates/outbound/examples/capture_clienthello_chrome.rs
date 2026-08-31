@@ -1,4 +1,4 @@
-//! Capture rustls Chrome-shaped `ClientHello` for differential vs Go uTLS.
+//! Capture shadow-rustls Chrome-shaped `ClientHello` for differential vs Go uTLS.
 //!
 //! ```text
 //! cargo run -p rewrite-outbound --example capture_clienthello_chrome
@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::rustls::ClientHelloFingerprint;
-use tokio_rustls::rustls::crypto::CryptoProvider;
-use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
-use tokio_rustls::rustls::pki_types::ServerName;
+use shadow_rustls::ClientConfig;
+use shadow_rustls::ClientHelloFingerprint;
+use shadow_rustls::crypto::CryptoProvider;
+use shadow_rustls::crypto::aws_lc_rs::default_provider;
+use shadow_rustls::pki_types::ServerName;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -49,11 +49,10 @@ fn main() {
     config.enable_sni = true;
 
     let server_name = ServerName::try_from("phase6c-shadow-tls.example").expect("sni");
-    let mut conn =
-        tokio_rustls::rustls::ClientConnection::new(Arc::new(config), server_name).expect("conn");
+    let mut conn = shadow_rustls::ClientConnection::new(Arc::new(config), server_name).expect("conn");
     let mut sock = TcpStream::connect(addr).expect("connect");
     {
-        let mut tls = tokio_rustls::rustls::Stream::new(&mut conn, &mut sock);
+        let mut tls = shadow_rustls::Stream::new(&mut conn, &mut sock);
         let _ = tls.write(b"x");
     }
     let _ = sock.shutdown(Shutdown::Both);
@@ -133,44 +132,37 @@ fn parse_client_hello(raw: &[u8]) -> Result<(Vec<u16>, Vec<u16>), String> {
 #[derive(Debug)]
 struct NoVerify;
 
-impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerify {
+impl shadow_rustls::client::danger::ServerCertVerifier for NoVerify {
     fn verify_server_cert(
         &self,
-        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _end_entity: &shadow_rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[shadow_rustls::pki_types::CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
-    {
-        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+        _now: shadow_rustls::pki_types::UnixTime,
+    ) -> Result<shadow_rustls::client::danger::ServerCertVerified, shadow_rustls::Error> {
+        Ok(shadow_rustls::client::danger::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &shadow_rustls::pki_types::CertificateDer<'_>,
+        _dss: &shadow_rustls::DigitallySignedStruct,
+    ) -> Result<shadow_rustls::client::danger::HandshakeSignatureValid, shadow_rustls::Error> {
+        Ok(shadow_rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
-        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
-        tokio_rustls::rustls::Error,
-    > {
-        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &shadow_rustls::pki_types::CertificateDer<'_>,
+        _dss: &shadow_rustls::DigitallySignedStruct,
+    ) -> Result<shadow_rustls::client::danger::HandshakeSignatureValid, shadow_rustls::Error> {
+        Ok(shadow_rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
-    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+    fn supported_verify_schemes(&self) -> Vec<shadow_rustls::SignatureScheme> {
         default_provider()
             .signature_verification_algorithms
             .supported_schemes()

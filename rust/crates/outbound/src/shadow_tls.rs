@@ -8,10 +8,11 @@ use rand::RngExt;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::pki_types::ServerName;
+use shadow_rustls::pki_types::ServerName;
+use shadow_tokio_rustls::TlsConnector;
 
-use crate::tls::{HttpProxyTls, client_config};
+use crate::shadow_tls_config::shadow_client_config;
+use crate::tls::HttpProxyTls;
 use crate::{BoxedOutboundStream, HttpProxyError};
 
 type HmacSha1 = Hmac<Sha1>;
@@ -88,7 +89,7 @@ pub async fn connect_shadow_tls(
         .map(|protocol| protocol.as_bytes().to_vec())
         .collect();
     let alpn_refs: Vec<&[u8]> = alpn.iter().map(Vec::as_slice).collect();
-    let config = Arc::new(client_config(
+    let config = Arc::new(shadow_client_config(
         HttpProxyTls {
             server_name: options.host,
             verification_name: options.verification_name,
@@ -101,14 +102,13 @@ pub async fn connect_shadow_tls(
             alpn_protocols: &alpn_refs,
             tls12_only: options.version == 1,
             tls13_only: false,
-            // Go ShadowTLS v1 bypasses uTLS fingerprint and uses TLS 1.2 only.
-            client_hello_fingerprint: if options.version == 1 {
-                None
-            } else {
-                options.client_fingerprint
-            },
-            client_hello_fingerprint_mlkem: options.version != 2,
         },
+        if options.version == 1 {
+            None
+        } else {
+            options.client_fingerprint
+        },
+        options.version != 2,
         clock,
     )?);
     let server_name = ServerName::try_from(options.host.to_owned()).map_err(|error| {

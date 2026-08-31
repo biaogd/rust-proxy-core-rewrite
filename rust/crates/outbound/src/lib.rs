@@ -4,6 +4,7 @@ mod direct;
 mod http;
 mod http_upgrade;
 mod shadow_tls;
+mod shadow_tls_config;
 mod shadowsocks;
 mod simple_obfs;
 mod socks5;
