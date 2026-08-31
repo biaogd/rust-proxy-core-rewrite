@@ -387,7 +387,7 @@ mod chrome_fingerprint_tests {
     use super::*;
 
     /// Partial Chrome fingerprint cipher list (rustls aws-lc supported suites only).
-    /// Full uTLS HelloChrome_133 advertises 16 suites including RSA/CBC (`c013`,
+    /// Full uTLS `HelloChrome_133` advertises 16 suites including RSA/CBC (`c013`,
     /// `c014`, `009c`, `009d`, `002f`, `0035`); those are intentionally omitted.
     const CHROME_CIPHERS_PARTIAL: &[u16] = &[
         0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
@@ -510,7 +510,7 @@ mod chrome_fingerprint_tests {
     #[test]
     fn chrome_partial_fingerprint_cipher_and_extension_set() {
         // Self-check of the partial rustls Chrome shape — not a Go/Rust differential.
-        // Go/uTLS HelloChrome_133 still advertises six extra cipher suites that rustls
+        // Go/uTLS `HelloChrome_133` still advertises six extra cipher suites that rustls
         // aws-lc cannot negotiate; see CHROME_CIPHERS_PARTIAL above.
         let raw = capture_client_hello(Some("chrome"));
         let (ciphers_raw, extensions_raw, ech_body) = parse_client_hello(&raw);
