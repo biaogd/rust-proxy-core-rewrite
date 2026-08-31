@@ -1786,6 +1786,69 @@ mux frames instead of reproducing the pinned Go writer's corrupt-frame edge.
 This documented safety divergence is not normalized or presented as exact
 wire parity for that invalid edge.
 
+### Phase 6C-M6 accepted scope — Shadowsocks ShadowTLS client
+
+A top-level Shadowsocks outbound may use native `plugin: shadow-tls` v1, v2 or
+v3 over the declared SS2022 TCP path. The focused client owns the ShadowTLS
+session-id authentication, camouflage TLS 1.2/1.3 relay and post-handshake
+HMAC/XOR framing while the existing Shadowsocks adapter continues to own SS
+encryption, routing and lifecycle.
+
+`compat/scripts/phase6c_shadowsocks_shadow_tls.py` is the protocol gate for
+configuration, domain and large-payload TCP relay, process survival and the
+pinned oracle's half-close behavior. The separate
+`compat/scripts/phase6c_shadowtls_clienthello_regression.py` records each
+runtime's production ClientHello baseline; it is not Go/Rust fingerprint wire
+parity. Only the partial Chrome fingerprint is accepted: the Rust path exposes
+10 cipher suites rather than the Go/uTLS Chrome profile's 16, and unsupported
+fingerprint names are rejected instead of silently falling back.
+
+This phase does not claim exact Chrome fingerprint parity, native 2022 UDP,
+multi-hop EIH, inbound/server behavior or other shared security consumers.
+
+### Phase 6C-N accepted scope — Shadowsocks inbound first server slice
+
+This gate introduces the first named server-direction slice. It accepts the
+legacy `ss-config` URI and a named `listeners` entry with
+`type: shadowsocks`, one IP address and one port. The external path starts with
+an encrypted Shadowsocks client connection and ends at an observable TCP or
+UDP result selected by the existing rule and outbound engines.
+
+The declared data-plane scope is:
+
+- representative SIP004 AEAD and legacy stream TCP, SS2022 TCP, and pre-2022
+  native UDP;
+- UoT v1 and v2 non-connect framing;
+- DIRECT, DNS, SOCKS5, Shadowsocks and Shadowsocks-UoT UDP targets;
+- named simple-obfs HTTP/TLS server wrapping;
+- ShadowTLS v3 authenticated TCP, plain-TLS fallback, concurrent fallback and
+  SS accepts, proxy-observed leaf/group `handshake.proxy`, and empty-proxy
+  routing with `IN-TYPE,INNER` distinct from the outer Shadowsocks flow;
+- password-identity reload while fallback is active, bounded shutdown and
+  fail-closed rejection of unimplemented listener/security fields.
+
+`compat/scripts/phase6c_shadowsocks_inbound.py` is the Go/Rust differential
+gate. A valid result must prove the selected handshake proxy observed the
+authenticated CONNECT, make an incorrect `SHADOWSOCKS` type reject the
+camouflage handshake destination, and change the listener reload identity
+before requiring replacement credentials. ShadowTLS `IN-USER` and SS2022 EIH
+inbound remain explicitly Rust-only evidence because the pinned Go paths do
+not expose equivalent behavior; they are not normalized into parity.
+
+The exit checks are the repository-wide fmt, clippy and test gates plus a
+passing corrected Phase 6C-N differential on a declared platform. Until the
+corrected differential passes, status remains "implemented; validation
+pending".
+
+This phase does not claim port lists/ranges, common named-listener `rule`,
+`proxy` or `routing-mark` fields, `mux-option`, UoT v2 connect mode, SS2022
+UDP, the complete inbound cipher matrix, ShadowTLS v1/v2 or advanced SNI
+selection, ResTLS, JLS, KCP-TUN, exact UDP timeout/socket parity, or full
+cross-platform runtime evidence. Those fields are rejected when necessary so
+an unimplemented behavior cannot be accepted silently. The common listener
+`proxy` gap is distinct from the implemented
+`shadow-tls.handshake.proxy` field.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

@@ -65,7 +65,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: Phase 5C current-adapter group strategies/composition/health complete | Later adapter-specific validation gates |
 | CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: Phase 5C current-adapter vehicles/health/lifecycle plus rule providers complete | Named download proxy, override-expression, encryption and later adapter gates |
 | CFG-06 | Rules, sub-rules and provider-backed rule construction | Partial | 5B1–5B5 |
-| CFG-07 | Named listeners and legacy fixed protocol listener fields | Not started | One gate per IN ID |
+| CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N implements legacy `ss-config` and the declared first named Shadowsocks listener slice with fail-closed unsupported fields | Remaining Shadowsocks fields and one gate per other IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
 | CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Not started | 8A–8D |
 | CFG-10 | Static TCP/UDP tunnels and validation | Not started | 5B6 |
@@ -92,14 +92,14 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Not started | 8A–8D |
-| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Not started | 6/7 protocol gates |
+| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N implements the first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 server slice; corrected full differential pending | Remaining Shadowsocks matrix and Snell 6/7 gates |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | 6 protocol gates |
 | IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Not started | 6 protocol gates |
 | IN-10 | Hysteria2 and Hysteria2-realm server | Not started | 6 protocol gates |
 | IN-11 | TUIC v4/v5 and ShadowQUIC server | Not started | 6/7 protocol gates |
 | IN-12 | AnyTLS, Mieru, Sudoku and TrustTunnel server | Not started | 7 protocol gates |
-| IN-13 | Transport/security extensions used by inbound protocols: Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya | Not started | 7T gates |
-| IN-14 | Listener hot rebind, same-port update, graceful drain and per-listener statistics for every type | Partial only for local listeners | Repeated protocol exit gate |
+| IN-13 | Transport/security extensions used by inbound protocols: Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya | Partial: Phase 6C-N implements Shadowsocks simple-obfs HTTP/TLS and ShadowTLS v3 authentication/fallback; corrected full differential pending | ShadowTLS v1/v2/advanced SNI, ReSTLS, JLS, mux and remaining 7T gates |
+| IN-14 | Listener hot rebind, same-port update, graceful drain and per-listener statistics for every type | Partial: current local listeners plus Phase 6C-N identity-changing same-port Shadowsocks reload and bounded fallback shutdown are implemented | Corrected 6C-N differential and repeated exit gate for every family |
 
 ## Rules, metadata and routing
 
@@ -135,7 +135,7 @@ The product parser enumerates outbound types in
 | OUT-02 | REJECT, REJECT-DROP, COMPATIBLE, PASS and PASS-RULE reserved built-ins; configured DNS and REMATCH control adapters | Complete in the declared current-listener Phase 6A scope: built-in/configured TCP and UDP behavior, DNS relay, REMATCH rescan and control views pass; exact REJECT-DROP expiry awaits Linux evidence | Extend evidence only when later listener/resolver/dialer compositions consume these adapters |
 | OUT-03 | HTTP proxy client: plaintext/TLS, auth, CONNECT and UDP limitations | Complete in native Phase 6B scope: plaintext/TLS CONNECT, SNI/name verification, roots/skip/pinning/client auth, credential/header precedence, delayed/malformed/exact-status handling and no-UDP/no-UoT view pass | Common dialer-proxy composition remains OUT-21/Phase 7T; later provider/platform combinations add evidence when consumed |
 | OUT-04 | SOCKS5 proxy client: TCP/UDP, auth and remote/local resolution | Complete in native Phase 6B scope: plaintext/TLS CONNECT and UDP ASSOCIATE, auth including overlength wire behavior, method/reply lifecycle, relay replacement/reuse and address types pass; native UoT is false | Common dialer-proxy composition remains OUT-21/Phase 7T; later provider/platform combinations add evidence when consumed |
-| OUT-05 | Shadowsocks: cipher matrix, plugins, UDP and UoT | Partial: Phase 6C A–M6 covers eight shared SIP004 AEAD and eight legacy stream ciphers over TCP/native IPv4/IPv6 UDP, four shared 2022 TCP methods including AES single-hop EIH, UoT v1/v2, providers/health, simple-obfs HTTP/TLS, the documented v2ray-plugin TCP surface and native `plugin: shadow-tls` v1/v2/v3 over SS2022 TCP; Chrome `client-fingerprint` is partial (10 vs 16 cipher suites; non-`chrome` labels rejected; `phase6c_shadowtls_clienthello_regression.py` per-runtime CI regression captures on-wire ClientHello via production ShadowTLS v3 paths and pins each runtime's documented cipher/extension baseline plus session-id HMAC — not Go/Rust wire parity; GREASE ECH enc key stand-in) | 2022 UDP is blocked by an oracle interop panic; broader plugins, Go-only extra ciphers, multi-hop EIH and server direction remain |
+| OUT-05 | Shadowsocks: cipher matrix, plugins, UDP and UoT | Partial: Phase 6C A–M6 covers eight shared SIP004 AEAD and eight legacy stream ciphers over TCP/native IPv4/IPv6 UDP, four shared 2022 TCP methods including AES single-hop EIH, UoT v1/v2, providers/health, simple-obfs HTTP/TLS, the documented v2ray-plugin TCP surface and native `plugin: shadow-tls` v1/v2/v3 over SS2022 TCP; Chrome `client-fingerprint` is partial (10 vs 16 cipher suites and per-runtime ClientHello regression, not wire parity). Phase 6C-N separately owns the first server direction slice | 2022 UDP is blocked by an oracle interop panic; broader plugins, Go-only extra ciphers, multi-hop EIH, advanced socket/dialer options and inbound features outside 6C-N remain |
 | OUT-06 | ShadowsocksR: cipher/protocol/obfs and UDP | Not started | 7A |
 | OUT-07 | VMess: security/alter-id, TCP/UDP, early data and packet modes | Not started | 6D |
 | OUT-08 | VLESS: encryption, Vision/Reality, TCP/UDP and packet modes | Not started | 6E |
@@ -152,7 +152,7 @@ The product parser enumerates outbound types in
 | OUT-19 | Tailscale/tsnet and Tailscale DNS | Not started | 7K plus `with_gvisor` |
 | OUT-20 | ZeroTier network lifecycle, state and managed DNS | Not started | 7L |
 | OUT-21 | Per-proxy dialer-proxy chains and sing-mux | Not started | 7T1 |
-| OUT-22 | Shared transports/security: WebSocket, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, simple-obfs, v2ray-plugin, ShadowTLS, ReSTLS, JLS, TLSMirror, Reality and ECH | Partial: Phase 6C-M1/M2 embeds simple-obfs HTTP/TLS and M5 completes the documented v2ray-plugin TCP options for the Shadowsocks consumer, including mux, headers, early data, raw/fast upgrade, mTLS and ECH | Reuse by VMess/VLESS and every other transport/security consumer remains separate gates; the corrupt Go mux write above 65,535 bytes is deliberately not reproduced |
+| OUT-22 | Shared transports/security: WebSocket, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, simple-obfs, v2ray-plugin, ShadowTLS, ReSTLS, JLS, TLSMirror, Reality and ECH | Partial: Phase 6C-M1/M2 embeds simple-obfs HTTP/TLS, M5 completes documented v2ray-plugin TCP options for the Shadowsocks client, M6 adds the partial-fingerprint ShadowTLS client, and N adds simple-obfs plus ShadowTLS-v3 Shadowsocks inbound use | Reuse by VMess/VLESS and every other transport/security consumer, exact Chrome fingerprint and remaining inbound security layers stay separate gates |
 | OUT-23 | Common adapter JSON, delay/history, liveness, UDP support, unwrap and lifecycle | Not started | Repeated adapter contract gate |
 
 ## Proxy groups and providers
