@@ -391,6 +391,8 @@ fn emit_client_hello_for_retry(
         cipher_suites.push(CipherSuite::TLS_EMPTY_RENEGOTIATION_INFO_SCSV);
     }
 
+    let supported_cipher_suites = cipher_suites.clone();
+
     if let Some(fingerprint) = config.client_hello_fingerprint {
         match fingerprint {
             crate::client::ClientHelloFingerprint::Chrome => {
@@ -398,6 +400,8 @@ fn emit_client_hello_for_retry(
                     &mut exts,
                     &mut cipher_suites,
                     config.client_hello_fingerprint_mlkem,
+                    &supported_versions,
+                    &supported_cipher_suites,
                     config.provider.secure_random,
                 )?;
             }
