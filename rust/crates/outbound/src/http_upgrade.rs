@@ -22,13 +22,41 @@ const MAX_HEADER_BYTES: usize = 8192;
 /// Returns an error when the request is invalid, transport I/O fails, or the
 /// peer returns an invalid HTTP Upgrade response.
 pub async fn connect_v2ray_http_upgrade(
-    mut stream: BoxedOutboundStream,
+    stream: BoxedOutboundStream,
     host: &str,
     path: &str,
     headers: &BTreeMap<String, String>,
     fast_open: bool,
 ) -> io::Result<BoxedOutboundStream> {
+    connect_http_upgrade_with_early_data(stream, host, path, headers, fast_open, 0, None).await
+}
+
+/// Opens the unframed `VMess`/v2ray HTTP Upgrade transport with optional lazy
+/// early data.
+///
+/// # Errors
+///
+/// Returns an error when request fields are invalid, transport I/O fails, or
+/// the peer returns an invalid Upgrade response.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_http_upgrade_with_early_data(
+    mut stream: BoxedOutboundStream,
+    host: &str,
+    path: &str,
+    headers: &BTreeMap<String, String>,
+    fast_open: bool,
+    configured_early_data_limit: usize,
+    configured_early_data_header_name: Option<&str>,
+) -> io::Result<BoxedOutboundStream> {
     let (path, early_data_limit) = split_early_data_path(path);
+    let (early_data_limit, early_data_header_name) = if early_data_limit > 0 {
+        (early_data_limit, Some("Sec-WebSocket-Protocol"))
+    } else {
+        (
+            configured_early_data_limit,
+            configured_early_data_header_name,
+        )
+    };
     if early_data_limit > 0 {
         return Ok(Box::new(LazyHttpUpgradeIo::new(
             stream,
@@ -36,6 +64,7 @@ pub async fn connect_v2ray_http_upgrade(
             path,
             headers.clone(),
             early_data_limit,
+            early_data_header_name.map(str::to_owned),
             fast_open,
         )?));
     }
@@ -53,21 +82,30 @@ fn build_request(
     host: &str,
     path: &str,
     headers: &BTreeMap<String, String>,
-    early_data: Option<&[u8]>,
+    early_data: Option<(&[u8], Option<&str>)>,
 ) -> io::Result<Vec<u8>> {
-    validate_request_target(path)?;
+    let encoded_early_data = early_data.map(|(bytes, _)| URL_SAFE_NO_PAD.encode(bytes));
+    let request_target = match (
+        encoded_early_data.as_deref(),
+        early_data.and_then(|(_, name)| name),
+    ) {
+        (Some(encoded), None) => append_to_path(path, encoded),
+        _ => path.to_owned(),
+    };
+    validate_request_target(&request_target)?;
     let effective_host = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("host"))
         .map_or(host, |(_, value)| value.as_str());
     validate_header("Host", effective_host)?;
-    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {effective_host}\r\n");
+    let mut request = format!("GET {request_target} HTTP/1.1\r\nHost: {effective_host}\r\n");
+    let early_header_name = early_data.and_then(|(_, name)| name);
     for (name, value) in headers {
         validate_header(name, value)?;
         if name.eq_ignore_ascii_case("host")
             || name.eq_ignore_ascii_case("connection")
             || name.eq_ignore_ascii_case("upgrade")
-            || early_data.is_some() && name.eq_ignore_ascii_case("sec-websocket-protocol")
+            || early_header_name.is_some_and(|early| name.eq_ignore_ascii_case(early))
         {
             continue;
         }
@@ -77,13 +115,22 @@ fn build_request(
         request.push_str("\r\n");
     }
     request.push_str("Connection: Upgrade\r\nUpgrade: websocket\r\n");
-    if let Some(early_data) = early_data {
-        request.push_str("Sec-WebSocket-Protocol: ");
-        request.push_str(&URL_SAFE_NO_PAD.encode(early_data));
+    if let (Some(name), Some(encoded)) = (early_header_name, encoded_early_data) {
+        validate_header(name, &encoded)?;
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(&encoded);
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
     Ok(request.into_bytes())
+}
+
+fn append_to_path(path: &str, encoded: &str) -> String {
+    path.split_once('?').map_or_else(
+        || format!("{path}{encoded}"),
+        |(base, query)| format!("{base}{encoded}?{query}"),
+    )
 }
 
 fn validate_request_target(path: &str) -> io::Result<()> {
@@ -370,6 +417,7 @@ enum LazyState {
         path: String,
         headers: BTreeMap<String, String>,
         early_data_limit: usize,
+        early_data_header_name: Option<String>,
         fast_open: bool,
     },
     Connecting(LazyFuture),
@@ -388,9 +436,15 @@ impl LazyHttpUpgradeIo {
         path: String,
         headers: BTreeMap<String, String>,
         early_data_limit: usize,
+        early_data_header_name: Option<String>,
         fast_open: bool,
     ) -> io::Result<Self> {
-        build_request(&host, &path, &headers, Some(&[]))?;
+        build_request(
+            &host,
+            &path,
+            &headers,
+            Some((&[], early_data_header_name.as_deref())),
+        )?;
         Ok(Self {
             state: LazyState::Pending {
                 stream: Some(stream),
@@ -398,6 +452,7 @@ impl LazyHttpUpgradeIo {
                 path,
                 headers,
                 early_data_limit,
+                early_data_header_name,
                 fast_open,
             },
         })
@@ -410,6 +465,7 @@ impl LazyHttpUpgradeIo {
             path,
             headers,
             early_data_limit,
+            early_data_header_name,
             fast_open,
         } = &mut self.state
         else {
@@ -419,6 +475,7 @@ impl LazyHttpUpgradeIo {
         let request_host = host.clone();
         let request_path = path.clone();
         let request_headers = headers.clone();
+        let early_data_header_name = early_data_header_name.clone();
         let early_length = input.len().min(*early_data_limit);
         let input = Bytes::copy_from_slice(input);
         let fast_open = *fast_open;
@@ -427,7 +484,7 @@ impl LazyHttpUpgradeIo {
                 &request_host,
                 &request_path,
                 &request_headers,
-                Some(&input[..early_length]),
+                Some((&input[..early_length], early_data_header_name.as_deref())),
             )?;
             stream.write_all(&request).await?;
             let mut stream: BoxedOutboundStream = if fast_open {
@@ -564,5 +621,29 @@ mod tests {
         assert!(request.contains("Upgrade: websocket\r\n"));
         assert!(!request.contains("Sec-WebSocket-Key"));
         assert!(!request.contains("Sec-WebSocket-Version"));
+    }
+
+    #[test]
+    fn raw_upgrade_early_data_uses_named_header_or_path_before_query() {
+        let request = build_request(
+            "example.test",
+            "/header",
+            &BTreeMap::new(),
+            Some((b"\x01\x02\x03", Some("X-Vmess-Early"))),
+        )
+        .unwrap();
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.starts_with("GET /header HTTP/1.1\r\n"));
+        assert!(request.contains("X-Vmess-Early: AQID\r\n"));
+
+        let request = build_request(
+            "example.test",
+            "/append?token=1",
+            &BTreeMap::new(),
+            Some((b"\x01\x02\x03", None)),
+        )
+        .unwrap();
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.starts_with("GET /appendAQID?token=1 HTTP/1.1\r\n"));
     }
 }

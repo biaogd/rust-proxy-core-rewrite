@@ -547,18 +547,64 @@ async fn connect_vmess_proxy(
             rewrite_outbound::VmessSecurity::ChaCha20Poly1305
         }
     };
+    let outer = connect_vmess_outer(
+        proxy,
+        server,
+        vmess,
+        allow_ipv6,
+        clock,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    rewrite_outbound::connect_vmess_on_stream(
+        outer,
+        destination,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
+            security,
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
+    )
+    .await
+    .map_err(|error| format!("VMess proxy connection failed: {error}"))
+}
+
+async fn connect_vmess_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let remote = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("VMess outer TCP connection failed: {error}"))?;
     let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
     let websocket = match &vmess.transport {
         rewrite_config::VmessTransport::Tcp => None,
-        rewrite_config::VmessTransport::WebSocket { path, headers } => {
-            Some((path.as_str(), headers))
-        }
+        rewrite_config::VmessTransport::WebSocket {
+            path,
+            headers,
+            max_early_data,
+            early_data_header_name,
+            http_upgrade,
+            http_upgrade_fast_open,
+        } => Some((
+            path.as_str(),
+            headers,
+            *max_early_data,
+            early_data_header_name.as_deref(),
+            *http_upgrade,
+            *http_upgrade_fast_open,
+        )),
     };
     if proxy.tls {
-        let websocket_host = websocket.and_then(|(_, headers)| {
+        let websocket_host = websocket.and_then(|(_, headers, ..)| {
             headers.iter().find_map(|(name, value)| {
                 name.eq_ignore_ascii_case("host").then_some(value.as_str())
             })
@@ -593,30 +639,35 @@ async fn connect_vmess_proxy(
         .await
         .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
     }
-    if let Some((path, headers)) = websocket {
-        outer = rewrite_outbound::connect_websocket_with_headers(
-            outer,
-            &proxy.server,
-            proxy.port,
-            path,
-            headers,
-        )
-        .await
-        .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+    if let Some((path, headers, max_early_data, early_header, http_upgrade, fast_open)) = websocket
+    {
+        if http_upgrade {
+            outer = rewrite_outbound::connect_http_upgrade_with_early_data(
+                outer,
+                &proxy.server,
+                path,
+                headers,
+                fast_open,
+                max_early_data,
+                early_header,
+            )
+            .await
+            .map_err(|error| format!("VMess HTTP Upgrade failed: {error}"))?;
+        } else {
+            outer = rewrite_outbound::connect_websocket_with_early_data(
+                outer,
+                &proxy.server,
+                proxy.port,
+                path,
+                headers,
+                max_early_data,
+                early_header,
+            )
+            .await
+            .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+        }
     }
-    rewrite_outbound::connect_vmess_on_stream(
-        outer,
-        destination,
-        rewrite_outbound::VmessTcpOptions {
-            uuid: vmess.uuid,
-            alter_id: vmess.alter_id,
-            security,
-            global_padding: vmess.global_padding,
-            authenticated_length: vmess.authenticated_length,
-        },
-    )
-    .await
-    .map_err(|error| format!("VMess proxy connection failed: {error}"))
+    Ok(outer)
 }
 
 async fn connect_shadowsocks_proxy(

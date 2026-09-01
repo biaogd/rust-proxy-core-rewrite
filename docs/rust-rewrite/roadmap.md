@@ -2075,6 +2075,40 @@ raw HTTP-upgrade variants. Custom ALPN, ECH, client-fingerprint emulation,
 ShadowTLS/ReSTLS/JLS/Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP,
 Mekya, general TCP mux and VMess inbound remain later `6D`/`7T` gates.
 
+### Phase 6D-G accepted scope — VMess WebSocket early data and HTTP Upgrade
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-G VMess WebSocket variants** and **Linux amd64 — Phase 6D-G
+VMess WebSocket variants**. Existing listener, rule, controller and UDP claims
+do not expand.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- RFC 6455 VMess with `max-early-data` placed in either an explicitly named
+  request header or appended to the configured URL path;
+- the Xray-compatible `path?ed=N` convention, which removes `ed`, canonicalizes
+  the remaining query and places early data in `Sec-WebSocket-Protocol`;
+- unframed `v2ray-http-upgrade` with ordinary response validation and the
+  `v2ray-http-upgrade-fast-open` write-before-response variant;
+- raw HTTP Upgrade combined with the same explicit/query early-data behavior;
+- plaintext and WSS outer transports, with representative zero and positive
+  AlterID/security modes rather than repeating the Phase 6D-A–F cross-product.
+
+`compat/scripts/phase6d_vmess_websocket_variants.py` is the Go/Rust
+differential gate. The independent Go authority parses the HTTP request,
+extracts and decodes early VMess bytes before invoking `sing-vmess`, then uses
+either RFC 6455 framing or the unframed upgraded stream. It compares exact
+Host/request-target/early-data placement, raw-versus-framed mode, large relay,
+half-close outcome, TLS use, fast-open lifecycle and process survival.
+
+This phase does not claim UDP over WebSocket, certificate pinning/client
+identity, custom ALPN, ECH, fingerprint emulation, ShadowTLS/ReSTLS/JLS/
+Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, general TCP mux or
+VMess inbound. Invalid header names/values and negative early-data sizes fail
+closed; broader Go acceptance/error wording remains outside this gate.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

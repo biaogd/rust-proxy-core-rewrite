@@ -19,7 +19,7 @@ pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
     wrap_client_tls_with_options,
 };
-pub use http_upgrade::connect_v2ray_http_upgrade;
+pub use http_upgrade::{connect_http_upgrade_with_early_data, connect_v2ray_http_upgrade};
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadow_tls_server::{
     ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,
@@ -42,7 +42,8 @@ pub use vmess::{
     associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,
 };
 pub use websocket::{
-    WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_headers,
+    WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
+    connect_websocket_with_headers,
 };
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}

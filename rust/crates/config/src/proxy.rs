@@ -400,14 +400,20 @@ fn parse_vmess_transport(
         return Ok(VmessTransport::Tcp);
     }
     let options = options.cloned().unwrap_or_default();
-    if options.max_early_data.is_some()
-        || options.early_data_header_name.is_some()
-        || options.v2ray_http_upgrade.is_some()
-        || options.v2ray_http_upgrade_fast_open.is_some()
-        || !options.extra.is_empty()
-    {
+    if !options.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
+    let max_early_data = options
+        .max_early_data
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?
+        .unwrap_or_default();
+    let early_data_header_name = options
+        .early_data_header_name
+        .filter(|name| !name.is_empty());
+    let http_upgrade = options.v2ray_http_upgrade.unwrap_or(false);
+    let http_upgrade_fast_open = options.v2ray_http_upgrade_fast_open.unwrap_or(false);
     let path = options
         .path
         .filter(|path| !path.is_empty())
@@ -418,6 +424,10 @@ fn parse_vmess_transport(
     Ok(VmessTransport::WebSocket {
         path,
         headers: options.headers.unwrap_or_default(),
+        max_early_data,
+        early_data_header_name,
+        http_upgrade,
+        http_upgrade_fast_open,
     })
 }
 

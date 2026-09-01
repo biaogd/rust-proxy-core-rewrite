@@ -1525,6 +1525,10 @@ fn parses_phase6d_f_vmess_tls_and_websocket_transport() {
                 ("Host".to_owned(), "front.phase6d.test".to_owned()),
                 ("X-Phase".to_owned(), "6d-f".to_owned()),
             ]),
+            max_early_data: 0,
+            early_data_header_name: None,
+            http_upgrade: false,
+            http_upgrade_fast_open: false,
         })
     );
 
@@ -1541,6 +1545,28 @@ fn parses_phase6d_f_vmess_tls_and_websocket_transport() {
             .as_ref()
             .map(|vmess| &vmess.transport),
         Some(&crate::VmessTransport::Tcp)
+    );
+}
+
+#[test]
+fn parses_phase6d_g_vmess_websocket_variants() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ws-variant\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-gcm\n    network: ws\n    tls: true\n    ws-opts:\n      path: /variant\n      max-early-data: 2048\n      early-data-header-name: X-Vmess-Early\n      v2ray-http-upgrade: true\n      v2ray-http-upgrade-fast-open: true\n      headers:\n        Host: variant.phase6d.test\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-G VMess variant config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::WebSocket {
+            path: "/variant".to_owned(),
+            headers: BTreeMap::from([("Host".to_owned(), "variant.phase6d.test".to_owned(),)]),
+            max_early_data: 2048,
+            early_data_header_name: Some("X-Vmess-Early".to_owned()),
+            http_upgrade: true,
+            http_upgrade_fast_open: true,
+        })
     );
 }
 
@@ -1631,7 +1657,7 @@ fn parses_phase6d_c_remaining_native_tcp_security_modes() {
 }
 
 #[test]
-fn phase6d_vmess_rejects_fields_outside_phase6d_f_scope() {
+fn phase6d_vmess_rejects_fields_outside_phase6d_g_scope() {
     let base = format!(
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );
@@ -1641,7 +1667,7 @@ fn phase6d_vmess_rejects_fields_outside_phase6d_f_scope() {
         "    network: grpc\n",
         "    packet-encoding: unsupported\n",
         "    network: ws\n    udp: true\n",
-        "    network: ws\n    ws-opts:\n      max-early-data: 2048\n",
+        "    network: ws\n    ws-opts:\n      max-early-data: -1\n",
         "    network: tcp\n    ws-opts:\n      path: /wrong\n",
         "    name-cert-verify: ignored-without-tls.example\n",
         "    tls: true\n    fingerprint: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",

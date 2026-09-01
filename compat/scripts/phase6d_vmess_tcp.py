@@ -54,6 +54,9 @@ def start_authority(
     private_key: pathlib.Path | None = None,
     expected_ws_host: str = "",
     expected_ws_path: str = "",
+    early_data_header: str = "",
+    early_data_path_prefix: str = "",
+    pre_response_bytes: int = 0,
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -74,6 +77,12 @@ def start_authority(
         expected_ws_host,
         "-expected-ws-path",
         expected_ws_path,
+        "-early-data-header",
+        early_data_header,
+        "-early-data-path-prefix",
+        early_data_path_prefix,
+        "-pre-response-bytes",
+        str(pre_response_bytes),
     ]
     if certificate is not None and private_key is not None:
         command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))

@@ -233,6 +233,10 @@ pub enum VmessTransport {
     WebSocket {
         path: String,
         headers: BTreeMap<String, String>,
+        max_early_data: usize,
+        early_data_header_name: Option<String>,
+        http_upgrade: bool,
+        http_upgrade_fast_open: bool,
     },
 }
 

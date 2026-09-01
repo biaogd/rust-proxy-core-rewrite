@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/gobwas/ws/wsutil"
@@ -39,6 +40,27 @@ type websocketConn struct {
 type bufferedReadWriter struct {
 	io.Reader
 	io.Writer
+}
+
+type readerConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (conn *readerConn) Read(payload []byte) (int, error) {
+	return conn.reader.Read(payload)
+}
+
+type prefixedConn struct {
+	net.Conn
+	prefix bytes.Reader
+}
+
+func (conn *prefixedConn) Read(payload []byte) (int, error) {
+	if conn.prefix.Len() != 0 {
+		return conn.prefix.Read(payload)
+	}
+	return conn.Conn.Read(payload)
 }
 
 func (conn *websocketConn) Read(payload []byte) (int, error) {
@@ -125,47 +147,109 @@ func (h *echoHandler) observe(format string, values ...any) {
 	h.output.Unlock()
 }
 
-func upgradeWebSocket(
+func upgradeTransport(
 	connection net.Conn,
+	transport string,
 	expectedHost string,
 	expectedPath string,
-) (net.Conn, string, string, error) {
+	earlyDataHeader string,
+	earlyDataPathPrefix string,
+	preResponseBytes int,
+) (net.Conn, string, string, string, int, error) {
 	reader := bufio.NewReader(connection)
 	request, err := http.ReadRequest(reader)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", 0, err
 	}
 	defer request.Body.Close()
 	if request.Method != http.MethodGet || request.Header.Get("Upgrade") != "websocket" {
-		return nil, "", "", fmt.Errorf("invalid WebSocket upgrade")
+		return nil, "", "", "", 0, fmt.Errorf("invalid WebSocket upgrade")
 	}
 	if expectedHost != "" && request.Host != expectedHost {
-		return nil, "", "", fmt.Errorf("unexpected WebSocket host %q", request.Host)
+		return nil, "", "", "", 0, fmt.Errorf("unexpected WebSocket host %q", request.Host)
 	}
-	if expectedPath != "" && request.URL.RequestURI() != expectedPath {
-		return nil, "", "", fmt.Errorf("unexpected WebSocket path %q", request.URL.RequestURI())
+	earlyLocation := ""
+	var earlyData []byte
+	observedPath := request.URL.RequestURI()
+	if earlyDataHeader != "" {
+		encoded := request.Header.Get(earlyDataHeader)
+		if encoded == "" {
+			return nil, "", "", "", 0, fmt.Errorf("missing early-data header %q", earlyDataHeader)
+		}
+		earlyData, err = base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, "", "", "", 0, fmt.Errorf("invalid early-data header: %w", err)
+		}
+		earlyLocation = earlyDataHeader
+	} else if earlyDataPathPrefix != "" {
+		if !strings.HasPrefix(request.URL.Path, earlyDataPathPrefix) {
+			return nil, "", "", "", 0, fmt.Errorf("unexpected early-data path %q", request.URL.Path)
+		}
+		encoded := strings.TrimPrefix(request.URL.Path, earlyDataPathPrefix)
+		if encoded == "" {
+			return nil, "", "", "", 0, fmt.Errorf("missing path early data")
+		}
+		earlyData, err = base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, "", "", "", 0, fmt.Errorf("invalid path early data: %w", err)
+		}
+		earlyLocation = "PATH"
+		observedPath = earlyDataPathPrefix
+		if request.URL.RawQuery != "" {
+			observedPath += "?" + request.URL.RawQuery
+		}
 	}
-	key := request.Header.Get("Sec-WebSocket-Key")
-	if key == "" {
-		return nil, "", "", fmt.Errorf("missing WebSocket key")
+	if expectedPath != "" && observedPath != expectedPath {
+		return nil, "", "", "", 0, fmt.Errorf("unexpected WebSocket path %q", observedPath)
 	}
-	digest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-	accept := base64.StdEncoding.EncodeToString(digest[:])
-	_, err = fmt.Fprintf(
-		connection,
-		"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
-		accept,
-	)
+	buffered := &readerConn{Conn: connection, reader: reader}
+	reportedEarlyLength := len(earlyData)
+	if preResponseBytes > 0 {
+		prefix := make([]byte, preResponseBytes)
+		if _, err := io.ReadFull(reader, prefix); err != nil {
+			return nil, "", "", "", 0, fmt.Errorf("missing fast-open bytes: %w", err)
+		}
+		earlyData = append(earlyData, prefix...)
+	}
+	var wrapped net.Conn
+	if transport == "upgrade" {
+		if request.Header.Get("Sec-WebSocket-Key") != "" {
+			return nil, "", "", "", 0, fmt.Errorf("raw Upgrade unexpectedly carried a WebSocket key")
+		}
+		_, err = fmt.Fprint(
+			connection,
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+		)
+		wrapped = buffered
+	} else {
+		key := request.Header.Get("Sec-WebSocket-Key")
+		if key == "" {
+			return nil, "", "", "", 0, fmt.Errorf("missing WebSocket key")
+		}
+		digest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+		accept := base64.StdEncoding.EncodeToString(digest[:])
+		_, err = fmt.Fprintf(
+			connection,
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n",
+			accept,
+		)
+		wrapped = &websocketConn{
+			Conn: connection,
+			reader: bufferedReadWriter{
+				Reader: reader,
+				Writer: connection,
+			},
+		}
+	}
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", 0, err
 	}
-	return &websocketConn{
-		Conn: connection,
-		reader: bufferedReadWriter{
-			Reader: reader,
-			Writer: connection,
-		},
-	}, request.Host, request.URL.RequestURI(), nil
+	if len(earlyData) != 0 {
+		prefixed := &prefixedConn{Conn: wrapped}
+		prefixed.prefix.Reset(earlyData)
+		wrapped = prefixed
+	}
+	return wrapped, request.Host, observedPath, earlyLocation, reportedEarlyLength, nil
 }
 
 func serve(
@@ -176,6 +260,9 @@ func serve(
 	transport string,
 	expectedWSHost string,
 	expectedWSPath string,
+	earlyDataHeader string,
+	earlyDataPathPrefix string,
+	preResponseBytes int,
 ) {
 	defer raw.Close()
 	var connection net.Conn = raw
@@ -187,13 +274,31 @@ func serve(
 		handler.observe("TLS %s\n", tlsConnection.ConnectionState().ServerName)
 		connection = tlsConnection
 	}
-	if transport == "ws" {
-		wrapped, host, path, err := upgradeWebSocket(connection, expectedWSHost, expectedWSPath)
+	if transport == "ws" || transport == "upgrade" {
+		wrapped, host, path, earlyLocation, earlyLength, err := upgradeTransport(
+			connection,
+			transport,
+			expectedWSHost,
+			expectedWSPath,
+			earlyDataHeader,
+			earlyDataPathPrefix,
+			preResponseBytes,
+		)
 		if err != nil {
 			handler.NewError(context.Background(), err)
 			return
 		}
-		handler.observe("WS %s %s\n", host, path)
+		label := "WS"
+		if transport == "upgrade" {
+			label = "UPGRADE"
+		}
+		handler.observe("%s %s %s\n", label, host, path)
+		if earlyLength != 0 {
+			handler.observe("EARLY %s %d\n", earlyLocation, earlyLength)
+		}
+		if preResponseBytes != 0 {
+			handler.observe("FASTOPEN %d\n", preResponseBytes)
+		}
 		connection = wrapped
 	}
 	if err := service.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
@@ -208,11 +313,14 @@ func main() {
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
 	packetMode := flag.String("packet-mode", "reject", "reject, standard, packetaddr, or xudp")
-	transport := flag.String("transport", "tcp", "tcp or ws")
+	transport := flag.String("transport", "tcp", "tcp, ws, or upgrade")
 	tlsCertificate := flag.String("tls-cert", "", "optional TLS certificate")
 	tlsPrivateKey := flag.String("tls-key", "", "optional TLS private key")
 	expectedWSHost := flag.String("expected-ws-host", "", "expected WebSocket Host")
 	expectedWSPath := flag.String("expected-ws-path", "", "expected WebSocket request target")
+	earlyDataHeader := flag.String("early-data-header", "", "request header carrying base64url early data")
+	earlyDataPathPrefix := flag.String("early-data-path-prefix", "", "URL path prefix before base64url early data")
+	preResponseBytes := flag.Int("pre-response-bytes", 0, "bytes required before the Upgrade response")
 	flag.Parse()
 	if *uuid == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -225,12 +333,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
 		os.Exit(2)
 	}
-	if *transport != "tcp" && *transport != "ws" {
+	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" {
 		fmt.Fprintln(os.Stderr, "invalid -transport")
 		os.Exit(2)
 	}
 	if (*tlsCertificate == "") != (*tlsPrivateKey == "") {
 		fmt.Fprintln(os.Stderr, "-tls-cert and -tls-key must be paired")
+		os.Exit(2)
+	}
+	if *preResponseBytes < 0 || (*transport != "upgrade" && *preResponseBytes != 0) {
+		fmt.Fprintln(os.Stderr, "invalid -pre-response-bytes")
 		os.Exit(2)
 	}
 	var tlsConfig *tls.Config
@@ -283,6 +395,9 @@ func main() {
 			*transport,
 			*expectedWSHost,
 			*expectedWSPath,
+			*earlyDataHeader,
+			*earlyDataPathPrefix,
+			*preResponseBytes,
 		)
 	}
 }

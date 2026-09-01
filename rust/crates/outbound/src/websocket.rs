@@ -78,7 +78,49 @@ pub async fn connect_websocket_with_headers(
     path: &str,
     headers: &BTreeMap<String, String>,
 ) -> Result<BoxedOutboundStream, Error> {
-    let request = websocket_request(host, port, path, headers, None)?;
+    connect_websocket_with_early_data(stream, host, port, path, headers, 0, None).await
+}
+
+/// Upgrades an established transport and defers the handshake until the first
+/// `VMess` bytes are available when early data is enabled.
+///
+/// An absent header name appends the encoded bytes to the URL path, matching
+/// Mihomo's `VMess` WebSocket transport. A present name places them in that
+/// request header.
+///
+/// # Errors
+///
+/// Returns an error when the request or early-data header is invalid, or the
+/// peer rejects the RFC 6455 handshake.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_websocket_with_early_data(
+    stream: BoxedOutboundStream,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &BTreeMap<String, String>,
+    max_early_data: usize,
+    early_data_header_name: Option<&str>,
+) -> Result<BoxedOutboundStream, Error> {
+    let (path, path_early_data) = split_early_data_path(path);
+    let (max_early_data, early_data_header_name) = if path_early_data > 0 {
+        (path_early_data, Some(SEC_WEBSOCKET_PROTOCOL.as_str()))
+    } else {
+        (max_early_data, early_data_header_name)
+    };
+    let request = websocket_request(host, port, &path, headers, None)?;
+    if max_early_data > 0 {
+        let placement = match early_data_header_name {
+            Some(name) => EarlyDataPlacement::Header(HeaderName::from_bytes(name.as_bytes())?),
+            None => EarlyDataPlacement::Path,
+        };
+        return Ok(Box::new(LazyWebSocketIo::new(
+            stream,
+            request,
+            max_early_data,
+            placement,
+        )));
+    }
     let (stream, _) = tokio_tungstenite::client_async(request, stream).await?;
     Ok(Box::new(WebSocketIo::new(stream)))
 }
@@ -98,12 +140,16 @@ pub async fn connect_v2ray_websocket(
     headers: &BTreeMap<String, String>,
 ) -> Result<BoxedOutboundStream, Error> {
     let (path, early_data) = split_early_data_path(path);
-    let request = websocket_request(host, port, &path, headers, None)?;
-    if early_data > 0 {
-        return Ok(Box::new(LazyWebSocketIo::new(stream, request, early_data)));
-    }
-    let (stream, _) = tokio_tungstenite::client_async(request, stream).await?;
-    Ok(Box::new(WebSocketIo::new(stream)))
+    connect_websocket_with_early_data(
+        stream,
+        host,
+        port,
+        &path,
+        headers,
+        early_data,
+        Some(SEC_WEBSOCKET_PROTOCOL.as_str()),
+    )
+    .await
 }
 
 fn websocket_request(
@@ -199,6 +245,7 @@ enum LazyState {
         stream: Option<BoxedOutboundStream>,
         request: Option<Request<()>>,
         early_data_limit: usize,
+        placement: Option<EarlyDataPlacement>,
     },
     Upgrading(UpgradeFuture),
     Connected(WebSocketIo<BoxedOutboundStream>),
@@ -209,13 +256,24 @@ struct LazyWebSocketIo {
     state: LazyState,
 }
 
+enum EarlyDataPlacement {
+    Header(HeaderName),
+    Path,
+}
+
 impl LazyWebSocketIo {
-    fn new(stream: BoxedOutboundStream, request: Request<()>, early_data_limit: usize) -> Self {
+    fn new(
+        stream: BoxedOutboundStream,
+        request: Request<()>,
+        early_data_limit: usize,
+        placement: EarlyDataPlacement,
+    ) -> Self {
         Self {
             state: LazyState::Pending {
                 stream: Some(stream),
                 request: Some(request),
                 early_data_limit,
+                placement: Some(placement),
             },
         }
     }
@@ -225,26 +283,21 @@ impl LazyWebSocketIo {
             stream,
             request,
             early_data_limit,
+            placement,
         } = &mut self.state
         else {
             return;
         };
         let stream = stream.take().expect("lazy WebSocket stream taken once");
         let mut request = request.take().expect("lazy WebSocket request taken once");
+        let placement = placement
+            .take()
+            .expect("lazy WebSocket early-data placement taken once");
         let input = Bytes::copy_from_slice(input);
         let early_length = input.len().min(*early_data_limit);
         let early = URL_SAFE_NO_PAD.encode(&input[..early_length]);
-        let value = match HeaderValue::from_str(&early) {
-            Ok(value) => value,
-            Err(error) => {
-                self.state = LazyState::Upgrading(Box::pin(async move {
-                    Err(io::Error::new(io::ErrorKind::InvalidInput, error))
-                }));
-                return;
-            }
-        };
-        request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
         self.state = LazyState::Upgrading(Box::pin(async move {
+            apply_early_data(&mut request, placement, &early)?;
             let stream = early_websocket_handshake(stream, request).await?;
             let mut stream = WebSocketIo::new(stream);
             if early_length < input.len() {
@@ -253,6 +306,43 @@ impl LazyWebSocketIo {
             Ok((stream, input.len()))
         }));
     }
+}
+
+fn apply_early_data(
+    request: &mut Request<()>,
+    placement: EarlyDataPlacement,
+    encoded: &str,
+) -> io::Result<()> {
+    match placement {
+        EarlyDataPlacement::Header(name) => {
+            let value = HeaderValue::from_str(encoded)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            request.headers_mut().insert(name, value);
+        }
+        EarlyDataPlacement::Path => {
+            let current = request.uri().clone();
+            let mut parts = current.into_parts();
+            let target = parts
+                .path_and_query
+                .as_ref()
+                .map_or("/", |value| value.as_str());
+            let (path, query) = target
+                .split_once('?')
+                .map_or((target, None), |(path, query)| (path, Some(query)));
+            let target = query.map_or_else(
+                || format!("{path}{encoded}"),
+                |query| format!("{path}{encoded}?{query}"),
+            );
+            parts.path_and_query = Some(
+                target
+                    .parse()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+            );
+            *request.uri_mut() = tokio_tungstenite::tungstenite::http::Uri::from_parts(parts)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        }
+    }
+    Ok(())
 }
 
 async fn early_websocket_handshake(
@@ -509,5 +599,46 @@ where
         Pin::new(&mut self.get_mut().stream)
             .poll_close(cx)
             .map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vmess_early_data_uses_named_header_or_path_before_query() {
+        let mut header_request =
+            websocket_request("example.test", 80, "/header", &BTreeMap::new(), None).unwrap();
+        apply_early_data(
+            &mut header_request,
+            EarlyDataPlacement::Header(HeaderName::from_static("x-vmess-early")),
+            "AQID",
+        )
+        .unwrap();
+        assert_eq!(header_request.headers()["x-vmess-early"], "AQID");
+        assert_eq!(header_request.uri().path_and_query().unwrap(), "/header");
+
+        let mut path_request = websocket_request(
+            "example.test",
+            80,
+            "/append?token=1",
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        apply_early_data(&mut path_request, EarlyDataPlacement::Path, "AQID").unwrap();
+        assert_eq!(
+            path_request.uri().path_and_query().unwrap(),
+            "/appendAQID?token=1"
+        );
+    }
+
+    #[test]
+    fn xray_early_data_query_is_removed_and_remaining_query_is_sorted() {
+        assert_eq!(
+            split_early_data_path("/ws?z=2&ed=64&a=1"),
+            ("/ws?a=1&z=2".to_owned(), 64)
+        );
     }
 }
