@@ -1650,6 +1650,51 @@ fn phase6d_h_empty_http_lists_use_oracle_defaults() {
 }
 
 #[test]
+fn parses_phase6d_i_vmess_grpc_single_stream_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: grpc-default\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n  - name: grpc-custom\n    type: vmess\n    server: 127.0.0.1\n    port: 10006\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: grpc\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    grpc-opts:\n      grpc-service-name: /custom/path\n      grpc-user-agent: phase6d-i/1.0\n      ping-interval: 0\n      max-connections: 0\n      min-streams: 0\n      max-streams: 0\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-I VMess gRPC config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "GunService".to_owned(),
+            user_agent: "grpc-go/1.36.0".to_owned(),
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "/custom/path".to_owned(),
+            user_agent: "phase6d-i/1.0".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn rejects_phase6d_i_grpc_pool_and_ping_options() {
+    for option in [
+        "ping-interval: 1",
+        "max-connections: 1",
+        "min-streams: 1",
+        "max-streams: 1",
+        "grpc-service-name: 'bad path'",
+        "grpc-user-agent: \"bad\\nagent\"",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-grpc\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n    grpc-opts:\n      {option}\n"
+        );
+        assert!(Config::from_yaml(&source).is_err(), "accepted {option}");
+    }
+}
+
+#[test]
 fn parses_phase6d_d_positive_legacy_alter_id() {
     for alter_id in [1_i64, 64, i64::MAX] {
         let source = format!(
@@ -1736,14 +1781,14 @@ fn parses_phase6d_c_remaining_native_tcp_security_modes() {
 }
 
 #[test]
-fn phase6d_vmess_rejects_fields_outside_phase6d_h_scope() {
+fn phase6d_vmess_rejects_fields_outside_phase6d_i_scope() {
     let base = format!(
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );
     for extra in [
         "    alterId: -1\n",
         "    cipher: aes-256-gcm\n",
-        "    network: grpc\n",
+        "    network: xhttp\n",
         "    packet-encoding: unsupported\n",
         "    network: ws\n    udp: true\n",
         "    network: ws\n    ws-opts:\n      max-early-data: -1\n",

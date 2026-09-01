@@ -61,6 +61,7 @@ def start_authority(
     expected_http_host: str = "",
     expected_http_path: str = "",
     expected_http_header: str = "",
+    expected_grpc_user_agent: str = "",
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -95,6 +96,8 @@ def start_authority(
         expected_http_path,
         "-expected-http-header",
         expected_http_header,
+        "-expected-grpc-user-agent",
+        expected_grpc_user_agent,
     ]
     if certificate is not None and private_key is not None:
         command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))

@@ -167,6 +167,7 @@ fn parse_remote_proxy(
         || proxy.ws_opts.is_some()
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -245,6 +246,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.ws_opts.is_some()
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -336,11 +338,12 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.private_key.is_some()
         || proxy.headers.is_some()
         || proxy.alter_id.unwrap_or_default() < 0
-        || !matches!(network, "tcp" | "ws" | "http" | "h2")
+        || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
         || (!tls && has_tls_options)
         || (network != "ws" && proxy.ws_opts.is_some())
         || (network != "http" && proxy.http_opts.is_some())
         || (network != "h2" && proxy.h2_opts.is_some())
+        || (network != "grpc" && proxy.grpc_opts.is_some())
         || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
         || !proxy.extra.is_empty()
     {
@@ -353,6 +356,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         proxy.ws_opts.as_ref(),
         proxy.http_opts.as_ref(),
         proxy.h2_opts.as_ref(),
+        proxy.grpc_opts.as_ref(),
         &name,
     )?;
     let server = proxy
@@ -408,6 +412,7 @@ fn parse_vmess_transport(
     websocket: Option<&crate::raw::RawVmessWebSocketOptions>,
     http: Option<&crate::raw::RawVmessHttpOptions>,
     http2: Option<&crate::raw::RawVmessHttp2Options>,
+    grpc: Option<&crate::raw::RawVmessGrpcOptions>,
     name: &str,
 ) -> Result<VmessTransport, ConfigError> {
     if network == "tcp" {
@@ -468,6 +473,9 @@ fn parse_vmess_transport(
         }
         return Ok(VmessTransport::Http2 { hosts, path });
     }
+    if network == "grpc" {
+        return parse_vmess_grpc_transport(grpc, name);
+    }
     let options = websocket.cloned().unwrap_or_default();
     if !options.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
@@ -497,6 +505,43 @@ fn parse_vmess_transport(
         early_data_header_name,
         http_upgrade,
         http_upgrade_fast_open,
+    })
+}
+
+fn parse_vmess_grpc_transport(
+    grpc: Option<&crate::raw::RawVmessGrpcOptions>,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    let options = grpc.cloned().unwrap_or_default();
+    if !options.extra.is_empty()
+        || options.ping_interval.unwrap_or_default() != 0
+        || options.max_connections.unwrap_or_default() != 0
+        || options.min_streams.unwrap_or_default() != 0
+        || options.max_streams.unwrap_or_default() != 0
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let service_name = options
+        .grpc_service_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "GunService".to_owned());
+    let user_agent = options
+        .grpc_user_agent
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or_else(|| "grpc-go/1.36.0".to_owned());
+    let service_path = if service_name.starts_with('/') {
+        service_name.clone()
+    } else {
+        format!("/{service_name}/Tun")
+    };
+    if service_path.parse::<http::uri::PathAndQuery>().is_err()
+        || http::header::HeaderValue::from_str(&user_agent).is_err()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(VmessTransport::Grpc {
+        service_name,
+        user_agent,
     })
 }
 
@@ -924,6 +969,7 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.ws_opts.is_some()
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()

@@ -2148,6 +2148,41 @@ xHTTP/H3, mKCP, Mekya, general TCP mux or VMess inbound. Invalid methods,
 paths, header names/values and unsupported transport combinations fail closed;
 broader Go acceptance/error wording remains outside this gate.
 
+### Phase 6D-I accepted scope — VMess gRPC/Gun single streams
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-I VMess gRPC/Gun** and **Linux amd64 — Phase 6D-I VMess
+gRPC/Gun**. Existing listener, rule, controller and UDP claims do not expand.
+
+The accepted external path is YAML through mixed HTTP/SOCKS TCP and rules to
+one Gun stream per application connection:
+
+- `network: grpc` over plaintext h2c or TLS with negotiated `h2` ALPN;
+- HTTP/2 `POST`, `Content-Type: application/grpc`, oracle-default
+  `grpc-go/1.36.0` User-Agent, configured User-Agent override and the oracle's
+  `https` pseudo-scheme even over h2c;
+- default `GunService` and configured service names mapped to
+  `/<service>/Tun`, while names beginning with `/` remain exact custom paths;
+- Gun's five-byte gRPC prefix plus protobuf field-1 varint envelope around each
+  VMess write, with the inverse envelope removed from response DATA frames;
+- default authority selection (`server:port`) and explicit `servername`, plus
+  representative zero/positive AlterID and raw/AEAD/CFB body modes, large
+  relay, close behavior and process survival.
+
+`compat/scripts/phase6d_vmess_grpc.py` is the Go/Rust differential gate. Its
+independent Go authority validates method, authority, path, content type,
+User-Agent, TLS ALPN and Gun frame boundaries before invoking `sing-vmess`.
+It does not reuse Mihomo's Gun client/server implementation.
+
+This gate deliberately accepts only the default zero-valued `ping-interval`,
+`max-connections`, `min-streams` and `max-streams` configuration. Nonzero
+values fail closed because transport reuse, concurrent stream balancing,
+keepalive ping and connection-pool lifecycle require a separate stateful gate.
+VMess UDP over Gun, advanced TLS/camouflage, gRPC pooling, xHTTP/H3, mKCP,
+Mekya, general TCP mux and VMess inbound remain outside Phase 6D-I.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

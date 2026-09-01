@@ -12,6 +12,7 @@ mod socks5;
 mod tls;
 mod v2ray_mux;
 mod vmess;
+mod vmess_grpc;
 mod vmess_h2;
 mod vmess_http;
 mod websocket;
@@ -43,6 +44,7 @@ pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
     associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,
 };
+pub use vmess_grpc::connect_vmess_grpc;
 pub use vmess_h2::connect_vmess_h2;
 pub use vmess_http::connect_vmess_http;
 pub use websocket::{

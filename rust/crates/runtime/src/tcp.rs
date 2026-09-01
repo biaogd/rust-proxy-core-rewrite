@@ -588,7 +588,8 @@ async fn connect_vmess_outer(
     let websocket = match &vmess.transport {
         rewrite_config::VmessTransport::Tcp
         | rewrite_config::VmessTransport::Http { .. }
-        | rewrite_config::VmessTransport::Http2 { .. } => None,
+        | rewrite_config::VmessTransport::Http2 { .. }
+        | rewrite_config::VmessTransport::Grpc { .. } => None,
         rewrite_config::VmessTransport::WebSocket {
             path,
             headers,
@@ -619,7 +620,8 @@ async fn connect_vmess_outer(
         let alpn: &[&[u8]] = match &vmess.transport {
             rewrite_config::VmessTransport::WebSocket { .. }
             | rewrite_config::VmessTransport::Http { .. } => &[b"http/1.1"],
-            rewrite_config::VmessTransport::Http2 { .. } => &[b"h2"],
+            rewrite_config::VmessTransport::Http2 { .. }
+            | rewrite_config::VmessTransport::Grpc { .. } => &[b"h2"],
             rewrite_config::VmessTransport::Tcp => &[],
         };
         outer = rewrite_outbound::wrap_client_tls_with_options(
@@ -642,12 +644,13 @@ async fn connect_vmess_outer(
         .await
         .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
     }
-    wrap_vmess_transport(outer, proxy, vmess).await
+    wrap_vmess_transport(outer, proxy, server, vmess).await
 }
 
 async fn wrap_vmess_transport(
     mut outer: rewrite_outbound::BoxedOutboundStream,
     proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
     vmess: &rewrite_config::VmessProxyConfig,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     match &vmess.transport {
@@ -698,6 +701,15 @@ async fn wrap_vmess_transport(
             outer = rewrite_outbound::connect_vmess_h2(outer, &hosts[index], path)
                 .await
                 .map_err(|error| format!("VMess HTTP/2 transport failed: {error}"))?;
+        }
+        rewrite_config::VmessTransport::Grpc {
+            service_name,
+            user_agent,
+        } => {
+            let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+            outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
+                .await
+                .map_err(|error| format!("VMess gRPC transport failed: {error}"))?;
         }
         rewrite_config::VmessTransport::Tcp => {}
     }

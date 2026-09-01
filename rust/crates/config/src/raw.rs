@@ -222,6 +222,7 @@ pub(crate) struct RawProxy {
     pub(crate) ws_opts: Option<RawVmessWebSocketOptions>,
     pub(crate) http_opts: Option<RawVmessHttpOptions>,
     pub(crate) h2_opts: Option<RawVmessHttp2Options>,
+    pub(crate) grpc_opts: Option<RawVmessGrpcOptions>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
     pub(crate) plugin: Option<String>,
@@ -268,6 +269,19 @@ pub(crate) struct RawVmessHttpOptions {
 pub(crate) struct RawVmessHttp2Options {
     pub(crate) host: Option<Vec<String>>,
     pub(crate) path: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessGrpcOptions {
+    pub(crate) grpc_service_name: Option<String>,
+    pub(crate) grpc_user_agent: Option<String>,
+    pub(crate) ping_interval: Option<i64>,
+    pub(crate) max_connections: Option<i64>,
+    pub(crate) min_streams: Option<i64>,
+    pub(crate) max_streams: Option<i64>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

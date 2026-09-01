@@ -20,11 +20,6 @@ pub async fn connect_vmess_h2(
     host: &str,
     path: &str,
 ) -> io::Result<BoxedOutboundStream> {
-    let (mut client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    client = client.ready().await.map_err(h2_error)?;
     // The pinned Go transport always emits `:scheme = https`, including over
     // its explicit h2c connection mode.
     let mut encoded = url::Url::parse("https://vmess.invalid/")
@@ -39,9 +34,21 @@ pub async fn connect_vmess_h2(
         .header("accept-encoding", "identity")
         .body(())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    connect_h2_request(stream, request).await
+}
+
+pub(crate) async fn connect_h2_request(
+    stream: BoxedOutboundStream,
+    request: Request<()>,
+) -> io::Result<BoxedOutboundStream> {
+    let (mut client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client = client.ready().await.map_err(h2_error)?;
     let (response, sender) = client.send_request(request, false).map_err(h2_error)?;
     let response = response.await.map_err(h2_error)?;
-    Ok(Box::new(VmessH2Stream {
+    Ok(Box::new(H2DataStream {
         sender,
         receiver: response.into_body(),
         read_chunk: Bytes::new(),
@@ -50,7 +57,7 @@ pub async fn connect_vmess_h2(
     }))
 }
 
-struct VmessH2Stream {
+struct H2DataStream {
     sender: SendStream<Bytes>,
     receiver: RecvStream,
     read_chunk: Bytes,
@@ -58,7 +65,7 @@ struct VmessH2Stream {
     write_closed: bool,
 }
 
-impl AsyncRead for VmessH2Stream {
+impl AsyncRead for H2DataStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -89,7 +96,7 @@ impl AsyncRead for VmessH2Stream {
     }
 }
 
-impl AsyncWrite for VmessH2Stream {
+impl AsyncWrite for H2DataStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -129,7 +136,7 @@ impl AsyncWrite for VmessH2Stream {
         }
         Poll::Ready(Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
-            "VMess HTTP/2 does not preserve TCP half-close",
+            "outer HTTP/2 stream does not preserve TCP half-close",
         )))
     }
 }

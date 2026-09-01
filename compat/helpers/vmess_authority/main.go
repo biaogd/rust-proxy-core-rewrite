@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +55,11 @@ type h2StreamConn struct {
 	writer http.ResponseWriter
 }
 
+type gunConn struct {
+	net.Conn
+	remaining int
+}
+
 func (conn *h2StreamConn) Read(payload []byte) (int, error) {
 	return conn.reader.Read(payload)
 }
@@ -71,6 +77,72 @@ func (conn *h2StreamConn) Close() error {
 		return closer.Close()
 	}
 	return nil
+}
+
+func readUvarint(reader io.Reader) (uint64, int, error) {
+	var value uint64
+	var one [1]byte
+	for index := 0; index < 10; index++ {
+		if _, err := io.ReadFull(reader, one[:]); err != nil {
+			return 0, 0, err
+		}
+		if index == 9 && one[0] > 1 {
+			return 0, 0, fmt.Errorf("invalid Gun payload length")
+		}
+		value |= uint64(one[0]&0x7f) << (index * 7)
+		if one[0] < 0x80 {
+			return value, index + 1, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("invalid Gun payload length")
+}
+
+func (conn *gunConn) Read(payload []byte) (int, error) {
+	if conn.remaining != 0 {
+		length := len(payload)
+		if length > conn.remaining {
+			length = conn.remaining
+		}
+		read, err := conn.Conn.Read(payload[:length])
+		conn.remaining -= read
+		return read, err
+	}
+	var header [6]byte
+	if _, err := io.ReadFull(conn.Conn, header[:]); err != nil {
+		return 0, err
+	}
+	if header[0] != 0 || header[5] != 0x0a {
+		return 0, fmt.Errorf("invalid Gun envelope")
+	}
+	payloadLength, varintLength, err := readUvarint(conn.Conn)
+	if err != nil {
+		return 0, err
+	}
+	grpcLength := binary.BigEndian.Uint32(header[1:5])
+	if payloadLength > uint64(^uint(0)>>1) ||
+		uint64(grpcLength) != 1+uint64(varintLength)+payloadLength {
+		return 0, fmt.Errorf("invalid Gun envelope length")
+	}
+	conn.remaining = int(payloadLength)
+	return conn.Read(payload)
+}
+
+func (conn *gunConn) Write(payload []byte) (int, error) {
+	var encodedLength [10]byte
+	varintLength := binary.PutUvarint(encodedLength[:], uint64(len(payload)))
+	grpcLength := 1 + varintLength + len(payload)
+	if uint64(grpcLength) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("Gun frame is too large")
+	}
+	frame := make([]byte, 5+grpcLength)
+	binary.BigEndian.PutUint32(frame[1:5], uint32(grpcLength))
+	frame[5] = 0x0a
+	copy(frame[6:], encodedLength[:varintLength])
+	copy(frame[6+varintLength:], payload)
+	if _, err := conn.Conn.Write(frame); err != nil {
+		return 0, err
+	}
+	return len(payload), nil
 }
 
 func (conn *readerConn) Read(payload []byte) (int, error) {
@@ -334,24 +406,47 @@ func serveH2(
 	connection net.Conn,
 	service *vmess.Service[string],
 	handler *echoHandler,
+	transport string,
 	expectedHost string,
 	expectedPath string,
+	expectedUserAgent string,
 ) error {
 	server := &http2.Server{}
 	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPut ||
-			(expectedHost != "" && request.Host != expectedHost) ||
-			(expectedPath != "" && request.URL.RequestURI() != expectedPath) ||
-			request.Header.Get("Accept-Encoding") != "identity" {
-			http.Error(writer, "invalid h2 VMess request", http.StatusBadRequest)
-			return
+		if transport == "grpc" {
+			if request.Method != http.MethodPost ||
+				(expectedHost != "" && request.Host != expectedHost) ||
+				(expectedPath != "" && request.URL.RequestURI() != expectedPath) ||
+				request.Header.Get("Content-Type") != "application/grpc" ||
+				(expectedUserAgent != "" && request.Header.Get("User-Agent") != expectedUserAgent) {
+				http.Error(writer, "invalid Gun VMess request", http.StatusBadRequest)
+				return
+			}
+			handler.observe(
+				"GRPC POST %s %s application/grpc %s\n",
+				request.Host,
+				request.URL.RequestURI(),
+				request.Header.Get("User-Agent"),
+			)
+			writer.Header().Set("Content-Type", "application/grpc")
+		} else {
+			if request.Method != http.MethodPut ||
+				(expectedHost != "" && request.Host != expectedHost) ||
+				(expectedPath != "" && request.URL.RequestURI() != expectedPath) ||
+				request.Header.Get("Accept-Encoding") != "identity" {
+				http.Error(writer, "invalid h2 VMess request", http.StatusBadRequest)
+				return
+			}
+			handler.observe("H2 PUT %s %s identity\n", request.Host, request.URL.RequestURI())
 		}
-		handler.observe("H2 PUT %s %s identity\n", request.Host, request.URL.RequestURI())
 		writer.WriteHeader(http.StatusOK)
 		if flusher, ok := writer.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		stream := &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
+		var stream net.Conn = &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
+		if transport == "grpc" {
+			stream = &gunConn{Conn: stream}
+		}
 		if err := service.NewConnection(request.Context(), stream, M.Metadata{}); err != nil {
 			handler.NewError(request.Context(), err)
 		}
@@ -374,6 +469,7 @@ func serve(
 	expectedHTTPHost string,
 	expectedHTTPPath string,
 	expectedHTTPHeader string,
+	expectedGrpcUserAgent string,
 ) {
 	defer raw.Close()
 	var connection net.Conn = raw
@@ -383,13 +479,21 @@ func serve(
 			return
 		}
 		handler.observe("TLS %s\n", tlsConnection.ConnectionState().ServerName)
-		if transport == "h2" {
+		if transport == "h2" || transport == "grpc" {
 			handler.observe("ALPN %s\n", tlsConnection.ConnectionState().NegotiatedProtocol)
 		}
 		connection = tlsConnection
 	}
-	if transport == "h2" {
-		if err := serveH2(connection, service, handler, expectedHTTPHost, expectedHTTPPath); err != nil {
+	if transport == "h2" || transport == "grpc" {
+		if err := serveH2(
+			connection,
+			service,
+			handler,
+			transport,
+			expectedHTTPHost,
+			expectedHTTPPath,
+			expectedGrpcUserAgent,
+		); err != nil {
 			handler.NewError(context.Background(), err)
 		}
 		return
@@ -448,7 +552,7 @@ func main() {
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
 	packetMode := flag.String("packet-mode", "reject", "reject, standard, packetaddr, or xudp")
-	transport := flag.String("transport", "tcp", "tcp, ws, upgrade, http, or h2")
+	transport := flag.String("transport", "tcp", "tcp, ws, upgrade, http, h2, or grpc")
 	tlsCertificate := flag.String("tls-cert", "", "optional TLS certificate")
 	tlsPrivateKey := flag.String("tls-key", "", "optional TLS private key")
 	expectedWSHost := flag.String("expected-ws-host", "", "expected WebSocket Host")
@@ -460,6 +564,7 @@ func main() {
 	expectedHTTPHost := flag.String("expected-http-host", "", "expected HTTP transport authority")
 	expectedHTTPPath := flag.String("expected-http-path", "", "expected HTTP transport request target")
 	expectedHTTPHeader := flag.String("expected-http-header", "", "expected HTTP/1 header as name=value")
+	expectedGrpcUserAgent := flag.String("expected-grpc-user-agent", "", "expected Gun User-Agent")
 	flag.Parse()
 	if *uuid == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -472,7 +577,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
 		os.Exit(2)
 	}
-	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" && *transport != "http" && *transport != "h2" {
+	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" && *transport != "http" && *transport != "h2" && *transport != "grpc" {
 		fmt.Fprintln(os.Stderr, "invalid -transport")
 		os.Exit(2)
 	}
@@ -492,7 +597,7 @@ func main() {
 			os.Exit(1)
 		}
 		nextProtocol := "http/1.1"
-		if *transport == "h2" {
+		if *transport == "h2" || *transport == "grpc" {
 			nextProtocol = "h2"
 		}
 		tlsConfig = &tls.Config{
@@ -545,6 +650,7 @@ func main() {
 			*expectedHTTPHost,
 			*expectedHTTPPath,
 			*expectedHTTPHeader,
+			*expectedGrpcUserAgent,
 		)
 	}
 }

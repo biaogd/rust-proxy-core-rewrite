@@ -239,6 +239,10 @@ pub enum VmessTransport {
         hosts: Vec<String>,
         path: String,
     },
+    Grpc {
+        service_name: String,
+        user_agent: String,
+    },
     WebSocket {
         path: String,
         headers: BTreeMap<String, String>,
