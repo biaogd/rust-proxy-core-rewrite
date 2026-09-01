@@ -7,20 +7,20 @@ use std::task::{Context, Poll, ready};
 use rand::RngExt as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::BoxedOutboundStream;
+use crate::BoxedStream;
 
 const MAX_RESPONSE_HEADER: usize = 64 * 1024;
 
-/// Wraps a stream with the pinned oracle's `VMess` HTTP/1 first-write transport.
+/// Wraps a stream with the pinned oracle's `V2Ray` HTTP/1 first-write transport.
 #[must_use]
-pub fn connect_vmess_http(
-    stream: BoxedOutboundStream,
+pub fn connect_v2ray_http(
+    stream: BoxedStream,
     server_host: &str,
     method: &str,
     paths: &[String],
     headers: &BTreeMap<String, Vec<String>>,
-) -> BoxedOutboundStream {
-    Box::new(VmessHttpStream::new(
+) -> BoxedStream {
+    Box::new(V2rayHttpStream::new(
         stream,
         server_host.to_owned(),
         method.to_owned(),
@@ -29,8 +29,8 @@ pub fn connect_vmess_http(
     ))
 }
 
-struct VmessHttpStream {
-    inner: BoxedOutboundStream,
+struct V2rayHttpStream {
+    inner: BoxedStream,
     server_host: String,
     method: String,
     paths: Vec<String>,
@@ -44,9 +44,9 @@ struct VmessHttpStream {
     read_offset: usize,
 }
 
-impl VmessHttpStream {
+impl V2rayHttpStream {
     fn new(
-        inner: BoxedOutboundStream,
+        inner: BoxedStream,
         server_host: String,
         method: String,
         paths: Vec<String>,
@@ -125,12 +125,12 @@ impl VmessHttpStream {
 }
 
 fn oracle_path(path: &str) -> String {
-    let mut url = url::Url::parse("http://vmess.invalid/").expect("static VMess HTTP base URL");
+    let mut url = url::Url::parse("http://vmess.invalid/").expect("static V2Ray HTTP base URL");
     url.set_path(path);
     url.path().to_owned()
 }
 
-impl AsyncRead for VmessHttpStream {
+impl AsyncRead for V2rayHttpStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -167,14 +167,14 @@ impl AsyncRead for VmessHttpStream {
             if this.read_buffer.len() > MAX_RESPONSE_HEADER {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "VMess HTTP response header exceeds limit",
+                    "V2Ray HTTP response header exceeds limit",
                 )));
             }
         }
     }
 }
 
-impl AsyncWrite for VmessHttpStream {
+impl AsyncWrite for V2rayHttpStream {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -218,14 +218,14 @@ mod tests {
 
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    use super::connect_vmess_http;
-    use crate::BoxedOutboundStream;
+    use super::connect_v2ray_http;
+    use crate::BoxedStream;
 
     #[tokio::test]
     async fn first_write_selects_configured_members_and_strips_response_header() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let mut client = connect_vmess_http(
-            Box::new(client) as BoxedOutboundStream,
+        let mut client = connect_v2ray_http(
+            Box::new(client) as BoxedStream,
             "origin.test",
             "POST",
             &["/a?x=1".to_owned(), "/b space".to_owned()],

@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions};
-use crate::tls::HttpProxyTls;
+use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 
 use super::auth::password_auth;
 use super::{Socks5ProxyError, connect_control};

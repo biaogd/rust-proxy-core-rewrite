@@ -153,7 +153,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-M4 Shadowsocks v2ray-plugin WebSocket TLS | Complete in declared non-mux WSS scope | Rustls plus Axum TLS authority verify custom-root trust, skip verification, untrusted rejection, SNI/Host/path, domain/128 KiB TCP and Go's half-close limitation; mux/advanced TLS remain open |
 | Phase 6C-M5 complete Shadowsocks v2ray-plugin TCP surface | Complete in documented functional TCP scope; one corrupt-frame oracle edge is deliberately not copied | Unified Go/Rust differential proves headers/Host override, default mux, early data, raw/fast HTTP Upgrade, name override, DER SHA-256 pinning, mTLS, inline ECH and proxy-resolver DNS ECH |
 | Phase 6C-M6 Shadowsocks shadow-tls v3 | Complete wire parity in declared top-level TCP scope; Chrome fingerprint partial | Native hand-rolled v1/v2/v3 client signs ClientHello session-id at rustls construction time, unwraps camouflage TLS 1.2/1.3 application-data HMAC/XOR during handshake relay and frames post-handshake SS2022 bytes; Clash config contract and domain/large TCP wire comparison pass against the Go oracle. Chrome `client-fingerprint` is a partial shape (10 cipher suites vs Go/uTLS 16; non-`chrome` labels rejected at YAML load). `phase6c_shadowtls_clienthello_regression.py` per-runtime CI regression captures on-wire ClientHello via production ShadowTLS v3 paths and pins each runtime's documented cipher/extension baseline plus session-id HMAC — not Go/Rust wire parity; GREASE ECH enc key is random stand-in. Protocol wire parity remains in `phase6c_shadowsocks_shadow_tls.py` |
-| Phase 6C-N Shadowsocks ss-config inbound | Implemented; corrected differential validation pending | Named `listeners` SS inbound implements TCP/UDP, UoT, simple-obfs and shadow-tls v3 in the roadmap's declared first-server scope. Corrected gates require a proxy-observed CONNECT, distinguish `INNER` from the outer Shadowsocks flow, change listener identity during fallback reload and reject unsupported fields. The five focused Rust scenarios and workspace quality gates pass at `c4ec1e4a`; the corrected full Go/Rust differential remains pending. ShadowTLS `IN-USER` and SS2022 EIH inbound stay Rust-only evidence |
+| Phase 6C-N Shadowsocks ss-config inbound | Complete in declared first-server scope | Named `listeners` SS inbound implements TCP/UDP, UoT, simple-obfs and shadow-tls v3 in the roadmap's declared first-server scope. The corrected native differential passes proxy-observed CONNECT, `INNER` discrimination, identity-changing fallback reload and fail-closed fields after the protocol ownership refactor. ShadowTLS `IN-USER` and SS2022 EIH inbound stay Rust-only evidence |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |
 | Phase 6D-C VMess remaining AlterID-zero security modes | Complete in declared client scope | Case-insensitive `none`, `zero` and AES-128-CFB pass an independent-authority Go/Rust differential with raw/CFB-checksummed bodies, ignored non-AEAD framing flags, domain/IPv4/IPv6, small/128 KiB relay and half-close; nonzero AlterID, UDP/XUDP, TLS/transports/mux and inbound remain open |
@@ -164,12 +164,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-H VMess HTTP transports | Complete in declared client scope | HTTP/HTTPS first-write obfuscation and library-backed h2c/H2 PUT streams pass an independent-authority Go/Rust differential with configured/default Host/path, headers/method, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and the oracle's response-dropping H2 half-close; UDP over HTTP/H2, pooling/multi-stream reuse, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-I VMess gRPC/Gun | Complete in declared single-stream client scope | Default, named and exact-path Gun services over h2c/H2 pass an independent-authority Go/Rust differential with exact POST authority/path/content-type/User-Agent and validated Gun envelope lengths, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and process survival; UDP, ping/pool controls, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-J VMess gRPC/Gun pool | Complete in declared client-pool scope | A shared `h2` pool passes independent-authority Go/Rust comparison for all-zero single-connection reuse, concurrent logical streams, `max-connections`/`min-streams`, `max-streams`, signed option acceptance, health PING and post-ping reuse; exact frame-idle scheduling, ACK-timeout injection, UDP, advanced TLS, later transports, general mux and inbound remain open |
-| Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks` and `rewrite-protocol-vmess` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound and Phase 6D-A–J re-pass |
+| Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
-| Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-J; Phase 6C-N corrected gate pending | Phase 1–6D-J Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Cargo workspace | Implemented | Twenty-one focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
+| Differential harness | Implemented through Phase 6D-J | Phase 1–6D-J Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate passes locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5287,11 +5288,12 @@ CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/pr4-review cargo clippy --ma
 CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/pr4-review cargo test --manifest-path rust/Cargo.toml --workspace --all-features
 ```
 
-All three checks pass, and the five corrected Rust handshake-proxy, INNER,
-shutdown and identity-changing reload scenarios pass when run directly. The
-full corrected `phase6c_shadowsocks_inbound.py` differential is not yet claimed:
-the local run stopped in the pre-existing first Go `ss-config` handshake before
-reaching the corrected cases, and the Linux Actions gate remains pending.
+The corrected full `phase6c_shadowsocks_inbound.py` differential passes on
+Darwin arm64, 2026-09-01, after SS wire helpers moved into the shared protocol
+crate. It covers both Go and Rust across the handshake-proxy, INNER, shutdown,
+identity-changing reload and fail-closed cases. Rust-only ShadowTLS `IN-USER`
+and SS2022 EIH observations remain excluded from the parity comparison. Linux
+Actions execution remains pending.
 
 Port ranges, common listener `rule`/`proxy`/`routing-mark`, mux, UoT v2 connect,
 SS2022 UDP, full cipher coverage, ShadowTLS v1/v2 and advanced SNI selection,
@@ -5599,6 +5601,41 @@ PINGs and enforces the oracle's 15-second ACK deadline; exact suppression/reset
 against every received HTTP/2 frame and ACK-timeout fault injection remain a
 release/stress gate. VMess UDP over Gun, xHTTP/H3, mKCP, Mekya, advanced TLS,
 general mux and VMess inbound remain later gates.
+
+## SS/VMess protocol ownership refactor
+
+The behavior-neutral ownership refactor changes inventory rows `OUT-04`,
+`OUT-07` and the implementation boundary prepared for `IN-08`; it does not
+expand their supported configuration surface. Four dependency layers are now
+explicit:
+
+- `rewrite-io` owns only the type-erased asynchronous duplex-stream contract.
+- `rewrite-protocol-shadowsocks` owns the maintained Shadowsocks-core adapter,
+  address conversion, native UDP codec boundary and sing-style UoT framing.
+- `rewrite-protocol-vmess` owns VMess KDF, request/response headers, body
+  records, legacy AlterID, standard UDP, packet-address and XUDP framing.
+- `rewrite-transport` owns reusable TLS/ShadowTLS, simple-obfs, WebSocket,
+  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun and mux carriers.
+
+Neither protocol crate depends on `config`, `inbound`, `outbound`, `runtime` or
+the carrier crate. `rewrite-outbound` keeps only socket policy and adapter
+composition, with compatibility re-exports preserving current internal callers.
+This makes a future VMess server able to consume the same crypto/framing crate
+without depending on client dialing policy.
+
+Local Darwin arm64 evidence on 2026-09-01:
+
+- protocol/transport unit suites: 59 tests pass;
+- all selected Phase 6C client differentials, the corrected Phase 6C-N inbound
+  differential and Phase 6D-A–J pass;
+- `cargo fmt --all --check` and workspace/all-target/all-feature clippy pass;
+- SS inbound fixture ports are selected for both TCP and UDP, and cold process
+  bind readiness no longer consumes the protocol round-trip timeout;
+- the gRPC pool authority has its own readiness barrier before stream timing.
+
+Support exclusions remain unchanged: SS2022 UDP and broader server features,
+VMess inbound, UDP over non-native carriers, advanced TLS/camouflage, mKCP,
+Mekya and general mux still require their own vertical slices.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

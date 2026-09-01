@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rand::RngExt as _;
+use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
@@ -8,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::header::VmessCommand;
 use super::header::read_response_header;
-use super::{ConnectedVmess, VmessProxyError, VmessTcpOptions, connect_protocol};
-use crate::{BoxedOutboundStream, DirectTcpOptions};
+use super::{ConnectedVmess, VmessClientOptions, VmessProtocolError, connect_protocol_on_stream};
 
 const VMESS_MAX_PACKET_FRAME: usize = 15_000;
 const XUDP_STATUS_NEW: u8 = 1;
@@ -28,18 +28,18 @@ pub enum VmessPacketMode {
 }
 
 pub struct VmessUdpAssociation {
-    remote: WriteHalf<BoxedOutboundStream>,
+    remote: WriteHalf<BoxedStream>,
     body_writer: super::body::BodyWriter,
     mode: VmessPacketMode,
     fixed_destination: Destination,
     xudp_global_id: [u8; 8],
     xudp_request_written: bool,
-    responses: mpsc::Receiver<Result<(Destination, Vec<u8>), VmessProxyError>>,
+    responses: mpsc::Receiver<Result<(Destination, Vec<u8>), VmessProtocolError>>,
     cancellation: CancellationToken,
 }
 
 struct VmessPacketReader {
-    remote: ReadHalf<BoxedOutboundStream>,
+    remote: ReadHalf<BoxedStream>,
     body_reader: super::body::BodyReader,
     response_key: [u8; 16],
     response_iv: [u8; 16],
@@ -68,11 +68,11 @@ impl VmessUdpAssociation {
         &mut self,
         destination: &Destination,
         payload: &[u8],
-    ) -> Result<(), VmessProxyError> {
+    ) -> Result<(), VmessProtocolError> {
         let frame = match self.mode {
             VmessPacketMode::Standard => {
                 if destination != &self.fixed_destination {
-                    return Err(VmessProxyError::Protocol(
+                    return Err(VmessProtocolError::Protocol(
                         "VMess UDP association destination changed".to_owned(),
                     ));
                 }
@@ -87,7 +87,7 @@ impl VmessUdpAssociation {
             VmessPacketMode::Xudp => self.encode_xudp_frame(destination, payload)?,
         };
         if frame.len() > VMESS_MAX_PACKET_FRAME {
-            return Err(VmessProxyError::Protocol(
+            return Err(VmessProtocolError::Protocol(
                 "VMess UDP frame exceeds 15000 bytes".to_owned(),
             ));
         }
@@ -102,7 +102,7 @@ impl VmessUdpAssociation {
     /// # Errors
     ///
     /// Returns a protocol or I/O error for malformed `VMess` packet framing.
-    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), VmessProxyError> {
+    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), VmessProtocolError> {
         self.responses.recv().await.unwrap_or_else(|| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -116,9 +116,9 @@ impl VmessUdpAssociation {
         &mut self,
         destination: &Destination,
         payload: &[u8],
-    ) -> Result<Vec<u8>, VmessProxyError> {
+    ) -> Result<Vec<u8>, VmessProtocolError> {
         let payload_length = u16::try_from(payload.len()).map_err(|_| {
-            VmessProxyError::Protocol("XUDP payload exceeds 65535 bytes".to_owned())
+            VmessProtocolError::Protocol("XUDP payload exceeds 65535 bytes".to_owned())
         })?;
         let mut address = Vec::with_capacity(20);
         encode_vmess_address(&mut address, destination)?;
@@ -127,9 +127,9 @@ impl VmessUdpAssociation {
         let frame_header_length = 5_usize
             .checked_add(address.len())
             .and_then(|length| length.checked_add(extension_length))
-            .ok_or_else(|| VmessProxyError::Protocol("XUDP frame is too large".to_owned()))?;
+            .ok_or_else(|| VmessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
         let frame_header_length = u16::try_from(frame_header_length)
-            .map_err(|_| VmessProxyError::Protocol("XUDP frame is too large".to_owned()))?;
+            .map_err(|_| VmessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
         let mut frame =
             Vec::with_capacity(2 + usize::from(frame_header_length) + 2 + payload.len());
         frame.extend_from_slice(&frame_header_length.to_be_bytes());
@@ -153,7 +153,7 @@ impl VmessUdpAssociation {
 }
 
 impl VmessPacketReader {
-    async fn recv(&mut self) -> Result<(Destination, Vec<u8>), VmessProxyError> {
+    async fn recv(&mut self) -> Result<(Destination, Vec<u8>), VmessProtocolError> {
         self.ensure_response_header().await?;
         match self.mode {
             VmessPacketMode::Standard => {
@@ -169,7 +169,7 @@ impl VmessPacketReader {
         }
     }
 
-    async fn ensure_response_header(&mut self) -> Result<(), VmessProxyError> {
+    async fn ensure_response_header(&mut self) -> Result<(), VmessProtocolError> {
         if self.response_header_read {
             return Ok(());
         }
@@ -195,21 +195,21 @@ impl VmessPacketReader {
         Ok(())
     }
 
-    async fn read_body_record(&mut self) -> Result<Vec<u8>, VmessProxyError> {
+    async fn read_body_record(&mut self) -> Result<Vec<u8>, VmessProtocolError> {
         self.body_reader
             .read_record(&mut self.remote)
             .await
-            .map_err(VmessProxyError::from)
+            .map_err(VmessProtocolError::from)
     }
 
-    async fn recv_xudp(&mut self) -> Result<(Destination, Vec<u8>), VmessProxyError> {
+    async fn recv_xudp(&mut self) -> Result<(Destination, Vec<u8>), VmessProtocolError> {
         loop {
             let length = {
                 let bytes = self.take_xudp_bytes(2).await?;
                 usize::from(u16::from_be_bytes([bytes[0], bytes[1]]))
             };
             if length < 4 {
-                return Err(VmessProxyError::Protocol(
+                return Err(VmessProtocolError::Protocol(
                     "invalid XUDP frame header length".to_owned(),
                 ));
             }
@@ -217,13 +217,13 @@ impl VmessPacketReader {
             let status = header[2];
             let option = header[3];
             if option & XUDP_OPTION_ERROR != 0 {
-                return Err(VmessProxyError::Protocol(
+                return Err(VmessProtocolError::Protocol(
                     "remote closed XUDP association".to_owned(),
                 ));
             }
             match status {
                 XUDP_STATUS_NEW => {
-                    return Err(VmessProxyError::Protocol(
+                    return Err(VmessProtocolError::Protocol(
                         "unexpected XUDP new response frame".to_owned(),
                     ));
                 }
@@ -236,7 +236,7 @@ impl VmessPacketReader {
                 }
                 XUDP_STATUS_KEEP | XUDP_STATUS_KEEPALIVE => {}
                 _ => {
-                    return Err(VmessProxyError::Protocol(
+                    return Err(VmessProtocolError::Protocol(
                         "invalid XUDP response status".to_owned(),
                     ));
                 }
@@ -245,13 +245,13 @@ impl VmessPacketReader {
                 self.fixed_destination.clone()
             } else {
                 if header[4] != XUDP_NETWORK_UDP {
-                    return Err(VmessProxyError::Protocol(
+                    return Err(VmessProtocolError::Protocol(
                         "invalid XUDP response network".to_owned(),
                     ));
                 }
                 let (destination, consumed) = decode_vmess_address(&header[5..])?;
                 if 5 + consumed != header.len() {
-                    return Err(VmessProxyError::Protocol(
+                    return Err(VmessProtocolError::Protocol(
                         "invalid XUDP response address length".to_owned(),
                     ));
                 }
@@ -269,11 +269,11 @@ impl VmessPacketReader {
         }
     }
 
-    async fn take_xudp_bytes(&mut self, length: usize) -> Result<Vec<u8>, VmessProxyError> {
+    async fn take_xudp_bytes(&mut self, length: usize) -> Result<Vec<u8>, VmessProtocolError> {
         while self.xudp_read_buffer.len() < length {
             let record = self.read_body_record().await?;
             if record.is_empty() {
-                return Err(VmessProxyError::Protocol(
+                return Err(VmessProtocolError::Protocol(
                     "empty VMess body record in XUDP stream".to_owned(),
                 ));
             }
@@ -283,19 +283,17 @@ impl VmessPacketReader {
     }
 }
 
-/// Opens a native-TCP `VMess` UDP association.
+/// Opens a `VMess` UDP association over an established outer transport.
 ///
 /// # Errors
 ///
-/// Returns an error when the upstream TCP connection or `VMess` handshake fails.
-pub async fn associate_vmess_udp_with_options(
-    server: &Destination,
+/// Returns an error when the `VMess` handshake or packet framing fails.
+pub async fn associate_vmess_udp_on_stream(
+    remote: BoxedStream,
     destination: &Destination,
-    allow_ipv6: bool,
-    options: VmessTcpOptions,
+    options: VmessClientOptions,
     mode: VmessPacketMode,
-    socket_options: DirectTcpOptions<'_>,
-) -> Result<VmessUdpAssociation, VmessProxyError> {
+) -> Result<VmessUdpAssociation, VmessProtocolError> {
     let (command, header_destination, chunked_none) = match mode {
         VmessPacketMode::Standard => (VmessCommand::Udp, destination.clone(), true),
         VmessPacketMode::PacketAddr => (
@@ -315,16 +313,9 @@ pub async fn associate_vmess_udp_with_options(
             false,
         ),
     };
-    let transport = connect_protocol(
-        server,
-        &header_destination,
-        allow_ipv6,
-        options,
-        socket_options,
-        command,
-        chunked_none,
-    )
-    .await?;
+    let transport =
+        connect_protocol_on_stream(remote, &header_destination, options, command, chunked_none)
+            .await?;
     let mut xudp_global_id = [0_u8; 8];
     rand::rng().fill(&mut xudp_global_id);
     let ConnectedVmess {
@@ -380,7 +371,7 @@ pub async fn associate_vmess_udp_with_options(
 fn encode_packet_address(
     output: &mut Vec<u8>,
     destination: &Destination,
-) -> Result<(), VmessProxyError> {
+) -> Result<(), VmessProtocolError> {
     match destination.host {
         Host::Ip(IpAddr::V4(address)) => {
             output.push(1);
@@ -391,7 +382,7 @@ fn encode_packet_address(
             output.extend_from_slice(&address.octets());
         }
         Host::Domain(_) => {
-            return Err(VmessProxyError::Protocol(
+            return Err(VmessProtocolError::Protocol(
                 "packet-address mode requires a resolved IP destination".to_owned(),
             ));
         }
@@ -400,7 +391,7 @@ fn encode_packet_address(
     Ok(())
 }
 
-fn decode_packet_address(input: &[u8]) -> Result<(Destination, usize), VmessProxyError> {
+fn decode_packet_address(input: &[u8]) -> Result<(Destination, usize), VmessProtocolError> {
     let (host, address_length) = decode_ip_address(input, 1, 2)?;
     let port_offset = 1 + address_length;
     let port = read_u16(input, port_offset)?;
@@ -410,7 +401,7 @@ fn decode_packet_address(input: &[u8]) -> Result<(Destination, usize), VmessProx
 fn encode_vmess_address(
     output: &mut Vec<u8>,
     destination: &Destination,
-) -> Result<(), VmessProxyError> {
+) -> Result<(), VmessProtocolError> {
     output.extend_from_slice(&destination.port.to_be_bytes());
     match &destination.host {
         Host::Ip(IpAddr::V4(address)) => {
@@ -419,10 +410,10 @@ fn encode_vmess_address(
         }
         Host::Domain(domain) => {
             let length = u8::try_from(domain.len()).map_err(|_| {
-                VmessProxyError::Protocol("XUDP domain exceeds 255 bytes".to_owned())
+                VmessProtocolError::Protocol("XUDP domain exceeds 255 bytes".to_owned())
             })?;
             if length == 0 {
-                return Err(VmessProxyError::Protocol(
+                return Err(VmessProtocolError::Protocol(
                     "XUDP destination domain is empty".to_owned(),
                 ));
             }
@@ -438,41 +429,41 @@ fn encode_vmess_address(
     Ok(())
 }
 
-fn decode_vmess_address(input: &[u8]) -> Result<(Destination, usize), VmessProxyError> {
+fn decode_vmess_address(input: &[u8]) -> Result<(Destination, usize), VmessProtocolError> {
     let port = read_u16(input, 0)?;
     let address_type = *input
         .get(2)
-        .ok_or_else(|| VmessProxyError::Protocol("truncated XUDP address".to_owned()))?;
+        .ok_or_else(|| VmessProtocolError::Protocol("truncated XUDP address".to_owned()))?;
     let (host, consumed) = match address_type {
         1 => {
             let octets: [u8; 4] = input
                 .get(3..7)
                 .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| VmessProxyError::Protocol("truncated XUDP IPv4".to_owned()))?;
+                .ok_or_else(|| VmessProtocolError::Protocol("truncated XUDP IPv4".to_owned()))?;
             (Host::Ip(Ipv4Addr::from(octets).into()), 7)
         }
         2 => {
             let length =
                 usize::from(*input.get(3).ok_or_else(|| {
-                    VmessProxyError::Protocol("truncated XUDP domain".to_owned())
+                    VmessProtocolError::Protocol("truncated XUDP domain".to_owned())
                 })?);
             let end = 4 + length;
             let domain = input
                 .get(4..end)
                 .and_then(|bytes| std::str::from_utf8(bytes).ok())
                 .filter(|domain| !domain.is_empty())
-                .ok_or_else(|| VmessProxyError::Protocol("invalid XUDP domain".to_owned()))?;
+                .ok_or_else(|| VmessProtocolError::Protocol("invalid XUDP domain".to_owned()))?;
             (Host::Domain(domain.to_owned()), end)
         }
         3 => {
             let octets: [u8; 16] = input
                 .get(3..19)
                 .and_then(|bytes| bytes.try_into().ok())
-                .ok_or_else(|| VmessProxyError::Protocol("truncated XUDP IPv6".to_owned()))?;
+                .ok_or_else(|| VmessProtocolError::Protocol("truncated XUDP IPv6".to_owned()))?;
             (Host::Ip(Ipv6Addr::from(octets).into()), 19)
         }
         _ => {
-            return Err(VmessProxyError::Protocol(
+            return Err(VmessProtocolError::Protocol(
                 "invalid XUDP address type".to_owned(),
             ));
         }
@@ -484,14 +475,14 @@ fn decode_ip_address(
     input: &[u8],
     ipv4_type: u8,
     ipv6_type: u8,
-) -> Result<(Host, usize), VmessProxyError> {
+) -> Result<(Host, usize), VmessProtocolError> {
     match input.first().copied() {
         Some(value) if value == ipv4_type => {
             let octets: [u8; 4] = input
                 .get(1..5)
                 .and_then(|bytes| bytes.try_into().ok())
                 .ok_or_else(|| {
-                    VmessProxyError::Protocol("truncated packet-address IPv4".to_owned())
+                    VmessProtocolError::Protocol("truncated packet-address IPv4".to_owned())
                 })?;
             Ok((Host::Ip(Ipv4Addr::from(octets).into()), 4))
         }
@@ -500,22 +491,22 @@ fn decode_ip_address(
                 .get(1..17)
                 .and_then(|bytes| bytes.try_into().ok())
                 .ok_or_else(|| {
-                    VmessProxyError::Protocol("truncated packet-address IPv6".to_owned())
+                    VmessProtocolError::Protocol("truncated packet-address IPv6".to_owned())
                 })?;
             Ok((Host::Ip(Ipv6Addr::from(octets).into()), 16))
         }
-        _ => Err(VmessProxyError::Protocol(
+        _ => Err(VmessProtocolError::Protocol(
             "invalid packet-address family".to_owned(),
         )),
     }
 }
 
-fn read_u16(input: &[u8], offset: usize) -> Result<u16, VmessProxyError> {
+fn read_u16(input: &[u8], offset: usize) -> Result<u16, VmessProtocolError> {
     input
         .get(offset..offset + 2)
         .and_then(|bytes| bytes.try_into().ok())
         .map(u16::from_be_bytes)
-        .ok_or_else(|| VmessProxyError::Protocol("truncated VMess packet frame".to_owned()))
+        .ok_or_else(|| VmessProtocolError::Protocol("truncated VMess packet frame".to_owned()))
 }
 
 #[cfg(test)]

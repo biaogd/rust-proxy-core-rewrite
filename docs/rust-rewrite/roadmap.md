@@ -2587,6 +2587,37 @@ SOCKS5 health behavior in URL-test/load-balance groups, authentication and
 CONNECT status exhaustiveness, exact failure-window reset, delayed-handshake
 success reset, UDP/UoT and concurrent reload remain later gates.
 
+### Phase 6R-1 accepted scope — SS/VMess protocol ownership refactor
+
+This behavior-neutral slice changes inventory rows `OUT-04` and `OUT-07` and
+prepares, without implementing, the server boundary in `IN-08`. The exact
+compatibility-matrix rows revalidated are **Configuration surface — Proxies and
+built-in proxy insertion**, **Configuration surface — Named listeners**,
+**Inbound listeners — Shadowsocks**, **Remote adapters — Shadowsocks (`ss`)**,
+and the Darwin arm64 Phase 6C/6D platform rows. No VMess inbound or new protocol
+option is claimed.
+
+Accepted ownership boundary:
+
+- `rewrite-io` contains only the type-erased async duplex stream;
+- one crate each owns transport-independent Shadowsocks and VMess wire/session
+  behavior;
+- shared TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun and v2ray
+  mux carriers live in `rewrite-transport` with protocol-neutral names;
+- `rewrite-outbound` retains direct socket policy and thin adapter composition;
+- configuration parsing stays in `rewrite-config`, and runtime retains routing,
+  pooling ownership and listener lifecycle.
+
+Acceptance requires all moved unit tests, the Phase 6C client gates, corrected
+Phase 6C-N inbound gate and Phase 6D-A–J differentials to pass without semantic
+normalization changes. It also requires workspace fmt and all-target/all-feature
+clippy. The full workspace test is also run locally before merge; unrelated
+differential regression remains the GitHub Actions responsibility requested for
+this development workflow.
+
+This slice does not start VMess server framing, non-native-carrier UDP, mKCP,
+Mekya, advanced TLS/camouflage or general mux work.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

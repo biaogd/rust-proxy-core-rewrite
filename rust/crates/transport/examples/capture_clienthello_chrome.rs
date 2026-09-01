@@ -2,13 +2,13 @@
 //! (`connect_shadow_tls` → `connect_with_session_id_generator`).
 //!
 //! ```text
-//! cargo run -p rewrite-outbound --example capture_clienthello_chrome
+//! cargo run -p rewrite-transport --example capture_clienthello_chrome
 //! ```
 
 use std::io;
 
 use hmac::Mac;
-use rewrite_outbound::{BoxedOutboundStream, ShadowTlsConnectOptions, connect_shadow_tls};
+use rewrite_transport::{BoxedStream, ShadowTlsConnectOptions, connect_shadow_tls};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -47,7 +47,7 @@ async fn main() {
     });
 
     let stream = TcpStream::connect(addr).await.expect("connect");
-    let boxed: BoxedOutboundStream = Box::new(stream);
+    let boxed: BoxedStream = Box::new(stream);
     let alpn = vec!["h2".to_owned(), "http/1.1".to_owned()];
     let _ = connect_shadow_tls(
         boxed,

@@ -7,16 +7,20 @@ members = [
   "crates/dns",
   "crates/generator",
   "crates/inbound",
+  "crates/io",
   "crates/model",
   "crates/net",
   "crates/outbound",
   "crates/platform",
+  "crates/protocol-shadowsocks",
+  "crates/protocol-vmess",
   "crates/rules",
   "crates/ruleset",
   "crates/runtime",
   "crates/services",
   "crates/state",
   "crates/test-support",
+  "crates/transport",
 ]
 resolver = "2"
 

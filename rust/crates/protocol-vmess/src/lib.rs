@@ -1,9 +1,9 @@
-//! Stream-oriented `VMess` client for the Phase 6D-A–F boundary.
+//! Transport-independent `VMess` protocol implementation.
 //!
 //! No maintained, narrowly scoped embeddable client crate was available at
-//! this phase boundary. Protocol framing is kept here while `RustCrypto` owns
-//! every cryptographic primitive. Transport and routing policy remain outside
-//! this module.
+//! this phase boundary. `RustCrypto` owns every cryptographic primitive.
+//! Socket dialing, outer transports, routing and configuration parsing remain
+//! outside this crate so inbound and outbound adapters can share the wire code.
 
 mod body;
 mod header;
@@ -13,18 +13,18 @@ mod packet;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
-use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
 use body::{BodyOptions, BodyReader, BodyWriter};
 use header::{
     SealRequestOptions, VmessCommand, command_key, read_response_header, seal_request_header,
 };
 
-pub use packet::{VmessPacketMode, VmessUdpAssociation, associate_vmess_udp_with_options};
+pub use packet::{VmessPacketMode, VmessUdpAssociation, associate_vmess_udp_on_stream};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmessSecurity {
@@ -60,7 +60,7 @@ fn fnv1a32(input: &[u8]) -> u32 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VmessTcpOptions {
+pub struct VmessClientOptions {
     pub uuid: [u8; 16],
     pub alter_id: i64,
     pub security: VmessSecurity,
@@ -69,34 +69,13 @@ pub struct VmessTcpOptions {
 }
 
 #[derive(Debug, Error)]
-pub enum VmessProxyError {
-    #[error(transparent)]
-    Direct(#[from] DirectError),
+pub enum VmessProtocolError {
+    #[error("{0}")]
+    Transport(String),
     #[error("VMess I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("VMess protocol failed: {0}")]
     Protocol(String),
-}
-
-/// Connects a `VMess` client over native TCP.
-///
-/// Phase 6D-D accepts zero/positive `AlterID` and the Phase 6D-A–C security
-/// modes. Configuration validation owns the remaining transport restrictions.
-///
-/// # Errors
-///
-/// Returns an error when the upstream TCP connection, request header write, or
-/// local protocol setup fails. Relay errors after setup close the returned
-/// stream and are observable by the caller as I/O failure or EOF.
-pub async fn connect_vmess_with_options(
-    server: &Destination,
-    destination: &Destination,
-    allow_ipv6: bool,
-    options: VmessTcpOptions,
-    socket_options: DirectTcpOptions<'_>,
-) -> Result<BoxedOutboundStream, VmessProxyError> {
-    let remote = connect_with_options(server, allow_ipv6, socket_options).await?;
-    connect_vmess_on_stream(Box::new(remote), destination, options).await
 }
 
 /// Starts a `VMess` TCP session over an already established outer transport.
@@ -109,10 +88,10 @@ pub async fn connect_vmess_with_options(
 /// Returns an error when the request header cannot be built or written. Relay
 /// failures after setup close the returned application stream.
 pub async fn connect_vmess_on_stream(
-    remote: BoxedOutboundStream,
+    remote: BoxedStream,
     destination: &Destination,
-    options: VmessTcpOptions,
-) -> Result<BoxedOutboundStream, VmessProxyError> {
+    options: VmessClientOptions,
+) -> Result<BoxedStream, VmessProtocolError> {
     let connected =
         connect_protocol_on_stream(remote, destination, options, VmessCommand::Tcp, false).await?;
     let ConnectedVmess {
@@ -149,7 +128,7 @@ pub async fn connect_vmess_on_stream(
 }
 
 struct ConnectedVmess {
-    remote: BoxedOutboundStream,
+    remote: BoxedStream,
     body_reader: BodyReader,
     body_writer: BodyWriter,
     response_key: [u8; 16],
@@ -159,34 +138,13 @@ struct ConnectedVmess {
     response_header_read: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn connect_protocol(
-    server: &Destination,
+pub(crate) async fn connect_protocol_on_stream(
+    mut remote: BoxedStream,
     destination: &Destination,
-    allow_ipv6: bool,
-    options: VmessTcpOptions,
-    socket_options: DirectTcpOptions<'_>,
+    options: VmessClientOptions,
     command: VmessCommand,
     chunked_none: bool,
-) -> Result<ConnectedVmess, VmessProxyError> {
-    let remote = connect_with_options(server, allow_ipv6, socket_options).await?;
-    connect_protocol_on_stream(
-        Box::new(remote),
-        destination,
-        options,
-        command,
-        chunked_none,
-    )
-    .await
-}
-
-async fn connect_protocol_on_stream(
-    mut remote: BoxedOutboundStream,
-    destination: &Destination,
-    options: VmessTcpOptions,
-    command: VmessCommand,
-    chunked_none: bool,
-) -> Result<ConnectedVmess, VmessProxyError> {
+) -> Result<ConnectedVmess, VmessProtocolError> {
     let security = options.security.resolved();
     let sealed = seal_request_header(
         &options.uuid,
@@ -272,7 +230,7 @@ impl AsyncWrite for VmessRelayStream {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_relay(
-    remote: BoxedOutboundStream,
+    remote: BoxedStream,
     relay: tokio::io::DuplexStream,
     mut body_reader: BodyReader,
     mut body_writer: BodyWriter,

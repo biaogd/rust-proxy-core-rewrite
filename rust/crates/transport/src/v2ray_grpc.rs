@@ -13,13 +13,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::BoxedOutboundStream;
-use crate::vmess_h2::{connect_h2_request, h2_error, open_h2_request};
+use crate::BoxedStream;
+use crate::v2ray_h2::{connect_h2_request, h2_error, open_h2_request};
 
 const PING_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VmessGrpcClientOptions {
+pub struct V2rayGrpcClientOptions {
     pub host: String,
     pub service_name: String,
     pub user_agent: String,
@@ -31,14 +31,14 @@ pub struct VmessGrpcClientOptions {
 
 /// A reusable `VMess` Gun client matching Mihomo's transport-selection policy.
 #[derive(Debug)]
-pub struct VmessGrpcClient {
-    options: VmessGrpcClientOptions,
+pub struct V2rayGrpcClient {
+    options: V2rayGrpcClientOptions,
     transports: Mutex<Vec<Arc<GrpcTransport>>>,
 }
 
-impl VmessGrpcClient {
+impl V2rayGrpcClient {
     #[must_use]
-    pub fn new(mut options: VmessGrpcClientOptions) -> Self {
+    pub fn new(mut options: V2rayGrpcClientOptions) -> Self {
         if options.max_connections == 0 && options.min_streams == 0 && options.max_streams == 0 {
             options.max_connections = 1;
         }
@@ -49,7 +49,7 @@ impl VmessGrpcClient {
     }
 
     #[must_use]
-    pub fn options(&self) -> &VmessGrpcClientOptions {
+    pub fn options(&self) -> &V2rayGrpcClientOptions {
         &self.options
     }
 
@@ -60,10 +60,10 @@ impl VmessGrpcClient {
     ///
     /// Returns an I/O error when the physical connection, HTTP/2 handshake, or
     /// Gun request cannot be established.
-    pub async fn connect<F, Fut>(&self, connector: F) -> io::Result<BoxedOutboundStream>
+    pub async fn connect<F, Fut>(&self, connector: F) -> io::Result<BoxedStream>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = io::Result<BoxedOutboundStream>>,
+        Fut: Future<Output = io::Result<BoxedStream>>,
     {
         let transport = {
             let mut transports = self.transports.lock().await;
@@ -111,7 +111,7 @@ impl VmessGrpcClient {
 fn should_create_transport(
     transport_count: usize,
     active: usize,
-    options: &VmessGrpcClientOptions,
+    options: &V2rayGrpcClientOptions,
 ) -> bool {
     if active == 0 {
         return false;
@@ -135,7 +135,7 @@ struct GrpcTransport {
 }
 
 impl GrpcTransport {
-    async fn connect(stream: BoxedOutboundStream, ping_interval: i64) -> io::Result<Self> {
+    async fn connect(stream: BoxedStream, ping_interval: i64) -> io::Result<Self> {
         let (sender, mut connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
         let ping_duration = ping_duration(ping_interval);
         let ping_pong = ping_duration
@@ -233,13 +233,13 @@ fn ping_duration(seconds: i64) -> Option<Duration> {
 ///
 /// Returns an I/O error when the URI, HTTP/2 handshake or response-header
 /// exchange is invalid.
-pub async fn connect_vmess_grpc(
-    stream: BoxedOutboundStream,
+pub async fn connect_v2ray_grpc(
+    stream: BoxedStream,
     host: &str,
     service_name: &str,
     user_agent: &str,
-) -> io::Result<BoxedOutboundStream> {
-    let request = grpc_request(&VmessGrpcClientOptions {
+) -> io::Result<BoxedStream> {
+    let request = grpc_request(&V2rayGrpcClientOptions {
         host: host.to_owned(),
         service_name: service_name.to_owned(),
         user_agent: user_agent.to_owned(),
@@ -252,7 +252,7 @@ pub async fn connect_vmess_grpc(
     Ok(Box::new(GunStream::new(stream)))
 }
 
-fn grpc_request(options: &VmessGrpcClientOptions) -> io::Result<Request<()>> {
+fn grpc_request(options: &V2rayGrpcClientOptions) -> io::Result<Request<()>> {
     let path = service_name_to_path(&options.service_name);
     let uri: Uri = format!("https://{}{path}", options.host)
         .parse()
@@ -275,7 +275,7 @@ fn service_name_to_path(service_name: &str) -> String {
 }
 
 struct GunStream {
-    inner: BoxedOutboundStream,
+    inner: BoxedStream,
     write_buffer: Vec<u8>,
     write_offset: usize,
     pending_input: usize,
@@ -285,7 +285,7 @@ struct GunStream {
 }
 
 impl GunStream {
-    fn new(inner: BoxedOutboundStream) -> Self {
+    fn new(inner: BoxedStream) -> Self {
         Self {
             inner,
             write_buffer: Vec::new(),
@@ -297,7 +297,7 @@ impl GunStream {
         }
     }
 
-    fn with_transport(inner: BoxedOutboundStream, transport: Arc<GrpcTransport>) -> Self {
+    fn with_transport(inner: BoxedStream, transport: Arc<GrpcTransport>) -> Self {
         Self {
             inner,
             write_buffer: Vec::new(),
@@ -476,15 +476,15 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::{
-        GunStream, VmessGrpcClientOptions, ping_duration, service_name_to_path,
+        GunStream, V2rayGrpcClientOptions, ping_duration, service_name_to_path,
         should_create_transport,
     };
-    use crate::BoxedOutboundStream;
+    use crate::BoxedStream;
 
     #[tokio::test]
     async fn frames_each_write_and_removes_response_envelopes() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let mut client = GunStream::new(Box::new(client) as BoxedOutboundStream);
+        let mut client = GunStream::new(Box::new(client) as BoxedStream);
         let server_task = tokio::spawn(async move {
             let mut request = [0_u8; 19];
             server.read_exact(&mut request).await.expect("Gun request");
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn matches_go_transport_selection_thresholds() {
-        let mut options = VmessGrpcClientOptions {
+        let mut options = V2rayGrpcClientOptions {
             host: "example.com".to_owned(),
             service_name: "GunService".to_owned(),
             user_agent: "mihomo".to_owned(),

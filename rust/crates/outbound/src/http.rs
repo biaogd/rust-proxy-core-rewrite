@@ -15,7 +15,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions, connect_with_options};
-use crate::tls::{HttpProxyTls, client_config};
+use rewrite_transport::{ClientTlsOptions as HttpProxyTls, TlsClientError, client_config};
 
 #[derive(Debug, Error)]
 pub enum HttpProxyError {
@@ -29,12 +29,8 @@ pub enum HttpProxyError {
     HeaderName(#[from] hyper::http::header::InvalidHeaderName),
     #[error("HTTP proxy header value is invalid: {0}")]
     HeaderValue(#[from] hyper::http::header::InvalidHeaderValue),
-    #[error("HTTP proxy TLS configuration is invalid: {0}")]
-    TlsConfiguration(String),
-    #[error("HTTP proxy TLS handshake timed out")]
-    TlsTimeout,
-    #[error("HTTP proxy TLS handshake failed: {0}")]
-    TlsHandshake(std::io::Error),
+    #[error(transparent)]
+    Tls(#[from] TlsClientError),
     #[error("HTTP proxy rejected CONNECT with status {0}")]
     Status(hyper::StatusCode),
 }
@@ -87,14 +83,14 @@ pub async fn connect_http_with_options(
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
         let config = client_config(tls, clock)?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
-            .map_err(|_| HttpProxyError::TlsConfiguration("invalid server name".to_owned()))?;
+            .map_err(|_| TlsClientError::Configuration("invalid server name".to_owned()))?;
         let stream = tokio::time::timeout(
             Duration::from_secs(5),
             TlsConnector::from(Arc::new(config)).connect(server_name, stream),
         )
         .await
-        .map_err(|_| HttpProxyError::TlsTimeout)?
-        .map_err(HttpProxyError::TlsHandshake)?;
+        .map_err(|_| TlsClientError::Timeout)?
+        .map_err(TlsClientError::Handshake)?;
         Box::new(stream)
     } else {
         Box::new(stream)
@@ -171,10 +167,10 @@ pub async fn wrap_client_tls_with_options(
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let config = client_config(tls, clock)?;
     let server_name = ServerName::try_from(tls.server_name.to_owned())
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     let stream = TlsConnector::from(Arc::new(config))
         .connect(server_name, stream)
         .await
-        .map_err(HttpProxyError::TlsHandshake)?;
+        .map_err(TlsClientError::Handshake)?;
     Ok(Box::new(stream))
 }

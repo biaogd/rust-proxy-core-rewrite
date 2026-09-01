@@ -8,19 +8,19 @@ use h2::{RecvStream, SendStream};
 use http::{Method, Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::BoxedOutboundStream;
+use crate::BoxedStream;
 
-/// Establishes the pinned oracle's single bidirectional `VMess` HTTP/2 stream.
+/// Establishes the pinned oracle's single bidirectional `V2Ray` HTTP/2 stream.
 ///
 /// # Errors
 ///
 /// Returns an I/O error when the HTTP/2 handshake, request construction or
 /// response-header exchange fails.
-pub async fn connect_vmess_h2(
-    stream: BoxedOutboundStream,
+pub async fn connect_v2ray_h2(
+    stream: BoxedStream,
     host: &str,
     path: &str,
-) -> io::Result<BoxedOutboundStream> {
+) -> io::Result<BoxedStream> {
     // The pinned Go transport always emits `:scheme = https`, including over
     // its explicit h2c connection mode.
     let mut encoded = url::Url::parse("https://vmess.invalid/")
@@ -39,9 +39,9 @@ pub async fn connect_vmess_h2(
 }
 
 pub(crate) async fn connect_h2_request(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     request: Request<()>,
-) -> io::Result<BoxedOutboundStream> {
+) -> io::Result<BoxedStream> {
     let (client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
     tokio::spawn(async move {
         let _ = connection.await;
@@ -52,7 +52,7 @@ pub(crate) async fn connect_h2_request(
 pub(crate) async fn open_h2_request(
     client: SendRequest<Bytes>,
     request: Request<()>,
-) -> io::Result<BoxedOutboundStream> {
+) -> io::Result<BoxedStream> {
     let mut client = client.ready().await.map_err(h2_error)?;
     let (response, sender) = client.send_request(request, false).map_err(h2_error)?;
     let response = response.await.map_err(h2_error)?;

@@ -128,7 +128,7 @@ def build_tools() -> tuple[pathlib.Path, pathlib.Path]:
             "--example",
             "capture_clienthello_chrome",
             "-p",
-            "rewrite-outbound",
+            "rewrite-transport",
             "--target-dir",
             str(output),
         ],

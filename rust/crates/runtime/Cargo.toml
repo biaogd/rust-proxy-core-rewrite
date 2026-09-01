@@ -16,6 +16,7 @@ rewrite-model = { path = "../model" }
 rewrite-net = { path = "../net" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-platform = { path = "../platform" }
+rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-rules = { path = "../rules" }
 rewrite-services = { path = "../services" }
 rewrite-state = { path = "../state" }

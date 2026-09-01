@@ -18,11 +18,19 @@ use tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
 };
 
-use crate::http::HttpProxyError;
+#[derive(Debug, thiserror::Error)]
+pub enum TlsClientError {
+    #[error("HTTP proxy TLS configuration is invalid: {0}")]
+    Configuration(String),
+    #[error("HTTP proxy TLS handshake timed out")]
+    Timeout,
+    #[error("HTTP proxy TLS handshake failed: {0}")]
+    Handshake(std::io::Error),
+}
 
 #[derive(Clone, Copy, Debug)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct HttpProxyTls<'a> {
+pub struct ClientTlsOptions<'a> {
     pub server_name: &'a str,
     pub verification_name: Option<&'a str>,
     pub skip_certificate_verification: bool,
@@ -200,72 +208,78 @@ impl ServerCertVerifier for FingerprintVerification {
     }
 }
 
-fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, HttpProxyError> {
+fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, TlsClientError> {
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     for certificate in native.certs {
         roots
             .add(certificate)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     }
     let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
         "../../../../component/ca/ca-certificates.crt"
     )))
     .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     for certificate in embedded {
         roots
             .add(certificate)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     }
     for pem in custom_roots {
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         for certificate in certificates {
             roots
                 .add(certificate)
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         }
     }
     Ok(roots)
 }
 
-pub(crate) fn client_config(
-    tls: HttpProxyTls<'_>,
+/// Builds the shared rustls client configuration for an outer transport.
+///
+/// # Errors
+///
+/// Returns an error for invalid roots, client identity, fingerprint, ECH or
+/// protocol-version constraints.
+pub fn client_config(
+    tls: ClientTlsOptions<'_>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
-) -> Result<ClientConfig, HttpProxyError> {
+) -> Result<ClientConfig, TlsClientError> {
     let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
     let roots = load_root_store(tls.custom_roots)?;
     let builder = if let Some(ech_config) = tls.ech_config {
         let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         let ech_config = EchConfig::new(EchConfigListBytes::from(ech_config), ALL_SUPPORTED_SUITES)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         ClientConfig::builder_with_details(provider, clock)
             .with_ech(EchMode::Enable(ech_config))
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     } else {
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
         if tls.tls12_only {
             ClientConfig::builder_with_details(provider, clock)
                 .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))?
         } else if tls.tls13_only {
             ClientConfig::builder_with_details(provider, clock)
                 .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))?
         } else {
             ClientConfig::builder_with_details(provider, clock)
                 .with_safe_default_protocol_versions()
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))?
         }
     };
     let builder = if let Some(fingerprint) = tls.fingerprint {
         let normalized = fingerprint.trim().replace(':', "");
         let fingerprint = hex::decode(normalized)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         let fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| {
-            HttpProxyError::TlsConfiguration(
+            TlsClientError::Configuration(
                 "certificate fingerprint must contain 32 bytes".to_owned(),
             )
         })?;
@@ -274,7 +288,7 @@ pub(crate) fn client_config(
             .map(str::to_owned)
             .map(ServerName::try_from)
             .transpose()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
@@ -285,10 +299,10 @@ pub(crate) fn client_config(
             }))
     } else if let Some(verification_name) = tls.verification_name {
         let verification_name = ServerName::try_from(verification_name.to_owned())
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NameOverrideVerification {
@@ -308,10 +322,10 @@ pub(crate) fn client_config(
             let private_key = load_private_key(private_key)?;
             builder
                 .with_client_auth_cert(certificates, private_key)
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))
         }
         (None, None) => Ok(builder.with_no_client_auth()),
-        _ => Err(HttpProxyError::TlsConfiguration(
+        _ => Err(TlsClientError::Configuration(
             "client certificate and private key must be configured together".to_owned(),
         )),
     }?;
@@ -323,30 +337,30 @@ fn apply_alpn(config: &mut ClientConfig, protocols: &[&[u8]]) {
     config.alpn_protocols = protocols.iter().map(|value| value.to_vec()).collect();
 }
 
-fn load_pem_or_path(value: &str) -> Result<Vec<u8>, HttpProxyError> {
+fn load_pem_or_path(value: &str) -> Result<Vec<u8>, TlsClientError> {
     if value.contains("-----BEGIN") {
         Ok(value.as_bytes().to_vec())
     } else {
-        std::fs::read(value).map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+        std::fs::read(value).map_err(|error| TlsClientError::Configuration(error.to_string()))
     }
 }
 
-fn load_certificates(value: &str) -> Result<Vec<CertificateDer<'static>>, HttpProxyError> {
+fn load_certificates(value: &str) -> Result<Vec<CertificateDer<'static>>, TlsClientError> {
     let bytes = load_pem_or_path(value)?;
     let certificates = rustls_pemfile::certs(&mut Cursor::new(bytes))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     if certificates.is_empty() {
-        return Err(HttpProxyError::TlsConfiguration(
+        return Err(TlsClientError::Configuration(
             "client certificate contains no certificate".to_owned(),
         ));
     }
     Ok(certificates)
 }
 
-fn load_private_key(value: &str) -> Result<PrivateKeyDer<'static>, HttpProxyError> {
+fn load_private_key(value: &str) -> Result<PrivateKeyDer<'static>, TlsClientError> {
     let bytes = load_pem_or_path(value)?;
     rustls_pemfile::private_key(&mut Cursor::new(bytes))
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-        .ok_or_else(|| HttpProxyError::TlsConfiguration("client private key is missing".to_owned()))
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?
+        .ok_or_else(|| TlsClientError::Configuration("client private key is missing".to_owned()))
 }

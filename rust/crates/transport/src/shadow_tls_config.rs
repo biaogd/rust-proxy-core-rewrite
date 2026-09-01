@@ -18,8 +18,8 @@ use shadow_rustls::{
     SignatureScheme,
 };
 
-use crate::http::HttpProxyError;
-use crate::tls::HttpProxyTls;
+use crate::tls::ClientTlsOptions;
+use crate::tls::TlsClientError;
 
 #[derive(Debug)]
 struct ShadowTimeProvider {
@@ -204,71 +204,71 @@ impl ServerCertVerifier for FingerprintVerification {
     }
 }
 
-fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, HttpProxyError> {
+fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, TlsClientError> {
     let mut roots = RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     for certificate in native.certs {
         roots
             .add(certificate)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     }
     let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
         "../../../../component/ca/ca-certificates.crt"
     )))
     .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+    .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     for certificate in embedded {
         roots
             .add(certificate)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     }
     for pem in custom_roots {
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         for certificate in certificates {
             roots
                 .add(certificate)
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         }
     }
     Ok(roots)
 }
 
-fn load_pem_or_path(value: &str) -> Result<Vec<u8>, HttpProxyError> {
+fn load_pem_or_path(value: &str) -> Result<Vec<u8>, TlsClientError> {
     if value.contains("-----BEGIN") {
         Ok(value.as_bytes().to_vec())
     } else {
-        std::fs::read(value).map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+        std::fs::read(value).map_err(|error| TlsClientError::Configuration(error.to_string()))
     }
 }
 
-fn load_certificates(value: &str) -> Result<Vec<CertificateDer<'static>>, HttpProxyError> {
+fn load_certificates(value: &str) -> Result<Vec<CertificateDer<'static>>, TlsClientError> {
     let bytes = load_pem_or_path(value)?;
     let certificates = rustls_pemfile::certs(&mut Cursor::new(bytes))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     if certificates.is_empty() {
-        return Err(HttpProxyError::TlsConfiguration(
+        return Err(TlsClientError::Configuration(
             "client certificate contains no certificate".to_owned(),
         ));
     }
     Ok(certificates)
 }
 
-fn load_private_key(value: &str) -> Result<PrivateKeyDer<'static>, HttpProxyError> {
+fn load_private_key(value: &str) -> Result<PrivateKeyDer<'static>, TlsClientError> {
     let bytes = load_pem_or_path(value)?;
     rustls_pemfile::private_key(&mut Cursor::new(bytes))
-        .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
-        .ok_or_else(|| HttpProxyError::TlsConfiguration("client private key is missing".to_owned()))
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?
+        .ok_or_else(|| TlsClientError::Configuration("client private key is missing".to_owned()))
 }
 
 pub(crate) fn shadow_client_config(
-    tls: HttpProxyTls<'_>,
+    tls: ClientTlsOptions<'_>,
     client_hello_fingerprint: Option<&str>,
     client_hello_fingerprint_mlkem: bool,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
-) -> Result<ClientConfig, HttpProxyError> {
+) -> Result<ClientConfig, TlsClientError> {
     let time_provider = Arc::new(ShadowTimeProvider {
         clock: clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default())),
     });
@@ -278,22 +278,22 @@ pub(crate) fn shadow_client_config(
     let builder = if tls.tls12_only {
         ClientConfig::builder_with_details(provider, time_provider)
             .with_protocol_versions(&[&shadow_rustls::version::TLS12])
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     } else if tls.tls13_only {
         ClientConfig::builder_with_details(provider, time_provider)
             .with_protocol_versions(&[&shadow_rustls::version::TLS13])
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     } else {
         ClientConfig::builder_with_details(provider, time_provider)
             .with_safe_default_protocol_versions()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     };
     let builder = if let Some(fingerprint) = tls.fingerprint {
         let normalized = fingerprint.trim().replace(':', "");
         let fingerprint = hex::decode(normalized)
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         let fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| {
-            HttpProxyError::TlsConfiguration(
+            TlsClientError::Configuration(
                 "certificate fingerprint must contain 32 bytes".to_owned(),
             )
         })?;
@@ -302,7 +302,7 @@ pub(crate) fn shadow_client_config(
             .map(str::to_owned)
             .map(ServerName::try_from)
             .transpose()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
@@ -313,10 +313,10 @@ pub(crate) fn shadow_client_config(
             }))
     } else if let Some(verification_name) = tls.verification_name {
         let verification_name = ServerName::try_from(verification_name.to_owned())
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
-            .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))?;
+            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NameOverrideVerification {
@@ -336,10 +336,10 @@ pub(crate) fn shadow_client_config(
             let private_key = load_private_key(private_key)?;
             builder
                 .with_client_auth_cert(certificates, private_key)
-                .map_err(|error| HttpProxyError::TlsConfiguration(error.to_string()))
+                .map_err(|error| TlsClientError::Configuration(error.to_string()))
         }
         (None, None) => Ok(builder.with_no_client_auth()),
-        _ => Err(HttpProxyError::TlsConfiguration(
+        _ => Err(TlsClientError::Configuration(
             "client certificate and private key must be configured together".to_owned(),
         )),
     }?;
@@ -356,7 +356,7 @@ pub(crate) fn shadow_client_config(
             config.client_hello_fingerprint_mlkem = client_hello_fingerprint_mlkem;
         }
         Some(value) => {
-            return Err(HttpProxyError::TlsConfiguration(format!(
+            return Err(TlsClientError::Configuration(format!(
                 "unsupported ShadowTLS client-fingerprint: {value}"
             )));
         }
@@ -376,7 +376,7 @@ mod chrome_fingerprint_tests {
     use shadow_rustls::{ClientConnection, Stream};
 
     use super::*;
-    use crate::tls::HttpProxyTls;
+    use crate::tls::ClientTlsOptions;
 
     const CHROME_CIPHERS_PARTIAL: &[u16] = &[
         0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
@@ -415,7 +415,7 @@ mod chrome_fingerprint_tests {
 
         let config = Arc::new(
             shadow_client_config(
-                HttpProxyTls {
+                ClientTlsOptions {
                     server_name: "phase6c-shadow-tls.example",
                     verification_name: None,
                     skip_certificate_verification: true,
@@ -569,7 +569,7 @@ mod chrome_fingerprint_tests {
             "random",
         ] {
             let error = shadow_client_config(
-                HttpProxyTls {
+                ClientTlsOptions {
                     server_name: "phase6c-shadow-tls.example",
                     verification_name: None,
                     skip_certificate_verification: true,

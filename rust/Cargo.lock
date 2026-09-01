@@ -2906,6 +2906,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite-io"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "rewrite-model"
 version = "0.1.0"
 
@@ -2920,42 +2927,22 @@ dependencies = [
 name = "rewrite-outbound"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
  "base64 0.22.1",
  "bytes",
- "cfb-mode",
- "chacha20poly1305 0.10.1",
- "crc32fast",
  "fast-socks5",
  "futures-util",
- "h2",
- "hex",
- "hmac 0.12.1",
- "http",
  "http-body-util",
- "httparse",
  "hyper",
  "hyper-util",
- "md-5 0.10.6",
- "rand 0.10.2",
  "rewrite-model",
  "rewrite-platform",
+ "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-vmess",
  "rewrite-services",
- "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
- "rustls-native-certs",
- "rustls-pemfile",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "sha3",
- "shadowsocks",
+ "rewrite-transport",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
- "tokio-tungstenite",
- "tokio-util",
- "url",
 ]
 
 [[package]]
@@ -2968,6 +2955,40 @@ dependencies = [
  "network-interface",
  "socket2 0.6.5",
  "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-shadowsocks"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rewrite-io",
+ "rewrite-model",
+ "shadowsocks",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-vmess"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "aes-gcm 0.10.3",
+ "cfb-mode",
+ "chacha20poly1305 0.10.1",
+ "crc32fast",
+ "hex",
+ "hmac 0.12.1",
+ "md-5 0.10.6",
+ "rand 0.10.2",
+ "rewrite-io",
+ "rewrite-model",
+ "sha2 0.10.9",
+ "sha3",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3008,6 +3029,7 @@ dependencies = [
  "rewrite-net",
  "rewrite-outbound",
  "rewrite-platform",
+ "rewrite-protocol-shadowsocks",
  "rewrite-rules",
  "rewrite-services",
  "rewrite-state",
@@ -3081,6 +3103,35 @@ dependencies = [
  "shadowsocks",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "rewrite-transport"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "h2",
+ "hex",
+ "hmac 0.12.1",
+ "http",
+ "httparse",
+ "rand 0.10.2",
+ "rewrite-io",
+ "rewrite-services",
+ "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
+ "tokio-tungstenite",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]

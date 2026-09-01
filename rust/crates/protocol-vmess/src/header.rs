@@ -12,7 +12,7 @@ use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use super::kdf::{derive_12, derive_16};
-use super::{VmessProxyError, VmessSecurity, fnv1a32};
+use super::{VmessProtocolError, VmessSecurity, fnv1a32};
 
 const VMESS_MAGIC: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 const VMESS_ALTER_ID_MAGIC: &[u8] = b"16167dc8-16b6-4e6d-b8bb-65dd68113a81";
@@ -88,7 +88,7 @@ pub(super) fn seal_request_header(
     command_key: &[u8; 16],
     destination: &Destination,
     options: SealRequestOptions,
-) -> Result<SealedHeader, VmessProxyError> {
+) -> Result<SealedHeader, VmessProtocolError> {
     let mut random = rand::rng();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -150,9 +150,9 @@ pub(super) fn seal_request_header(
         &[b"VMess Header AEAD Nonce", &auth_id, &connection_nonce],
     );
     let plaintext_length = u16::try_from(plaintext.len())
-        .map_err(|_| VmessProxyError::Protocol("request header is too large".to_owned()))?;
+        .map_err(|_| VmessProtocolError::Protocol("request header is too large".to_owned()))?;
     let encrypted_length = Aes128Gcm::new_from_slice(&length_key)
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
         .encrypt(
             Nonce::from_slice(&length_nonce),
             Payload {
@@ -160,9 +160,9 @@ pub(super) fn seal_request_header(
                 aad: &auth_id,
             },
         )
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?;
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
     let encrypted_header = Aes128Gcm::new_from_slice(&header_key)
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
         .encrypt(
             Nonce::from_slice(&header_nonce),
             Payload {
@@ -170,7 +170,7 @@ pub(super) fn seal_request_header(
                 aad: &auth_id,
             },
         )
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?;
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
 
     let mut wire = Vec::with_capacity(
         auth_id.len() + encrypted_length.len() + connection_nonce.len() + encrypted_header.len(),
@@ -195,10 +195,10 @@ fn seal_legacy_request_header(
     request_key: [u8; 16],
     request_iv: [u8; 16],
     response_verification: u8,
-) -> Result<SealedHeader, VmessProxyError> {
+) -> Result<SealedHeader, VmessProtocolError> {
     let alter_id = first_alter_id(uuid);
     let mut authenticator = <Hmac<Md5> as hmac::Mac>::new_from_slice(&alter_id)
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?;
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
     authenticator.update(&now.to_be_bytes());
     let authentication = authenticator.finalize().into_bytes();
 
@@ -240,7 +240,7 @@ fn build_auth_id(
     command_key: &[u8; 16],
     now: u64,
     random: &mut impl rand::Rng,
-) -> Result<[u8; 16], VmessProxyError> {
+) -> Result<[u8; 16], VmessProtocolError> {
     let mut block = [0_u8; 16];
     block[..8].copy_from_slice(&now.to_be_bytes());
     random.fill(&mut block[8..12]);
@@ -249,7 +249,7 @@ fn build_auth_id(
 
     let key = derive_16(command_key, &[b"AES Auth ID Encryption"]);
     let cipher = Aes128::new_from_slice(&key)
-        .map_err(|error| VmessProxyError::Protocol(error.to_string()))?;
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
     let mut encrypted = aes::Block::from(block);
     cipher.encrypt_block(&mut encrypted);
     Ok(encrypted.into())
@@ -261,7 +261,7 @@ fn build_request_plaintext(
     destination: &Destination,
     options: RequestPlaintextOptions,
     random: &mut impl rand::Rng,
-) -> Result<Vec<u8>, VmessProxyError> {
+) -> Result<Vec<u8>, VmessProtocolError> {
     let padding_length = random.random_range(0_u8..16);
     let mut header = Vec::with_capacity(80);
     header.push(0x01);
@@ -301,7 +301,7 @@ fn build_request_plaintext(
     Ok(header)
 }
 
-fn encode_address(output: &mut Vec<u8>, host: &Host) -> Result<(), VmessProxyError> {
+fn encode_address(output: &mut Vec<u8>, host: &Host) -> Result<(), VmessProtocolError> {
     match host {
         Host::Ip(std::net::IpAddr::V4(address)) => {
             output.push(ADDRESS_IPV4);
@@ -313,10 +313,12 @@ fn encode_address(output: &mut Vec<u8>, host: &Host) -> Result<(), VmessProxyErr
         }
         Host::Domain(domain) => {
             let length = u8::try_from(domain.len()).map_err(|_| {
-                VmessProxyError::Protocol("VMess destination domain exceeds 255 bytes".to_owned())
+                VmessProtocolError::Protocol(
+                    "VMess destination domain exceeds 255 bytes".to_owned(),
+                )
             })?;
             if length == 0 {
-                return Err(VmessProxyError::Protocol(
+                return Err(VmessProtocolError::Protocol(
                     "VMess destination domain is empty".to_owned(),
                 ));
             }

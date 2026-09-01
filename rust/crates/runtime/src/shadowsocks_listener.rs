@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::future::pending;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -68,13 +67,14 @@ pub(crate) struct ShadowsocksListener {
 
 impl ShadowsocksListener {
     pub(crate) async fn bind(config: &ShadowsocksInboundConfig) -> Result<Self, RuntimeError> {
-        let method = CipherKind::from_str(&config.cipher).map_err(|_| {
+        let method = rewrite_protocol_shadowsocks::cipher_kind(&config.cipher).map_err(|_| {
             RuntimeError::Config(rewrite_config::ConfigError::InvalidInbound(format!(
                 "unsupported shadowsocks inbound cipher: {}",
                 config.cipher
             )))
         })?;
-        let (server_password, user_keys) = split_shadowsocks_inbound_password(&config.password);
+        let (server_password, user_keys) =
+            rewrite_protocol_shadowsocks::split_inbound_password(&config.password);
         if !user_keys.is_empty() && !method_support_eih(method) {
             return Err(RuntimeError::Config(
                 rewrite_config::ConfigError::InvalidInbound(format!(
@@ -1870,19 +1870,6 @@ fn shadow_tls_handshake_target(config: &ShadowsocksShadowTlsConfig) -> (String, 
         config.handshake.dest.clone(),
         config.handshake.proxy.clone(),
     )
-}
-
-/// Splits an inbound password into the server PSK and optional EIH user keys.
-///
-/// Single-hop EIH uses `server_key:user_key`. Extra `:`-separated segments become
-/// additional users (AES-128/256 GCM only).
-fn split_shadowsocks_inbound_password(password: &str) -> (String, Vec<String>) {
-    let mut parts = password.split(':').map(str::to_owned).collect::<Vec<_>>();
-    if parts.len() <= 1 {
-        return (password.to_owned(), Vec::new());
-    }
-    let server_password = parts.remove(0);
-    (server_password, parts)
 }
 
 fn address_to_destination(address: &Address) -> Result<Destination, &'static str> {

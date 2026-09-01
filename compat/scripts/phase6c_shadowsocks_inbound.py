@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import signal
+import socket
 import socketserver
 import subprocess
 import tempfile
@@ -66,6 +67,21 @@ TCP_UOT_PROXY_UOT_PAYLOAD = "phase6c-ss-inbound-uot-proxy-uot"
 TCP_RELOAD_PAYLOAD = "phase6c-ss-inbound-reload"
 
 
+def reserve_tcp_udp_port() -> int:
+    """Choose a loopback port free for both SS TCP and UDP listeners."""
+    for _ in range(128):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = int(tcp.getsockname()[1])
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                    udp.bind(("127.0.0.1", port))
+                    return port
+            except OSError:
+                continue
+    raise RuntimeError("could not reserve a shared TCP/UDP loopback port")
+
+
 def client_binary() -> pathlib.Path:
     target = cargo_target_path("PHASE6CSSINBOUND_CARGO_TARGET", "phase6c-shadowsocks-inbound")
     suffix = ".exe" if os.name == "nt" else ""
@@ -101,6 +117,7 @@ def proxied_echo(
     obfs_host: str | None = None,
     plugin_password: str | None = None,
     plugin_version: int | None = None,
+    timeout: float = IO_DEADLINE,
 ) -> bool:
     command = [
         str(client),
@@ -120,7 +137,7 @@ def proxied_echo(
         if plugin_version is not None:
             command.append(str(plugin_version))
     try:
-        completed = subprocess.run(command, check=False, capture_output=True, timeout=IO_DEADLINE)
+        completed = subprocess.run(command, check=False, capture_output=True, timeout=timeout)
         return completed.returncode == 0
     except subprocess.TimeoutExpired:
         return False
@@ -139,6 +156,9 @@ def wait_ss_route(
     plugin_password: str | None = None,
     plugin_version: int | None = None,
 ) -> None:
+    # Process startup can be cold after a workspace rebuild. Give socket bind
+    # its own deadline so it does not consume the end-to-end protocol budget.
+    wait_ready(process, ss_port)
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -155,6 +175,7 @@ def wait_ss_route(
                 obfs_host,
                 plugin_password,
                 plugin_version,
+                timeout=min(1.0, max(0.1, deadline - time.monotonic())),
             ):
                 return
         except (AssertionError, OSError, subprocess.SubprocessError):
@@ -263,6 +284,7 @@ def wait_ss_udp_route(
     payload: str = UDP_PAYLOAD,
     cipher: str = CIPHER,
 ) -> None:
+    wait_ready(process, ss_port)
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -287,7 +309,7 @@ def exercise(
     udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
     udp_thread.start()
     udp_port = int(udp_echo.server_address[1])
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -328,7 +350,7 @@ def exercise_legacy_tcp(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "legacy-config.yaml"
     config.write_text(
         f"""ss-config: ss://{LEGACY_CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -373,7 +395,7 @@ def exercise_2022_tcp(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "2022-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER_2022}:{KEY_2022}@127.0.0.1:{ss_port}
@@ -418,7 +440,7 @@ def exercise_dns_udp(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     dns_port = reserve_port()
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     query = dns_query("ss-inbound.phase6c.test", DNS_QUERY_ID)
     encoded_query = "b64:" + base64.b64encode(query).decode("ascii")
     config = scratch / "dns-udp-config.yaml"
@@ -473,7 +495,7 @@ def exercise_socks5_udp(
 ) -> dict[str, bool]:
     relay = RelayServer()
     control = ControlServer(relay)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     destination_port = 32_010
     config = scratch / "socks5-udp-config.yaml"
     config.write_text(
@@ -525,7 +547,7 @@ def exercise_obfs_http_listener(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "obfs-listener-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -580,7 +602,7 @@ def exercise_obfs_tls_listener(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "obfs-tls-listener-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -638,7 +660,7 @@ def exercise_uot_listener(
     udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
     udp_thread.start()
     udp_port = int(udp_echo.server_address[1])
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "uot-listener-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -698,7 +720,7 @@ def exercise_uot_dns(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     dns_port = reserve_port()
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     query = dns_query("ss-inbound-uot.phase6c.test", DNS_QUERY_ID)
     encoded_query = "b64:" + base64.b64encode(query).decode("ascii")
     config = scratch / "uot-dns-config.yaml"
@@ -758,7 +780,7 @@ def exercise_uot_socks5(
 ) -> dict[str, bool]:
     relay = RelayServer()
     control = ControlServer(relay)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     destination_port = 32_011
     config = scratch / "uot-socks5-config.yaml"
     config.write_text(
@@ -820,7 +842,7 @@ def exercise_uot_proxied(
         authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
     )
     time.sleep(0.2)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "uot-proxy-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -885,7 +907,7 @@ def exercise_uot_proxied_uot(
         authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
     )
     time.sleep(0.2)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "uot-proxy-uot-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -993,7 +1015,7 @@ def exercise_shadow_tls_listener(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-listener-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1060,7 +1082,7 @@ def exercise_shadow_tls_fallback_concurrency(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-fallback-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1177,7 +1199,7 @@ def exercise_shadow_tls_handshake_proxy_leaf(
     echo = start_server(EchoHandler)
     upstream = ConnectProxyServer()
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-handshake-proxy-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1257,7 +1279,7 @@ def exercise_shadow_tls_handshake_proxy_group(
     echo = start_server(EchoHandler)
     upstream = ConnectProxyServer()
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-handshake-group-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1341,7 +1363,7 @@ def exercise_shadow_tls_handshake_inner_rule(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-handshake-inner-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1411,7 +1433,7 @@ def exercise_shadow_tls_fallback_shutdown(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-fallback-shutdown-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1483,7 +1505,7 @@ def exercise_shadow_tls_fallback_reload(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-fallback-reload-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1600,7 +1622,7 @@ def exercise_shadow_tls_in_user(
     """Rust-only: Go sing-shadowsocks inbound does not attach shadow-tls user to IN-USER metadata yet."""
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "shadow-tls-in-user-config.yaml"
     config.write_text(
         f"""mode: rule
@@ -1669,7 +1691,7 @@ def exercise_2022_eih_tcp(
 ) -> dict[str, bool]:
     """Rust SS2022 EIH inbound smoke (Go Clash cannot listen with server:user PSK)."""
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     password = f"{KEY_2022}:{KEY_2022_EIH_USER}"
     scratch.mkdir(parents=True, exist_ok=True)
     config = scratch / "2022-eih-config.yaml"
@@ -1764,7 +1786,7 @@ def exercise_proxied_udp(
         authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
     )
     time.sleep(0.2)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "proxy-udp-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -1828,7 +1850,7 @@ def exercise_proxied_udp_uot(
         authority, scratch, authority_port, cipher=CIPHER, password=OUTBOUND_PASSWORD
     )
     time.sleep(0.2)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "proxy-udp-uot-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
@@ -1885,7 +1907,7 @@ def exercise_password_reload(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_port()
+    ss_port = reserve_tcp_udp_port()
     config = scratch / "reload-password-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}

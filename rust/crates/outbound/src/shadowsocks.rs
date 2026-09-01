@@ -1,19 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
 use std::sync::Arc;
 
-use bytes::BufMut;
 use rewrite_model::{Destination, Host, ShadowsocksPluginConfig};
-use shadowsocks::ProxyClientStream;
-use shadowsocks::config::{ServerConfig, ServerType};
-use shadowsocks::context::Context;
-use shadowsocks::crypto::CipherKind;
-use shadowsocks::net::UdpSocket as ShadowUdpSocket;
-use shadowsocks::relay::socks5::Address;
-use shadowsocks::relay::udprelay::ProxySocket;
-use shadowsocks::relay::udprelay::proxy_socket::UdpSocketType;
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     BoxedOutboundStream, DirectError, DirectTcpOptions, HttpObfsClient, TlsObfsClient,
@@ -24,14 +13,10 @@ use crate::{
 pub enum ShadowsocksProxyError {
     #[error(transparent)]
     Direct(#[from] DirectError),
-    #[error("unsupported Shadowsocks cipher: {0}")]
-    Cipher(String),
-    #[error("invalid Shadowsocks server configuration: {0}")]
-    Configuration(String),
+    #[error(transparent)]
+    ProtocolCore(#[from] rewrite_protocol_shadowsocks::ShadowsocksProtocolError),
     #[error("Shadowsocks UDP I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Shadowsocks UDP protocol failed: {0}")]
-    Protocol(String),
     #[error("Shadowsocks plugin failed: {0}")]
     Plugin(String),
 }
@@ -46,94 +31,7 @@ pub struct ShadowsocksTcpOptions<'a> {
     pub client_fingerprint: Option<&'a str>,
 }
 
-pub struct ShadowsocksUdpAssociation {
-    socket: ProxySocket<ShadowUdpSocket>,
-}
-
-pub struct ShadowsocksUotAssociation {
-    stream: BoxedOutboundStream,
-    version: u8,
-    request_written: bool,
-}
-
-impl ShadowsocksUotAssociation {
-    /// Sends one UDP-over-TCP frame over the encrypted Shadowsocks stream.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol or I/O error when the destination or payload cannot
-    /// be encoded, or when the encrypted stream fails.
-    pub async fn send(
-        &mut self,
-        destination: &Destination,
-        payload: &[u8],
-    ) -> Result<(), ShadowsocksProxyError> {
-        let length = u16::try_from(payload.len()).map_err(|_| {
-            ShadowsocksProxyError::Protocol("UoT payload exceeds 65535 bytes".to_owned())
-        })?;
-        let mut frame = Vec::with_capacity(payload.len() + 32);
-        if self.version == 2 && !self.request_written {
-            frame.put_u8(0);
-            destination_address(destination).write_to_buf(&mut frame);
-            self.request_written = true;
-        }
-        write_uot_address(&mut frame, destination)?;
-        frame.put_u16(length);
-        frame.extend_from_slice(payload);
-        self.stream.write_all(&frame).await?;
-        Ok(())
-    }
-
-    /// Receives and decodes one UDP-over-TCP response frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol or I/O error for malformed or truncated frames.
-    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), ShadowsocksProxyError> {
-        let destination = read_uot_address(&mut self.stream).await?;
-        let length = self.stream.read_u16().await? as usize;
-        let mut payload = vec![0_u8; length];
-        self.stream.read_exact(&mut payload).await?;
-        Ok((destination, payload))
-    }
-}
-
-impl ShadowsocksUdpAssociation {
-    /// Sends one SIP004 UDP payload through the configured server.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol or socket error when the datagram cannot be encoded
-    /// or sent.
-    pub async fn send(
-        &self,
-        destination: &Destination,
-        payload: &[u8],
-    ) -> Result<(), ShadowsocksProxyError> {
-        self.socket
-            .send(&destination_address(destination), payload)
-            .await
-            .map(|_| ())
-            .map_err(|error| ShadowsocksProxyError::Protocol(error.to_string()))
-    }
-
-    /// Receives and decodes one SIP004 UDP payload from the server.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol or socket error when the datagram cannot be received
-    /// or authenticated.
-    pub async fn recv(&self) -> Result<(Destination, Vec<u8>), ShadowsocksProxyError> {
-        let mut buffer = vec![0_u8; 65_536];
-        let (length, address, _) = self
-            .socket
-            .recv(&mut buffer)
-            .await
-            .map_err(|error| ShadowsocksProxyError::Protocol(error.to_string()))?;
-        buffer.truncate(length);
-        Ok((address_destination(address), buffer))
-    }
-}
+pub use rewrite_protocol_shadowsocks::{ShadowsocksUdpAssociation, ShadowsocksUotAssociation};
 
 /// Opens the upstream TCP socket with the rewrite's platform policy, then
 /// delegates SIP004 encryption and framing to the official Shadowsocks core.
@@ -179,20 +77,16 @@ pub async fn connect_shadowsocks_with_plugin_options(
     cipher: &str,
     options: ShadowsocksTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
-    let method = CipherKind::from_str(cipher)
-        .map_err(|_| ShadowsocksProxyError::Cipher(cipher.to_owned()))?;
-    let server_config = ServerConfig::new(destination_address(server), password, method)
-        .map_err(|error| ShadowsocksProxyError::Configuration(error.to_string()))?;
     let stream = connect_with_options(server, allow_ipv6, options.socket).await?;
     let stream = apply_shadowsocks_plugin(Box::new(stream), server, options).await?;
-    let context = Context::new_shared(ServerType::Local);
-    let stream = ProxyClientStream::from_stream(
-        context,
+    rewrite_protocol_shadowsocks::connect_tcp_on_stream(
         stream,
-        &server_config,
-        destination_address(destination),
-    );
-    Ok(Box::new(stream))
+        server,
+        destination,
+        password,
+        cipher,
+    )
+    .map_err(Into::into)
 }
 
 async fn apply_v2ray_websocket_plugin(
@@ -335,10 +229,6 @@ pub async fn associate_shadowsocks_udp_with_options(
     cipher: &str,
     options: DirectTcpOptions<'_>,
 ) -> Result<ShadowsocksUdpAssociation, ShadowsocksProxyError> {
-    let method = CipherKind::from_str(cipher)
-        .map_err(|_| ShadowsocksProxyError::Cipher(cipher.to_owned()))?;
-    let server_config = ServerConfig::new(destination_address(server), password, method)
-        .map_err(|error| ShadowsocksProxyError::Configuration(error.to_string()))?;
     let server_address = resolve_server(server, allow_ipv6).await?;
     let bind_address = if server_address.is_ipv4() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
@@ -349,13 +239,10 @@ pub async fn associate_shadowsocks_udp_with_options(
         rewrite_platform::bind_outbound_udp(bind_address, options.interface, options.routing_mark)?;
     let socket = tokio::net::UdpSocket::from_std(socket)?;
     socket.connect(server_address).await?;
-    let socket = ProxySocket::from_socket(
-        UdpSocketType::Client,
-        Context::new_shared(ServerType::Local),
-        &server_config,
-        ShadowUdpSocket::from(socket),
-    );
-    Ok(ShadowsocksUdpAssociation { socket })
+    rewrite_protocol_shadowsocks::ShadowsocksUdpAssociation::from_connected_socket(
+        socket, server, password, cipher,
+    )
+    .map_err(Into::into)
 }
 
 /// Opens the sing-style Shadowsocks UDP-over-TCP v1 or v2 stream.
@@ -375,19 +262,7 @@ pub async fn associate_shadowsocks_uot_with_options(
     version: u8,
     options: DirectTcpOptions<'_>,
 ) -> Result<ShadowsocksUotAssociation, ShadowsocksProxyError> {
-    let magic_domain = match version {
-        1 => "sp.udp-over-tcp.arpa",
-        2 => "sp.v2.udp-over-tcp.arpa",
-        _ => {
-            return Err(ShadowsocksProxyError::Configuration(format!(
-                "unsupported UoT version {version}"
-            )));
-        }
-    };
-    let destination = Destination {
-        host: Host::Domain(magic_domain.to_owned()),
-        port: 0,
-    };
+    let destination = rewrite_protocol_shadowsocks::uot_destination(version)?;
     let stream = connect_shadowsocks_with_options(
         server,
         &destination,
@@ -397,69 +272,7 @@ pub async fn associate_shadowsocks_uot_with_options(
         options,
     )
     .await?;
-    Ok(ShadowsocksUotAssociation {
-        stream,
-        version,
-        request_written: false,
-    })
-}
-
-fn write_uot_address(
-    buffer: &mut Vec<u8>,
-    destination: &Destination,
-) -> Result<(), ShadowsocksProxyError> {
-    match &destination.host {
-        Host::Ip(IpAddr::V4(address)) => {
-            buffer.put_u8(0);
-            buffer.extend_from_slice(&address.octets());
-        }
-        Host::Ip(IpAddr::V6(address)) => {
-            buffer.put_u8(1);
-            buffer.extend_from_slice(&address.octets());
-        }
-        Host::Domain(domain) => {
-            let length = u8::try_from(domain.len()).map_err(|_| {
-                ShadowsocksProxyError::Protocol("UoT domain exceeds 255 bytes".to_owned())
-            })?;
-            buffer.put_u8(2);
-            buffer.put_u8(length);
-            buffer.extend_from_slice(domain.as_bytes());
-        }
-    }
-    buffer.put_u16(destination.port);
-    Ok(())
-}
-
-async fn read_uot_address(
-    stream: &mut BoxedOutboundStream,
-) -> Result<Destination, ShadowsocksProxyError> {
-    let host = match stream.read_u8().await? {
-        0 => {
-            let mut octets = [0_u8; 4];
-            stream.read_exact(&mut octets).await?;
-            Host::Ip(IpAddr::V4(Ipv4Addr::from(octets)))
-        }
-        1 => {
-            let mut octets = [0_u8; 16];
-            stream.read_exact(&mut octets).await?;
-            Host::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
-        }
-        2 => {
-            let length = stream.read_u8().await? as usize;
-            let mut domain = vec![0_u8; length];
-            stream.read_exact(&mut domain).await?;
-            Host::Domain(String::from_utf8(domain).map_err(|_| {
-                ShadowsocksProxyError::Protocol("UoT domain is not UTF-8".to_owned())
-            })?)
-        }
-        kind => {
-            return Err(ShadowsocksProxyError::Protocol(format!(
-                "unsupported UoT address type {kind}"
-            )));
-        }
-    };
-    let port = stream.read_u16().await?;
-    Ok(Destination { host, port })
+    ShadowsocksUotAssociation::new(stream, version).map_err(Into::into)
 }
 
 async fn resolve_server(
@@ -482,25 +295,5 @@ async fn resolve_server(
                     "no permitted Shadowsocks UDP server address resolved",
                 ))
             }),
-    }
-}
-
-fn destination_address(destination: &Destination) -> Address {
-    match &destination.host {
-        Host::Ip(address) => Address::from(SocketAddr::new(*address, destination.port)),
-        Host::Domain(domain) => Address::from((domain.clone(), destination.port)),
-    }
-}
-
-fn address_destination(address: Address) -> Destination {
-    match address {
-        Address::SocketAddress(address) => Destination {
-            host: Host::Ip(address.ip()),
-            port: address.port(),
-        },
-        Address::DomainNameAddress(domain, port) => Destination {
-            host: Host::Domain(domain),
-            port,
-        },
     }
 }

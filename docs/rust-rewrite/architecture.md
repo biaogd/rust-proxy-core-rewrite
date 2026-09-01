@@ -779,18 +779,22 @@ wire decoding and zone-text rendering for the controller JSON boundary; it is
 not used to replace the existing resolver/cache/transport implementation.
 `rewrite-platform` also owns the small controller socket-mark-before-bind
 boundary; it is still not a general TUN/routing implementation.
-Crates marked “later phase” remain design boundaries and do not exist yet:
+The current workspace uses these ownership boundaries:
 
 ```text
 rust/
   Cargo.toml                 workspace policy and shared dependency versions
   crates/
     model/                   metadata, enums, addresses; no I/O
+    io/                      minimal type-erased async duplex-stream boundary
     config/                  YAML/defaults/validation; produces owned specs
     rules/                   parsing and pure matching over model
     net/                     buffered streams, relay, deadlines, cancellation
     inbound/                 HTTP/SOCKS/mixed and later other listeners
-    outbound/                DIRECT first, then protocol adapters
+    protocol-shadowsocks/    SS core adapter, addresses, UDP and UoT framing
+    protocol-vmess/          VMess crypto, headers, body and packet framing
+    transport/               TLS/camouflage and reusable outer carriers
+    outbound/                socket policy and thin protocol dial composition
     state/                   trackers, DNS mappings and fake-IP pools/profile state
     dns/                     classic/DoT DNS, cache, hosts/fake-IP and policy service
     controller/              REST surface over runtime interfaces
@@ -807,7 +811,12 @@ model <- config
 model <- rules
 model <- state
 model <- net <- inbound
-model <- net <- outbound
+io <- protocol-shadowsocks
+model <- protocol-shadowsocks
+io <- protocol-vmess
+model <- protocol-vmess
+io <- transport
+model + io + protocol-* + transport <- outbound
 config <- dns
 platform <- dns
 config + dns + state <- controller
@@ -831,9 +840,9 @@ refresh and file watching; generation changes re-key their inventories and
 shutdown joins each task with a bounded abort fallback.
 
 Phase 6B keeps HTTP and SOCKS5 product policy in `runtime`/`config` and confines
-wire mechanics to `outbound`. HTTP uses Hyper's client handshake, CONNECT
+adapter mechanics to `outbound`. HTTP uses Hyper's client handshake, CONNECT
 request/response framing and upgrade stream. Both adapters pass a single TLS
-policy object to the rustls boundary, which builds system + embedded + configured
+policy object to `rewrite-transport`, which builds system + embedded + configured
 roots, selects ordinary/name-override/skip/fingerprint verification and loads
 an optional client keypair. This avoids duplicating certificate policy between
 data-plane dials and controller health checks.
@@ -850,10 +859,17 @@ packet path; SOCKS5 reports UDP only when its configured `udp` flag is true.
 
 The outbound crate exposes that boundary through a small facade rather than a
 monolithic implementation file. `direct` owns platform-aware TCP dialing,
-`http` owns Hyper CONNECT and its public errors, `tls` owns rustls verification
-and client identity construction, while `socks5` separates common control/TLS,
-TCP command framing, UDP association and RFC 1929 authentication. Only the
-facade re-exports are public; cross-file helpers remain crate- or module-local.
+`http` owns Hyper CONNECT and its public errors, while `socks5` separates common
+control/TLS, TCP command framing, UDP association and RFC 1929 authentication.
+SS and VMess files are thin dial/composition facades over their protocol crates.
+TLS, ShadowTLS, simple-obfs, WebSocket/Upgrade, V2Ray HTTP/H2/gRPC and mux live
+in `rewrite-transport`; only compatibility re-exports remain in outbound.
+
+The protocol crates deliberately do not depend on the carrier crate. Both use
+only `rewrite-io::BoxedStream` plus `rewrite-model` destinations, so a future
+inbound server can share byte-exact crypto, headers and framing without pulling
+in outbound socket policy or every outer transport. Configuration YAML remains
+in `rewrite-config`; protocol crates receive normalized typed options only.
 
 ## Architectural risks to track
 

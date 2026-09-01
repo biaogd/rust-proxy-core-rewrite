@@ -8,7 +8,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions, connect_with_options};
-use crate::tls::{HttpProxyTls, client_config};
+use rewrite_transport::{ClientTlsOptions as HttpProxyTls, client_config};
 
 mod auth;
 mod tcp;

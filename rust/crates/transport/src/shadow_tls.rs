@@ -12,8 +12,8 @@ use shadow_tokio_rustls::TlsConnector;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::shadow_tls_config::shadow_client_config;
-use crate::tls::HttpProxyTls;
-use crate::{BoxedOutboundStream, HttpProxyError};
+use crate::tls::ClientTlsOptions;
+use crate::{BoxedStream, TlsClientError};
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -33,7 +33,7 @@ const MAX_TLS_PLAINTEXT: usize = 16_384;
 #[derive(Debug, thiserror::Error)]
 pub enum ShadowTlsError {
     #[error(transparent)]
-    Tls(#[from] HttpProxyError),
+    Tls(#[from] TlsClientError),
     #[error("shadow-tls: {0}")]
     Protocol(String),
     #[error(transparent)]
@@ -72,10 +72,10 @@ pub struct ShadowTlsConnectOptions<'a> {
 /// Returns [`ShadowTlsError`] when the protocol version is unsupported, TLS
 /// configuration or handshake fails, or the camouflage server rejects the session.
 pub async fn connect_shadow_tls(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     options: ShadowTlsConnectOptions<'_>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
-) -> Result<BoxedOutboundStream, ShadowTlsError> {
+) -> Result<BoxedStream, ShadowTlsError> {
     if !matches!(options.version, 1..=3) {
         return Err(ShadowTlsError::Protocol(format!(
             "unknown protocol version: {}",
@@ -89,7 +89,7 @@ pub async fn connect_shadow_tls(
         .collect();
     let alpn_refs: Vec<&[u8]> = alpn.iter().map(Vec::as_slice).collect();
     let config = Arc::new(shadow_client_config(
-        HttpProxyTls {
+        ClientTlsOptions {
             server_name: options.host,
             verification_name: options.verification_name,
             skip_certificate_verification: options.skip_certificate_verification,
@@ -107,7 +107,7 @@ pub async fn connect_shadow_tls(
                 .client_fingerprint
                 .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
             {
-                return Err(ShadowTlsError::Tls(HttpProxyError::TlsConfiguration(
+                return Err(ShadowTlsError::Tls(TlsClientError::Configuration(
                     "ShadowTLS v1 does not support client-fingerprint".to_owned(),
                 )));
             }
@@ -118,9 +118,8 @@ pub async fn connect_shadow_tls(
         options.version != 2,
         clock,
     )?);
-    let server_name = ServerName::try_from(options.host.to_owned()).map_err(|error| {
-        ShadowTlsError::Tls(HttpProxyError::TlsConfiguration(error.to_string()))
-    })?;
+    let server_name = ServerName::try_from(options.host.to_owned())
+        .map_err(|error| ShadowTlsError::Tls(TlsClientError::Configuration(error.to_string())))?;
     let password = options.password.to_owned();
     let io = ShadowTlsIo::new(stream, options.version, password.clone());
     let connector = TlsConnector::from(config);
@@ -136,7 +135,7 @@ pub async fn connect_shadow_tls(
         connector.connect(server_name, io).await
     }
     .map_err(|error| {
-        ShadowTlsError::Tls(HttpProxyError::TlsHandshake(io::Error::new(
+        ShadowTlsError::Tls(TlsClientError::Handshake(io::Error::new(
             io::ErrorKind::InvalidData,
             error,
         )))
@@ -167,7 +166,7 @@ enum WriteState {
 }
 
 struct ShadowTlsIo {
-    inner: BoxedOutboundStream,
+    inner: BoxedStream,
     version: u8,
     password: String,
     pending_read: Vec<u8>,
@@ -181,7 +180,7 @@ struct ShadowTlsIo {
 }
 
 impl ShadowTlsIo {
-    fn new(inner: BoxedOutboundStream, version: u8, password: String) -> Self {
+    fn new(inner: BoxedStream, version: u8, password: String) -> Self {
         let read_hash = if version == 2 {
             Some(HmacSha1::new_from_slice(password.as_bytes()).expect("HMAC key"))
         } else {
@@ -202,7 +201,7 @@ impl ShadowTlsIo {
         }
     }
 
-    fn finish(self, version: u8) -> Result<BoxedOutboundStream, ShadowTlsError> {
+    fn finish(self, version: u8) -> Result<BoxedStream, ShadowTlsError> {
         match version {
             1 => Ok(Box::new(self.inner)),
             2 => {
@@ -459,7 +458,7 @@ impl AsyncWrite for ShadowTlsIo {
 }
 
 struct V2ClientStream {
-    inner: BoxedOutboundStream,
+    inner: BoxedStream,
     hash: Vec<u8>,
     prefix_sent: bool,
     write_state: WriteState,
@@ -470,7 +469,7 @@ struct V2ClientStream {
 }
 
 impl V2ClientStream {
-    fn new(inner: BoxedOutboundStream, hash: Vec<u8>) -> Self {
+    fn new(inner: BoxedStream, hash: Vec<u8>) -> Self {
         Self {
             inner,
             hash,
@@ -708,7 +707,7 @@ impl AsyncWrite for V2ClientStream {
 const TLS_ALERT_RECORD_SIZE: usize = 31;
 
 pub(crate) struct VerifiedStream {
-    inner: BoxedOutboundStream,
+    inner: BoxedStream,
     hmac_add: HmacSha1,
     hmac_verify: HmacSha1,
     hmac_ignore: Option<HmacSha1>,
@@ -723,7 +722,7 @@ pub(crate) struct VerifiedStream {
 
 impl VerifiedStream {
     pub(crate) fn from_server(
-        inner: BoxedOutboundStream,
+        inner: BoxedStream,
         hmac_add: HmacSha1,
         hmac_verify: HmacSha1,
         pending: Vec<u8>,
@@ -1050,7 +1049,7 @@ pub(crate) fn set_tls_record_length(header: &mut [u8], payload_len: usize) -> io
 }
 
 fn poll_write_all(
-    mut inner: Pin<&mut BoxedOutboundStream>,
+    mut inner: Pin<&mut BoxedStream>,
     cx: &mut Context<'_>,
     buffer: &[u8],
     offset: usize,
@@ -1080,7 +1079,7 @@ fn is_timeout_like(error: &io::Error) -> bool {
 
 fn drain_write_state(
     write_state: &mut WriteState,
-    inner: &mut BoxedOutboundStream,
+    inner: &mut BoxedStream,
     cx: &mut Context<'_>,
 ) -> Poll<io::Result<()>> {
     loop {

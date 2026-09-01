@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::{Error, Message};
 use url::Url;
 
-use crate::BoxedOutboundStream;
+use crate::BoxedStream;
 
 pub struct WebSocketIo<S> {
     stream: WebSocketStream<S>,
@@ -72,12 +72,12 @@ where
 /// Returns an error when a configured header is invalid or the peer rejects
 /// the RFC 6455 handshake.
 pub async fn connect_websocket_with_headers(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     host: &str,
     port: u16,
     path: &str,
     headers: &BTreeMap<String, String>,
-) -> Result<BoxedOutboundStream, Error> {
+) -> Result<BoxedStream, Error> {
     connect_websocket_with_early_data(stream, host, port, path, headers, 0, None).await
 }
 
@@ -94,14 +94,14 @@ pub async fn connect_websocket_with_headers(
 /// peer rejects the RFC 6455 handshake.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_websocket_with_early_data(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     host: &str,
     port: u16,
     path: &str,
     headers: &BTreeMap<String, String>,
     max_early_data: usize,
     early_data_header_name: Option<&str>,
-) -> Result<BoxedOutboundStream, Error> {
+) -> Result<BoxedStream, Error> {
     let (path, path_early_data) = split_early_data_path(path);
     let (max_early_data, early_data_header_name) = if path_early_data > 0 {
         (path_early_data, Some(SEC_WEBSOCKET_PROTOCOL.as_str()))
@@ -133,12 +133,12 @@ pub async fn connect_websocket_with_early_data(
 /// Returns an error when request headers are invalid or the peer rejects or
 /// violates the WebSocket handshake.
 pub async fn connect_v2ray_websocket(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     host: &str,
     port: u16,
     path: &str,
     headers: &BTreeMap<String, String>,
-) -> Result<BoxedOutboundStream, Error> {
+) -> Result<BoxedStream, Error> {
     let (path, early_data) = split_early_data_path(path);
     connect_websocket_with_early_data(
         stream,
@@ -234,21 +234,18 @@ fn split_early_data_path(path: &str) -> (String, usize) {
     )
 }
 
-type UpgradeFuture = Pin<
-    Box<
-        dyn Future<Output = io::Result<(WebSocketIo<BoxedOutboundStream>, usize)>> + Send + 'static,
-    >,
->;
+type UpgradeFuture =
+    Pin<Box<dyn Future<Output = io::Result<(WebSocketIo<BoxedStream>, usize)>> + Send + 'static>>;
 
 enum LazyState {
     Pending {
-        stream: Option<BoxedOutboundStream>,
+        stream: Option<BoxedStream>,
         request: Option<Request<()>>,
         early_data_limit: usize,
         placement: Option<EarlyDataPlacement>,
     },
     Upgrading(UpgradeFuture),
-    Connected(WebSocketIo<BoxedOutboundStream>),
+    Connected(WebSocketIo<BoxedStream>),
     Failed,
 }
 
@@ -263,7 +260,7 @@ enum EarlyDataPlacement {
 
 impl LazyWebSocketIo {
     fn new(
-        stream: BoxedOutboundStream,
+        stream: BoxedStream,
         request: Request<()>,
         early_data_limit: usize,
         placement: EarlyDataPlacement,
@@ -346,9 +343,9 @@ fn apply_early_data(
 }
 
 async fn early_websocket_handshake(
-    mut stream: BoxedOutboundStream,
+    mut stream: BoxedStream,
     request: Request<()>,
-) -> io::Result<WebSocketStream<BoxedOutboundStream>> {
+) -> io::Result<WebSocketStream<BoxedStream>> {
     let target = request
         .uri()
         .path_and_query()

@@ -10,7 +10,7 @@ use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use url::Url;
 
-use crate::BoxedOutboundStream;
+use crate::BoxedStream;
 
 const MAX_HEADER_BYTES: usize = 8192;
 
@@ -22,12 +22,12 @@ const MAX_HEADER_BYTES: usize = 8192;
 /// Returns an error when the request is invalid, transport I/O fails, or the
 /// peer returns an invalid HTTP Upgrade response.
 pub async fn connect_v2ray_http_upgrade(
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     host: &str,
     path: &str,
     headers: &BTreeMap<String, String>,
     fast_open: bool,
-) -> io::Result<BoxedOutboundStream> {
+) -> io::Result<BoxedStream> {
     connect_http_upgrade_with_early_data(stream, host, path, headers, fast_open, 0, None).await
 }
 
@@ -40,14 +40,14 @@ pub async fn connect_v2ray_http_upgrade(
 /// the peer returns an invalid Upgrade response.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_http_upgrade_with_early_data(
-    mut stream: BoxedOutboundStream,
+    mut stream: BoxedStream,
     host: &str,
     path: &str,
     headers: &BTreeMap<String, String>,
     fast_open: bool,
     configured_early_data_limit: usize,
     configured_early_data_header_name: Option<&str>,
-) -> io::Result<BoxedOutboundStream> {
+) -> io::Result<BoxedStream> {
     let (path, early_data_limit) = split_early_data_path(path);
     let (early_data_limit, early_data_header_name) = if early_data_limit > 0 {
         (early_data_limit, Some("Sec-WebSocket-Protocol"))
@@ -174,7 +174,7 @@ fn validate_header(name: &str, value: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn read_response(stream: &mut BoxedOutboundStream) -> io::Result<Vec<u8>> {
+async fn read_response(stream: &mut BoxedStream) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(512);
     let mut chunk = [0_u8; 1024];
     loop {
@@ -278,13 +278,13 @@ fn split_early_data_path(path: &str) -> (String, usize) {
 }
 
 struct PrefixedIo {
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     prefix: Bytes,
     offset: usize,
 }
 
 impl PrefixedIo {
-    fn new(stream: BoxedOutboundStream, prefix: Vec<u8>) -> Self {
+    fn new(stream: BoxedStream, prefix: Vec<u8>) -> Self {
         Self {
             stream,
             prefix: Bytes::from(prefix),
@@ -330,7 +330,7 @@ impl AsyncWrite for PrefixedIo {
 }
 
 struct PendingResponseIo {
-    stream: BoxedOutboundStream,
+    stream: BoxedStream,
     response: Vec<u8>,
     prefix: Bytes,
     prefix_offset: usize,
@@ -338,7 +338,7 @@ struct PendingResponseIo {
 }
 
 impl PendingResponseIo {
-    fn new(stream: BoxedOutboundStream) -> Self {
+    fn new(stream: BoxedStream) -> Self {
         Self {
             stream,
             response: Vec::with_capacity(512),
@@ -408,11 +408,11 @@ impl AsyncWrite for PendingResponseIo {
     }
 }
 
-type LazyFuture = Pin<Box<dyn Future<Output = io::Result<(BoxedOutboundStream, usize)>> + Send>>;
+type LazyFuture = Pin<Box<dyn Future<Output = io::Result<(BoxedStream, usize)>> + Send>>;
 
 enum LazyState {
     Pending {
-        stream: Option<BoxedOutboundStream>,
+        stream: Option<BoxedStream>,
         host: String,
         path: String,
         headers: BTreeMap<String, String>,
@@ -421,7 +421,7 @@ enum LazyState {
         fast_open: bool,
     },
     Connecting(LazyFuture),
-    Connected(BoxedOutboundStream),
+    Connected(BoxedStream),
     Failed,
 }
 
@@ -431,7 +431,7 @@ struct LazyHttpUpgradeIo {
 
 impl LazyHttpUpgradeIo {
     fn new(
-        stream: BoxedOutboundStream,
+        stream: BoxedStream,
         host: String,
         path: String,
         headers: BTreeMap<String, String>,
@@ -487,7 +487,7 @@ impl LazyHttpUpgradeIo {
                 Some((&input[..early_length], early_data_header_name.as_deref())),
             )?;
             stream.write_all(&request).await?;
-            let mut stream: BoxedOutboundStream = if fast_open {
+            let mut stream: BoxedStream = if fast_open {
                 Box::new(PendingResponseIo::new(stream))
             } else {
                 let prefix = read_response(&mut stream).await?;

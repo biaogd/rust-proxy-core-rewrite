@@ -20,6 +20,18 @@ from phase6d_vmess_tcp import build_authority, config_validation, exchange, star
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6d-vmess-grpc-pool-diff.json"
 
 
+def wait_authority_ready(process: Any, output: pathlib.Path) -> None:
+    """Give helper startup its own budget before stream timing begins."""
+    deadline = time.monotonic() + max(IO_DEADLINE, 10.0)
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"gRPC authority exited during startup with {process.returncode}")
+        if any(line.startswith("READY ") for line in output.read_text(errors="replace").splitlines()):
+            return
+        time.sleep(0.02)
+    raise TimeoutError(f"gRPC authority did not become ready: {output}")
+
+
 def record(name: str, port: int, options: str = "") -> str:
     return f"""  - name: {name}
     type: vmess
@@ -118,6 +130,9 @@ def exercise(
         )
         authorities.append((process, output))
         handles.append((process, stdout, stderr))
+
+    for authority, output in authorities:
+        wait_authority_ready(authority, output)
 
     mixed_port = reserve_port()
     config = scratch / "config.yaml"

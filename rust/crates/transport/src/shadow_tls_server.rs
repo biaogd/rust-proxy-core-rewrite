@@ -7,7 +7,7 @@ use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::BoxedOutboundStream;
+use crate::BoxedStream;
 use crate::shadow_tls::{
     APPLICATION_DATA, HANDSHAKE, HMAC_SIZE, SERVER_HELLO, SERVER_RANDOM_INDEX,
     SESSION_ID_LENGTH_INDEX, ShadowTlsError, TLS_HEADER_SIZE, TLS_HMAC_HEADER_SIZE,
@@ -18,9 +18,7 @@ use crate::shadow_tls::{
 type HmacSha1 = Hmac<Sha1>;
 
 pub type ShadowTlsHandshakeDial = Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = Result<BoxedOutboundStream, io::Error>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<BoxedStream, io::Error>> + Send>> + Send + Sync,
 >;
 
 #[derive(Clone, Debug)]
@@ -35,10 +33,7 @@ pub struct ShadowTlsServerConfig {
 /// Outcome of a completed `ShadowTLS` v3 accept attempt.
 pub enum ShadowTlsAcceptResult {
     /// Camouflage TLS finished; inner stream carries post-handshake SS bytes.
-    Authenticated {
-        stream: BoxedOutboundStream,
-        user: String,
-    },
+    Authenticated { stream: BoxedStream, user: String },
     /// Client was relayed to the handshake destination (probe/wrong password/plain TLS).
     FallbackCompleted,
 }
@@ -116,18 +111,18 @@ where
     .await?;
     Ok(ShadowTlsAcceptResult::Authenticated {
         stream: Box::new(VerifiedStream::from_server(
-            Box::new(client) as BoxedOutboundStream,
+            Box::new(client) as BoxedStream,
             hmac_add,
             hmac_verify,
             pending,
-        )) as BoxedOutboundStream,
+        )) as BoxedStream,
         user: user.0,
     })
 }
 
 async fn relay_fallback<S>(
     mut client: S,
-    handshake: &mut BoxedOutboundStream,
+    handshake: &mut BoxedStream,
     prefix: Option<Vec<u8>>,
 ) -> Result<(), ShadowTlsError>
 where
@@ -147,7 +142,7 @@ where
 
 async fn relay_v3_handshake<S>(
     client: &mut S,
-    handshake: &mut BoxedOutboundStream,
+    handshake: &mut BoxedStream,
     password: &str,
     server_random: &[u8; 32],
     hmac_write: &mut HmacSha1,
@@ -314,7 +309,7 @@ mod tests {
             Box::pin(async move {
                 TcpStream::connect(addr)
                     .await
-                    .map(|stream| Box::new(stream) as BoxedOutboundStream)
+                    .map(|stream| Box::new(stream) as BoxedStream)
             })
         })
     }
@@ -444,7 +439,7 @@ mod tests {
         let relay_addr = relay_listener.local_addr().expect("addr");
         let relay_task = tokio::spawn(async move {
             let (mut inbound, _) = relay_listener.accept().await.expect("accept");
-            let mut upstream: BoxedOutboundStream =
+            let mut upstream: BoxedStream =
                 Box::new(TcpStream::connect(hs_addr).await.expect("connect"));
             relay_fallback(&mut inbound, &mut upstream, None).await
         });
