@@ -11,7 +11,7 @@ use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use super::kdf::{derive_12, derive_16};
-use super::{VmessProxyError, VmessSecurity};
+use super::{VmessProxyError, VmessSecurity, fnv1a32};
 
 const VMESS_MAGIC: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 const OPTION_CHUNK_STREAM_AND_MASKING: u8 = 0x01 | 0x04;
@@ -23,8 +23,10 @@ const ADDRESS_IPV6: u8 = 0x03;
 impl VmessSecurity {
     const fn wire_value(self) -> u8 {
         match self {
+            Self::Aes128Cfb => 0x01,
             Self::Aes128Gcm => 0x03,
             Self::ChaCha20Poly1305 => 0x04,
+            Self::None => 0x05,
             Self::Auto => unreachable!(),
         }
     }
@@ -175,13 +177,21 @@ fn build_request_plaintext(
     header.extend_from_slice(request_iv);
     header.extend_from_slice(request_key);
     header.push(options.response_verification);
-    let mut request_options = OPTION_CHUNK_STREAM_AND_MASKING;
-    if options.global_padding {
-        request_options |= 0x08;
-    }
-    if options.authenticated_length {
-        request_options |= 0x10;
-    }
+    let request_options = match options.security {
+        VmessSecurity::None => 0,
+        VmessSecurity::Aes128Cfb => 0x01,
+        VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305 => {
+            let mut request_options = OPTION_CHUNK_STREAM_AND_MASKING;
+            if options.global_padding {
+                request_options |= 0x08;
+            }
+            if options.authenticated_length {
+                request_options |= 0x10;
+            }
+            request_options
+        }
+        VmessSecurity::Auto => unreachable!(),
+    };
     header.push(request_options);
     header.push((padding_length << 4) | options.security.wire_value());
     header.push(0x00);
@@ -222,12 +232,6 @@ fn encode_address(output: &mut Vec<u8>, host: &Host) -> Result<(), VmessProxyErr
         }
     }
     Ok(())
-}
-
-fn fnv1a32(input: &[u8]) -> u32 {
-    input.iter().fold(0x811c_9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-    })
 }
 
 pub(super) fn response_body_material(
@@ -366,6 +370,25 @@ mod tests {
             u32::from_be_bytes(plaintext[checksum_offset..].try_into().unwrap()),
             fnv1a32(&plaintext[..checksum_offset])
         );
+    }
+
+    #[test]
+    fn non_aead_security_modes_use_oracle_wire_options() {
+        let uuid = [0x31; 16];
+        let key = command_key(&uuid);
+        let destination = Destination {
+            host: Host::Ip("192.0.2.44".parse().unwrap()),
+            port: 8443,
+        };
+        for (security, expected_option, expected_security) in [
+            (VmessSecurity::None, 0, 5),
+            (VmessSecurity::Aes128Cfb, 1, 1),
+        ] {
+            let sealed = seal_request_header(&key, security, &destination, true, true).unwrap();
+            let plaintext = open_request_header(&key, &sealed.wire);
+            assert_eq!(plaintext[34], expected_option);
+            assert_eq!(plaintext[35] & 0x0f, expected_security);
+        }
     }
 
     #[tokio::test]

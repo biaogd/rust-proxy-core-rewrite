@@ -1,5 +1,6 @@
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes128Gcm, Nonce};
+use cfb_mode::cipher::KeyIvInit as _;
 use chacha20poly1305::ChaCha20Poly1305;
 use md5::{Digest as _, Md5};
 use rand::RngExt as _;
@@ -7,9 +8,9 @@ use sha3::Shake128;
 use sha3::digest::{ExtendableOutput as _, Update as _, XofReader as _};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use super::VmessSecurity;
 use super::header::response_body_material;
 use super::kdf::derive_16;
+use super::{VmessSecurity, fnv1a32};
 
 const MAX_WRITE_PLAINTEXT: usize = 15_000;
 const MAX_READ_CIPHERTEXT: usize = 16_384;
@@ -70,7 +71,7 @@ impl RecordCipher {
                         .expect("VMess ChaCha20 key is 32 bytes"),
                 ))
             }
-            VmessSecurity::Auto => unreachable!(),
+            VmessSecurity::Auto | VmessSecurity::None | VmessSecurity::Aes128Cfb => unreachable!(),
         }
     }
 
@@ -159,11 +160,21 @@ fn record_nonce(iv: &[u8; 16], counter: u16) -> [u8; 12] {
     nonce
 }
 
-pub(super) struct BodyWriter {
+struct AeadWriter {
     cipher: RecordCipher,
     iv: [u8; 16],
     counter: u16,
     framing: Framing,
+}
+
+enum WriterMode {
+    None,
+    Aes128Cfb(Box<cfb_mode::BufEncryptor<aes::Aes128>>),
+    Aead(Box<AeadWriter>),
+}
+
+pub(super) struct BodyWriter {
+    mode: WriterMode,
 }
 
 impl BodyWriter {
@@ -173,19 +184,32 @@ impl BodyWriter {
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
-        Self {
-            cipher: RecordCipher::new(security, &keys.body_key),
-            iv: keys.body_iv,
-            counter: 0,
-            framing: Framing::new(
-                security,
-                &keys.authenticated_length_key,
-                &keys.authenticated_length_iv,
-                &keys.body_iv,
-                global_padding,
-                authenticated_length,
-            ),
-        }
+        let mode = match security {
+            VmessSecurity::None => WriterMode::None,
+            VmessSecurity::Aes128Cfb => {
+                WriterMode::Aes128Cfb(Box::new(cfb_mode::BufEncryptor::<aes::Aes128>::new(
+                    &keys.body_key.into(),
+                    &keys.body_iv.into(),
+                )))
+            }
+            VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305 => {
+                WriterMode::Aead(Box::new(AeadWriter {
+                    cipher: RecordCipher::new(security, &keys.body_key),
+                    iv: keys.body_iv,
+                    counter: 0,
+                    framing: Framing::new(
+                        security,
+                        &keys.authenticated_length_key,
+                        &keys.authenticated_length_iv,
+                        &keys.body_iv,
+                        global_padding,
+                        authenticated_length,
+                    ),
+                }))
+            }
+            VmessSecurity::Auto => unreachable!(),
+        };
+        Self { mode }
     }
 
     pub(super) async fn write_record<W: AsyncWrite + Unpin>(
@@ -193,38 +217,56 @@ impl BodyWriter {
         writer: &mut W,
         plaintext: &[u8],
     ) -> std::io::Result<()> {
-        let nonce = record_nonce(&self.iv, self.counter);
-        let ciphertext = self.cipher.seal(&nonce, plaintext)?;
-        let padding_length = self.framing.padding_length();
-        let framed_length = ciphertext
-            .len()
-            .checked_add(padding_length)
-            .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+        match &mut self.mode {
+            WriterMode::None => writer.write_all(plaintext).await?,
+            WriterMode::Aes128Cfb(cipher) => {
+                let framed_length = plaintext
+                    .len()
+                    .checked_add(4)
+                    .and_then(|length| u16::try_from(length).ok())
+                    .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+                let mut wire = Vec::with_capacity(2 + usize::from(framed_length));
+                wire.extend_from_slice(&framed_length.to_be_bytes());
+                wire.extend_from_slice(&fnv1a32(plaintext).to_be_bytes());
+                wire.extend_from_slice(plaintext);
+                cipher.encrypt(&mut wire);
+                writer.write_all(&wire).await?;
+            }
+            WriterMode::Aead(aead) => {
+                let nonce = record_nonce(&aead.iv, aead.counter);
+                let ciphertext = aead.cipher.seal(&nonce, plaintext)?;
+                let padding_length = aead.framing.padding_length();
+                let framed_length = ciphertext
+                    .len()
+                    .checked_add(padding_length)
+                    .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
 
-        if let Some(length_cipher) = &self.framing.authenticated_length {
-            let plaintext_length = framed_length
-                .checked_sub(AEAD_OVERHEAD)
-                .and_then(|length| u16::try_from(length).ok())
-                .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
-            writer
-                .write_all(&length_cipher.seal(
-                    &self.framing.authenticated_length_nonce(self.counter),
-                    &plaintext_length.to_be_bytes(),
-                )?)
-                .await?;
-        } else {
-            let length = u16::try_from(framed_length)
-                .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
-            let masked = self.framing.mask_length(length);
-            writer.write_all(&masked.to_be_bytes()).await?;
+                if let Some(length_cipher) = &aead.framing.authenticated_length {
+                    let plaintext_length = framed_length
+                        .checked_sub(AEAD_OVERHEAD)
+                        .and_then(|length| u16::try_from(length).ok())
+                        .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+                    writer
+                        .write_all(&length_cipher.seal(
+                            &aead.framing.authenticated_length_nonce(aead.counter),
+                            &plaintext_length.to_be_bytes(),
+                        )?)
+                        .await?;
+                } else {
+                    let length = u16::try_from(framed_length)
+                        .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
+                    let masked = aead.framing.mask_length(length);
+                    writer.write_all(&masked.to_be_bytes()).await?;
+                }
+                writer.write_all(&ciphertext).await?;
+                if padding_length != 0 {
+                    let mut padding = vec![0_u8; padding_length];
+                    rand::rng().fill(padding.as_mut_slice());
+                    writer.write_all(&padding).await?;
+                }
+                aead.counter = aead.counter.wrapping_add(1);
+            }
         }
-        writer.write_all(&ciphertext).await?;
-        if padding_length != 0 {
-            let mut padding = vec![0_u8; padding_length];
-            rand::rng().fill(padding.as_mut_slice());
-            writer.write_all(&padding).await?;
-        }
-        self.counter = self.counter.wrapping_add(1);
         writer.flush().await
     }
 
@@ -233,11 +275,21 @@ impl BodyWriter {
     }
 }
 
-pub(super) struct BodyReader {
+struct AeadReader {
     cipher: RecordCipher,
     iv: [u8; 16],
     counter: u16,
     framing: Framing,
+}
+
+enum ReaderMode {
+    None,
+    Aes128Cfb(Box<cfb_mode::BufDecryptor<aes::Aes128>>),
+    Aead(Box<AeadReader>),
+}
+
+pub(super) struct BodyReader {
+    mode: ReaderMode,
 }
 
 impl BodyReader {
@@ -247,57 +299,111 @@ impl BodyReader {
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
-        Self {
-            cipher: RecordCipher::new(security, &keys.body_key),
-            iv: keys.body_iv,
-            counter: 0,
-            framing: Framing::new(
-                security,
-                &keys.authenticated_length_key,
-                &keys.authenticated_length_iv,
-                &keys.body_iv,
-                global_padding,
-                authenticated_length,
-            ),
-        }
+        let mode = match security {
+            VmessSecurity::None => ReaderMode::None,
+            VmessSecurity::Aes128Cfb => {
+                ReaderMode::Aes128Cfb(Box::new(cfb_mode::BufDecryptor::<aes::Aes128>::new(
+                    &keys.body_key.into(),
+                    &keys.body_iv.into(),
+                )))
+            }
+            VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305 => {
+                ReaderMode::Aead(Box::new(AeadReader {
+                    cipher: RecordCipher::new(security, &keys.body_key),
+                    iv: keys.body_iv,
+                    counter: 0,
+                    framing: Framing::new(
+                        security,
+                        &keys.authenticated_length_key,
+                        &keys.authenticated_length_iv,
+                        &keys.body_iv,
+                        global_padding,
+                        authenticated_length,
+                    ),
+                }))
+            }
+            VmessSecurity::Auto => unreachable!(),
+        };
+        Self { mode }
     }
 
     pub(super) async fn read_record<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut R,
     ) -> std::io::Result<Vec<u8>> {
-        let nonce = record_nonce(&self.iv, self.counter);
-        let padding_length = self.framing.padding_length();
-        let framed_length = if let Some(length_cipher) = &self.framing.authenticated_length {
-            let mut sealed_length = [0_u8; 2 + AEAD_OVERHEAD];
-            reader.read_exact(&mut sealed_length).await?;
-            let length = length_cipher.open(
-                &self.framing.authenticated_length_nonce(self.counter),
-                &sealed_length,
-            )?;
-            let [high, low] = length.as_slice() else {
-                return Err(std::io::Error::other("invalid VMess authenticated length"));
-            };
-            usize::from(u16::from_be_bytes([*high, *low])) + AEAD_OVERHEAD
-        } else {
-            let mut length = [0_u8; 2];
-            reader.read_exact(&mut length).await?;
-            usize::from(self.framing.mask_length(u16::from_be_bytes(length)))
-        };
-        let ciphertext_length = framed_length
-            .checked_sub(padding_length)
-            .ok_or_else(|| std::io::Error::other("invalid VMess body padding length"))?;
-        if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length) {
-            return Err(std::io::Error::other("invalid VMess body record length"));
+        match &mut self.mode {
+            ReaderMode::None => {
+                let mut plaintext = vec![0_u8; MAX_READ_CIPHERTEXT];
+                let length = reader.read(&mut plaintext).await?;
+                if length == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "VMess raw body ended",
+                    ));
+                }
+                plaintext.truncate(length);
+                Ok(plaintext)
+            }
+            ReaderMode::Aes128Cfb(cipher) => {
+                let mut encrypted_length = [0_u8; 2];
+                reader.read_exact(&mut encrypted_length).await?;
+                cipher.decrypt(&mut encrypted_length);
+                let framed_length = usize::from(u16::from_be_bytes(encrypted_length));
+                if !(4..=MAX_READ_CIPHERTEXT).contains(&framed_length) {
+                    return Err(std::io::Error::other(
+                        "invalid VMess CFB body record length",
+                    ));
+                }
+                let mut framed = vec![0_u8; framed_length];
+                reader.read_exact(&mut framed).await?;
+                cipher.decrypt(&mut framed);
+                let expected = u32::from_be_bytes(
+                    framed[..4]
+                        .try_into()
+                        .expect("VMess CFB record checksum is four bytes"),
+                );
+                let plaintext = framed.split_off(4);
+                if fnv1a32(&plaintext) != expected {
+                    return Err(std::io::Error::other("VMess CFB body checksum failed"));
+                }
+                Ok(plaintext)
+            }
+            ReaderMode::Aead(aead) => {
+                let nonce = record_nonce(&aead.iv, aead.counter);
+                let padding_length = aead.framing.padding_length();
+                let framed_length = if let Some(length_cipher) = &aead.framing.authenticated_length
+                {
+                    let mut sealed_length = [0_u8; 2 + AEAD_OVERHEAD];
+                    reader.read_exact(&mut sealed_length).await?;
+                    let length = length_cipher.open(
+                        &aead.framing.authenticated_length_nonce(aead.counter),
+                        &sealed_length,
+                    )?;
+                    let [high, low] = length.as_slice() else {
+                        return Err(std::io::Error::other("invalid VMess authenticated length"));
+                    };
+                    usize::from(u16::from_be_bytes([*high, *low])) + AEAD_OVERHEAD
+                } else {
+                    let mut length = [0_u8; 2];
+                    reader.read_exact(&mut length).await?;
+                    usize::from(aead.framing.mask_length(u16::from_be_bytes(length)))
+                };
+                let ciphertext_length = framed_length
+                    .checked_sub(padding_length)
+                    .ok_or_else(|| std::io::Error::other("invalid VMess body padding length"))?;
+                if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length) {
+                    return Err(std::io::Error::other("invalid VMess body record length"));
+                }
+                let mut ciphertext = vec![0_u8; ciphertext_length];
+                reader.read_exact(&mut ciphertext).await?;
+                if padding_length != 0 {
+                    let mut padding = vec![0_u8; padding_length];
+                    reader.read_exact(&mut padding).await?;
+                }
+                aead.counter = aead.counter.wrapping_add(1);
+                aead.cipher.open(&nonce, &ciphertext)
+            }
         }
-        let mut ciphertext = vec![0_u8; ciphertext_length];
-        reader.read_exact(&mut ciphertext).await?;
-        if padding_length != 0 {
-            let mut padding = vec![0_u8; padding_length];
-            reader.read_exact(&mut padding).await?;
-        }
-        self.counter = self.counter.wrapping_add(1);
-        self.cipher.open(&nonce, &ciphertext)
     }
 }
 
@@ -372,6 +478,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn none_is_raw_and_cfb_is_checksum_framed_across_records() {
+        let key = [0x71; 16];
+        let iv = [0x82; 16];
+        let keys = DirectionKeys::request(&key, &iv);
+
+        let mut none_writer = BodyWriter::new(VmessSecurity::None, keys, true, true);
+        let mut none_wire = Vec::new();
+        none_writer
+            .write_record(&mut none_wire, b"raw-")
+            .await
+            .unwrap();
+        none_writer
+            .write_record(&mut none_wire, b"stream")
+            .await
+            .unwrap();
+        assert_eq!(none_wire, b"raw-stream");
+
+        let mut cfb_writer = BodyWriter::new(VmessSecurity::Aes128Cfb, keys, true, true);
+        let mut cfb_wire = Vec::new();
+        cfb_writer
+            .write_record(&mut cfb_wire, b"first record")
+            .await
+            .unwrap();
+        cfb_writer
+            .write_record(&mut cfb_wire, b"second record")
+            .await
+            .unwrap();
+        assert!(
+            !cfb_wire
+                .windows(b"first record".len())
+                .any(|window| window == b"first record")
+        );
+        let mut reader = BodyReader::new(VmessSecurity::Aes128Cfb, keys, true, true);
+        let mut cursor = std::io::Cursor::new(cfb_wire);
+        assert_eq!(
+            reader.read_record(&mut cursor).await.unwrap(),
+            b"first record"
+        );
+        assert_eq!(
+            reader.read_record(&mut cursor).await.unwrap(),
+            b"second record"
+        );
     }
 
     #[tokio::test]

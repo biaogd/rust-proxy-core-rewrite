@@ -529,6 +529,8 @@ async fn connect_vmess_proxy(
         .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
     let security = match vmess.security {
         rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
+        rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
+        rewrite_config::VmessSecurity::Aes128Cfb => rewrite_outbound::VmessSecurity::Aes128Cfb,
         rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
         rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
             rewrite_outbound::VmessSecurity::ChaCha20Poly1305

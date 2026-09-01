@@ -227,6 +227,8 @@ pub struct VmessProxyConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmessSecurity {
     Auto,
+    None,
+    Aes128Cfb,
     Aes128Gcm,
     ChaCha20Poly1305,
 }

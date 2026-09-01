@@ -1931,6 +1931,40 @@ UDP/XUDP/packet addressing, TLS, every outer transport/security plugin and mux.
 Those are separate vertical gates and are not implied by explicit AEAD framing
 parity.
 
+### Phase 6D-C accepted scope — remaining AlterID-zero native-TCP security modes
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-C VMess native-TCP security modes** and
+**Linux amd64 — Phase 6D-C VMess native-TCP security modes**. It does not
+advance `OUT-22`, any inbound row, or the legacy-header/nonzero-AlterID gate.
+
+The external path remains mixed HTTP/SOCKS TCP to a native-TCP VMess client and
+the deterministic independent Go authority. This slice completes the oracle's
+AlterID-zero `cipher` vocabulary:
+
+- `none` and its `zero` alias use VMess security value 5 and an unframed raw TCP
+  body after the AEAD request/response headers;
+- `aes-128-cfb` uses security value 1, continuous AES-128-CFB encryption and
+  length-prefixed FNV-1a-protected body chunks;
+- cipher labels remain case-insensitive and controller/config views preserve a
+  normalized label;
+- the oracle accepts `global-padding` and `authenticated-length` on these
+  non-AEAD modes but deliberately does not put those flags on the wire; Rust
+  reproduces that observable behavior instead of applying AEAD framing;
+- domain, IPv4 and IPv6 destinations, small and 128 KiB multi-chunk relay,
+  half-close, malformed security rejection and process survival are covered.
+
+`compat/scripts/phase6d_vmess_security.py` is the Go/Rust differential gate.
+RustCrypto's maintained `cfb-mode` crate owns streaming CFB state; the local
+adapter owns only VMess chunk length, checksum and lifecycle policy. This is a
+protocol-compatibility dependency with MIT OR Apache-2.0 licensing, Rust 1.56
+MSRV and portable `no_std` core support.
+
+Nonzero AlterID/legacy request headers and response-key derivation, UDP/XUDP,
+packet addressing, TLS, WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports and mux
+remain independent later gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

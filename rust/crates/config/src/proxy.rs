@@ -343,12 +343,20 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let security = match proxy.cipher.as_deref().map(str::to_ascii_lowercase) {
         Some(cipher) if cipher == "auto" => VmessSecurity::Auto,
+        Some(cipher) if matches!(cipher.as_str(), "none" | "zero") => VmessSecurity::None,
+        Some(cipher) if cipher == "aes-128-cfb" => VmessSecurity::Aes128Cfb,
         Some(cipher) if cipher == "aes-128-gcm" => VmessSecurity::Aes128Gcm,
         Some(cipher) if cipher == "chacha20-poly1305" => VmessSecurity::ChaCha20Poly1305,
         _ => return Err(ConfigError::UnsupportedProxy(name)),
     };
     let cipher = match security {
         VmessSecurity::Auto => "auto",
+        VmessSecurity::None => proxy
+            .cipher
+            .as_deref()
+            .filter(|cipher| cipher.eq_ignore_ascii_case("zero"))
+            .map_or("none", |_| "zero"),
+        VmessSecurity::Aes128Cfb => "aes-128-cfb",
         VmessSecurity::Aes128Gcm => "aes-128-gcm",
         VmessSecurity::ChaCha20Poly1305 => "chacha20-poly1305",
     };
