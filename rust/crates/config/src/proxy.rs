@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VmessPacketMode, VmessProxyConfig, VmessSecurity,
+    VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -161,6 +161,10 @@ fn parse_remote_proxy(
         || proxy.network.is_some()
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -233,6 +237,10 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.network.is_some()
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -302,31 +310,39 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
 }
 
 fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
-    if proxy.target_rematch_name.is_some()
-        || proxy.target_sub_rule.is_some()
-        || proxy.username.is_some()
-        || proxy.password.is_some()
-        || proxy.tls.unwrap_or(false)
-        || proxy.udp_over_tcp.is_some()
-        || proxy.udp_over_tcp_version.is_some()
-        || proxy.plugin.is_some()
-        || proxy.plugin_opts.is_some()
-        || proxy.sni.is_some()
+    let network = proxy.network.as_deref().unwrap_or("tcp");
+    let tls = proxy.tls.unwrap_or(false);
+    let has_tls_options = proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
         || proxy.name_cert_verify.is_some()
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
-        || proxy.private_key.is_some()
+        || proxy.private_key.is_some();
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
         || proxy.client_fingerprint.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
         || proxy.headers.is_some()
         || proxy.alter_id.unwrap_or_default() < 0
-        || !matches!(proxy.network.as_deref(), None | Some("tcp"))
+        || !matches!(network, "tcp" | "ws")
+        || (!tls && has_tls_options)
+        || (network == "tcp" && proxy.ws_opts.is_some())
+        || (proxy.udp.unwrap_or(false) && (tls || network == "ws"))
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let (security, cipher) = parse_vmess_security(proxy.cipher.as_deref(), &name)?;
     let packet_mode = parse_vmess_packet_mode(&proxy, &name)?;
+    let transport = parse_vmess_transport(network, proxy.ws_opts.as_ref(), &name)?;
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -350,10 +366,10 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         username: None,
         password: None,
         cipher: Some(cipher),
-        tls: false,
-        sni: None,
-        skip_cert_verify: false,
-        name_cert_verify: None,
+        tls,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|name| !name.is_empty()),
         fingerprint: None,
         certificate: None,
         private_key: None,
@@ -367,10 +383,41 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
             alter_id: proxy.alter_id.unwrap_or_default(),
             security,
             packet_mode,
+            transport,
             global_padding: proxy.global_padding.unwrap_or(false),
             authenticated_length: proxy.authenticated_length.unwrap_or(false),
         }),
         headers: BTreeMap::new(),
+    })
+}
+
+fn parse_vmess_transport(
+    network: &str,
+    options: Option<&crate::raw::RawVmessWebSocketOptions>,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    if network == "tcp" {
+        return Ok(VmessTransport::Tcp);
+    }
+    let options = options.cloned().unwrap_or_default();
+    if options.max_early_data.is_some()
+        || options.early_data_header_name.is_some()
+        || options.v2ray_http_upgrade.is_some()
+        || options.v2ray_http_upgrade_fast_open.is_some()
+        || !options.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let path = options
+        .path
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "/".to_owned());
+    if !path.starts_with('/') {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(VmessTransport::WebSocket {
+        path,
+        headers: options.headers.unwrap_or_default(),
     })
 }
 
@@ -792,6 +839,10 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.network.is_some()
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()

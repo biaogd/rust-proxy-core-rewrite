@@ -1500,7 +1500,48 @@ fn parses_phase6d_a_vmess_native_tcp_scope() {
         Some(crate::VmessSecurity::Auto)
     );
     assert_eq!(proxy.vmess.as_ref().map(|vmess| vmess.alter_id), Some(0));
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Tcp)
+    );
     assert!(!proxy.udp);
+}
+
+#[test]
+fn parses_phase6d_f_vmess_tls_and_websocket_transport() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ws-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: ws\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    ws-opts:\n      path: /vmess?token=1\n      headers:\n        Host: front.phase6d.test\n        X-Phase: 6d-f\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-F VMess WSS config");
+    let proxy = &config.proxies[0];
+    assert!(proxy.tls);
+    assert_eq!(proxy.sni.as_deref(), Some("tls.phase6d.test"));
+    assert!(proxy.skip_cert_verify);
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::WebSocket {
+            path: "/vmess?token=1".to_owned(),
+            headers: BTreeMap::from([
+                ("Host".to_owned(), "front.phase6d.test".to_owned()),
+                ("X-Phase".to_owned(), "6d-f".to_owned()),
+            ]),
+        })
+    );
+
+    let native_tls = source
+        .replace("    network: ws\n", "    network: tcp\n")
+        .replace(
+            "    ws-opts:\n      path: /vmess?token=1\n      headers:\n        Host: front.phase6d.test\n        X-Phase: 6d-f\n",
+            "",
+        );
+    let config = Config::from_yaml(&native_tls).expect("Phase 6D-F native TLS config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Tcp)
+    );
 }
 
 #[test]
@@ -1590,16 +1631,21 @@ fn parses_phase6d_c_remaining_native_tcp_security_modes() {
 }
 
 #[test]
-fn phase6d_vmess_rejects_fields_outside_current_native_tcp_scope() {
+fn phase6d_vmess_rejects_fields_outside_phase6d_f_scope() {
     let base = format!(
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );
     for extra in [
         "    alterId: -1\n",
         "    cipher: aes-256-gcm\n",
-        "    network: ws\n",
-        "    tls: true\n",
+        "    network: grpc\n",
         "    packet-encoding: unsupported\n",
+        "    network: ws\n    udp: true\n",
+        "    network: ws\n    ws-opts:\n      max-early-data: 2048\n",
+        "    network: tcp\n    ws-opts:\n      path: /wrong\n",
+        "    name-cert-verify: ignored-without-tls.example\n",
+        "    tls: true\n    fingerprint: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        "    tls: true\n    certificate: client.pem\n    private-key: client-key.pem\n",
         "    uuid: invalid\n",
     ] {
         let source = if extra.starts_with("    uuid:") {

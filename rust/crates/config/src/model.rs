@@ -216,14 +216,24 @@ pub struct ProxyConfig {
     pub headers: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmessProxyConfig {
     pub uuid: [u8; 16],
     pub alter_id: i64,
     pub security: VmessSecurity,
     pub packet_mode: VmessPacketMode,
+    pub transport: VmessTransport,
     pub global_padding: bool,
     pub authenticated_length: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmessTransport {
+    Tcp,
+    WebSocket {
+        path: String,
+        headers: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

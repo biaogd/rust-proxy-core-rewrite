@@ -2040,6 +2040,41 @@ This phase does not claim FQDN payloads in packet-address mode, jumbo datagrams
 above the VMess 15,000-byte body limit, negative AlterID, TLS,
 WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, general TCP mux or VMess inbound.
 
+### Phase 6D-F accepted scope — VMess TLS and WebSocket TCP transports
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, begins VMess reuse
+of `OUT-22`, and only changes the compatibility-matrix rows **Proxies and
+built-in proxy insertion**, outbound **VMess**, **Shared outbound
+transport/security variants**, **Darwin arm64 — Phase 6D-F VMess TLS and
+WebSocket TCP** and **Linux amd64 — Phase 6D-F VMess TLS and WebSocket TCP**.
+It does not expand the existing listener, rule or controller API claims.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- native TCP VMess wrapped directly in standard TLS;
+- plaintext RFC 6455 WebSocket carrying VMess binary records;
+- verified or explicitly insecure WebSocket-over-TLS with `http/1.1` ALPN;
+- `network: tcp|ws`, `tls`, `servername`, `skip-cert-verify`,
+  `name-cert-verify`, inline custom roots, and `ws-opts.path` plus string
+  `ws-opts.headers` configuration;
+- explicit `servername` and WebSocket `Host` TLS-name selection, matching the
+  pinned oracle in both exercised branches;
+- every Phase 6D-A–D VMess security/AlterID body mode above the transport,
+  represented by focused AEAD and legacy cases instead of repeating the full
+  already-proven cross-product.
+
+`compat/scripts/phase6d_vmess_websocket.py` is the Go/Rust differential gate.
+It uses the independent Go `sing-vmess` authority behind standard-library TLS
+and an independently parsed RFC 6455 server boundary. The gate compares
+configuration acceptance, exact WebSocket Host/path and TLS SNI observations,
+domain and large IPv4 relay, half-close outcome, trusted/custom-root,
+skip-verification and untrusted failure lifecycle, and process survival.
+
+This phase deliberately rejects UDP over WebSocket, WebSocket early data and
+raw HTTP-upgrade variants. Custom ALPN, ECH, client-fingerprint emulation,
+ShadowTLS/ReSTLS/JLS/Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP,
+Mekya, general TCP mux and VMess inbound remain later `6D`/`7T` gates.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

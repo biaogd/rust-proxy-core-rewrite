@@ -219,10 +219,12 @@ pub(crate) struct RawProxy {
     pub(crate) packet_addr: Option<bool>,
     pub(crate) xudp: Option<bool>,
     pub(crate) packet_encoding: Option<String>,
+    pub(crate) ws_opts: Option<RawVmessWebSocketOptions>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
     pub(crate) plugin: Option<String>,
     pub(crate) plugin_opts: Option<BTreeMap<String, Value>>,
+    #[serde(alias = "servername")]
     pub(crate) sni: Option<String>,
     pub(crate) skip_cert_verify: Option<bool>,
     pub(crate) name_cert_verify: Option<String>,
@@ -232,6 +234,19 @@ pub(crate) struct RawProxy {
     #[serde(rename = "client-fingerprint")]
     pub(crate) client_fingerprint: Option<String>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessWebSocketOptions {
+    pub(crate) path: Option<String>,
+    pub(crate) headers: Option<BTreeMap<String, String>>,
+    pub(crate) max_early_data: Option<i64>,
+    pub(crate) early_data_header_name: Option<String>,
+    pub(crate) v2ray_http_upgrade: Option<bool>,
+    pub(crate) v2ray_http_upgrade_fast_open: Option<bool>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

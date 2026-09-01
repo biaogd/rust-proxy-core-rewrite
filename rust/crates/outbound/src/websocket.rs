@@ -64,6 +64,25 @@ where
     Ok(WebSocketIo::new(stream))
 }
 
+/// Upgrades an established transport using an explicit WebSocket request
+/// path and header set.
+///
+/// # Errors
+///
+/// Returns an error when a configured header is invalid or the peer rejects
+/// the RFC 6455 handshake.
+pub async fn connect_websocket_with_headers(
+    stream: BoxedOutboundStream,
+    host: &str,
+    port: u16,
+    path: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<BoxedOutboundStream, Error> {
+    let request = websocket_request(host, port, path, headers, None)?;
+    let (stream, _) = tokio_tungstenite::client_async(request, stream).await?;
+    Ok(Box::new(WebSocketIo::new(stream)))
+}
+
 /// Opens the Go-compatible v2ray-plugin WebSocket transport, including custom
 /// headers and the `path?ed=N` lazy early-data convention.
 ///

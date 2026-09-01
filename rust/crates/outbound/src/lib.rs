@@ -39,9 +39,11 @@ pub use tls::HttpProxyTls;
 pub use v2ray_mux::{V2rayMux, V2rayMuxNetwork, V2rayMuxOptions};
 pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
-    associate_vmess_udp_with_options, connect_vmess_with_options,
+    associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,
 };
-pub use websocket::{WebSocketIo, connect_v2ray_websocket, connect_websocket};
+pub use websocket::{
+    WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_headers,
+};
 
 pub trait OutboundStream: AsyncRead + AsyncWrite + Unpin + Send {}
 

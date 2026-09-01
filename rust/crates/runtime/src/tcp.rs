@@ -508,7 +508,16 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Vmess => {
-            connect_vmess_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
+            connect_vmess_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                clock,
+                custom_roots,
+                socket_options,
+            )
+            .await
         }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
@@ -521,6 +530,8 @@ async fn connect_vmess_proxy(
     server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let vmess = proxy
@@ -536,10 +547,66 @@ async fn connect_vmess_proxy(
             rewrite_outbound::VmessSecurity::ChaCha20Poly1305
         }
     };
-    rewrite_outbound::connect_vmess_with_options(
-        server,
+    let remote = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+        .await
+        .map_err(|error| format!("VMess outer TCP connection failed: {error}"))?;
+    let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
+    let websocket = match &vmess.transport {
+        rewrite_config::VmessTransport::Tcp => None,
+        rewrite_config::VmessTransport::WebSocket { path, headers } => {
+            Some((path.as_str(), headers))
+        }
+    };
+    if proxy.tls {
+        let websocket_host = websocket.and_then(|(_, headers)| {
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("host").then_some(value.as_str())
+            })
+        });
+        let server_name = proxy
+            .sni
+            .as_deref()
+            .or(websocket_host)
+            .unwrap_or(&proxy.server);
+        let alpn: &[&[u8]] = if websocket.is_some() {
+            &[b"http/1.1"]
+        } else {
+            &[]
+        };
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: alpn,
+                tls12_only: false,
+                tls13_only: false,
+            },
+            Some(clock),
+        )
+        .await
+        .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
+    }
+    if let Some((path, headers)) = websocket {
+        outer = rewrite_outbound::connect_websocket_with_headers(
+            outer,
+            &proxy.server,
+            proxy.port,
+            path,
+            headers,
+        )
+        .await
+        .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+    }
+    rewrite_outbound::connect_vmess_on_stream(
+        outer,
         destination,
-        allow_ipv6,
         rewrite_outbound::VmessTcpOptions {
             uuid: vmess.uuid,
             alter_id: vmess.alter_id,
@@ -547,7 +614,6 @@ async fn connect_vmess_proxy(
             global_padding: vmess.global_padding,
             authenticated_length: vmess.authenticated_length,
         },
-        socket_options,
     )
     .await
     .map_err(|error| format!("VMess proxy connection failed: {error}"))

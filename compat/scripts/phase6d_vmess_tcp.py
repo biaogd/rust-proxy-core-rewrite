@@ -49,22 +49,36 @@ def start_authority(
     alter_id: int = 0,
     packet_mode: str = "reject",
     log_name: str = "authority",
+    transport: str = "tcp",
+    certificate: pathlib.Path | None = None,
+    private_key: pathlib.Path | None = None,
+    expected_ws_host: str = "",
+    expected_ws_path: str = "",
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
     stderr = (scratch / f"{log_name}-stderr.log").open("wb")
+    command = [
+        str(binary),
+        "-listen",
+        f"127.0.0.1:{port}",
+        "-uuid",
+        UUID,
+        "-alter-id",
+        str(alter_id),
+        "-packet-mode",
+        packet_mode,
+        "-transport",
+        transport,
+        "-expected-ws-host",
+        expected_ws_host,
+        "-expected-ws-path",
+        expected_ws_path,
+    ]
+    if certificate is not None and private_key is not None:
+        command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))
     process = subprocess.Popen(
-        [
-            str(binary),
-            "-listen",
-            f"127.0.0.1:{port}",
-            "-uuid",
-            UUID,
-            "-alter-id",
-            str(alter_id),
-            "-packet-mode",
-            packet_mode,
-        ],
+        command,
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
@@ -417,8 +431,6 @@ def assert_rust_only_rejections(
     rust_binary: pathlib.Path, scratch: pathlib.Path, authority_port: int
 ) -> None:
     for extra in [
-        "    tls: true\n",
-        "    network: ws\n",
         "    alterId: -1\n",
         "    packet-encoding: unsupported\n",
     ]:

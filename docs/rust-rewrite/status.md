@@ -159,12 +159,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-C VMess remaining AlterID-zero security modes | Complete in declared client scope | Case-insensitive `none`, `zero` and AES-128-CFB pass an independent-authority Go/Rust differential with raw/CFB-checksummed bodies, ignored non-AEAD framing flags, domain/IPv4/IPv6, small/128 KiB relay and half-close; nonzero AlterID, UDP/XUDP, TLS/transports/mux and inbound remain open |
 | Phase 6D-D VMess legacy AlterID native TCP | Complete in declared client scope | Positive AlterID counts 1/2/64 and every Phase 6D-A–C security mode pass an independent-authority Go/Rust differential with legacy HMAC-MD5/AES-CFB headers, MD5 response material, CFB header/body continuation, provider selector routing, domain/IPv4/IPv6, small/128 KiB relay, half-close and wrong-UUID lifecycle; negative AlterID, UDP/XUDP, TLS/transports/mux and inbound remain open |
 | Phase 6D-E VMess UDP packet modes | Complete in declared client scope | Ordinary fixed-destination UDP, packet-address IPv4/IPv6 and XUDP multi-destination associations pass one independent-authority Go/Rust differential through mixed/SOCKS5 UDP. The gate covers resolved domains, same-association reuse, legacy AlterID, AEAD framing, controller capabilities and process survival; oversized frames, packet-address FQDN payloads, negative AlterID, TLS/outer transports, general TCP mux and inbound remain open |
+| Phase 6D-F VMess TLS and WebSocket TCP | Complete in declared client scope | Native TLS, plaintext WS and WSS compose the shared Rustls/Tungstenite boundaries with VMess. Independent-authority differential evidence covers exact SNI/Host/path, custom roots, name override, skip verification, untrusted rejection, domain/128 KiB relay, half-close and process survival; advanced TLS, UDP over WS, early/raw upgrade, remaining transports, mux and inbound remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-E; Phase 6C-N corrected gate pending | Phase 1–6D-E Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6D-F; Phase 6C-N corrected gate pending | Phase 1–6D-F Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5424,6 +5425,37 @@ Linux amd64 execution is configured in the default controller/outbound Actions
 shard but remains pending until CI completes. Negative AlterID, UDP/XUDP, packet
 addressing, TLS, outer transports, mux and inbound/server mode remain explicit
 later gates.
+
+## Phase 6D-F VMess TLS/WebSocket TCP evidence
+
+The sixth VMess client slice composes the existing VMess stream protocol with
+the shared Rustls TLS client and Tungstenite WebSocket codec. It accepts native
+TLS, plaintext RFC 6455 WebSocket and WSS TCP with explicit WebSocket path and
+string headers. TLS verification covers inline custom roots, explicit
+certificate-name override and deliberate skip verification; the differential
+observes both explicit-`servername` and WebSocket-`Host` SNI selection.
+
+`compat/scripts/phase6d_vmess_websocket.py` passes on Darwin arm64,
+2026-09-01. The independent Go authority observes the exact TLS SNI and
+WebSocket Host/path before `sing-vmess` decodes the VMess destination. The
+differential covers standard and positive-AlterID headers, AEAD/raw/CFB body
+representatives, domain targets, a 128 KiB relay, half-close, trusted and
+skipped verification, untrusted rejection and process survival. All Phase
+6D-A–E differentials re-pass after the stream refactor.
+
+Local acceptance commands use the external target directory:
+
+```sh
+PHASE6DFVMESS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6d_vmess_websocket.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+Linux amd64 execution is configured in the default controller/outbound Actions
+shard but remains pending until CI completes. Certificate pinning, client
+identity, fingerprint emulation, UDP over WebSocket, early data, raw HTTP
+upgrade, HTTP/2, gRPC, xHTTP/H3, mKCP, Mekya, general mux and VMess inbound are
+not claimed by this phase and are rejected or remain unimplemented.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

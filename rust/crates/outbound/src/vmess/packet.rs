@@ -2,14 +2,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rand::RngExt as _;
 use rewrite_model::{Destination, Host};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::header::VmessCommand;
 use super::header::read_response_header;
 use super::{ConnectedVmess, VmessProxyError, VmessTcpOptions, connect_protocol};
-use crate::DirectTcpOptions;
+use crate::{BoxedOutboundStream, DirectTcpOptions};
 
 const VMESS_MAX_PACKET_FRAME: usize = 15_000;
 const XUDP_STATUS_NEW: u8 = 1;
@@ -28,7 +28,7 @@ pub enum VmessPacketMode {
 }
 
 pub struct VmessUdpAssociation {
-    remote: OwnedWriteHalf,
+    remote: WriteHalf<BoxedOutboundStream>,
     body_writer: super::body::BodyWriter,
     mode: VmessPacketMode,
     fixed_destination: Destination,
@@ -39,7 +39,7 @@ pub struct VmessUdpAssociation {
 }
 
 struct VmessPacketReader {
-    remote: OwnedReadHalf,
+    remote: ReadHalf<BoxedOutboundStream>,
     body_reader: super::body::BodyReader,
     response_key: [u8; 16],
     response_iv: [u8; 16],
@@ -337,7 +337,7 @@ pub async fn associate_vmess_udp_with_options(
         legacy_header,
         response_header_read,
     } = transport;
-    let (remote_read, remote_write) = remote.into_split();
+    let (remote_read, remote_write) = tokio::io::split(remote);
     let mut reader = VmessPacketReader {
         remote: remote_read,
         body_reader,
