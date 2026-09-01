@@ -1571,6 +1571,85 @@ fn parses_phase6d_g_vmess_websocket_variants() {
 }
 
 #[test]
+fn parses_phase6d_h_vmess_http_transports() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: http-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: http\n    http-opts:\n      method: POST\n      path: [/phase6d-h]\n      headers:\n        Host: [front.phase6d.test]\n        X-Phase: [6d-h]\n  - name: h2-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10004\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: h2\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    h2-opts:\n      host: [front-h2.phase6d.test]\n      path: /vmess-h2\n"
+    ))
+    .expect("phase 6D-H VMess HTTP transports should parse");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http {
+            method: "POST".to_owned(),
+            paths: vec!["/phase6d-h".to_owned()],
+            headers: BTreeMap::from([
+                ("Host".to_owned(), vec!["front.phase6d.test".to_owned()]),
+                ("X-Phase".to_owned(), vec!["6d-h".to_owned()]),
+            ]),
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http2 {
+            hosts: vec!["front-h2.phase6d.test".to_owned()],
+            path: "/vmess-h2".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_phase6d_h_vmess_http_options() {
+    for proxy in [
+        "network: http\n    http-opts:\n      method: 'bad method'",
+        "network: http\n    http-opts:\n      path: [relative]",
+        "network: h2\n    h2-opts:\n      path: relative",
+        "network: tcp\n    http-opts:\n      path: [/unexpected]",
+    ] {
+        let yaml = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-http-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    {proxy}\n"
+        );
+        assert!(
+            Config::from_yaml(&yaml).is_err(),
+            "unexpectedly accepted:\n{yaml}"
+        );
+    }
+}
+
+#[test]
+fn phase6d_h_empty_http_lists_use_oracle_defaults() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: empty-http\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: http\n    http-opts:\n      path: []\n      headers:\n        X-Ignored: []\n  - name: empty-h2\n    type: vmess\n    server: 127.0.0.1\n    port: 10004\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: h2\n    h2-opts:\n      host: []\n"
+    );
+    let config = Config::from_yaml(&source).expect("empty lists use oracle defaults");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http {
+            method: "GET".to_owned(),
+            paths: vec!["/".to_owned()],
+            headers: BTreeMap::from([("X-Ignored".to_owned(), Vec::new())]),
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http2 {
+            hosts: vec!["www.example.com".to_owned()],
+            path: "/".to_owned(),
+        })
+    );
+}
+
+#[test]
 fn parses_phase6d_d_positive_legacy_alter_id() {
     for alter_id in [1_i64, 64, i64::MAX] {
         let source = format!(
@@ -1657,7 +1736,7 @@ fn parses_phase6d_c_remaining_native_tcp_security_modes() {
 }
 
 #[test]
-fn phase6d_vmess_rejects_fields_outside_phase6d_g_scope() {
+fn phase6d_vmess_rejects_fields_outside_phase6d_h_scope() {
     let base = format!(
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );

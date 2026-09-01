@@ -271,6 +271,7 @@ jobs:
       PHASE6DEVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6DFVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6DGVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DHVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DTRANSPORT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -402,6 +403,7 @@ jobs:
             compat/scripts/phase6d_vmess_udp.py \
             compat/scripts/phase6d_vmess_websocket.py \
             compat/scripts/phase6d_vmess_websocket_variants.py \
+            compat/scripts/phase6d_vmess_http.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

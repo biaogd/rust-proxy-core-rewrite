@@ -586,7 +586,9 @@ async fn connect_vmess_outer(
         .map_err(|error| format!("VMess outer TCP connection failed: {error}"))?;
     let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
     let websocket = match &vmess.transport {
-        rewrite_config::VmessTransport::Tcp => None,
+        rewrite_config::VmessTransport::Tcp
+        | rewrite_config::VmessTransport::Http { .. }
+        | rewrite_config::VmessTransport::Http2 { .. } => None,
         rewrite_config::VmessTransport::WebSocket {
             path,
             headers,
@@ -614,10 +616,11 @@ async fn connect_vmess_outer(
             .as_deref()
             .or(websocket_host)
             .unwrap_or(&proxy.server);
-        let alpn: &[&[u8]] = if websocket.is_some() {
-            &[b"http/1.1"]
-        } else {
-            &[]
+        let alpn: &[&[u8]] = match &vmess.transport {
+            rewrite_config::VmessTransport::WebSocket { .. }
+            | rewrite_config::VmessTransport::Http { .. } => &[b"http/1.1"],
+            rewrite_config::VmessTransport::Http2 { .. } => &[b"h2"],
+            rewrite_config::VmessTransport::Tcp => &[],
         };
         outer = rewrite_outbound::wrap_client_tls_with_options(
             outer,
@@ -639,33 +642,64 @@ async fn connect_vmess_outer(
         .await
         .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
     }
-    if let Some((path, headers, max_early_data, early_header, http_upgrade, fast_open)) = websocket
-    {
-        if http_upgrade {
-            outer = rewrite_outbound::connect_http_upgrade_with_early_data(
-                outer,
-                &proxy.server,
-                path,
-                headers,
-                fast_open,
-                max_early_data,
-                early_header,
-            )
-            .await
-            .map_err(|error| format!("VMess HTTP Upgrade failed: {error}"))?;
-        } else {
-            outer = rewrite_outbound::connect_websocket_with_early_data(
-                outer,
-                &proxy.server,
-                proxy.port,
-                path,
-                headers,
-                max_early_data,
-                early_header,
-            )
-            .await
-            .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+    wrap_vmess_transport(outer, proxy, vmess).await
+}
+
+async fn wrap_vmess_transport(
+    mut outer: rewrite_outbound::BoxedOutboundStream,
+    proxy: &rewrite_config::ProxyConfig,
+    vmess: &rewrite_config::VmessProxyConfig,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    match &vmess.transport {
+        rewrite_config::VmessTransport::WebSocket {
+            path,
+            headers,
+            max_early_data,
+            early_data_header_name,
+            http_upgrade,
+            http_upgrade_fast_open,
+        } => {
+            if *http_upgrade {
+                outer = rewrite_outbound::connect_http_upgrade_with_early_data(
+                    outer,
+                    &proxy.server,
+                    path,
+                    headers,
+                    *http_upgrade_fast_open,
+                    *max_early_data,
+                    early_data_header_name.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("VMess HTTP Upgrade failed: {error}"))?;
+            } else {
+                outer = rewrite_outbound::connect_websocket_with_early_data(
+                    outer,
+                    &proxy.server,
+                    proxy.port,
+                    path,
+                    headers,
+                    *max_early_data,
+                    early_data_header_name.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+            }
         }
+        rewrite_config::VmessTransport::Http {
+            method,
+            paths,
+            headers,
+        } => {
+            outer =
+                rewrite_outbound::connect_vmess_http(outer, &proxy.server, method, paths, headers);
+        }
+        rewrite_config::VmessTransport::Http2 { hosts, path } => {
+            let index = rand::random_range(0..hosts.len());
+            outer = rewrite_outbound::connect_vmess_h2(outer, &hosts[index], path)
+                .await
+                .map_err(|error| format!("VMess HTTP/2 transport failed: {error}"))?;
+        }
+        rewrite_config::VmessTransport::Tcp => {}
     }
     Ok(outer)
 }

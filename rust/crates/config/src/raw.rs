@@ -220,6 +220,8 @@ pub(crate) struct RawProxy {
     pub(crate) xudp: Option<bool>,
     pub(crate) packet_encoding: Option<String>,
     pub(crate) ws_opts: Option<RawVmessWebSocketOptions>,
+    pub(crate) http_opts: Option<RawVmessHttpOptions>,
+    pub(crate) h2_opts: Option<RawVmessHttp2Options>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
     pub(crate) plugin: Option<String>,
@@ -247,6 +249,25 @@ pub(crate) struct RawVmessWebSocketOptions {
     pub(crate) early_data_header_name: Option<String>,
     pub(crate) v2ray_http_upgrade: Option<bool>,
     pub(crate) v2ray_http_upgrade_fast_open: Option<bool>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessHttpOptions {
+    pub(crate) method: Option<String>,
+    pub(crate) path: Option<Vec<String>>,
+    pub(crate) headers: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessHttp2Options {
+    pub(crate) host: Option<Vec<String>>,
+    pub(crate) path: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

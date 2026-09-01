@@ -161,12 +161,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-E VMess UDP packet modes | Complete in declared client scope | Ordinary fixed-destination UDP, packet-address IPv4/IPv6 and XUDP multi-destination associations pass one independent-authority Go/Rust differential through mixed/SOCKS5 UDP. The gate covers resolved domains, same-association reuse, legacy AlterID, AEAD framing, controller capabilities and process survival; oversized frames, packet-address FQDN payloads, negative AlterID, TLS/outer transports, general TCP mux and inbound remain open |
 | Phase 6D-F VMess TLS and WebSocket TCP | Complete in declared client scope | Native TLS, plaintext WS and WSS compose the shared Rustls/Tungstenite boundaries with VMess. Independent-authority differential evidence covers exact SNI/Host/path, custom roots, name override, skip verification, untrusted rejection, domain/128 KiB relay, half-close and process survival; advanced TLS, UDP over WS, early/raw upgrade, remaining transports, mux and inbound remain open |
 | Phase 6D-G VMess WebSocket variants | Complete in declared client scope | Named-header/path/query early data and unframed ordinary/fast HTTP Upgrade compose the shared transport adapters with VMess over plaintext/TLS. The authority forces fast-open bytes before `101` and verifies exact request placement, large relay, half-close and process survival; UDP over WS, advanced TLS, remaining transports, mux and inbound remain open |
+| Phase 6D-H VMess HTTP transports | Complete in declared client scope | HTTP/HTTPS first-write obfuscation and library-backed h2c/H2 PUT streams pass an independent-authority Go/Rust differential with configured/default Host/path, headers/method, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and the oracle's response-dropping H2 half-close; UDP over HTTP/H2, pooling/multi-stream reuse, advanced TLS, later transports, mux and inbound remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-G; Phase 6C-N corrected gate pending | Phase 1–6D-G Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6D-H; Phase 6C-N corrected gate pending | Phase 1–6D-H Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5487,8 +5488,45 @@ CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path r
 
 Linux amd64 execution is configured in the default controller/outbound Actions
 shard but remains pending until CI completes. Negative early-data sizes fail
-closed. UDP over WebSocket, advanced TLS, HTTP/2, gRPC, xHTTP/H3, mKCP, Mekya,
-general mux and VMess inbound remain later gates.
+closed. HTTP/2 advances independently in Phase 6D-H below. UDP over WebSocket,
+advanced TLS, gRPC, xHTTP/H3, mKCP, Mekya, general mux and VMess inbound remain
+later gates.
+
+## Phase 6D-H VMess HTTP-transport evidence
+
+The eighth VMess client slice accepts the pinned oracle's `network: http` and
+`network: h2` TCP transports. HTTP/1 wraps exactly the first VMess write in a
+request body, then exposes the connection as an unframed stream; method, one
+random configured path/header value, Host override, default User-Agent and
+response-header removal are transport-owned. Paths use URL escaping equivalent
+to Go's `url.URL.Path`. HTTP/2 uses the maintained `h2` codec for one PUT
+request/response stream over h2c or TLS with `Accept-Encoding: identity`, the
+oracle's `https` pseudo-scheme and `h2` TLS ALPN.
+
+`compat/scripts/phase6d_vmess_http.py` passes on Darwin arm64, 2026-09-01.
+The independent Go authority parses HTTP/1 request boundaries and HTTP/2
+pseudo-header semantics before handing the byte stream to `sing-vmess`. Six
+routes cover configured and oracle-default Host/path/method values,
+HTTP/HTTPS/h2c/H2, custom headers, zero/positive AlterID, none/CFB/AEAD bodies,
+128 KiB relay and process survival. VMess request random padding length is the
+only normalized observation. The gate also pins Go's nonstandard H2 close
+behavior: application half-close drops the pending response, and Rust returns
+the same failure rather than silently preserving it.
+
+Local acceptance commands use the external target directory:
+
+```sh
+PHASE6DHVMESS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6d_vmess_http.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+Linux amd64 execution is configured in the default controller/outbound Actions
+shard but remains pending until CI completes. UDP over HTTP/H2, connection
+pooling or multi-stream reuse, certificate pinning/client identity, custom
+ALPN, ECH/fingerprint emulation and alternate TLS camouflage remain outside
+this slice. gRPC/Gun, xHTTP/H3, mKCP, Mekya, general mux and VMess inbound are
+later gates.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

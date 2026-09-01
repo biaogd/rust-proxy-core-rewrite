@@ -2109,6 +2109,45 @@ Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, general TCP mux or
 VMess inbound. Invalid header names/values and negative early-data sizes fail
 closed; broader Go acceptance/error wording remains outside this gate.
 
+### Phase 6D-H accepted scope — VMess HTTP/1 obfuscation and HTTP/2 streams
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-H VMess HTTP transports** and **Linux amd64 — Phase 6D-H
+VMess HTTP transports**. Existing listener, rule, controller and UDP claims do
+not expand.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- `network: http`, where the first VMess write is the exact body of one
+  HTTP/1.1 request and later writes are unframed; method, path candidates,
+  multi-value headers and Host override follow the pinned oracle;
+- plaintext HTTP and HTTPS outer connections, with HTTP/1.1 ALPN constrained
+  for TLS;
+- `network: h2`, where one HTTP/2 PUT request carries the VMess byte stream in
+  its request DATA frames and the response DATA frames form the receive stream;
+- configured/default HTTP/2 Host and path, the oracle's `https` pseudo-scheme
+  over plaintext h2c or TLS, SNI/certificate policy, and negotiated `h2` ALPN
+  for TLS;
+- representative zero and positive AlterID/security modes above both transports,
+  plus large relay, the oracle's response-dropping half-close behavior and
+  transport-failure process survival.
+
+`compat/scripts/phase6d_vmess_http.py` is the Go/Rust differential gate. The
+independent Go authority records HTTP/1 request line, Host, selected path,
+headers and exact first-body boundary, or HTTP/2 method/authority/path,
+ALPN and bidirectional stream lifecycle before invoking `sing-vmess`. Fixed
+single-element path/Host lists make the wire comparison deterministic; list
+selection is separately contract-tested as membership rather than order.
+
+This phase does not claim VMess UDP over HTTP/H2, HTTP connection pooling or
+multi-stream reuse, certificate pinning/client identity, custom ALPN, ECH,
+fingerprint emulation, ShadowTLS/ReSTLS/JLS/Reality/TLSMirror, gRPC/Gun,
+xHTTP/H3, mKCP, Mekya, general TCP mux or VMess inbound. Invalid methods,
+paths, header names/values and unsupported transport combinations fail closed;
+broader Go acceptance/error wording remains outside this gate.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

@@ -22,6 +22,7 @@ import (
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
+	"golang.org/x/net/http2"
 )
 
 type echoHandler struct {
@@ -45,6 +46,31 @@ type bufferedReadWriter struct {
 type readerConn struct {
 	net.Conn
 	reader io.Reader
+}
+
+type h2StreamConn struct {
+	net.Conn
+	reader io.Reader
+	writer http.ResponseWriter
+}
+
+func (conn *h2StreamConn) Read(payload []byte) (int, error) {
+	return conn.reader.Read(payload)
+}
+
+func (conn *h2StreamConn) Write(payload []byte) (int, error) {
+	written, err := conn.writer.Write(payload)
+	if flusher, ok := conn.writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return written, err
+}
+
+func (conn *h2StreamConn) Close() error {
+	if closer, ok := conn.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (conn *readerConn) Read(payload []byte) (int, error) {
@@ -252,6 +278,87 @@ func upgradeTransport(
 	return wrapped, request.Host, observedPath, earlyLocation, reportedEarlyLength, nil
 }
 
+func httpTransport(
+	connection net.Conn,
+	handler *echoHandler,
+	expectedMethod string,
+	expectedHost string,
+	expectedPath string,
+	expectedHeader string,
+) (net.Conn, error) {
+	reader := bufio.NewReader(connection)
+	request, err := http.ReadRequest(reader)
+	if err != nil {
+		return nil, err
+	}
+	body, err := io.ReadAll(request.Body)
+	_ = request.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if expectedMethod != "" && request.Method != expectedMethod {
+		return nil, fmt.Errorf("unexpected HTTP method %q", request.Method)
+	}
+	if expectedHost != "" && request.Host != expectedHost {
+		return nil, fmt.Errorf("unexpected HTTP host %q", request.Host)
+	}
+	if expectedPath != "" && request.URL.RequestURI() != expectedPath {
+		return nil, fmt.Errorf("unexpected HTTP path %q", request.URL.RequestURI())
+	}
+	headerValue := ""
+	if expectedHeader != "" {
+		name, value, found := strings.Cut(expectedHeader, "=")
+		if !found || request.Header.Get(name) != value {
+			return nil, fmt.Errorf("unexpected HTTP header %q", expectedHeader)
+		}
+		headerValue = name + "=" + request.Header.Get(name)
+	}
+	if _, err := fmt.Fprint(connection, "HTTP/1.1 200 OK\r\n\r\n"); err != nil {
+		return nil, err
+	}
+	handler.observe(
+		"HTTP %s %s %s %s BODY %d\n",
+		request.Method,
+		request.Host,
+		request.URL.RequestURI(),
+		headerValue,
+		len(body),
+	)
+	buffered := &readerConn{Conn: connection, reader: reader}
+	prefixed := &prefixedConn{Conn: buffered}
+	prefixed.prefix.Reset(body)
+	return prefixed, nil
+}
+
+func serveH2(
+	connection net.Conn,
+	service *vmess.Service[string],
+	handler *echoHandler,
+	expectedHost string,
+	expectedPath string,
+) error {
+	server := &http2.Server{}
+	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut ||
+			(expectedHost != "" && request.Host != expectedHost) ||
+			(expectedPath != "" && request.URL.RequestURI() != expectedPath) ||
+			request.Header.Get("Accept-Encoding") != "identity" {
+			http.Error(writer, "invalid h2 VMess request", http.StatusBadRequest)
+			return
+		}
+		handler.observe("H2 PUT %s %s identity\n", request.Host, request.URL.RequestURI())
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		stream := &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
+		if err := service.NewConnection(request.Context(), stream, M.Metadata{}); err != nil {
+			handler.NewError(request.Context(), err)
+		}
+	})})
+	return nil
+}
+
 func serve(
 	raw net.Conn,
 	service *vmess.Service[string],
@@ -263,6 +370,10 @@ func serve(
 	earlyDataHeader string,
 	earlyDataPathPrefix string,
 	preResponseBytes int,
+	expectedHTTPMethod string,
+	expectedHTTPHost string,
+	expectedHTTPPath string,
+	expectedHTTPHeader string,
 ) {
 	defer raw.Close()
 	var connection net.Conn = raw
@@ -272,7 +383,31 @@ func serve(
 			return
 		}
 		handler.observe("TLS %s\n", tlsConnection.ConnectionState().ServerName)
+		if transport == "h2" {
+			handler.observe("ALPN %s\n", tlsConnection.ConnectionState().NegotiatedProtocol)
+		}
 		connection = tlsConnection
+	}
+	if transport == "h2" {
+		if err := serveH2(connection, service, handler, expectedHTTPHost, expectedHTTPPath); err != nil {
+			handler.NewError(context.Background(), err)
+		}
+		return
+	}
+	if transport == "http" {
+		wrapped, err := httpTransport(
+			connection,
+			handler,
+			expectedHTTPMethod,
+			expectedHTTPHost,
+			expectedHTTPPath,
+			expectedHTTPHeader,
+		)
+		if err != nil {
+			handler.NewError(context.Background(), err)
+			return
+		}
+		connection = wrapped
 	}
 	if transport == "ws" || transport == "upgrade" {
 		wrapped, host, path, earlyLocation, earlyLength, err := upgradeTransport(
@@ -313,7 +448,7 @@ func main() {
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
 	packetMode := flag.String("packet-mode", "reject", "reject, standard, packetaddr, or xudp")
-	transport := flag.String("transport", "tcp", "tcp, ws, or upgrade")
+	transport := flag.String("transport", "tcp", "tcp, ws, upgrade, http, or h2")
 	tlsCertificate := flag.String("tls-cert", "", "optional TLS certificate")
 	tlsPrivateKey := flag.String("tls-key", "", "optional TLS private key")
 	expectedWSHost := flag.String("expected-ws-host", "", "expected WebSocket Host")
@@ -321,6 +456,10 @@ func main() {
 	earlyDataHeader := flag.String("early-data-header", "", "request header carrying base64url early data")
 	earlyDataPathPrefix := flag.String("early-data-path-prefix", "", "URL path prefix before base64url early data")
 	preResponseBytes := flag.Int("pre-response-bytes", 0, "bytes required before the Upgrade response")
+	expectedHTTPMethod := flag.String("expected-http-method", "", "expected HTTP transport method")
+	expectedHTTPHost := flag.String("expected-http-host", "", "expected HTTP transport authority")
+	expectedHTTPPath := flag.String("expected-http-path", "", "expected HTTP transport request target")
+	expectedHTTPHeader := flag.String("expected-http-header", "", "expected HTTP/1 header as name=value")
 	flag.Parse()
 	if *uuid == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -333,7 +472,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
 		os.Exit(2)
 	}
-	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" {
+	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" && *transport != "http" && *transport != "h2" {
 		fmt.Fprintln(os.Stderr, "invalid -transport")
 		os.Exit(2)
 	}
@@ -352,9 +491,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		nextProtocol := "http/1.1"
+		if *transport == "h2" {
+			nextProtocol = "h2"
+		}
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{keyPair},
-			NextProtos:   []string{"http/1.1"},
+			NextProtos:   []string{nextProtocol},
 			MinVersion:   tls.VersionTLS12,
 		}
 	}
@@ -398,6 +541,10 @@ func main() {
 			*earlyDataHeader,
 			*earlyDataPathPrefix,
 			*preResponseBytes,
+			*expectedHTTPMethod,
+			*expectedHTTPHost,
+			*expectedHTTPPath,
+			*expectedHTTPHeader,
 		)
 	}
 }

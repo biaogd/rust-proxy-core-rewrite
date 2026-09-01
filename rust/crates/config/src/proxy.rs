@@ -165,6 +165,8 @@ fn parse_remote_proxy(
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
         || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -241,6 +243,8 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
         || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -332,17 +336,25 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.private_key.is_some()
         || proxy.headers.is_some()
         || proxy.alter_id.unwrap_or_default() < 0
-        || !matches!(network, "tcp" | "ws")
+        || !matches!(network, "tcp" | "ws" | "http" | "h2")
         || (!tls && has_tls_options)
-        || (network == "tcp" && proxy.ws_opts.is_some())
-        || (proxy.udp.unwrap_or(false) && (tls || network == "ws"))
+        || (network != "ws" && proxy.ws_opts.is_some())
+        || (network != "http" && proxy.http_opts.is_some())
+        || (network != "h2" && proxy.h2_opts.is_some())
+        || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let (security, cipher) = parse_vmess_security(proxy.cipher.as_deref(), &name)?;
     let packet_mode = parse_vmess_packet_mode(&proxy, &name)?;
-    let transport = parse_vmess_transport(network, proxy.ws_opts.as_ref(), &name)?;
+    let transport = parse_vmess_transport(
+        network,
+        proxy.ws_opts.as_ref(),
+        proxy.http_opts.as_ref(),
+        proxy.h2_opts.as_ref(),
+        &name,
+    )?;
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -393,13 +405,70 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
 
 fn parse_vmess_transport(
     network: &str,
-    options: Option<&crate::raw::RawVmessWebSocketOptions>,
+    websocket: Option<&crate::raw::RawVmessWebSocketOptions>,
+    http: Option<&crate::raw::RawVmessHttpOptions>,
+    http2: Option<&crate::raw::RawVmessHttp2Options>,
     name: &str,
 ) -> Result<VmessTransport, ConfigError> {
     if network == "tcp" {
         return Ok(VmessTransport::Tcp);
     }
-    let options = options.cloned().unwrap_or_default();
+    if network == "http" {
+        let options = http.cloned().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let method = options
+            .method
+            .filter(|method| !method.is_empty())
+            .unwrap_or_else(|| "GET".to_owned());
+        if http::Method::from_bytes(method.as_bytes()).is_err() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut paths = options.path.unwrap_or_default();
+        if paths.is_empty() {
+            paths.push("/".to_owned());
+        }
+        if paths.iter().any(|path| !path.starts_with('/')) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let headers = options.headers.unwrap_or_default();
+        if headers.iter().any(|(header, values)| {
+            http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                || values
+                    .iter()
+                    .any(|value| http::header::HeaderValue::from_str(value).is_err())
+        }) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VmessTransport::Http {
+            method,
+            paths,
+            headers,
+        });
+    }
+    if network == "h2" {
+        let options = http2.cloned().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut hosts = options.host.unwrap_or_default();
+        if hosts.is_empty() {
+            hosts.push("www.example.com".to_owned());
+        }
+        let path = options
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_owned());
+        if hosts.iter().any(|host| {
+            host.is_empty() || http::uri::Authority::from_maybe_shared(host.clone()).is_err()
+        }) || !path.starts_with('/')
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VmessTransport::Http2 { hosts, path });
+    }
+    let options = websocket.cloned().unwrap_or_default();
     if !options.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -853,6 +922,8 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
         || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()
