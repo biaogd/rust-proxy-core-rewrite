@@ -483,6 +483,7 @@ pub(super) async fn measure_http_delay(
                         config.ipv6,
                         rewrite_outbound::VmessTcpOptions {
                             uuid: vmess.uuid,
+                            alter_id: vmess.alter_id,
                             security,
                             global_padding: vmess.global_padding,
                             authenticated_length: vmess.authenticated_length,

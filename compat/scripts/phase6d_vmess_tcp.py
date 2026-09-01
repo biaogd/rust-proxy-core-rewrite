@@ -43,13 +43,21 @@ def build_authority(output: pathlib.Path) -> pathlib.Path:
 
 
 def start_authority(
-    binary: pathlib.Path, scratch: pathlib.Path, port: int
+    binary: pathlib.Path, scratch: pathlib.Path, port: int, alter_id: int = 0
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / "authority-stdout.log"
     stdout = stdout_path.open("wb")
     stderr = (scratch / "authority-stderr.log").open("wb")
     process = subprocess.Popen(
-        [str(binary), "-listen", f"127.0.0.1:{port}", "-uuid", UUID],
+        [
+            str(binary),
+            "-listen",
+            f"127.0.0.1:{port}",
+            "-uuid",
+            UUID,
+            "-alter-id",
+            str(alter_id),
+        ],
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
@@ -75,6 +83,7 @@ def vmess_record(
     cipher: str = "auto",
     global_padding: bool = False,
     authenticated_length: bool = False,
+    alter_id: int = 0,
 ) -> str:
     framing = ""
     if global_padding:
@@ -86,7 +95,7 @@ def vmess_record(
     server: 127.0.0.1
     port: {authority_port}
     uuid: {uuid}
-    alterId: 0
+    alterId: {alter_id}
     cipher: {cipher}
     network: tcp
 {framing}{extra}"""

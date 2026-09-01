@@ -1965,6 +1965,43 @@ Nonzero AlterID/legacy request headers and response-key derivation, UDP/XUDP,
 packet addressing, TLS, WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports and mux
 remain independent later gates.
 
+### Phase 6D-D accepted scope — legacy AlterID native-TCP client
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-D VMess legacy AlterID native TCP** and
+**Linux amd64 — Phase 6D-D VMess legacy AlterID native TCP**. It does not
+advance `OUT-22`, any inbound row, UDP/XUDP, packet addressing, mux or an outer
+transport/security layer.
+
+The external path remains mixed HTTP/SOCKS TCP to the native-TCP VMess client
+and the independent Go VMess authority. The accepted configuration and wire
+scope is:
+
+- positive signed `alterId` values select the oracle's legacy-header path; the
+  numeric count is retained in configuration, while the client wire behavior
+  uses the first UUID-derived AlterID exactly as `sing-vmess` 0.2.5 does;
+- the request starts with HMAC-MD5(AlterID, Unix timestamp), followed by the
+  ordinary request plaintext encrypted with AES-128-CFB under the command key
+  and the four-times timestamp MD5 IV;
+- the response header uses MD5-derived body key/IV and AES-128-CFB; for
+  `aes-128-cfb`, that response cipher stream continues into the first body
+  frame instead of being restarted;
+- all Phase 6D-A–C security labels and framing combinations remain available,
+  with domain, IPv4 and IPv6 targets, small/128 KiB relay and half-close;
+- zero `alterId` continues to use the AEAD header path and existing Phase
+  6D-A–C gates remain mandatory regressions.
+
+`compat/scripts/phase6d_vmess_alterid.py` is the Go/Rust differential gate. It
+runs representative positive counts against an authority provisioned with the
+same derived AlterID set and covers every supported body security mode. The
+standard HMAC/MD5/AES-CFB primitives remain library-owned; local code owns only
+VMess key derivation, header layout and the response cipher-continuation rule.
+
+Negative `alterId`, UDP/XUDP, packet addressing, TLS,
+WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, mux and VMess inbound/server
+behavior remain outside this slice.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

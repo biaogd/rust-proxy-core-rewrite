@@ -56,6 +56,7 @@ func (h *echoHandler) NewError(_ context.Context, err error) {
 func main() {
 	listen := flag.String("listen", "127.0.0.1:0", "TCP listen address")
 	uuid := flag.String("uuid", "", "accepted VMess UUID")
+	alterID := flag.Int("alter-id", 0, "accepted VMess AlterID count")
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
 	flag.Parse()
@@ -66,7 +67,7 @@ func main() {
 
 	handler := &echoHandler{expectedHost: *expectedHost, expectedPort: *expectedPort}
 	service := vmess.NewService[string](handler, vmess.ServiceWithDisableHeaderProtection())
-	if err := service.UpdateUsers([]string{"phase6d"}, []string{*uuid}, []int{0}); err != nil {
+	if err := service.UpdateUsers([]string{"phase6d"}, []string{*uuid}, []int{*alterID}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

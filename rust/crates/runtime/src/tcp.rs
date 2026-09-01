@@ -542,6 +542,7 @@ async fn connect_vmess_proxy(
         allow_ipv6,
         rewrite_outbound::VmessTcpOptions {
             uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
             security,
             global_padding: vmess.global_padding,
             authenticated_length: vmess.authenticated_length,

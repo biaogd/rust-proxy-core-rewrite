@@ -405,16 +405,54 @@ impl BodyReader {
             }
         }
     }
+
+    pub(super) async fn read_legacy_response_header<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+        response_key: &[u8; 16],
+        response_iv: &[u8; 16],
+        expected_verification: u8,
+    ) -> std::io::Result<()> {
+        let mut header = [0_u8; 4];
+        reader.read_exact(&mut header).await?;
+        match &mut self.mode {
+            ReaderMode::Aes128Cfb(cipher) => cipher.decrypt(&mut header),
+            ReaderMode::None | ReaderMode::Aead(_) => {
+                let mut cipher = cfb_mode::BufDecryptor::<aes::Aes128>::new(
+                    response_key.into(),
+                    response_iv.into(),
+                );
+                cipher.decrypt(&mut header);
+            }
+        }
+        if header[0] != expected_verification {
+            return Err(std::io::Error::other(
+                "VMess response verification byte mismatch",
+            ));
+        }
+        if header[2] != 0 {
+            return Err(std::io::Error::other(
+                "VMess dynamic port response is unsupported",
+            ));
+        }
+        if header[3] != 0 {
+            let mut command = vec![0_u8; usize::from(header[3])];
+            reader.read_exact(&mut command).await?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn pair(
     security: VmessSecurity,
     request_key: &[u8; 16],
     request_iv: &[u8; 16],
+    legacy_header: bool,
     global_padding: bool,
     authenticated_length: bool,
 ) -> (BodyReader, BodyWriter, [u8; 16], [u8; 16]) {
-    let (response_key, response_iv) = response_body_material(request_key, request_iv);
+    let (response_key, response_iv) =
+        response_body_material(request_key, request_iv, legacy_header);
     (
         BodyReader::new(
             security,
@@ -526,6 +564,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_response_header_continues_cfb_body_stream() {
+        let response_key = [0x27; 16];
+        let response_iv = [0x38; 16];
+        let verification = 0x49;
+        let payload = b"legacy CFB continuation";
+        let framed_length = u16::try_from(payload.len() + 4).unwrap();
+        let mut wire = vec![verification, 1, 0, 0];
+        wire.extend_from_slice(&framed_length.to_be_bytes());
+        wire.extend_from_slice(&fnv1a32(payload).to_be_bytes());
+        wire.extend_from_slice(payload);
+        let mut cipher = cfb_mode::BufEncryptor::<aes::Aes128>::new(
+            (&response_key).into(),
+            (&response_iv).into(),
+        );
+        cipher.encrypt(&mut wire);
+
+        let keys = DirectionKeys::response(&[0_u8; 16], &[0_u8; 16], &response_key, &response_iv);
+        let mut reader = BodyReader::new(VmessSecurity::Aes128Cfb, keys, false, false);
+        let mut cursor = std::io::Cursor::new(wire);
+        reader
+            .read_legacy_response_header(&mut cursor, &response_key, &response_iv, verification)
+            .await
+            .unwrap();
+        assert_eq!(reader.read_record(&mut cursor).await.unwrap(), payload);
+    }
+
+    #[tokio::test]
     async fn authenticated_length_rejects_tampering() {
         let key = [0x51; 16];
         let iv = [0x62; 16];
@@ -572,7 +637,7 @@ mod tests {
     async fn response_direction_uses_sha256_material() {
         let request_key = [0x31; 16];
         let request_iv = [0x42; 16];
-        let (response_key, response_iv) = response_body_material(&request_key, &request_iv);
+        let (response_key, response_iv) = response_body_material(&request_key, &request_iv, false);
         let mut server_writer = BodyWriter::new(
             VmessSecurity::Aes128Gcm,
             DirectionKeys::response(&request_key, &request_iv, &response_key, &response_iv),
@@ -588,6 +653,7 @@ mod tests {
             VmessSecurity::Aes128Gcm,
             &request_key,
             &request_iv,
+            false,
             true,
             true,
         );

@@ -320,7 +320,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.private_key.is_some()
         || proxy.client_fingerprint.is_some()
         || proxy.headers.is_some()
-        || proxy.alter_id.unwrap_or_default() != 0
+        || proxy.alter_id.unwrap_or_default() < 0
         || !matches!(proxy.network.as_deref(), None | Some("tcp"))
         || !proxy.extra.is_empty()
     {
@@ -382,6 +382,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         shadowsocks_plugin: None,
         vmess: Some(VmessProxyConfig {
             uuid,
+            alter_id: proxy.alter_id.unwrap_or_default(),
             security,
             global_padding: proxy.global_padding.unwrap_or(false),
             authenticated_length: proxy.authenticated_length.unwrap_or(false),

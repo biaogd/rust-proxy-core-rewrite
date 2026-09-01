@@ -1,4 +1,4 @@
-//! Minimal `VMess` AEAD client for the Phase 6D-A/B native-TCP boundary.
+//! Native-TCP `VMess` client for the Phase 6D-A–D boundary.
 //!
 //! No maintained, narrowly scoped embeddable client crate was available at
 //! this phase boundary. Protocol framing is kept here while `RustCrypto` owns
@@ -57,6 +57,7 @@ fn fnv1a32(input: &[u8]) -> u32 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmessTcpOptions {
     pub uuid: [u8; 16],
+    pub alter_id: i64,
     pub security: VmessSecurity,
     pub global_padding: bool,
     pub authenticated_length: bool,
@@ -72,10 +73,10 @@ pub enum VmessProxyError {
     Protocol(String),
 }
 
-/// Connects a `VMess` AEAD client over native TCP.
+/// Connects a `VMess` client over native TCP.
 ///
-/// Phase 6D-A/B intentionally accepts only `AlterID` zero and the declared AEAD
-/// security/framing options; configuration validation owns those restrictions.
+/// Phase 6D-D accepts zero/positive `AlterID` and the Phase 6D-A–C security
+/// modes. Configuration validation owns the remaining transport restrictions.
 ///
 /// # Errors
 ///
@@ -92,7 +93,9 @@ pub async fn connect_vmess_with_options(
     let mut remote = connect_with_options(server, allow_ipv6, socket_options).await?;
     let security = options.security.resolved();
     let sealed = seal_request_header(
+        &options.uuid,
         &command_key(&options.uuid),
+        options.alter_id,
         security,
         destination,
         options.global_padding,
@@ -104,6 +107,7 @@ pub async fn connect_vmess_with_options(
         security,
         &sealed.request_key,
         &sealed.request_iv,
+        options.alter_id > 0,
         options.global_padding,
         options.authenticated_length,
     );
@@ -119,6 +123,7 @@ pub async fn connect_vmess_with_options(
             response_key,
             response_iv,
             sealed.response_verification,
+            options.alter_id > 0,
             task_cancellation,
         )
         .await;
@@ -183,6 +188,7 @@ async fn run_relay(
     response_key: [u8; 16],
     response_iv: [u8; 16],
     response_verification: u8,
+    legacy_header: bool,
     cancellation: CancellationToken,
 ) {
     let (mut remote_read, mut remote_write) = remote.into_split();
@@ -191,14 +197,26 @@ async fn run_relay(
     let write_cancellation = cancellation.clone();
 
     let read_loop = async move {
-        tokio::select! {
-            () = read_cancellation.cancelled() => return Ok(()),
-            result = read_response_header(
-                &mut remote_read,
-                &response_key,
-                &response_iv,
-                response_verification,
-            ) => result?,
+        if legacy_header {
+            tokio::select! {
+                () = read_cancellation.cancelled() => return Ok(()),
+                result = body_reader.read_legacy_response_header(
+                    &mut remote_read,
+                    &response_key,
+                    &response_iv,
+                    response_verification,
+                ) => result?,
+            }
+        } else {
+            tokio::select! {
+                () = read_cancellation.cancelled() => return Ok(()),
+                result = read_response_header(
+                    &mut remote_read,
+                    &response_key,
+                    &response_iv,
+                    response_verification,
+                ) => result?,
+            }
         }
         loop {
             let plaintext = tokio::select! {

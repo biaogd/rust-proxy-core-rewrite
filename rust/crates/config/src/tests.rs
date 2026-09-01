@@ -1499,7 +1499,22 @@ fn parses_phase6d_a_vmess_native_tcp_scope() {
         proxy.vmess.as_ref().map(|vmess| vmess.security),
         Some(crate::VmessSecurity::Auto)
     );
+    assert_eq!(proxy.vmess.as_ref().map(|vmess| vmess.alter_id), Some(0));
     assert!(!proxy.udp);
+}
+
+#[test]
+fn parses_phase6d_d_positive_legacy_alter_id() {
+    for alter_id in [1_i64, 64, i64::MAX] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: legacy-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: {alter_id}\n    cipher: aes-128-gcm\n    network: tcp\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-D VMess config");
+        assert_eq!(
+            config.proxies[0].vmess.as_ref().map(|vmess| vmess.alter_id),
+            Some(alter_id)
+        );
+    }
 }
 
 #[test]
@@ -1549,7 +1564,7 @@ fn phase6d_vmess_rejects_fields_outside_current_native_tcp_scope() {
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );
     for extra in [
-        "    alterId: 1\n",
+        "    alterId: -1\n",
         "    cipher: aes-256-gcm\n",
         "    network: ws\n",
         "    tls: true\n",

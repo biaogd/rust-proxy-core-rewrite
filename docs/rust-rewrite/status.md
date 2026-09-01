@@ -157,12 +157,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |
 | Phase 6D-C VMess remaining AlterID-zero security modes | Complete in declared client scope | Case-insensitive `none`, `zero` and AES-128-CFB pass an independent-authority Go/Rust differential with raw/CFB-checksummed bodies, ignored non-AEAD framing flags, domain/IPv4/IPv6, small/128 KiB relay and half-close; nonzero AlterID, UDP/XUDP, TLS/transports/mux and inbound remain open |
+| Phase 6D-D VMess legacy AlterID native TCP | Complete in declared client scope | Positive AlterID counts 1/2/64 and every Phase 6D-A–C security mode pass an independent-authority Go/Rust differential with legacy HMAC-MD5/AES-CFB headers, MD5 response material, CFB header/body continuation, provider selector routing, domain/IPv4/IPv6, small/128 KiB relay, half-close and wrong-UUID lifecycle; negative AlterID, UDP/XUDP, TLS/transports/mux and inbound remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-C; Phase 6C-N corrected gate pending | Phase 1–6D-C Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6D-D; Phase 6C-N corrected gate pending | Phase 1–6D-D Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5386,9 +5387,42 @@ CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/phase6d-c cargo test --manif
 ```
 
 Linux amd64 execution is configured in the default controller/outbound Actions
-shard but remains pending until CI completes. Nonzero AlterID and its legacy
-request/response-header derivation, UDP/XUDP, packet addressing, TLS, all outer
-transports, mux and inbound/server mode remain explicit later gates.
+shard but remains pending until CI completes. This Phase 6D-C evidence does not
+claim legacy AlterID; Phase 6D-D below advances that independent gate. UDP/XUDP,
+packet addressing, TLS, all outer transports, mux and inbound/server mode remain
+explicit later gates.
+
+## Phase 6D-D VMess legacy-AlterID native-TCP evidence
+
+The fourth VMess client slice accepts positive signed `alterId` values and
+reproduces the oracle's legacy-header path. Rust derives the first AlterID from
+the UUID, authenticates the current Unix timestamp with HMAC-MD5, and encrypts
+the ordinary request header with AES-128-CFB under the command key and
+four-times-timestamp MD5 IV. The response uses MD5-derived key/IV rather than
+the AlterID-zero SHA-256 material. For AES-128-CFB bodies, the response-header
+decryptor deliberately continues into the first body frame; a focused unit test
+pins that stateful boundary.
+
+`compat/scripts/phase6d_vmess_alterid.py` passes on Darwin arm64, 2026-09-01.
+It compares Go and Rust through an independent `sing-vmess` authority configured
+with 64 AlterIDs. Client records use counts 1, 2 and 64 across `auto`,
+AES-128-GCM, ChaCha20-Poly1305, `none` and AES-128-CFB. The gate covers every
+mode's small and 128 KiB half-close relay, domain/IPv4/IPv6 destinations,
+positive AlterID propagation through a file-provider selector, wrong-UUID
+rejection and process survival. Phase 6D-A/B/C differentials also pass unchanged.
+
+Local acceptance commands use the external target directory:
+
+```sh
+PHASE6DDVMESS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6d-d python3 compat/scripts/phase6d_vmess_alterid.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/phase6d-d cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/phase6d-d cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+Linux amd64 execution is configured in the default controller/outbound Actions
+shard but remains pending until CI completes. Negative AlterID, UDP/XUDP, packet
+addressing, TLS, outer transports, mux and inbound/server mode remain explicit
+later gates.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while
