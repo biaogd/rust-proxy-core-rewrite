@@ -140,6 +140,7 @@ pub(super) enum UdpSessionMode {
     Socks5(String),
     Shadowsocks(String),
     ShadowsocksUot(String),
+    Vmess(String),
 }
 
 #[derive(Default)]
@@ -253,6 +254,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
             Some(UdpSessionMode::ShadowsocksUot(target.to_owned()))
         }
         ProxyKind::Shadowsocks if proxy.udp => Some(UdpSessionMode::Shadowsocks(target.to_owned())),
+        ProxyKind::Vmess if proxy.udp => Some(UdpSessionMode::Vmess(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -349,6 +351,12 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::ShadowsocksUot(proxy) => {
             run_shadowsocks_uot_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Vmess(proxy) => {
+            run_vmess_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
@@ -755,6 +763,139 @@ pub(super) async fn run_shadowsocks_uot_session(
                 "error",
                 format!("Shadowsocks UoT association failed: {error}"),
             );
+            return;
+        }
+    };
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination =
+                match resolve_udp_target(&request.metadata, request.fake_host.as_deref(), &config)
+                    .await
+                {
+                    Ok(address) => Destination {
+                        host: Host::Ip(address.ip()),
+                        port: address.port(),
+                    },
+                    Err(_) => break,
+                };
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_vmess_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let Some(vmess) = proxy.vmess.as_ref() else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let Ok(initial_address) =
+        resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
+    else {
+        return;
+    };
+    let initial_destination = Destination {
+        host: Host::Ip(initial_address.ip()),
+        port: initial_address.port(),
+    };
+    let security = match vmess.security {
+        rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
+        rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
+        rewrite_config::VmessSecurity::Aes128Cfb => rewrite_outbound::VmessSecurity::Aes128Cfb,
+        rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
+        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+        }
+    };
+    let packet_mode = match vmess.packet_mode {
+        rewrite_config::VmessPacketMode::Standard => rewrite_outbound::VmessPacketMode::Standard,
+        rewrite_config::VmessPacketMode::PacketAddr => {
+            rewrite_outbound::VmessPacketMode::PacketAddr
+        }
+        rewrite_config::VmessPacketMode::Xudp => rewrite_outbound::VmessPacketMode::Xudp,
+    };
+    let mut association = match rewrite_outbound::associate_vmess_udp_with_options(
+        &server,
+        &initial_destination,
+        config.ipv6,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
+            security,
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
+        packet_mode,
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log("error", format!("VMess UDP association failed: {error}"));
             return;
         }
     };

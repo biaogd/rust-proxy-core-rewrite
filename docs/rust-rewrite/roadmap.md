@@ -2002,6 +2002,44 @@ Negative `alterId`, UDP/XUDP, packet addressing, TLS,
 WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, mux and VMess inbound/server
 behavior remain outside this slice.
 
+### Phase 6D-E accepted scope — VMess UDP packet modes over native TCP
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-E VMess UDP packet modes** and
+**Linux amd64 — Phase 6D-E VMess UDP packet modes**. Existing SOCKS5 UDP
+listener/NAT/rule behavior is reused and is not re-claimed as a new inbound
+implementation. `OUT-22`, TLS/outer transports, TCP mux and VMess inbound remain
+outside this phase.
+
+The accepted path is YAML `udp: true` through mixed/SOCKS5 UDP, rules and one
+native-TCP VMess association to the independent Go authority:
+
+- ordinary VMess UDP uses command 2 and one fixed resolved IP destination per
+  association; writes to another destination fail closed as in the Go adapter;
+- `packet-addr: true` and `packet-encoding: packetaddr|packet` target
+  `sp.packet-addr.v2fly.arpa:443` and prefix every body datagram with its IPv4
+  or IPv6 address and port;
+- `xudp: true` and `packet-encoding: xudp` use VMess command 3 to
+  `v1.mux.cool:666`, encode new/keep UDP frames and allow multiple destinations
+  on one client association; XUDP takes precedence when both packet switches
+  are set, matching the oracle;
+- all Phase 6D-A–D body security and AlterID header modes remain usable;
+  focused differential cases cover AEAD/legacy headers, AEAD, raw and CFB body
+  modes rather than multiplying every already-proven cross-product;
+- deterministic tests cover IPv4/IPv6, domain-to-IP resolution, association
+  reuse, multi-destination packet modes, controller `udp`/`uot`/`xudp` shape,
+  bounded datagrams, malformed packet-mode rejection and process survival.
+
+`compat/scripts/phase6d_vmess_udp.py` is the Go/Rust differential gate. The Go
+authority uses `sing-vmess` server, packet-address and XUDP implementations as
+an independent decoder/encoder. Rust owns VMess packet-mode framing while the
+existing RustCrypto-backed body layer retains encryption and authentication.
+
+This phase does not claim FQDN payloads in packet-address mode, jumbo datagrams
+above the VMess 15,000-byte body limit, negative AlterID, TLS,
+WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, general TCP mux or VMess inbound.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

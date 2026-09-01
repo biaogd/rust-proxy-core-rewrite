@@ -18,10 +18,26 @@ const VMESS_MAGIC: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 const VMESS_ALTER_ID_MAGIC: &[u8] = b"16167dc8-16b6-4e6d-b8bb-65dd68113a81";
 const VMESS_ALTER_ID_COLLISION_MAGIC: &[u8] = b"533eff8a-4113-4b10-b5ce-0f5d76b98cd2";
 const OPTION_CHUNK_STREAM_AND_MASKING: u8 = 0x01 | 0x04;
-const COMMAND_TCP: u8 = 0x01;
 const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x02;
 const ADDRESS_IPV6: u8 = 0x03;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum VmessCommand {
+    Tcp,
+    Udp,
+    Mux,
+}
+
+impl VmessCommand {
+    const fn wire_value(self) -> u8 {
+        match self {
+            Self::Tcp => 1,
+            Self::Udp => 2,
+            Self::Mux => 3,
+        }
+    }
+}
 
 impl VmessSecurity {
     const fn wire_value(self) -> u8 {
@@ -46,8 +62,18 @@ pub(super) struct SealedHeader {
 struct RequestPlaintextOptions {
     response_verification: u8,
     security: VmessSecurity,
+    command: VmessCommand,
     global_padding: bool,
     authenticated_length: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SealRequestOptions {
+    pub alter_id: i64,
+    pub security: VmessSecurity,
+    pub command: VmessCommand,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
 }
 
 pub(super) fn command_key(uuid: &[u8; 16]) -> [u8; 16] {
@@ -60,11 +86,8 @@ pub(super) fn command_key(uuid: &[u8; 16]) -> [u8; 16] {
 pub(super) fn seal_request_header(
     uuid: &[u8; 16],
     command_key: &[u8; 16],
-    alter_id: i64,
-    security: VmessSecurity,
     destination: &Destination,
-    global_padding: bool,
-    authenticated_length: bool,
+    options: SealRequestOptions,
 ) -> Result<SealedHeader, VmessProxyError> {
     let mut random = rand::rng();
     let now = SystemTime::now()
@@ -84,14 +107,15 @@ pub(super) fn seal_request_header(
         destination,
         RequestPlaintextOptions {
             response_verification,
-            security,
-            global_padding,
-            authenticated_length,
+            security: options.security,
+            command: options.command,
+            global_padding: options.global_padding,
+            authenticated_length: options.authenticated_length,
         },
         &mut random,
     )?;
 
-    if alter_id > 0 {
+    if options.alter_id > 0 {
         return seal_legacy_request_header(
             uuid,
             command_key,
@@ -245,6 +269,7 @@ fn build_request_plaintext(
     header.extend_from_slice(request_key);
     header.push(options.response_verification);
     let request_options = match options.security {
+        VmessSecurity::None if options.command == VmessCommand::Udp => 0x01,
         VmessSecurity::None => 0,
         VmessSecurity::Aes128Cfb => 0x01,
         VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305 => {
@@ -262,9 +287,11 @@ fn build_request_plaintext(
     header.push(request_options);
     header.push((padding_length << 4) | options.security.wire_value());
     header.push(0x00);
-    header.push(COMMAND_TCP);
-    header.extend_from_slice(&destination.port.to_be_bytes());
-    encode_address(&mut header, &destination.host)?;
+    header.push(options.command.wire_value());
+    if options.command != VmessCommand::Mux {
+        header.extend_from_slice(&destination.port.to_be_bytes());
+        encode_address(&mut header, &destination.host)?;
+    }
     if padding_length != 0 {
         let mut padding = [0_u8; 15];
         random.fill(&mut padding[..usize::from(padding_length)]);
@@ -427,11 +454,14 @@ mod tests {
         let sealed = seal_request_header(
             &uuid,
             &key,
-            0,
-            VmessSecurity::Aes128Gcm,
             &destination,
-            false,
-            false,
+            SealRequestOptions {
+                alter_id: 0,
+                security: VmessSecurity::Aes128Gcm,
+                command: VmessCommand::Tcp,
+                global_padding: false,
+                authenticated_length: false,
+            },
         )
         .unwrap();
         let plaintext = open_request_header(&key, &sealed.wire);
@@ -441,7 +471,7 @@ mod tests {
         assert_eq!(plaintext[33], sealed.response_verification);
         assert_eq!(plaintext[34], OPTION_CHUNK_STREAM_AND_MASKING);
         assert_eq!(plaintext[35] & 0x0f, 3);
-        assert_eq!(plaintext[37], COMMAND_TCP);
+        assert_eq!(plaintext[37], VmessCommand::Tcp.wire_value());
         assert_eq!(&plaintext[38..40], &443_u16.to_be_bytes());
         assert_eq!(plaintext[40], ADDRESS_DOMAIN);
         assert_eq!(plaintext[41], 15);
@@ -465,12 +495,69 @@ mod tests {
             (VmessSecurity::None, 0, 5),
             (VmessSecurity::Aes128Cfb, 1, 1),
         ] {
-            let sealed =
-                seal_request_header(&uuid, &key, 0, security, &destination, true, true).unwrap();
+            let sealed = seal_request_header(
+                &uuid,
+                &key,
+                &destination,
+                SealRequestOptions {
+                    alter_id: 0,
+                    security,
+                    command: VmessCommand::Tcp,
+                    global_padding: true,
+                    authenticated_length: true,
+                },
+            )
+            .unwrap();
             let plaintext = open_request_header(&key, &sealed.wire);
             assert_eq!(plaintext[34], expected_option);
             assert_eq!(plaintext[35] & 0x0f, expected_security);
         }
+    }
+
+    #[test]
+    fn udp_and_mux_commands_use_oracle_header_shapes() {
+        let destination = Destination {
+            host: Host::Ip("192.0.2.45".parse().unwrap()),
+            port: 5353,
+        };
+        let mut random = rand::rng();
+        let udp = build_request_plaintext(
+            &[0x11; 16],
+            &[0x22; 16],
+            &destination,
+            RequestPlaintextOptions {
+                response_verification: 0x33,
+                security: VmessSecurity::None,
+                command: VmessCommand::Udp,
+                global_padding: false,
+                authenticated_length: false,
+            },
+            &mut random,
+        )
+        .unwrap();
+        assert_eq!(udp[34], 1);
+        assert_eq!(udp[37], VmessCommand::Udp.wire_value());
+        assert_eq!(&udp[38..40], &5353_u16.to_be_bytes());
+        assert_eq!(udp[40], ADDRESS_IPV4);
+        assert_eq!(&udp[41..45], &[192, 0, 2, 45]);
+
+        let mux = build_request_plaintext(
+            &[0x44; 16],
+            &[0x55; 16],
+            &destination,
+            RequestPlaintextOptions {
+                response_verification: 0x66,
+                security: VmessSecurity::Aes128Gcm,
+                command: VmessCommand::Mux,
+                global_padding: false,
+                authenticated_length: false,
+            },
+            &mut random,
+        )
+        .unwrap();
+        let padding_length = usize::from(mux[35] >> 4);
+        assert_eq!(mux[37], VmessCommand::Mux.wire_value());
+        assert_eq!(mux.len(), 38 + padding_length + 4);
     }
 
     #[test]
@@ -484,11 +571,14 @@ mod tests {
         let sealed = seal_request_header(
             &uuid,
             &key,
-            64,
-            VmessSecurity::Aes128Gcm,
             &destination,
-            false,
-            false,
+            SealRequestOptions {
+                alter_id: 64,
+                security: VmessSecurity::Aes128Gcm,
+                command: VmessCommand::Tcp,
+                global_padding: false,
+                authenticated_length: false,
+            },
         )
         .unwrap();
         let now = SystemTime::now()
@@ -517,7 +607,7 @@ mod tests {
         assert_eq!(&plaintext[17..33], &sealed.request_key);
         assert_eq!(plaintext[33], sealed.response_verification);
         assert_eq!(plaintext[35] & 0x0f, 3);
-        assert_eq!(plaintext[37], COMMAND_TCP);
+        assert_eq!(plaintext[37], VmessCommand::Tcp.wire_value());
         assert_eq!(&plaintext[38..40], &9443_u16.to_be_bytes());
         assert_eq!(plaintext[40], ADDRESS_DOMAIN);
     }

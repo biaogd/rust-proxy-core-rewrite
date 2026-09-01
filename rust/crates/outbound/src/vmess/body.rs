@@ -17,6 +17,15 @@ const MAX_READ_CIPHERTEXT: usize = 16_384;
 const AEAD_OVERHEAD: usize = 16;
 
 #[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // Independent VMess wire flags, not binary state.
+pub(super) struct BodyOptions {
+    pub legacy_header: bool,
+    pub chunked_none: bool,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
+}
+
+#[derive(Clone, Copy)]
 struct DirectionKeys {
     body_key: [u8; 16],
     body_iv: [u8; 16],
@@ -168,7 +177,7 @@ struct AeadWriter {
 }
 
 enum WriterMode {
-    None,
+    None { chunked: bool },
     Aes128Cfb(Box<cfb_mode::BufEncryptor<aes::Aes128>>),
     Aead(Box<AeadWriter>),
 }
@@ -178,14 +187,27 @@ pub(super) struct BodyWriter {
 }
 
 impl BodyWriter {
+    #[cfg(test)]
     fn new(
         security: VmessSecurity,
         keys: DirectionKeys,
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
+        Self::new_with_none_chunking(security, keys, global_padding, authenticated_length, false)
+    }
+
+    fn new_with_none_chunking(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+        chunked_none: bool,
+    ) -> Self {
         let mode = match security {
-            VmessSecurity::None => WriterMode::None,
+            VmessSecurity::None => WriterMode::None {
+                chunked: chunked_none,
+            },
             VmessSecurity::Aes128Cfb => {
                 WriterMode::Aes128Cfb(Box::new(cfb_mode::BufEncryptor::<aes::Aes128>::new(
                     &keys.body_key.into(),
@@ -218,7 +240,14 @@ impl BodyWriter {
         plaintext: &[u8],
     ) -> std::io::Result<()> {
         match &mut self.mode {
-            WriterMode::None => writer.write_all(plaintext).await?,
+            WriterMode::None { chunked } => {
+                if *chunked {
+                    let length = u16::try_from(plaintext.len())
+                        .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
+                    writer.write_all(&length.to_be_bytes()).await?;
+                }
+                writer.write_all(plaintext).await?;
+            }
             WriterMode::Aes128Cfb(cipher) => {
                 let framed_length = plaintext
                     .len()
@@ -283,7 +312,7 @@ struct AeadReader {
 }
 
 enum ReaderMode {
-    None,
+    None { chunked: bool },
     Aes128Cfb(Box<cfb_mode::BufDecryptor<aes::Aes128>>),
     Aead(Box<AeadReader>),
 }
@@ -293,14 +322,27 @@ pub(super) struct BodyReader {
 }
 
 impl BodyReader {
+    #[cfg(test)]
     fn new(
         security: VmessSecurity,
         keys: DirectionKeys,
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
+        Self::new_with_none_chunking(security, keys, global_padding, authenticated_length, false)
+    }
+
+    fn new_with_none_chunking(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+        chunked_none: bool,
+    ) -> Self {
         let mode = match security {
-            VmessSecurity::None => ReaderMode::None,
+            VmessSecurity::None => ReaderMode::None {
+                chunked: chunked_none,
+            },
             VmessSecurity::Aes128Cfb => {
                 ReaderMode::Aes128Cfb(Box::new(cfb_mode::BufDecryptor::<aes::Aes128>::new(
                     &keys.body_key.into(),
@@ -332,17 +374,29 @@ impl BodyReader {
         reader: &mut R,
     ) -> std::io::Result<Vec<u8>> {
         match &mut self.mode {
-            ReaderMode::None => {
-                let mut plaintext = vec![0_u8; MAX_READ_CIPHERTEXT];
-                let length = reader.read(&mut plaintext).await?;
-                if length == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "VMess raw body ended",
-                    ));
+            ReaderMode::None { chunked } => {
+                if *chunked {
+                    let length = usize::from(reader.read_u16().await?);
+                    if !(1..=MAX_READ_CIPHERTEXT).contains(&length) {
+                        return Err(std::io::Error::other(
+                            "invalid VMess plain body record length",
+                        ));
+                    }
+                    let mut plaintext = vec![0_u8; length];
+                    reader.read_exact(&mut plaintext).await?;
+                    Ok(plaintext)
+                } else {
+                    let mut plaintext = vec![0_u8; MAX_READ_CIPHERTEXT];
+                    let length = reader.read(&mut plaintext).await?;
+                    if length == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "VMess raw body ended",
+                        ));
+                    }
+                    plaintext.truncate(length);
+                    Ok(plaintext)
                 }
-                plaintext.truncate(length);
-                Ok(plaintext)
             }
             ReaderMode::Aes128Cfb(cipher) => {
                 let mut encrypted_length = [0_u8; 2];
@@ -417,7 +471,7 @@ impl BodyReader {
         reader.read_exact(&mut header).await?;
         match &mut self.mode {
             ReaderMode::Aes128Cfb(cipher) => cipher.decrypt(&mut header),
-            ReaderMode::None | ReaderMode::Aead(_) => {
+            ReaderMode::None { .. } | ReaderMode::Aead(_) => {
                 let mut cipher = cfb_mode::BufDecryptor::<aes::Aes128>::new(
                     response_key.into(),
                     response_iv.into(),
@@ -447,24 +501,24 @@ pub(super) fn pair(
     security: VmessSecurity,
     request_key: &[u8; 16],
     request_iv: &[u8; 16],
-    legacy_header: bool,
-    global_padding: bool,
-    authenticated_length: bool,
+    options: BodyOptions,
 ) -> (BodyReader, BodyWriter, [u8; 16], [u8; 16]) {
     let (response_key, response_iv) =
-        response_body_material(request_key, request_iv, legacy_header);
+        response_body_material(request_key, request_iv, options.legacy_header);
     (
-        BodyReader::new(
+        BodyReader::new_with_none_chunking(
             security,
             DirectionKeys::response(request_key, request_iv, &response_key, &response_iv),
-            global_padding,
-            authenticated_length,
+            options.global_padding,
+            options.authenticated_length,
+            options.chunked_none,
         ),
-        BodyWriter::new(
+        BodyWriter::new_with_none_chunking(
             security,
             DirectionKeys::request(request_key, request_iv),
-            global_padding,
-            authenticated_length,
+            options.global_padding,
+            options.authenticated_length,
+            options.chunked_none,
         ),
         response_key,
         response_iv,
@@ -564,6 +618,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn none_udp_chunk_stream_preserves_datagram_boundaries() {
+        let keys = DirectionKeys::request(&[0x91; 16], &[0xa2; 16]);
+        let mut writer =
+            BodyWriter::new_with_none_chunking(VmessSecurity::None, keys, false, false, true);
+        let mut wire = Vec::new();
+        writer.write_record(&mut wire, b"first").await.unwrap();
+        writer.write_record(&mut wire, b"second").await.unwrap();
+        assert_eq!(&wire[..2], &5_u16.to_be_bytes());
+
+        let mut reader =
+            BodyReader::new_with_none_chunking(VmessSecurity::None, keys, false, false, true);
+        let mut cursor = std::io::Cursor::new(wire);
+        assert_eq!(reader.read_record(&mut cursor).await.unwrap(), b"first");
+        assert_eq!(reader.read_record(&mut cursor).await.unwrap(), b"second");
+    }
+
+    #[tokio::test]
     async fn legacy_response_header_continues_cfb_body_stream() {
         let response_key = [0x27; 16];
         let response_iv = [0x38; 16];
@@ -653,9 +724,12 @@ mod tests {
             VmessSecurity::Aes128Gcm,
             &request_key,
             &request_iv,
-            false,
-            true,
-            true,
+            BodyOptions {
+                legacy_header: false,
+                chunked_none: false,
+                global_padding: true,
+                authenticated_length: true,
+            },
         );
         assert_eq!(
             client_reader

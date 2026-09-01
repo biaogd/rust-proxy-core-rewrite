@@ -221,8 +221,16 @@ pub struct VmessProxyConfig {
     pub uuid: [u8; 16],
     pub alter_id: i64,
     pub security: VmessSecurity,
+    pub packet_mode: VmessPacketMode,
     pub global_padding: bool,
     pub authenticated_length: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmessPacketMode {
+    Standard,
+    PacketAddr,
+    Xudp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

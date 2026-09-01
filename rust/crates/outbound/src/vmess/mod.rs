@@ -1,4 +1,4 @@
-//! Native-TCP `VMess` client for the Phase 6D-A–D boundary.
+//! Native-TCP `VMess` client for the Phase 6D-A–E boundary.
 //!
 //! No maintained, narrowly scoped embeddable client crate was available at
 //! this phase boundary. Protocol framing is kept here while `RustCrypto` owns
@@ -8,6 +8,7 @@
 mod body;
 mod header;
 mod kdf;
+mod packet;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -18,8 +19,12 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
 use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
-use body::{BodyReader, BodyWriter};
-use header::{command_key, read_response_header, seal_request_header};
+use body::{BodyOptions, BodyReader, BodyWriter};
+use header::{
+    SealRequestOptions, VmessCommand, command_key, read_response_header, seal_request_header,
+};
+
+pub use packet::{VmessPacketMode, VmessUdpAssociation, associate_vmess_udp_with_options};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmessSecurity {
@@ -90,27 +95,26 @@ pub async fn connect_vmess_with_options(
     options: VmessTcpOptions,
     socket_options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, VmessProxyError> {
-    let mut remote = connect_with_options(server, allow_ipv6, socket_options).await?;
-    let security = options.security.resolved();
-    let sealed = seal_request_header(
-        &options.uuid,
-        &command_key(&options.uuid),
-        options.alter_id,
-        security,
+    let connected = connect_protocol(
+        server,
         destination,
-        options.global_padding,
-        options.authenticated_length,
-    )?;
-    remote.write_all(&sealed.wire).await?;
-
-    let (body_reader, body_writer, response_key, response_iv) = body::pair(
-        security,
-        &sealed.request_key,
-        &sealed.request_iv,
-        options.alter_id > 0,
-        options.global_padding,
-        options.authenticated_length,
-    );
+        allow_ipv6,
+        options,
+        socket_options,
+        VmessCommand::Tcp,
+        false,
+    )
+    .await?;
+    let ConnectedVmess {
+        remote,
+        body_reader,
+        body_writer,
+        response_key,
+        response_iv,
+        response_verification,
+        legacy_header,
+        ..
+    } = connected;
     let cancellation = CancellationToken::new();
     let (application, relay) = tokio::io::duplex(64 * 1024);
     let task_cancellation = cancellation.clone();
@@ -122,8 +126,8 @@ pub async fn connect_vmess_with_options(
             body_writer,
             response_key,
             response_iv,
-            sealed.response_verification,
-            options.alter_id > 0,
+            response_verification,
+            legacy_header,
             task_cancellation,
         )
         .await;
@@ -132,6 +136,66 @@ pub async fn connect_vmess_with_options(
         inner: application,
         cancellation,
     }))
+}
+
+struct ConnectedVmess {
+    remote: tokio::net::TcpStream,
+    body_reader: BodyReader,
+    body_writer: BodyWriter,
+    response_key: [u8; 16],
+    response_iv: [u8; 16],
+    response_verification: u8,
+    legacy_header: bool,
+    response_header_read: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_protocol(
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    options: VmessTcpOptions,
+    socket_options: DirectTcpOptions<'_>,
+    command: VmessCommand,
+    chunked_none: bool,
+) -> Result<ConnectedVmess, VmessProxyError> {
+    let mut remote = connect_with_options(server, allow_ipv6, socket_options).await?;
+    let security = options.security.resolved();
+    let sealed = seal_request_header(
+        &options.uuid,
+        &command_key(&options.uuid),
+        destination,
+        SealRequestOptions {
+            alter_id: options.alter_id,
+            security,
+            command,
+            global_padding: options.global_padding,
+            authenticated_length: options.authenticated_length,
+        },
+    )?;
+    remote.write_all(&sealed.wire).await?;
+
+    let (body_reader, body_writer, response_key, response_iv) = body::pair(
+        security,
+        &sealed.request_key,
+        &sealed.request_iv,
+        BodyOptions {
+            legacy_header: options.alter_id > 0,
+            chunked_none,
+            global_padding: options.global_padding,
+            authenticated_length: options.authenticated_length,
+        },
+    );
+    Ok(ConnectedVmess {
+        remote,
+        body_reader,
+        body_writer,
+        response_key,
+        response_iv,
+        response_verification: sealed.response_verification,
+        legacy_header: options.alter_id > 0,
+        response_header_read: false,
+    })
 }
 
 struct VmessRelayStream {

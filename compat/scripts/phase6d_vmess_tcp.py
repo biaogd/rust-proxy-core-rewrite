@@ -43,11 +43,16 @@ def build_authority(output: pathlib.Path) -> pathlib.Path:
 
 
 def start_authority(
-    binary: pathlib.Path, scratch: pathlib.Path, port: int, alter_id: int = 0
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    port: int,
+    alter_id: int = 0,
+    packet_mode: str = "reject",
+    log_name: str = "authority",
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
-    stdout_path = scratch / "authority-stdout.log"
+    stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
-    stderr = (scratch / "authority-stderr.log").open("wb")
+    stderr = (scratch / f"{log_name}-stderr.log").open("wb")
     process = subprocess.Popen(
         [
             str(binary),
@@ -57,6 +62,8 @@ def start_authority(
             UUID,
             "-alter-id",
             str(alter_id),
+            "-packet-mode",
+            packet_mode,
         ],
         cwd=scratch,
         stdout=stdout,
@@ -410,11 +417,10 @@ def assert_rust_only_rejections(
     rust_binary: pathlib.Path, scratch: pathlib.Path, authority_port: int
 ) -> None:
     for extra in [
-        "    alterId: 1\n",
-        "    udp: true\n",
         "    tls: true\n",
         "    network: ws\n",
-        "    packet-addr: true\n",
+        "    alterId: -1\n",
+        "    packet-encoding: unsupported\n",
     ]:
         accepted = config_validation(
             rust_binary,

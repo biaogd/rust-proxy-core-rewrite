@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	vmess "github.com/metacubex/sing-vmess"
+	"github.com/metacubex/sing-vmess/packetaddr"
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
@@ -18,6 +19,7 @@ import (
 type echoHandler struct {
 	expectedHost string
 	expectedPort uint
+	packetMode   string
 	output       sync.Mutex
 }
 
@@ -43,8 +45,36 @@ func (h *echoHandler) NewConnection(_ context.Context, conn net.Conn, metadata M
 	return err
 }
 
-func (h *echoHandler) NewPacketConnection(context.Context, N.PacketConn, M.Metadata) error {
-	return E.New("UDP is outside Phase 6D-A")
+func (h *echoHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, _ M.Metadata) error {
+	if h.packetMode == "reject" {
+		return E.New("UDP is outside the selected authority mode")
+	}
+	defer conn.Close()
+	packets, ok := conn.(net.PacketConn)
+	if !ok {
+		return E.New("VMess packet connection lacks net.PacketConn")
+	}
+	if h.packetMode == "packetaddr" {
+		packets = packetaddr.NewConn(packets, M.Socksaddr{})
+	}
+	buffer := make([]byte, 65_535)
+	for {
+		length, address, err := packets.ReadFrom(buffer)
+		if err != nil {
+			return err
+		}
+		destination := M.SocksaddrFromNet(address)
+		host := destination.Fqdn
+		if host == "" && destination.Addr.IsValid() {
+			host = destination.Addr.String()
+		}
+		h.output.Lock()
+		fmt.Printf("PACKET %s %s:%d %d\n", h.packetMode, host, destination.Port, length)
+		h.output.Unlock()
+		if _, err := packets.WriteTo(buffer[:length], address); err != nil {
+			return err
+		}
+	}
 }
 
 func (h *echoHandler) NewError(_ context.Context, err error) {
@@ -59,13 +89,24 @@ func main() {
 	alterID := flag.Int("alter-id", 0, "accepted VMess AlterID count")
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
+	packetMode := flag.String("packet-mode", "reject", "reject, standard, packetaddr, or xudp")
 	flag.Parse()
 	if *uuid == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
 		os.Exit(2)
 	}
 
-	handler := &echoHandler{expectedHost: *expectedHost, expectedPort: *expectedPort}
+	switch *packetMode {
+	case "reject", "standard", "packetaddr", "xudp":
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
+		os.Exit(2)
+	}
+	handler := &echoHandler{
+		expectedHost: *expectedHost,
+		expectedPort: *expectedPort,
+		packetMode:   *packetMode,
+	}
 	service := vmess.NewService[string](handler, vmess.ServiceWithDisableHeaderProtection())
 	if err := service.UpdateUsers([]string{"phase6d"}, []string{*uuid}, []int{*alterID}); err != nil {
 		fmt.Fprintln(os.Stderr, err)

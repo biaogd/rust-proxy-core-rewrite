@@ -1518,6 +1518,37 @@ fn parses_phase6d_d_positive_legacy_alter_id() {
 }
 
 #[test]
+fn parses_phase6d_e_vmess_udp_packet_modes_and_precedence() {
+    for (fields, expected) in [
+        ("", crate::VmessPacketMode::Standard),
+        (
+            "    packet-addr: true\n",
+            crate::VmessPacketMode::PacketAddr,
+        ),
+        (
+            "    packet-encoding: packet\n",
+            crate::VmessPacketMode::PacketAddr,
+        ),
+        ("    packet-encoding: xudp\n", crate::VmessPacketMode::Xudp),
+        (
+            "    packet-addr: true\n    xudp: true\n",
+            crate::VmessPacketMode::Xudp,
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: udp-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: aes-128-gcm\n    network: tcp\n    udp: true\n{fields}"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-E VMess UDP config");
+        let proxy = &config.proxies[0];
+        assert!(proxy.udp);
+        assert_eq!(
+            proxy.vmess.as_ref().map(|vmess| vmess.packet_mode),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn parses_phase6d_b_explicit_aead_framing_options() {
     for (cipher, expected) in [
         ("AES-128-GCM", crate::VmessSecurity::Aes128Gcm),
@@ -1568,8 +1599,7 @@ fn phase6d_vmess_rejects_fields_outside_current_native_tcp_scope() {
         "    cipher: aes-256-gcm\n",
         "    network: ws\n",
         "    tls: true\n",
-        "    udp: true\n",
-        "    packet-addr: true\n",
+        "    packet-encoding: unsupported\n",
         "    uuid: invalid\n",
     ] {
         let source = if extra.starts_with("    uuid:") {
