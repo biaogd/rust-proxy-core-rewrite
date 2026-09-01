@@ -242,6 +242,10 @@ pub enum VmessTransport {
     Grpc {
         service_name: String,
         user_agent: String,
+        ping_interval: i64,
+        max_connections: i64,
+        min_streams: i64,
+        max_streams: i64,
     },
     WebSocket {
         path: String,

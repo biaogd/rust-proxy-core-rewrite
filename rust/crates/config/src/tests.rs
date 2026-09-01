@@ -1663,6 +1663,10 @@ fn parses_phase6d_i_vmess_grpc_single_stream_scope() {
         Some(&crate::VmessTransport::Grpc {
             service_name: "GunService".to_owned(),
             user_agent: "grpc-go/1.36.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
         })
     );
     assert_eq!(
@@ -1673,17 +1677,39 @@ fn parses_phase6d_i_vmess_grpc_single_stream_scope() {
         Some(&crate::VmessTransport::Grpc {
             service_name: "/custom/path".to_owned(),
             user_agent: "phase6d-i/1.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
         })
     );
 }
 
 #[test]
-fn rejects_phase6d_i_grpc_pool_and_ping_options() {
+fn parses_phase6d_j_grpc_pool_and_ping_options() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: pooled-grpc\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n    grpc-opts:\n      ping-interval: 1\n      max-connections: 2\n      min-streams: 3\n      max-streams: 4\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-J pool config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "GunService".to_owned(),
+            user_agent: "grpc-go/1.36.0".to_owned(),
+            ping_interval: 1,
+            max_connections: 2,
+            min_streams: 3,
+            max_streams: 4,
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_phase6d_j_grpc_metadata() {
     for option in [
-        "ping-interval: 1",
-        "max-connections: 1",
-        "min-streams: 1",
-        "max-streams: 1",
         "grpc-service-name: 'bad path'",
         "grpc-user-agent: \"bad\\nagent\"",
     ] {

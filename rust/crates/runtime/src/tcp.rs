@@ -383,7 +383,7 @@ pub(super) async fn connect_tcp_outbound(
                 proxy,
                 &metadata.destination,
                 config.ipv6,
-                state.clock(),
+                state,
                 &config.trust_certificates,
                 config.dns.as_ref(),
                 direct_tcp_options(config),
@@ -422,11 +422,12 @@ pub(super) async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
     allow_ipv6: bool,
-    clock: Arc<rewrite_services::AdjustedClock>,
+    state: &RuntimeState,
     custom_roots: &[String],
     dns: Option<&rewrite_config::DnsConfig>,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let clock = state.clock();
     let server = Destination {
         host: proxy
             .server
@@ -513,7 +514,7 @@ pub(super) async fn connect_configured_proxy(
                 &server,
                 destination,
                 allow_ipv6,
-                clock,
+                state,
                 custom_roots,
                 socket_options,
             )
@@ -530,10 +531,11 @@ async fn connect_vmess_proxy(
     server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
-    clock: Arc<rewrite_services::AdjustedClock>,
+    state: &RuntimeState,
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let clock = state.clock();
     let vmess = proxy
         .vmess
         .as_ref()
@@ -547,16 +549,58 @@ async fn connect_vmess_proxy(
             rewrite_outbound::VmessSecurity::ChaCha20Poly1305
         }
     };
-    let outer = connect_vmess_outer(
-        proxy,
-        server,
-        vmess,
-        allow_ipv6,
-        clock,
-        custom_roots,
-        socket_options,
-    )
-    .await?;
+    let outer = if let rewrite_config::VmessTransport::Grpc {
+        service_name,
+        user_agent,
+        ping_interval,
+        max_connections,
+        min_streams,
+        max_streams,
+    } = &vmess.transport
+    {
+        let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+        let options = rewrite_outbound::VmessGrpcClientOptions {
+            host,
+            service_name: service_name.clone(),
+            user_agent: user_agent.clone(),
+            ping_interval: *ping_interval,
+            max_connections: *max_connections,
+            min_streams: *min_streams,
+            max_streams: *max_streams,
+        };
+        let identity =
+            format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+        let client = state
+            .vmess_grpc_client(&proxy.name, identity, options)
+            .await;
+        client
+            .connect(|| async {
+                connect_vmess_physical_outer(
+                    proxy,
+                    server,
+                    vmess,
+                    allow_ipv6,
+                    Arc::clone(&clock),
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+                .map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| format!("VMess gRPC transport failed: {error}"))?
+    } else {
+        connect_vmess_outer(
+            proxy,
+            server,
+            vmess,
+            allow_ipv6,
+            clock,
+            custom_roots,
+            socket_options,
+        )
+        .await?
+    };
     rewrite_outbound::connect_vmess_on_stream(
         outer,
         destination,
@@ -573,6 +617,28 @@ async fn connect_vmess_proxy(
 }
 
 async fn connect_vmess_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let outer = connect_vmess_physical_outer(
+        proxy,
+        server,
+        vmess,
+        allow_ipv6,
+        clock,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    wrap_vmess_transport(outer, proxy, server, vmess).await
+}
+
+async fn connect_vmess_physical_outer(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
     vmess: &rewrite_config::VmessProxyConfig,
@@ -644,7 +710,7 @@ async fn connect_vmess_outer(
         .await
         .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
     }
-    wrap_vmess_transport(outer, proxy, server, vmess).await
+    Ok(outer)
 }
 
 async fn wrap_vmess_transport(
@@ -705,6 +771,7 @@ async fn wrap_vmess_transport(
         rewrite_config::VmessTransport::Grpc {
             service_name,
             user_agent,
+            ..
         } => {
             let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
             outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)

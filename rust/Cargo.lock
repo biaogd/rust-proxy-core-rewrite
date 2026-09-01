@@ -3047,6 +3047,7 @@ dependencies = [
  "ipnet",
  "lru",
  "rewrite-model",
+ "rewrite-outbound",
  "rewrite-services",
  "rmpv",
  "serde",

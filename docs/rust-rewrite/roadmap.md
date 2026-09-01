@@ -2176,12 +2176,52 @@ independent Go authority validates method, authority, path, content type,
 User-Agent, TLS ALPN and Gun frame boundaries before invoking `sing-vmess`.
 It does not reuse Mihomo's Gun client/server implementation.
 
-This gate deliberately accepts only the default zero-valued `ping-interval`,
-`max-connections`, `min-streams` and `max-streams` configuration. Nonzero
-values fail closed because transport reuse, concurrent stream balancing,
-keepalive ping and connection-pool lifecycle require a separate stateful gate.
-VMess UDP over Gun, advanced TLS/camouflage, gRPC pooling, xHTTP/H3, mKCP,
-Mekya, general TCP mux and VMess inbound remain outside Phase 6D-I.
+This gate deliberately exercises only the default zero-valued `ping-interval`,
+`max-connections`, `min-streams` and `max-streams` configuration. Stateful
+transport reuse, concurrent stream balancing, keepalive ping and pool lifecycle
+advance independently in Phase 6D-J below. VMess UDP over Gun, advanced
+TLS/camouflage, xHTTP/H3, mKCP, Mekya, general TCP mux and VMess inbound remain
+outside Phase 6D-I.
+
+### Phase 6D-J accepted scope — VMess gRPC/Gun pooling and health ping
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-J VMess gRPC/Gun pool** and **Linux amd64 — Phase 6D-J VMess
+gRPC/Gun pool**. Existing listener, rule, controller and UDP claims do not
+expand.
+
+The accepted external path remains YAML through mixed HTTP/SOCKS TCP and rules,
+but concurrent application connections now share and balance reusable Gun
+transports:
+
+- all-zero pool controls preserve the oracle default of one physical HTTP/2
+  connection with independent concurrent logical streams;
+- positive `max-connections` and `min-streams` use the least-active transport
+  and create connections at the same threshold as Go;
+- when `max-connections` is not positive, positive `max-streams` caps logical
+  streams per physical connection with the same least-active selection;
+- signed pool values are accepted, including Go's non-positive disable
+  semantics; stream leases are released on every success/error/drop path;
+- positive `ping-interval` emits HTTP/2 health PING frames, requires an ACK
+  within the oracle's 15-second bound and retires failed transports; and
+- successful generation replacement retires the previous generation's idle
+  pool without aborting logical streams that are still active.
+
+`compat/scripts/phase6d_vmess_grpc_pool.py` is the Go/Rust differential gate.
+Its independent authority releases fixed concurrent-stream barriers, assigns
+physical-connection identities and parses raw h2c PING frames. The gate proves
+one-connection default reuse, the `2/2` connection/stream threshold, a
+one-stream-per-connection cap, ping followed by physical-connection reuse,
+signed option acceptance and process survival.
+
+This slice uses the maintained `h2` codec directly; a generated gRPC RPC library
+would add HTTP/2/protobuf policy while Gun requires only a byte-stream envelope
+and Mihomo-specific pool selection. Exact frame-activity-based ping scheduling,
+ACK-timeout fault injection and reload during live streams remain release/stress
+gates. VMess UDP over Gun, advanced TLS/camouflage, xHTTP/H3, mKCP, Mekya,
+general TCP mux and VMess inbound remain outside Phase 6D-J.
 
 ### Phase 5C1b accepted scope
 

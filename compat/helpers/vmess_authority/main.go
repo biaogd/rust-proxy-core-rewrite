@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gobwas/ws/wsutil"
 	vmess "github.com/metacubex/sing-vmess"
@@ -27,10 +28,15 @@ import (
 )
 
 type echoHandler struct {
-	expectedHost string
-	expectedPort uint
-	packetMode   string
-	output       sync.Mutex
+	expectedHost     string
+	expectedPort     uint
+	packetMode       string
+	streamBarrier    int64
+	streamCount      atomic.Int64
+	barrierReady     chan struct{}
+	barrierOnce      sync.Once
+	nextH2Connection atomic.Uint64
+	output           sync.Mutex
 }
 
 type websocketConn struct {
@@ -58,6 +64,47 @@ type h2StreamConn struct {
 type gunConn struct {
 	net.Conn
 	remaining int
+}
+
+type h2FrameObservingConn struct {
+	net.Conn
+	handler     *echoHandler
+	buffer      []byte
+	prefaceRead bool
+}
+
+func (conn *h2FrameObservingConn) Read(payload []byte) (int, error) {
+	read, err := conn.Conn.Read(payload)
+	if read != 0 {
+		conn.buffer = append(conn.buffer, payload[:read]...)
+		conn.observeFrames()
+	}
+	return read, err
+}
+
+func (conn *h2FrameObservingConn) observeFrames() {
+	if !conn.prefaceRead {
+		const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+		if len(conn.buffer) < len(preface) {
+			return
+		}
+		if string(conn.buffer[:len(preface)]) != preface {
+			conn.buffer = nil
+			return
+		}
+		conn.buffer = conn.buffer[len(preface):]
+		conn.prefaceRead = true
+	}
+	for len(conn.buffer) >= 9 {
+		length := int(conn.buffer[0])<<16 | int(conn.buffer[1])<<8 | int(conn.buffer[2])
+		if len(conn.buffer) < 9+length {
+			return
+		}
+		if conn.buffer[3] == 0x6 && conn.buffer[4]&0x1 == 0 {
+			conn.handler.observe("H2-PING\n")
+		}
+		conn.buffer = conn.buffer[9+length:]
+	}
 }
 
 func (conn *h2StreamConn) Read(payload []byte) (int, error) {
@@ -197,6 +244,12 @@ func (h *echoHandler) NewConnection(_ context.Context, conn net.Conn, metadata M
 	h.output.Lock()
 	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
 	h.output.Unlock()
+	if h.streamBarrier > 0 {
+		if h.streamCount.Add(1) >= h.streamBarrier {
+			h.barrierOnce.Do(func() { close(h.barrierReady) })
+		}
+		<-h.barrierReady
+	}
 	_, err := io.Copy(conn, conn)
 	return err
 }
@@ -412,6 +465,8 @@ func serveH2(
 	expectedUserAgent string,
 ) error {
 	server := &http2.Server{}
+	var connectionOnce sync.Once
+	var connectionID uint64
 	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if transport == "grpc" {
 			if request.Method != http.MethodPost ||
@@ -422,6 +477,10 @@ func serveH2(
 				http.Error(writer, "invalid Gun VMess request", http.StatusBadRequest)
 				return
 			}
+			connectionOnce.Do(func() {
+				connectionID = handler.nextH2Connection.Add(1)
+				handler.observe("GRPC-CONN %d\n", connectionID)
+			})
 			handler.observe(
 				"GRPC POST %s %s application/grpc %s\n",
 				request.Host,
@@ -470,6 +529,7 @@ func serve(
 	expectedHTTPPath string,
 	expectedHTTPHeader string,
 	expectedGrpcUserAgent string,
+	observeH2Ping bool,
 ) {
 	defer raw.Close()
 	var connection net.Conn = raw
@@ -483,6 +543,8 @@ func serve(
 			handler.observe("ALPN %s\n", tlsConnection.ConnectionState().NegotiatedProtocol)
 		}
 		connection = tlsConnection
+	} else if transport == "grpc" && observeH2Ping {
+		connection = &h2FrameObservingConn{Conn: connection, handler: handler}
 	}
 	if transport == "h2" || transport == "grpc" {
 		if err := serveH2(
@@ -565,6 +627,8 @@ func main() {
 	expectedHTTPPath := flag.String("expected-http-path", "", "expected HTTP transport request target")
 	expectedHTTPHeader := flag.String("expected-http-header", "", "expected HTTP/1 header as name=value")
 	expectedGrpcUserAgent := flag.String("expected-grpc-user-agent", "", "expected Gun User-Agent")
+	streamBarrier := flag.Int64("stream-barrier", 0, "concurrent VMess streams required before echo")
+	observeH2Ping := flag.Bool("observe-h2-ping", false, "report client HTTP/2 PING frames")
 	flag.Parse()
 	if *uuid == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -589,6 +653,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -pre-response-bytes")
 		os.Exit(2)
 	}
+	if *streamBarrier < 0 || (*transport != "grpc" && *streamBarrier != 0) {
+		fmt.Fprintln(os.Stderr, "invalid -stream-barrier")
+		os.Exit(2)
+	}
+	if *observeH2Ping && *transport != "grpc" {
+		fmt.Fprintln(os.Stderr, "-observe-h2-ping requires grpc transport")
+		os.Exit(2)
+	}
 	var tlsConfig *tls.Config
 	if *tlsCertificate != "" {
 		keyPair, err := tls.LoadX509KeyPair(*tlsCertificate, *tlsPrivateKey)
@@ -607,9 +679,11 @@ func main() {
 		}
 	}
 	handler := &echoHandler{
-		expectedHost: *expectedHost,
-		expectedPort: *expectedPort,
-		packetMode:   *packetMode,
+		expectedHost:  *expectedHost,
+		expectedPort:  *expectedPort,
+		packetMode:    *packetMode,
+		streamBarrier: *streamBarrier,
+		barrierReady:  make(chan struct{}),
 	}
 	service := vmess.NewService[string](handler, vmess.ServiceWithDisableHeaderProtection())
 	if err := service.UpdateUsers([]string{"phase6d"}, []string{*uuid}, []int{*alterID}); err != nil {
@@ -651,6 +725,7 @@ func main() {
 			*expectedHTTPPath,
 			*expectedHTTPHeader,
 			*expectedGrpcUserAgent,
+			*observeH2Ping,
 		)
 	}
 }

@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
+use h2::client::SendRequest;
 use h2::{RecvStream, SendStream};
 use http::{Method, Request, Uri};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -41,11 +42,18 @@ pub(crate) async fn connect_h2_request(
     stream: BoxedOutboundStream,
     request: Request<()>,
 ) -> io::Result<BoxedOutboundStream> {
-    let (mut client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
+    let (client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    client = client.ready().await.map_err(h2_error)?;
+    open_h2_request(client, request).await
+}
+
+pub(crate) async fn open_h2_request(
+    client: SendRequest<Bytes>,
+    request: Request<()>,
+) -> io::Result<BoxedOutboundStream> {
+    let mut client = client.ready().await.map_err(h2_error)?;
     let (response, sender) = client.send_request(request, false).map_err(h2_error)?;
     let response = response.await.map_err(h2_error)?;
     Ok(Box::new(H2DataStream {
@@ -141,6 +149,6 @@ impl AsyncWrite for H2DataStream {
     }
 }
 
-fn h2_error(error: h2::Error) -> io::Error {
+pub(crate) fn h2_error(error: h2::Error) -> io::Error {
     io::Error::other(error)
 }

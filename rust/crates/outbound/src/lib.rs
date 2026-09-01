@@ -44,7 +44,7 @@ pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
     associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,
 };
-pub use vmess_grpc::connect_vmess_grpc;
+pub use vmess_grpc::{VmessGrpcClient, VmessGrpcClientOptions, connect_vmess_grpc};
 pub use vmess_h2::connect_vmess_h2;
 pub use vmess_http::connect_vmess_http;
 pub use websocket::{

@@ -62,6 +62,8 @@ def start_authority(
     expected_http_path: str = "",
     expected_http_header: str = "",
     expected_grpc_user_agent: str = "",
+    stream_barrier: int = 0,
+    observe_h2_ping: bool = False,
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -98,7 +100,11 @@ def start_authority(
         expected_http_header,
         "-expected-grpc-user-agent",
         expected_grpc_user_agent,
+        "-stream-barrier",
+        str(stream_barrier),
     ]
+    if observe_h2_ping:
+        command.append("-observe-h2-ping")
     if certificate is not None and private_key is not None:
         command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))
     process = subprocess.Popen(

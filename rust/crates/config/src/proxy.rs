@@ -513,12 +513,7 @@ fn parse_vmess_grpc_transport(
     name: &str,
 ) -> Result<VmessTransport, ConfigError> {
     let options = grpc.cloned().unwrap_or_default();
-    if !options.extra.is_empty()
-        || options.ping_interval.unwrap_or_default() != 0
-        || options.max_connections.unwrap_or_default() != 0
-        || options.min_streams.unwrap_or_default() != 0
-        || options.max_streams.unwrap_or_default() != 0
-    {
+    if !options.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     let service_name = options
@@ -542,6 +537,10 @@ fn parse_vmess_grpc_transport(
     Ok(VmessTransport::Grpc {
         service_name,
         user_agent,
+        ping_interval: options.ping_interval.unwrap_or_default(),
+        max_connections: options.max_connections.unwrap_or_default(),
+        min_streams: options.min_streams.unwrap_or_default(),
+        max_streams: options.max_streams.unwrap_or_default(),
     })
 }
 
