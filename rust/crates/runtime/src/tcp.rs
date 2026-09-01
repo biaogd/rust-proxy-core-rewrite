@@ -1,3 +1,4 @@
+use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -540,16 +541,29 @@ async fn connect_vmess_proxy(
         .vmess
         .as_ref()
         .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
-    let security = match vmess.security {
-        rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
-        rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
-        rewrite_config::VmessSecurity::Aes128Cfb => rewrite_outbound::VmessSecurity::Aes128Cfb,
-        rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
-        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
-            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
-        }
-    };
-    let outer = if let rewrite_config::VmessTransport::Grpc {
+    let security = outbound_vmess_security(vmess.security);
+    let outer = if let rewrite_config::VmessTransport::Mkcp(options) = &vmess.transport {
+        connect_vmess_mkcp_outer(
+            proxy,
+            server,
+            options,
+            allow_ipv6,
+            Arc::clone(&clock),
+            custom_roots,
+            socket_options,
+        )
+        .await?
+    } else if let rewrite_config::VmessTransport::Mekya(options) = &vmess.transport {
+        connect_vmess_mekya_outer(
+            proxy,
+            server,
+            options,
+            allow_ipv6,
+            Arc::clone(&clock),
+            custom_roots,
+            socket_options,
+        )?
+    } else if let rewrite_config::VmessTransport::Grpc {
         service_name,
         user_agent,
         ping_interval,
@@ -616,6 +630,179 @@ async fn connect_vmess_proxy(
     .map_err(|error| format!("VMess proxy connection failed: {error}"))
 }
 
+fn outbound_vmess_security(
+    security: rewrite_config::VmessSecurity,
+) -> rewrite_outbound::VmessSecurity {
+    match security {
+        rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
+        rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
+        rewrite_config::VmessSecurity::Aes128Cfb => rewrite_outbound::VmessSecurity::Aes128Cfb,
+        rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
+        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+        }
+    }
+}
+
+fn mkcp_transport_options(
+    options: &rewrite_config::VmessMkcpOptions,
+) -> rewrite_outbound::MkcpConfig {
+    rewrite_outbound::MkcpConfig {
+        mtu: options.mtu,
+        tti: options.tti,
+        uplink_capacity: options.uplink_capacity,
+        downlink_capacity: options.downlink_capacity,
+        congestion: options.congestion,
+        write_buffer: options.write_buffer,
+        read_buffer: options.read_buffer,
+        seed: options.seed.clone(),
+        header: options.header.clone(),
+    }
+}
+
+async fn connect_vmess_mkcp_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    options: &rewrite_config::VmessMkcpOptions,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let socket = rewrite_outbound::connect_udp_with_options(server, allow_ipv6, socket_options)
+        .await
+        .map_err(|error| format!("VMess mKCP UDP connection failed: {error}"))?;
+    let mut outer = rewrite_outbound::connect_mkcp(socket, mkcp_transport_options(options))
+        .map_err(|error| format!("VMess mKCP transport failed: {error}"))?;
+    if proxy.tls {
+        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: &[],
+                tls12_only: false,
+                tls13_only: false,
+            },
+            Some(clock),
+        )
+        .await
+        .map_err(|error| format!("VMess mKCP TLS connection failed: {error}"))?;
+    }
+    Ok(outer)
+}
+
+fn connect_vmess_mekya_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    options: &rewrite_config::VmessMekyaOptions,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let destination = server.clone();
+    let interface = socket_options.interface.to_owned();
+    let routing_mark = socket_options.routing_mark;
+    let keep_alive_idle = socket_options.keep_alive_idle;
+    let keep_alive_interval = socket_options.keep_alive_interval;
+    let disable_keep_alive = socket_options.disable_keep_alive;
+    let tcp_concurrent = socket_options.tcp_concurrent;
+    let tls = proxy.tls;
+    let server_name = proxy.sni.clone().unwrap_or_else(|| proxy.server.clone());
+    let verification_name = proxy.name_cert_verify.clone();
+    let skip_certificate_verification = proxy.skip_cert_verify;
+    let fingerprint = proxy.fingerprint.clone();
+    let certificate = proxy.certificate.clone();
+    let private_key = proxy.private_key.clone();
+    let roots = custom_roots.to_vec();
+    let connector: Arc<dyn rewrite_outbound::MekyaConnector> = Arc::new(move || {
+        let destination = destination.clone();
+        let interface = interface.clone();
+        let server_name = server_name.clone();
+        let verification_name = verification_name.clone();
+        let fingerprint = fingerprint.clone();
+        let certificate = certificate.clone();
+        let private_key = private_key.clone();
+        let roots = roots.clone();
+        let clock = Arc::clone(&clock);
+        async move {
+            let remote = rewrite_outbound::connect_with_options(
+                &destination,
+                allow_ipv6,
+                rewrite_outbound::DirectTcpOptions {
+                    interface: &interface,
+                    routing_mark,
+                    keep_alive_idle,
+                    keep_alive_interval,
+                    disable_keep_alive,
+                    tcp_concurrent,
+                },
+            )
+            .await
+            .map_err(io::Error::other)?;
+            let stream = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
+            if !tls {
+                return Ok(rewrite_outbound::MekyaConnection {
+                    stream,
+                    negotiated_h2: false,
+                });
+            }
+            let (stream, alpn) = rewrite_outbound::wrap_client_tls_with_alpn(
+                stream,
+                rewrite_outbound::HttpProxyTls {
+                    server_name: &server_name,
+                    verification_name: verification_name.as_deref(),
+                    skip_certificate_verification,
+                    fingerprint: fingerprint.as_deref(),
+                    certificate: certificate.as_deref(),
+                    private_key: private_key.as_deref(),
+                    custom_roots: &roots,
+                    ech_config: None,
+                    alpn_protocols: &[b"h2", b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                },
+                Some(clock),
+            )
+            .await
+            .map_err(io::Error::other)?;
+            Ok(rewrite_outbound::MekyaConnection {
+                stream,
+                negotiated_h2: alpn.as_deref() == Some(b"h2"),
+            })
+        }
+    });
+    let url = if options.url.is_empty() {
+        format!("https://{}", server.authority())
+    } else {
+        options.url.clone()
+    };
+    rewrite_outbound::connect_mekya(
+        &connector,
+        rewrite_outbound::MekyaOptions {
+            url,
+            h2_pool_size: options.h2_pool_size,
+            max_write_delay: options.max_write_delay,
+            max_request_size: options.max_request_size,
+            polling_interval_initial: options.polling_interval_initial,
+            max_write_size: options.max_write_size,
+            max_write_duration_ms: options.max_write_duration_ms,
+            max_simultaneous_write_connection: options.max_simultaneous_write_connection,
+            packet_writing_buffer: options.packet_writing_buffer,
+            kcp: mkcp_transport_options(&options.kcp),
+        },
+    )
+    .map_err(|error| format!("VMess Mekya transport failed: {error}"))
+}
+
 async fn connect_vmess_outer(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
@@ -653,6 +840,8 @@ async fn connect_vmess_physical_outer(
     let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
     let websocket = match &vmess.transport {
         rewrite_config::VmessTransport::Tcp
+        | rewrite_config::VmessTransport::Mkcp(_)
+        | rewrite_config::VmessTransport::Mekya(_)
         | rewrite_config::VmessTransport::Http { .. }
         | rewrite_config::VmessTransport::Http2 { .. }
         | rewrite_config::VmessTransport::Grpc { .. } => None,
@@ -689,6 +878,9 @@ async fn connect_vmess_physical_outer(
             rewrite_config::VmessTransport::Http2 { .. }
             | rewrite_config::VmessTransport::Grpc { .. } => &[b"h2"],
             rewrite_config::VmessTransport::Tcp => &[],
+            rewrite_config::VmessTransport::Mkcp(_) | rewrite_config::VmessTransport::Mekya(_) => {
+                &[]
+            }
         };
         outer = rewrite_outbound::wrap_client_tls_with_options(
             outer,
@@ -778,7 +970,9 @@ async fn wrap_vmess_transport(
                 .await
                 .map_err(|error| format!("VMess gRPC transport failed: {error}"))?;
         }
-        rewrite_config::VmessTransport::Tcp => {}
+        rewrite_config::VmessTransport::Tcp
+        | rewrite_config::VmessTransport::Mkcp(_)
+        | rewrite_config::VmessTransport::Mekya(_) => {}
     }
     Ok(outer)
 }

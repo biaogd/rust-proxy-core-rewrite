@@ -2223,6 +2223,41 @@ ACK-timeout fault injection and reload during live streams remain release/stress
 gates. VMess UDP over Gun, advanced TLS/camouflage, xHTTP/H3, mKCP, Mekya,
 general TCP mux and VMess inbound remain outside Phase 6D-J.
 
+### Phase 6D-K/L accepted scope — VMess mKCP and Mekya TCP
+
+These two adjacent transport slices continue inventory rows `CFG-03`, `OUT-07`
+and `OUT-22`. They only change the compatibility-matrix rows **Proxies and
+built-in proxy insertion**, outbound **VMess**, **Shared outbound
+transport/security variants**, and the corresponding Darwin/Linux Phase 6D-K/L
+platform rows. Listener, controller, rule and UDP claims do not expand.
+
+Phase 6D-K carries one VMess TCP session over V2Ray's custom mKCP wire format:
+
+- typed `mkcp-opts` parsing covers MTU, TTI, capacity, congestion, buffer sizes,
+  seed and header, with `network: kcp` retained as an alias;
+- the carrier implements V2Ray segment, ACK, retransmit and close messages,
+  default simple authentication and seeded AES-128-GCM authentication; and
+- no-op, SRTP, uTP, WeChat-video, DTLS and WireGuard camouflage headers are
+  exercised against an independent Go authority.
+
+Phase 6D-L carries the same mKCP packets through Mihomo's Mekya request/response
+packet bundles. The production client uses Hyper for HTTP framing and supports
+TLS with negotiated HTTP/2 or HTTP/1.1, polling intervals, maximum request size,
+long-lived response bodies and H2 pool selection. `mekya-opts.kcp` is normalized
+through the same typed mKCP boundary.
+
+`compat/scripts/phase6d_vmess_mkcp_mekya.py` is the shared Go/Rust differential
+gate. It validates all camouflage variants, seeded and default authentication,
+small and 128 KiB TCP relays, Mekya H2/HTTP1 negotiation, packet aggregation,
+pool configuration, independent-authority VMess CONNECT observations and
+process survival.
+
+This scope does not claim non-native-carrier UDP, an inbound/server endpoint,
+induced-loss or congestion-control equivalence, transport half-close, xHTTP/H3,
+advanced TLS camouflage or general TCP mux. Half-close is intentionally absent
+from this gate because the pinned Go Mekya/mKCP oracle does not complete that
+fixture reliably; it must not be inferred from ordinary VMess TCP success.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

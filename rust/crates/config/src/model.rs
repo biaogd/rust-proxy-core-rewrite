@@ -230,6 +230,8 @@ pub struct VmessProxyConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmessTransport {
     Tcp,
+    Mkcp(VmessMkcpOptions),
+    Mekya(VmessMekyaOptions),
     Http {
         method: String,
         paths: Vec<String>,
@@ -255,6 +257,33 @@ pub enum VmessTransport {
         http_upgrade: bool,
         http_upgrade_fast_open: bool,
     },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmessMkcpOptions {
+    pub mtu: u32,
+    pub tti: u32,
+    pub uplink_capacity: u32,
+    pub downlink_capacity: u32,
+    pub congestion: bool,
+    pub write_buffer: u32,
+    pub read_buffer: u32,
+    pub seed: String,
+    pub header: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmessMekyaOptions {
+    pub url: String,
+    pub h2_pool_size: i64,
+    pub max_write_delay: i64,
+    pub max_request_size: i64,
+    pub polling_interval_initial: i64,
+    pub max_write_size: i64,
+    pub max_write_duration_ms: i64,
+    pub max_simultaneous_write_connection: i64,
+    pub packet_writing_buffer: i64,
+    pub kcp: VmessMkcpOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

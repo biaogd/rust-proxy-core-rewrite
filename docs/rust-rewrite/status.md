@@ -164,13 +164,15 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-H VMess HTTP transports | Complete in declared client scope | HTTP/HTTPS first-write obfuscation and library-backed h2c/H2 PUT streams pass an independent-authority Go/Rust differential with configured/default Host/path, headers/method, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and the oracle's response-dropping H2 half-close; UDP over HTTP/H2, pooling/multi-stream reuse, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-I VMess gRPC/Gun | Complete in declared single-stream client scope | Default, named and exact-path Gun services over h2c/H2 pass an independent-authority Go/Rust differential with exact POST authority/path/content-type/User-Agent and validated Gun envelope lengths, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and process survival; UDP, ping/pool controls, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-J VMess gRPC/Gun pool | Complete in declared client-pool scope | A shared `h2` pool passes independent-authority Go/Rust comparison for all-zero single-connection reuse, concurrent logical streams, `max-connections`/`min-streams`, `max-streams`, signed option acceptance, health PING and post-ping reuse; exact frame-idle scheduling, ACK-timeout injection, UDP, advanced TLS, later transports, general mux and inbound remain open |
-| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks` and `rewrite-protocol-vmess` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound and Phase 6D-A–J re-pass |
+| Phase 6D-K VMess mKCP TCP | Complete in declared client scope | Default/simple and seeded AES-GCM authentication, six header modes, small/128 KiB relay and independent-authority VMess parsing pass; induced loss, exact congestion behavior, transport half-close, UDP and server direction remain open |
+| Phase 6D-L VMess Mekya TCP | Complete in declared client scope | Hyper-backed TLS HTTP/2 and HTTP/1.1 packet carriers pass packet-bundle, polling, H2-pool, nested mKCP, small/128 KiB and process-survival comparison; transport half-close, plaintext carrier, UDP and server direction remain open |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks` and `rewrite-protocol-vmess` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound and Phase 6D-A–L pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-one focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-J | Phase 1–6D-J Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate passes locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6D-L | Phase 1–6D-L Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5602,6 +5604,42 @@ against every received HTTP/2 frame and ACK-timeout fault injection remain a
 release/stress gate. VMess UDP over Gun, xHTTP/H3, mKCP, Mekya, advanced TLS,
 general mux and VMess inbound remain later gates.
 
+## Phase 6D-K/L VMess mKCP and Mekya evidence
+
+Phase 6D-K adds V2Ray mKCP as a reusable packet-to-stream carrier in
+`rewrite-transport`; it does not substitute generic KCP, whose segment and
+authentication wire formats differ. Typed YAML covers every Go option and the
+`kcp` network alias. The implementation has simple and seeded AES-GCM packet
+authentication, ACK/retransmit/termination handling, bounded application
+queues and all six no-op/camouflage header modes.
+
+Phase 6D-L adds a Hyper-backed Mekya client. It sends and receives length-
+prefixed mKCP packet bundles over TLS HTTP/2 or HTTP/1.1, applies request-size
+and polling controls, preserves the long response stream and selects from the
+configured H2 client pool. HTTP framing remains a maintained-library boundary;
+Mekya-specific aggregation and polling policy stays in the transport module.
+
+Local Darwin arm64 evidence on 2026-09-01:
+
+```sh
+PHASE6DKL_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6d_vmess_mkcp_mekya.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo fmt --manifest-path rust/Cargo.toml --all --check
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+The differential passes seven direct-mKCP routes (default, seed and every
+camouflage family) plus TLS Mekya over negotiated H2 and HTTP/1.1. It compares
+small and 128 KiB relay bytes, independent Go-authority VMess CONNECT
+observations and process survival. Linux amd64 execution is configured in the
+controller/outbound Actions shard and remains pending until CI completes.
+
+The current evidence does not cover induced loss, exact congestion control,
+transport half-close, plaintext Mekya, UDP over either carrier, inbound/server
+use or other protocol consumers. The pinned Go oracle itself fails the chosen
+transport-half-close fixture, so that behavior is excluded rather than
+normalized. These are explicit later gates, not implied compatibility.
+
 ## SS/VMess protocol ownership refactor
 
 The behavior-neutral ownership refactor changes inventory rows `OUT-04`,
@@ -5615,7 +5653,7 @@ explicit:
 - `rewrite-protocol-vmess` owns VMess KDF, request/response headers, body
   records, legacy AlterID, standard UDP, packet-address and XUDP framing.
 - `rewrite-transport` owns reusable TLS/ShadowTLS, simple-obfs, WebSocket,
-  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun and mux carriers.
+  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, mKCP, Mekya and mux carriers.
 
 Neither protocol crate depends on `config`, `inbound`, `outbound`, `runtime` or
 the carrier crate. `rewrite-outbound` keeps only socket policy and adapter
@@ -5634,8 +5672,9 @@ Local Darwin arm64 evidence on 2026-09-01:
 - the gRPC pool authority has its own readiness barrier before stream timing.
 
 Support exclusions remain unchanged: SS2022 UDP and broader server features,
-VMess inbound, UDP over non-native carriers, advanced TLS/camouflage, mKCP,
-Mekya and general mux still require their own vertical slices.
+VMess inbound, UDP over non-native carriers, advanced TLS/camouflage, mKCP and
+Mekya use outside their declared VMess TCP client slices, and general mux still
+require their own vertical slices.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

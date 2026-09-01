@@ -17,8 +17,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gobwas/ws/wsutil"
+	"github.com/metacubex/mihomo/transport/mekya"
+	"github.com/metacubex/mihomo/transport/mkcp"
 	vmess "github.com/metacubex/sing-vmess"
 	"github.com/metacubex/sing-vmess/packetaddr"
 	E "github.com/metacubex/sing/common/exceptions"
@@ -614,7 +617,10 @@ func main() {
 	expectedHost := flag.String("expected-host", "", "expected target host")
 	expectedPort := flag.Uint("expected-port", 0, "expected target port")
 	packetMode := flag.String("packet-mode", "reject", "reject, standard, packetaddr, or xudp")
-	transport := flag.String("transport", "tcp", "tcp, ws, upgrade, http, h2, or grpc")
+	transport := flag.String("transport", "tcp", "tcp, ws, upgrade, http, h2, grpc, mkcp, or mekya")
+	mkcpSeed := flag.String("mkcp-seed", "", "optional mKCP AES-GCM seed")
+	mkcpHeader := flag.String("mkcp-header", "", "optional mKCP camouflage header")
+	mekyaALPN := flag.String("mekya-alpn", "h2", "Mekya TLS ALPN: h2 or http/1.1")
 	tlsCertificate := flag.String("tls-cert", "", "optional TLS certificate")
 	tlsPrivateKey := flag.String("tls-key", "", "optional TLS private key")
 	expectedWSHost := flag.String("expected-ws-host", "", "expected WebSocket Host")
@@ -641,8 +647,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
 		os.Exit(2)
 	}
-	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" && *transport != "http" && *transport != "h2" && *transport != "grpc" {
+	if *transport != "tcp" && *transport != "ws" && *transport != "upgrade" && *transport != "http" && *transport != "h2" && *transport != "grpc" && *transport != "mkcp" && *transport != "mekya" {
 		fmt.Fprintln(os.Stderr, "invalid -transport")
+		os.Exit(2)
+	}
+	if *mekyaALPN != "h2" && *mekyaALPN != "http/1.1" {
+		fmt.Fprintln(os.Stderr, "invalid -mekya-alpn")
 		os.Exit(2)
 	}
 	if (*tlsCertificate == "") != (*tlsPrivateKey == "") {
@@ -671,6 +681,8 @@ func main() {
 		nextProtocol := "http/1.1"
 		if *transport == "h2" || *transport == "grpc" {
 			nextProtocol = "h2"
+		} else if *transport == "mekya" {
+			nextProtocol = *mekyaALPN
 		}
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{keyPair},
@@ -696,10 +708,54 @@ func main() {
 	}
 	defer service.Close()
 
-	listener, err := net.Listen("tcp", *listen)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	var listener net.Listener
+	var err error
+	serveTLSConfig := tlsConfig
+	switch *transport {
+	case "mkcp":
+		packetConn, err := net.ListenPacket("udp", *listen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		listener, err = mkcp.Listen(context.Background(), packetConn, mkcp.Config{Seed: *mkcpSeed, Header: *mkcpHeader})
+		if err != nil {
+			_ = packetConn.Close()
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "mekya":
+		outer, err := net.Listen("tcp", *listen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if tlsConfig != nil {
+			outer = tls.NewListener(outer, tlsConfig)
+		}
+		listener, err = mekya.Listen(context.Background(), outer, mekya.Config{
+			KCP:                            mkcp.Config{Seed: *mkcpSeed, Header: *mkcpHeader},
+			H2PoolSize:                     2,
+			MaxWriteDelay:                  20,
+			MaxRequestSize:                 96000,
+			PollingIntervalInitial:         20,
+			MaxWriteSize:                   1 << 20,
+			MaxWriteDurationMs:             int((5 * time.Second) / time.Millisecond),
+			MaxSimultaneousWriteConnection: 16,
+			PacketWritingBuffer:            1024,
+		})
+		if err != nil {
+			_ = outer.Close()
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		serveTLSConfig = nil
+	default:
+		listener, err = net.Listen("tcp", *listen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 	defer listener.Close()
 	fmt.Printf("READY %s\n", listener.Addr())
@@ -713,7 +769,7 @@ func main() {
 			conn,
 			service,
 			handler,
-			tlsConfig,
+			serveTLSConfig,
 			*transport,
 			*expectedWSHost,
 			*expectedWSPath,

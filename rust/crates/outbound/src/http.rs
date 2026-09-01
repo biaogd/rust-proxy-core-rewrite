@@ -165,6 +165,21 @@ pub async fn wrap_client_tls_with_options(
     tls: HttpProxyTls<'_>,
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
+    wrap_client_tls_with_alpn(stream, tls, clock)
+        .await
+        .map(|(stream, _)| stream)
+}
+
+/// Wraps an established stream in TLS and returns the negotiated ALPN value.
+///
+/// # Errors
+///
+/// Returns configuration, server-name or TLS handshake failures.
+pub async fn wrap_client_tls_with_alpn(
+    stream: BoxedOutboundStream,
+    tls: HttpProxyTls<'_>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<(BoxedOutboundStream, Option<Vec<u8>>), HttpProxyError> {
     let config = client_config(tls, clock)?;
     let server_name = ServerName::try_from(tls.server_name.to_owned())
         .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
@@ -172,5 +187,6 @@ pub async fn wrap_client_tls_with_options(
         .connect(server_name, stream)
         .await
         .map_err(TlsClientError::Handshake)?;
-    Ok(Box::new(stream))
+    let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+    Ok((Box::new(stream), alpn))
 }

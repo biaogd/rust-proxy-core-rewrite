@@ -1,9 +1,10 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use rewrite_model::{Destination, Host};
 use thiserror::Error;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 
 #[derive(Debug, Error)]
 pub enum DirectError {
@@ -101,6 +102,66 @@ pub async fn connect_with_options(
                 })))
             }
         }
+    };
+    tokio::time::timeout(Duration::from_secs(5), connect)
+        .await
+        .map_err(|_| DirectError::Timeout)?
+}
+
+/// Opens a connected UDP socket with the same resolution, interface and mark
+/// policy used by direct TCP dials.
+///
+/// # Errors
+///
+/// Returns policy, resolution, bind, connect or timeout failures.
+pub async fn connect_udp_with_options(
+    destination: &Destination,
+    allow_ipv6: bool,
+    options: DirectTcpOptions<'_>,
+) -> Result<UdpSocket, DirectError> {
+    let connect = async {
+        let addresses = match destination.host {
+            Host::Ip(address) => vec![(address, destination.port).into()],
+            Host::Domain(ref domain) => {
+                tokio::net::lookup_host((domain.as_str(), destination.port))
+                    .await
+                    .map_err(DirectError::Io)?
+                    .collect()
+            }
+        };
+        let mut last_error = None;
+        for address in addresses
+            .into_iter()
+            .filter(|address| allow_ipv6 || address.is_ipv4())
+        {
+            let bind = if address.is_ipv4() {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+            } else {
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+            };
+            let socket = match rewrite_platform::bind_outbound_udp(
+                bind,
+                options.interface,
+                options.routing_mark,
+            ) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            let socket = UdpSocket::from_std(socket).map_err(DirectError::Io)?;
+            match socket.connect(address).await {
+                Ok(()) => return Ok(socket),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(DirectError::Io(last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "no permitted UDP address resolved",
+            )
+        })))
     };
     tokio::time::timeout(Duration::from_secs(5), connect)
         .await

@@ -64,6 +64,9 @@ def start_authority(
     expected_grpc_user_agent: str = "",
     stream_barrier: int = 0,
     observe_h2_ping: bool = False,
+    mkcp_seed: str = "",
+    mkcp_header: str = "",
+    mekya_alpn: str = "h2",
 ) -> tuple[subprocess.Popen[bytes], Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -80,6 +83,12 @@ def start_authority(
         packet_mode,
         "-transport",
         transport,
+        "-mkcp-seed",
+        mkcp_seed,
+        "-mkcp-header",
+        mkcp_header,
+        "-mekya-alpn",
+        mekya_alpn,
         "-expected-ws-host",
         expected_ws_host,
         "-expected-ws-path",
@@ -118,11 +127,16 @@ def start_authority(
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"VMess authority exited with {process.returncode}")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+        if transport == "mkcp":
+            if "READY " in stdout_path.read_text(errors="replace"):
                 return process, stdout, stderr, stdout_path
-        except OSError:
-            time.sleep(0.02)
+        else:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    return process, stdout, stderr, stdout_path
+            except OSError:
+                pass
+        time.sleep(0.02)
     raise TimeoutError("VMess authority did not become ready")
 
 

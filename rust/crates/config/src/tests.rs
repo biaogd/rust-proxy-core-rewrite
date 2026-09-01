@@ -1708,6 +1708,67 @@ fn parses_phase6d_j_grpc_pool_and_ping_options() {
 }
 
 #[test]
+fn parses_phase6d_k_l_vmess_mkcp_and_mekya_transports() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: mkcp-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10007\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: kcp\n    mkcp-opts:\n      mtu: 1200\n      tti: 15\n      uplink-capacity: 10\n      downlink-capacity: 50\n      congestion: true\n      write-buffer: 1048576\n      read-buffer: 2097152\n      seed: phase6d-k\n      header: srtp\n  - name: mekya-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10008\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: mekya\n    tls: true\n    skip-cert-verify: true\n    mekya-opts:\n      url: example.test/mekya\n      h2-pool-size: 2\n      max-write-delay: 20\n      max-request-size: 96000\n      polling-interval-initial: 20\n      max-write-size: 1048576\n      max-write-duration-ms: 5000\n      max-simultaneous-write-connection: 16\n      packet-writing-buffer: 1024\n      kcp:\n        tti: 15\n        seed: phase6d-l\n        header: dtls\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-K/L transports");
+    let mkcp = crate::VmessMkcpOptions {
+        mtu: 1200,
+        tti: 15,
+        uplink_capacity: 10,
+        downlink_capacity: 50,
+        congestion: true,
+        write_buffer: 1_048_576,
+        read_buffer: 2_097_152,
+        seed: "phase6d-k".to_owned(),
+        header: "srtp".to_owned(),
+    };
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Mkcp(mkcp))
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Mekya(crate::VmessMekyaOptions {
+            url: "https://example.test/mekya".to_owned(),
+            h2_pool_size: 2,
+            max_write_delay: 20,
+            max_request_size: 96_000,
+            polling_interval_initial: 20,
+            max_write_size: 1_048_576,
+            max_write_duration_ms: 5_000,
+            max_simultaneous_write_connection: 16,
+            packet_writing_buffer: 1_024,
+            kcp: crate::VmessMkcpOptions {
+                tti: 15,
+                seed: "phase6d-l".to_owned(),
+                header: "dtls".to_owned(),
+                ..crate::VmessMkcpOptions::default()
+            },
+        }))
+    );
+
+    for invalid in [
+        "network: mkcp\n    mkcp-opts:\n      mtu: -1",
+        "network: mekya\n    mekya-opts:\n      url: http://example.test/mekya",
+        "network: tcp\n    mkcp-opts:\n      seed: misplaced",
+        "network: mkcp\n    mekya-opts:\n      url: example.test",
+    ] {
+        let yaml = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-transport\n    type: vmess\n    server: 127.0.0.1\n    port: 10009\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    {invalid}\n"
+        );
+        assert!(Config::from_yaml(&yaml).is_err(), "accepted {invalid}");
+    }
+}
+
+#[test]
 fn rejects_invalid_phase6d_j_grpc_metadata() {
     for option in [
         "grpc-service-name: 'bad path'",

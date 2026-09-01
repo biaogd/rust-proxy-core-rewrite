@@ -223,6 +223,8 @@ pub(crate) struct RawProxy {
     pub(crate) http_opts: Option<RawVmessHttpOptions>,
     pub(crate) h2_opts: Option<RawVmessHttp2Options>,
     pub(crate) grpc_opts: Option<RawVmessGrpcOptions>,
+    pub(crate) mkcp_opts: Option<RawVmessMkcpOptions>,
+    pub(crate) mekya_opts: Option<RawVmessMekyaOptions>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
     pub(crate) plugin: Option<String>,
@@ -282,6 +284,39 @@ pub(crate) struct RawVmessGrpcOptions {
     pub(crate) max_connections: Option<i64>,
     pub(crate) min_streams: Option<i64>,
     pub(crate) max_streams: Option<i64>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessMkcpOptions {
+    pub(crate) mtu: Option<i64>,
+    pub(crate) tti: Option<i64>,
+    pub(crate) uplink_capacity: Option<i64>,
+    pub(crate) downlink_capacity: Option<i64>,
+    pub(crate) congestion: Option<bool>,
+    pub(crate) write_buffer: Option<i64>,
+    pub(crate) read_buffer: Option<i64>,
+    pub(crate) seed: Option<String>,
+    pub(crate) header: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessMekyaOptions {
+    pub(crate) url: Option<String>,
+    pub(crate) h2_pool_size: Option<i64>,
+    pub(crate) max_write_delay: Option<i64>,
+    pub(crate) max_request_size: Option<i64>,
+    pub(crate) polling_interval_initial: Option<i64>,
+    pub(crate) max_write_size: Option<i64>,
+    pub(crate) max_write_duration_ms: Option<i64>,
+    pub(crate) max_simultaneous_write_connection: Option<i64>,
+    pub(crate) packet_writing_buffer: Option<i64>,
+    pub(crate) kcp: Option<RawVmessMkcpOptions>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

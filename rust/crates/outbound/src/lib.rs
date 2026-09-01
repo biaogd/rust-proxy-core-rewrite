@@ -4,10 +4,12 @@ mod shadowsocks;
 mod socks5;
 mod vmess;
 
-pub use direct::{DirectError, DirectTcpOptions, connect, connect_with_options};
+pub use direct::{
+    DirectError, DirectTcpOptions, connect, connect_udp_with_options, connect_with_options,
+};
 pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
-    wrap_client_tls_with_options,
+    wrap_client_tls_with_alpn, wrap_client_tls_with_options,
 };
 pub use rewrite_transport::BoxedStream as BoxedOutboundStream;
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
@@ -18,6 +20,9 @@ pub use rewrite_transport::{
     connect_http_upgrade_with_early_data, connect_shadow_tls, connect_v2ray_http_upgrade,
     connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
     connect_websocket_with_headers,
+};
+pub use rewrite_transport::{
+    MekyaConnection, MekyaConnector, MekyaOptions, MkcpConfig, connect_mekya, connect_mkcp,
 };
 pub use rewrite_transport::{
     V2rayGrpcClient as VmessGrpcClient, V2rayGrpcClientOptions as VmessGrpcClientOptions,

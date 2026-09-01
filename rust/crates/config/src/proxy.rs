@@ -13,7 +13,8 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
+    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
+    VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -338,12 +339,17 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.private_key.is_some()
         || proxy.headers.is_some()
         || proxy.alter_id.unwrap_or_default() < 0
-        || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
+        || !matches!(
+            network,
+            "tcp" | "ws" | "http" | "h2" | "grpc" | "mkcp" | "kcp" | "mekya"
+        )
         || (!tls && has_tls_options)
         || (network != "ws" && proxy.ws_opts.is_some())
         || (network != "http" && proxy.http_opts.is_some())
         || (network != "h2" && proxy.h2_opts.is_some())
         || (network != "grpc" && proxy.grpc_opts.is_some())
+        || (!matches!(network, "mkcp" | "kcp") && proxy.mkcp_opts.is_some())
+        || (network != "mekya" && proxy.mekya_opts.is_some())
         || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
         || !proxy.extra.is_empty()
     {
@@ -351,14 +357,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     }
     let (security, cipher) = parse_vmess_security(proxy.cipher.as_deref(), &name)?;
     let packet_mode = parse_vmess_packet_mode(&proxy, &name)?;
-    let transport = parse_vmess_transport(
-        network,
-        proxy.ws_opts.as_ref(),
-        proxy.http_opts.as_ref(),
-        proxy.h2_opts.as_ref(),
-        proxy.grpc_opts.as_ref(),
-        &name,
-    )?;
+    let transport = parse_vmess_transport(network, &proxy, &name)?;
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -409,17 +408,20 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
 
 fn parse_vmess_transport(
     network: &str,
-    websocket: Option<&crate::raw::RawVmessWebSocketOptions>,
-    http: Option<&crate::raw::RawVmessHttpOptions>,
-    http2: Option<&crate::raw::RawVmessHttp2Options>,
-    grpc: Option<&crate::raw::RawVmessGrpcOptions>,
+    proxy: &RawProxy,
     name: &str,
 ) -> Result<VmessTransport, ConfigError> {
     if network == "tcp" {
         return Ok(VmessTransport::Tcp);
     }
+    if matches!(network, "mkcp" | "kcp") {
+        return parse_vmess_mkcp(proxy.mkcp_opts.as_ref(), name).map(VmessTransport::Mkcp);
+    }
+    if network == "mekya" {
+        return parse_vmess_mekya(proxy.mekya_opts.as_ref(), name);
+    }
     if network == "http" {
-        let options = http.cloned().unwrap_or_default();
+        let options = proxy.http_opts.clone().unwrap_or_default();
         if !options.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
@@ -453,7 +455,7 @@ fn parse_vmess_transport(
         });
     }
     if network == "h2" {
-        let options = http2.cloned().unwrap_or_default();
+        let options = proxy.h2_opts.clone().unwrap_or_default();
         if !options.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
@@ -474,9 +476,9 @@ fn parse_vmess_transport(
         return Ok(VmessTransport::Http2 { hosts, path });
     }
     if network == "grpc" {
-        return parse_vmess_grpc_transport(grpc, name);
+        return parse_vmess_grpc_transport(proxy.grpc_opts.as_ref(), name);
     }
-    let options = websocket.cloned().unwrap_or_default();
+    let options = proxy.ws_opts.clone().unwrap_or_default();
     if !options.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -506,6 +508,90 @@ fn parse_vmess_transport(
         http_upgrade,
         http_upgrade_fast_open,
     })
+}
+
+fn parse_vmess_mkcp(
+    configured: Option<&crate::raw::RawVmessMkcpOptions>,
+    name: &str,
+) -> Result<VmessMkcpOptions, ConfigError> {
+    let options = configured.cloned().unwrap_or_default();
+    if !options.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let convert = |value: Option<i64>| {
+        value
+            .map(u32::try_from)
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))
+    };
+    Ok(VmessMkcpOptions {
+        mtu: convert(options.mtu)?,
+        tti: convert(options.tti)?,
+        uplink_capacity: convert(options.uplink_capacity)?,
+        downlink_capacity: convert(options.downlink_capacity)?,
+        congestion: options.congestion.unwrap_or(false),
+        write_buffer: convert(options.write_buffer)?,
+        read_buffer: convert(options.read_buffer)?,
+        seed: options.seed.unwrap_or_default(),
+        header: options.header.unwrap_or_default(),
+    })
+}
+
+fn parse_vmess_mekya(
+    configured: Option<&crate::raw::RawVmessMekyaOptions>,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    let options = configured.cloned().unwrap_or_default();
+    if !options.extra.is_empty()
+        || [
+            options.h2_pool_size,
+            options.max_write_delay,
+            options.max_request_size,
+            options.polling_interval_initial,
+            options.max_write_size,
+            options.max_write_duration_ms,
+            options.max_simultaneous_write_connection,
+            options.packet_writing_buffer,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value < 0)
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let url = normalize_mekya_url(options.url.as_deref(), name)?;
+    Ok(VmessTransport::Mekya(VmessMekyaOptions {
+        url,
+        h2_pool_size: options.h2_pool_size.unwrap_or_default(),
+        max_write_delay: options.max_write_delay.unwrap_or_default(),
+        max_request_size: options.max_request_size.unwrap_or_default(),
+        polling_interval_initial: options.polling_interval_initial.unwrap_or_default(),
+        max_write_size: options.max_write_size.unwrap_or_default(),
+        max_write_duration_ms: options.max_write_duration_ms.unwrap_or_default(),
+        max_simultaneous_write_connection: options
+            .max_simultaneous_write_connection
+            .unwrap_or_default(),
+        packet_writing_buffer: options.packet_writing_buffer.unwrap_or_default(),
+        kcp: parse_vmess_mkcp(options.kcp.as_ref(), name)?,
+    }))
+}
+
+fn normalize_mekya_url(configured: Option<&str>, name: &str) -> Result<String, ConfigError> {
+    let Some(configured) = configured.filter(|value| !value.is_empty()) else {
+        return Ok(String::new());
+    };
+    let candidate = if configured.contains("://") {
+        configured.to_owned()
+    } else {
+        format!("https://{configured}")
+    };
+    let parsed =
+        Url::parse(&candidate).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(parsed.to_string())
 }
 
 fn parse_vmess_grpc_transport(
