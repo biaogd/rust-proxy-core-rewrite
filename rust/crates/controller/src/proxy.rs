@@ -460,11 +460,27 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::Vmess => {
                     let vmess = proxy.vmess.as_ref().ok_or(())?;
+                    let security = match vmess.security {
+                        rewrite_config::VmessSecurity::Auto => {
+                            rewrite_outbound::VmessSecurity::Auto
+                        }
+                        rewrite_config::VmessSecurity::Aes128Gcm => {
+                            rewrite_outbound::VmessSecurity::Aes128Gcm
+                        }
+                        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+                            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+                        }
+                    };
                     rewrite_outbound::connect_vmess_with_options(
                         &server,
                         &destination,
                         config.ipv6,
-                        &vmess.uuid,
+                        rewrite_outbound::VmessTcpOptions {
+                            uuid: vmess.uuid,
+                            security,
+                            global_padding: vmess.global_padding,
+                            authenticated_length: vmess.authenticated_length,
+                        },
                         controller_socket_options(config),
                     )
                     .await

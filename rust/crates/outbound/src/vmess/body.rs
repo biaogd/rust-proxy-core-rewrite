@@ -2,14 +2,51 @@ use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes128Gcm, Nonce};
 use chacha20poly1305::ChaCha20Poly1305;
 use md5::{Digest as _, Md5};
+use rand::RngExt as _;
 use sha3::Shake128;
 use sha3::digest::{ExtendableOutput as _, Update as _, XofReader as _};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use super::header::{Security, response_body_material};
+use super::VmessSecurity;
+use super::header::response_body_material;
+use super::kdf::derive_16;
 
 const MAX_WRITE_PLAINTEXT: usize = 15_000;
 const MAX_READ_CIPHERTEXT: usize = 16_384;
+const AEAD_OVERHEAD: usize = 16;
+
+#[derive(Clone, Copy)]
+struct DirectionKeys {
+    body_key: [u8; 16],
+    body_iv: [u8; 16],
+    authenticated_length_key: [u8; 16],
+    authenticated_length_iv: [u8; 16],
+}
+
+impl DirectionKeys {
+    const fn request(key: &[u8; 16], iv: &[u8; 16]) -> Self {
+        Self {
+            body_key: *key,
+            body_iv: *iv,
+            authenticated_length_key: *key,
+            authenticated_length_iv: *iv,
+        }
+    }
+
+    const fn response(
+        request_key: &[u8; 16],
+        request_iv: &[u8; 16],
+        response_key: &[u8; 16],
+        response_iv: &[u8; 16],
+    ) -> Self {
+        Self {
+            body_key: *response_key,
+            body_iv: *response_iv,
+            authenticated_length_key: *request_key,
+            authenticated_length_iv: *request_iv,
+        }
+    }
+}
 
 enum RecordCipher {
     Aes128Gcm(Box<Aes128Gcm>),
@@ -17,12 +54,12 @@ enum RecordCipher {
 }
 
 impl RecordCipher {
-    fn new(security: Security, key: &[u8; 16]) -> Self {
+    fn new(security: VmessSecurity, key: &[u8; 16]) -> Self {
         match security {
-            Security::Aes128Gcm => Self::Aes128Gcm(Box::new(
+            VmessSecurity::Aes128Gcm => Self::Aes128Gcm(Box::new(
                 Aes128Gcm::new_from_slice(key).expect("VMess AES key is 16 bytes"),
             )),
-            Security::ChaCha20Poly1305 => {
+            VmessSecurity::ChaCha20Poly1305 => {
                 let first: [u8; 16] = Md5::digest(key).into();
                 let second: [u8; 16] = Md5::digest(first).into();
                 let mut expanded = [0_u8; 32];
@@ -33,6 +70,7 @@ impl RecordCipher {
                         .expect("VMess ChaCha20 key is 32 bytes"),
                 ))
             }
+            VmessSecurity::Auto => unreachable!(),
         }
     }
 
@@ -59,19 +97,57 @@ impl RecordCipher {
     }
 }
 
-struct LengthMask(sha3::Shake128Reader);
+struct Framing {
+    shake: sha3::Shake128Reader,
+    global_padding: bool,
+    authenticated_length: Option<RecordCipher>,
+    authenticated_length_iv: [u8; 16],
+}
 
-impl LengthMask {
-    fn new(iv: &[u8; 16]) -> Self {
+impl Framing {
+    fn new(
+        security: VmessSecurity,
+        authenticated_length_key: &[u8; 16],
+        authenticated_length_iv: &[u8; 16],
+        padding_iv: &[u8; 16],
+        global_padding: bool,
+        authenticated_length: bool,
+    ) -> Self {
         let mut shake = Shake128::default();
-        shake.update(iv);
-        Self(shake.finalize_xof())
+        shake.update(padding_iv);
+        Self {
+            shake: shake.finalize_xof(),
+            global_padding,
+            authenticated_length: authenticated_length.then(|| {
+                RecordCipher::new(
+                    security,
+                    &derive_16(authenticated_length_key, &[b"auth_len"]),
+                )
+            }),
+            authenticated_length_iv: *authenticated_length_iv,
+        }
     }
 
-    fn next(&mut self) -> u16 {
+    fn next_u16(&mut self) -> u16 {
         let mut output = [0_u8; 2];
-        self.0.read(&mut output);
+        self.shake.read(&mut output);
         u16::from_be_bytes(output)
+    }
+
+    fn padding_length(&mut self) -> usize {
+        if self.global_padding {
+            usize::from(self.next_u16() % 64)
+        } else {
+            0
+        }
+    }
+
+    fn mask_length(&mut self, length: u16) -> u16 {
+        length ^ self.next_u16()
+    }
+
+    fn authenticated_length_nonce(&self, counter: u16) -> [u8; 12] {
+        record_nonce(&self.authenticated_length_iv, counter)
     }
 }
 
@@ -87,16 +163,28 @@ pub(super) struct BodyWriter {
     cipher: RecordCipher,
     iv: [u8; 16],
     counter: u16,
-    mask: LengthMask,
+    framing: Framing,
 }
 
 impl BodyWriter {
-    pub(super) fn new(security: Security, key: &[u8; 16], iv: &[u8; 16]) -> Self {
+    fn new(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+    ) -> Self {
         Self {
-            cipher: RecordCipher::new(security, key),
-            iv: *iv,
+            cipher: RecordCipher::new(security, &keys.body_key),
+            iv: keys.body_iv,
             counter: 0,
-            mask: LengthMask::new(iv),
+            framing: Framing::new(
+                security,
+                &keys.authenticated_length_key,
+                &keys.authenticated_length_iv,
+                &keys.body_iv,
+                global_padding,
+                authenticated_length,
+            ),
         }
     }
 
@@ -106,13 +194,37 @@ impl BodyWriter {
         plaintext: &[u8],
     ) -> std::io::Result<()> {
         let nonce = record_nonce(&self.iv, self.counter);
-        self.counter = self.counter.wrapping_add(1);
         let ciphertext = self.cipher.seal(&nonce, plaintext)?;
-        let length = u16::try_from(ciphertext.len())
-            .map_err(|_| std::io::Error::other("VMess body record is too large"))?
-            ^ self.mask.next();
-        writer.write_all(&length.to_be_bytes()).await?;
+        let padding_length = self.framing.padding_length();
+        let framed_length = ciphertext
+            .len()
+            .checked_add(padding_length)
+            .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+
+        if let Some(length_cipher) = &self.framing.authenticated_length {
+            let plaintext_length = framed_length
+                .checked_sub(AEAD_OVERHEAD)
+                .and_then(|length| u16::try_from(length).ok())
+                .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+            writer
+                .write_all(&length_cipher.seal(
+                    &self.framing.authenticated_length_nonce(self.counter),
+                    &plaintext_length.to_be_bytes(),
+                )?)
+                .await?;
+        } else {
+            let length = u16::try_from(framed_length)
+                .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
+            let masked = self.framing.mask_length(length);
+            writer.write_all(&masked.to_be_bytes()).await?;
+        }
         writer.write_all(&ciphertext).await?;
+        if padding_length != 0 {
+            let mut padding = vec![0_u8; padding_length];
+            rand::rng().fill(padding.as_mut_slice());
+            writer.write_all(&padding).await?;
+        }
+        self.counter = self.counter.wrapping_add(1);
         writer.flush().await
     }
 
@@ -125,16 +237,28 @@ pub(super) struct BodyReader {
     cipher: RecordCipher,
     iv: [u8; 16],
     counter: u16,
-    mask: LengthMask,
+    framing: Framing,
 }
 
 impl BodyReader {
-    pub(super) fn new(security: Security, key: &[u8; 16], iv: &[u8; 16]) -> Self {
+    fn new(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+    ) -> Self {
         Self {
-            cipher: RecordCipher::new(security, key),
-            iv: *iv,
+            cipher: RecordCipher::new(security, &keys.body_key),
+            iv: keys.body_iv,
             counter: 0,
-            mask: LengthMask::new(iv),
+            framing: Framing::new(
+                security,
+                &keys.authenticated_length_key,
+                &keys.authenticated_length_iv,
+                &keys.body_iv,
+                global_padding,
+                authenticated_length,
+            ),
         }
     }
 
@@ -142,29 +266,62 @@ impl BodyReader {
         &mut self,
         reader: &mut R,
     ) -> std::io::Result<Vec<u8>> {
-        let mut length = [0_u8; 2];
-        reader.read_exact(&mut length).await?;
-        let length = usize::from(u16::from_be_bytes(length) ^ self.mask.next());
-        if !(16..=MAX_READ_CIPHERTEXT).contains(&length) {
+        let nonce = record_nonce(&self.iv, self.counter);
+        let padding_length = self.framing.padding_length();
+        let framed_length = if let Some(length_cipher) = &self.framing.authenticated_length {
+            let mut sealed_length = [0_u8; 2 + AEAD_OVERHEAD];
+            reader.read_exact(&mut sealed_length).await?;
+            let length = length_cipher.open(
+                &self.framing.authenticated_length_nonce(self.counter),
+                &sealed_length,
+            )?;
+            let [high, low] = length.as_slice() else {
+                return Err(std::io::Error::other("invalid VMess authenticated length"));
+            };
+            usize::from(u16::from_be_bytes([*high, *low])) + AEAD_OVERHEAD
+        } else {
+            let mut length = [0_u8; 2];
+            reader.read_exact(&mut length).await?;
+            usize::from(self.framing.mask_length(u16::from_be_bytes(length)))
+        };
+        let ciphertext_length = framed_length
+            .checked_sub(padding_length)
+            .ok_or_else(|| std::io::Error::other("invalid VMess body padding length"))?;
+        if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length) {
             return Err(std::io::Error::other("invalid VMess body record length"));
         }
-        let mut ciphertext = vec![0_u8; length];
+        let mut ciphertext = vec![0_u8; ciphertext_length];
         reader.read_exact(&mut ciphertext).await?;
-        let nonce = record_nonce(&self.iv, self.counter);
+        if padding_length != 0 {
+            let mut padding = vec![0_u8; padding_length];
+            reader.read_exact(&mut padding).await?;
+        }
         self.counter = self.counter.wrapping_add(1);
         self.cipher.open(&nonce, &ciphertext)
     }
 }
 
 pub(super) fn pair(
-    security: Security,
+    security: VmessSecurity,
     request_key: &[u8; 16],
     request_iv: &[u8; 16],
+    global_padding: bool,
+    authenticated_length: bool,
 ) -> (BodyReader, BodyWriter, [u8; 16], [u8; 16]) {
     let (response_key, response_iv) = response_body_material(request_key, request_iv);
     (
-        BodyReader::new(security, &response_key, &response_iv),
-        BodyWriter::new(security, request_key, request_iv),
+        BodyReader::new(
+            security,
+            DirectionKeys::response(request_key, request_iv, &response_key, &response_iv),
+            global_padding,
+            authenticated_length,
+        ),
+        BodyWriter::new(
+            security,
+            DirectionKeys::request(request_key, request_iv),
+            global_padding,
+            authenticated_length,
+        ),
         response_key,
         response_iv,
     )
@@ -181,32 +338,83 @@ mod tests {
             record_nonce(&iv, 0x1234),
             [0x12, 0x34, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
-        let mut first = LengthMask::new(&iv);
-        let mut second = LengthMask::new(&iv);
-        assert_eq!(first.next(), second.next());
-        assert_eq!(first.next(), second.next());
+        let key = [0x11; 16];
+        let mut first = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, false);
+        let mut second = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, false);
+        assert_eq!(first.next_u16(), second.next_u16());
+        assert_eq!(first.next_u16(), second.next_u16());
     }
 
     #[tokio::test]
-    async fn request_records_round_trip_with_independent_reader() {
+    async fn explicit_aead_framing_options_round_trip() {
         let key = [0x11; 16];
         let iv = [0x22; 16];
-        for security in [Security::Aes128Gcm, Security::ChaCha20Poly1305] {
-            let mut writer = BodyWriter::new(security, &key, &iv);
-            let mut wire = Vec::new();
-            writer
-                .write_record(&mut wire, b"phase6d VMess body")
-                .await
-                .unwrap();
-            let mut reader = BodyReader::new(security, &key, &iv);
-            assert_eq!(
-                reader
-                    .read_record(&mut std::io::Cursor::new(wire))
+        for security in [VmessSecurity::Aes128Gcm, VmessSecurity::ChaCha20Poly1305] {
+            for (global_padding, authenticated_length) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let keys = DirectionKeys::request(&key, &iv);
+                let mut writer =
+                    BodyWriter::new(security, keys, global_padding, authenticated_length);
+                let mut wire = Vec::new();
+                writer
+                    .write_record(&mut wire, b"phase6d VMess body")
                     .await
-                    .unwrap(),
-                b"phase6d VMess body"
-            );
+                    .unwrap();
+                let mut reader =
+                    BodyReader::new(security, keys, global_padding, authenticated_length);
+                assert_eq!(
+                    reader
+                        .read_record(&mut std::io::Cursor::new(wire))
+                        .await
+                        .unwrap(),
+                    b"phase6d VMess body"
+                );
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn authenticated_length_rejects_tampering() {
+        let key = [0x51; 16];
+        let iv = [0x62; 16];
+        let keys = DirectionKeys::request(&key, &iv);
+        let mut writer = BodyWriter::new(VmessSecurity::Aes128Gcm, keys, true, true);
+        let mut wire = Vec::new();
+        writer
+            .write_record(&mut wire, b"authenticated length")
+            .await
+            .unwrap();
+        wire[0] ^= 0x01;
+        let mut reader = BodyReader::new(VmessSecurity::Aes128Gcm, keys, true, true);
+        assert!(
+            reader
+                .read_record(&mut std::io::Cursor::new(wire))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_framing_matches_go_prefix_vector() {
+        let key = [0x11; 16];
+        let iv = [0x22; 16];
+        let mut writer = BodyWriter::new(
+            VmessSecurity::Aes128Gcm,
+            DirectionKeys::request(&key, &iv),
+            true,
+            true,
+        );
+        let mut wire = Vec::new();
+        writer
+            .write_record(&mut wire, b"phase6d VMess body")
+            .await
+            .unwrap();
+        assert_eq!(
+            hex::encode(&wire[..52]),
+            "c68036f360f886a9255a83a637089de91ec3ecc2637944e73fff63204979fcc546287770a4248364d21c42b1c25a10cd7669a0e2"
+        );
+        assert_eq!(wire.len(), 111);
     }
 
     #[tokio::test]
@@ -214,13 +422,24 @@ mod tests {
         let request_key = [0x31; 16];
         let request_iv = [0x42; 16];
         let (response_key, response_iv) = response_body_material(&request_key, &request_iv);
-        let mut server_writer = BodyWriter::new(Security::Aes128Gcm, &response_key, &response_iv);
+        let mut server_writer = BodyWriter::new(
+            VmessSecurity::Aes128Gcm,
+            DirectionKeys::response(&request_key, &request_iv, &response_key, &response_iv),
+            true,
+            true,
+        );
         let mut wire = Vec::new();
         server_writer
             .write_record(&mut wire, b"response")
             .await
             .unwrap();
-        let (mut client_reader, _, _, _) = pair(Security::Aes128Gcm, &request_key, &request_iv);
+        let (mut client_reader, _, _, _) = pair(
+            VmessSecurity::Aes128Gcm,
+            &request_key,
+            &request_iv,
+            true,
+            true,
+        );
         assert_eq!(
             client_reader
                 .read_record(&mut std::io::Cursor::new(wire))

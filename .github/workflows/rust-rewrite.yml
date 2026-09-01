@@ -265,6 +265,7 @@ jobs:
       PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DPROXIES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6DVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DBVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DTRANSPORT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -389,6 +390,8 @@ jobs:
             compat/scripts/phase6c_shadowsocks_shadow_tls.py \
             compat/scripts/phase6c_shadowtls_clienthello_regression.py \
             compat/scripts/phase6c_shadowsocks_inbound.py \
+            compat/scripts/phase6d_vmess_tcp.py \
+            compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

@@ -1900,6 +1900,37 @@ HTTPUpgrade, mKCP, Mekya, Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux,
 health-check breadth, VMess inbound/server behavior or cross-platform runtime
 parity. Every excluded field is rejected rather than silently ignored.
 
+### Phase 6D-B accepted scope — explicit VMess AEAD framing options
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-B VMess explicit AEAD** and
+**Linux amd64 — Phase 6D-B VMess explicit AEAD**. It does not advance
+`OUT-22` or any inbound row.
+
+The external path remains mixed HTTP/SOCKS TCP to a native-TCP VMess client and
+the deterministic local authority. The additional accepted surface is:
+
+- explicit case-insensitive `cipher: aes-128-gcm` and
+  `cipher: chacha20-poly1305`, while retaining explicit `auto`;
+- `global-padding` and `authenticated-length`, independently and together,
+  including the oracle's shared SHAKE stream ordering and per-record AEAD
+  length nonces;
+- domain, IPv4 and IPv6 destination encoding across both explicit ciphers;
+- small and multi-record bidirectional relay, half-close, malformed-option
+  rejection and process survival through the existing lifecycle boundary.
+
+`compat/scripts/phase6d_vmess_aead.py` is the Go/Rust differential gate. It
+runs every explicit cipher × framing-option combination through the same
+independent Go authority, including a 128 KiB record sequence and an explicit
+IPv6 destination. Focused Rust tests separately verify ordinary masked length,
+global-padding ordering and authenticated-length tamper rejection.
+
+This phase still rejects `none`, `zero`, `aes-128-cfb`, nonzero AlterID,
+UDP/XUDP/packet addressing, TLS, every outer transport/security plugin and mux.
+Those are separate vertical gates and are not implied by explicit AEAD framing
+parity.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

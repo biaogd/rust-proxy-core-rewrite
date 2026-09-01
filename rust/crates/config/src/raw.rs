@@ -212,6 +212,8 @@ pub(crate) struct RawProxy {
     #[serde(rename = "alterId", alias = "alter-id")]
     pub(crate) alter_id: Option<i64>,
     pub(crate) network: Option<String>,
+    pub(crate) global_padding: Option<bool>,
+    pub(crate) authenticated_length: Option<bool>,
     pub(crate) tls: Option<bool>,
     pub(crate) udp: Option<bool>,
     pub(crate) udp_over_tcp: Option<bool>,

@@ -10,8 +10,8 @@ use rewrite_model::{Destination, Host};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
-use super::VmessProxyError;
 use super::kdf::{derive_12, derive_16};
+use super::{VmessProxyError, VmessSecurity};
 
 const VMESS_MAGIC: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 const OPTION_CHUNK_STREAM_AND_MASKING: u8 = 0x01 | 0x04;
@@ -20,30 +20,13 @@ const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x02;
 const ADDRESS_IPV6: u8 = 0x03;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Security {
-    Aes128Gcm,
-    ChaCha20Poly1305,
-}
-
-impl Security {
+impl VmessSecurity {
     const fn wire_value(self) -> u8 {
         match self {
             Self::Aes128Gcm => 0x03,
             Self::ChaCha20Poly1305 => 0x04,
+            Self::Auto => unreachable!(),
         }
-    }
-}
-
-pub(super) const fn auto_security() -> Security {
-    if cfg!(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "s390x"
-    )) {
-        Security::Aes128Gcm
-    } else {
-        Security::ChaCha20Poly1305
     }
 }
 
@@ -52,6 +35,14 @@ pub(super) struct SealedHeader {
     pub(super) request_key: [u8; 16],
     pub(super) request_iv: [u8; 16],
     pub(super) response_verification: u8,
+}
+
+#[derive(Clone, Copy)]
+struct RequestPlaintextOptions {
+    response_verification: u8,
+    security: VmessSecurity,
+    global_padding: bool,
+    authenticated_length: bool,
 }
 
 pub(super) fn command_key(uuid: &[u8; 16]) -> [u8; 16] {
@@ -63,8 +54,10 @@ pub(super) fn command_key(uuid: &[u8; 16]) -> [u8; 16] {
 
 pub(super) fn seal_request_header(
     command_key: &[u8; 16],
-    security: Security,
+    security: VmessSecurity,
     destination: &Destination,
+    global_padding: bool,
+    authenticated_length: bool,
 ) -> Result<SealedHeader, VmessProxyError> {
     let mut random = rand::rng();
     let now = SystemTime::now()
@@ -82,9 +75,13 @@ pub(super) fn seal_request_header(
     let plaintext = build_request_plaintext(
         &request_key,
         &request_iv,
-        response_verification,
-        security,
         destination,
+        RequestPlaintextOptions {
+            response_verification,
+            security,
+            global_padding,
+            authenticated_length,
+        },
         &mut random,
     )?;
 
@@ -168,9 +165,8 @@ fn build_auth_id(
 fn build_request_plaintext(
     request_key: &[u8; 16],
     request_iv: &[u8; 16],
-    response_verification: u8,
-    security: Security,
     destination: &Destination,
+    options: RequestPlaintextOptions,
     random: &mut impl rand::Rng,
 ) -> Result<Vec<u8>, VmessProxyError> {
     let padding_length = random.random_range(0_u8..16);
@@ -178,9 +174,16 @@ fn build_request_plaintext(
     header.push(0x01);
     header.extend_from_slice(request_iv);
     header.extend_from_slice(request_key);
-    header.push(response_verification);
-    header.push(OPTION_CHUNK_STREAM_AND_MASKING);
-    header.push((padding_length << 4) | security.wire_value());
+    header.push(options.response_verification);
+    let mut request_options = OPTION_CHUNK_STREAM_AND_MASKING;
+    if options.global_padding {
+        request_options |= 0x08;
+    }
+    if options.authenticated_length {
+        request_options |= 0x10;
+    }
+    header.push(request_options);
+    header.push((padding_length << 4) | options.security.wire_value());
     header.push(0x00);
     header.push(COMMAND_TCP);
     header.extend_from_slice(&destination.port.to_be_bytes());
@@ -343,7 +346,9 @@ mod tests {
             host: Host::Domain("phase6d.example".to_owned()),
             port: 443,
         };
-        let sealed = seal_request_header(&key, Security::Aes128Gcm, &destination).unwrap();
+        let sealed =
+            seal_request_header(&key, VmessSecurity::Aes128Gcm, &destination, false, false)
+                .unwrap();
         let plaintext = open_request_header(&key, &sealed.wire);
         assert_eq!(plaintext[0], 1);
         assert_eq!(&plaintext[1..17], &sealed.request_iv);

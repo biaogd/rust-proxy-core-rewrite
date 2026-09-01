@@ -155,12 +155,13 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6C-M6 Shadowsocks shadow-tls v3 | Complete wire parity in declared top-level TCP scope; Chrome fingerprint partial | Native hand-rolled v1/v2/v3 client signs ClientHello session-id at rustls construction time, unwraps camouflage TLS 1.2/1.3 application-data HMAC/XOR during handshake relay and frames post-handshake SS2022 bytes; Clash config contract and domain/large TCP wire comparison pass against the Go oracle. Chrome `client-fingerprint` is a partial shape (10 cipher suites vs Go/uTLS 16; non-`chrome` labels rejected at YAML load). `phase6c_shadowtls_clienthello_regression.py` per-runtime CI regression captures on-wire ClientHello via production ShadowTLS v3 paths and pins each runtime's documented cipher/extension baseline plus session-id HMAC — not Go/Rust wire parity; GREASE ECH enc key is random stand-in. Protocol wire parity remains in `phase6c_shadowsocks_shadow_tls.py` |
 | Phase 6C-N Shadowsocks ss-config inbound | Implemented; corrected differential validation pending | Named `listeners` SS inbound implements TCP/UDP, UoT, simple-obfs and shadow-tls v3 in the roadmap's declared first-server scope. Corrected gates require a proxy-observed CONNECT, distinguish `INNER` from the outer Shadowsocks flow, change listener identity during fallback reload and reject unsupported fields. The five focused Rust scenarios and workspace quality gates pass at `c4ec1e4a`; the corrected full Go/Rust differential remains pending. ShadowTLS `IN-USER` and SS2022 EIH inbound stay Rust-only evidence |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
+| Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |
 | Outbound module refactor | Complete; behavior-neutral | The 924-line facade is reduced to module declarations/re-exports; DIRECT, HTTP, TLS and SOCKS5 TCP/UDP/auth live in focused files and all seven Phase 6B differentials re-pass |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Fourteen focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-A; Phase 6C-N corrected gate pending | Phase 1–6D-A Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6D-B; Phase 6C-N corrected gate pending | Phase 1–6D-B Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N gate is present, but its full Go/Rust result is not yet accepted. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5320,6 +5321,40 @@ Linux amd64 execution is configured in the default controller/outbound Actions
 shard but remains pending until CI completes. VMess UDP/XUDP, other
 security/AlterID behavior, TLS and every outer transport/mux, broader health
 combinations and inbound/server mode remain later independent gates.
+
+## Phase 6D-B VMess explicit-AEAD framing evidence
+
+The second VMess client slice retains the Phase 6D-A native-TCP and AlterID 0
+boundary, and adds explicit case-insensitive `aes-128-gcm` and
+`chacha20-poly1305` security plus `global-padding` and
+`authenticated-length`, independently and together. Missing, unknown and
+out-of-scope cipher values fail during configuration loading. RustCrypto owns
+the standardized AEAD/SHAKE primitives; protocol code owns VMess key expansion,
+nonce/counter ordering, record limits and direction-specific key selection.
+
+`compat/scripts/phase6d_vmess_aead.py` passes on Darwin arm64, 2026-09-01.
+The eight-case Go/Rust matrix reaches the independent Go authority through the
+same mixed listener and compares both explicit ciphers across ordinary,
+global-padding, authenticated-length and combined framing. It verifies domain,
+IPv4 and IPv6 destination encoding, 128 KiB multi-record bidirectional relay,
+half-close, process survival and exact observed destinations. A focused Go
+prefix vector pins combined request framing, tamper tests reject modified
+authenticated lengths, and the response test protects the protocol's
+asymmetric rule: response body encryption uses response material while the
+authenticated-length stream keeps request key/IV material.
+
+Local acceptance commands use the external target directory:
+
+```sh
+PHASE6DBVMESS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo/phase6d-b python3 compat/scripts/phase6d_vmess_aead.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/phase6d-b cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo/phase6d-b cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+Linux amd64 execution is configured in the default controller/outbound Actions
+shard but remains pending until CI completes. `none`, `zero`, `aes-128-cfb`,
+nonzero AlterID, UDP/XUDP, TLS, outer transports, mux and inbound/server mode
+remain explicit later gates.
 
 Other workstreams stop at their latest independently accepted rows above.
 `DNS-03`–`DNS-05` retain the platform/integration gaps documented above, while

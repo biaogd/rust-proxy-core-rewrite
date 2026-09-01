@@ -219,6 +219,16 @@ pub struct ProxyConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmessProxyConfig {
     pub uuid: [u8; 16],
+    pub security: VmessSecurity,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmessSecurity {
+    Auto,
+    Aes128Gcm,
+    ChaCha20Poly1305,
 }
 
 impl ProxyConfig {

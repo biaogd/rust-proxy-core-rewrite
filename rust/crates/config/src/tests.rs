@@ -1495,11 +1495,32 @@ fn parses_phase6d_a_vmess_native_tcp_scope() {
             0x08, 0x11,
         ])
     );
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| vmess.security),
+        Some(crate::VmessSecurity::Auto)
+    );
     assert!(!proxy.udp);
 }
 
 #[test]
-fn phase6d_a_vmess_rejects_fields_outside_native_tcp_scope() {
+fn parses_phase6d_b_explicit_aead_framing_options() {
+    for (cipher, expected) in [
+        ("AES-128-GCM", crate::VmessSecurity::Aes128Gcm),
+        ("CHACHA20-POLY1305", crate::VmessSecurity::ChaCha20Poly1305),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: explicit-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: {cipher}\n    network: tcp\n    global-padding: true\n    authenticated-length: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-B VMess config");
+        let vmess = config.proxies[0].vmess.as_ref().unwrap();
+        assert_eq!(vmess.security, expected);
+        assert!(vmess.global_padding);
+        assert!(vmess.authenticated_length);
+    }
+}
+
+#[test]
+fn phase6d_vmess_rejects_fields_outside_current_native_tcp_scope() {
     let base = format!(
         "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
     );
@@ -1525,6 +1546,12 @@ fn phase6d_a_vmess_rejects_fields_outside_native_tcp_scope() {
             "unexpectedly accepted {extra:?}"
         );
     }
+
+    let missing_cipher = base;
+    assert!(matches!(
+        Config::from_yaml(&missing_cipher),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
 }
 
 #[test]

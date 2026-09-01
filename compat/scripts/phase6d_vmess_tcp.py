@@ -68,17 +68,28 @@ def start_authority(
 
 
 def vmess_record(
-    name: str, authority_port: int, uuid: str = UUID, extra: str = ""
+    name: str,
+    authority_port: int,
+    uuid: str = UUID,
+    extra: str = "",
+    cipher: str = "auto",
+    global_padding: bool = False,
+    authenticated_length: bool = False,
 ) -> str:
+    framing = ""
+    if global_padding:
+        framing += "    global-padding: true\n"
+    if authenticated_length:
+        framing += "    authenticated-length: true\n"
     return f"""  - name: {name}
     type: vmess
     server: 127.0.0.1
     port: {authority_port}
     uuid: {uuid}
     alterId: 0
-    cipher: auto
+    cipher: {cipher}
     network: tcp
-{extra}"""
+{framing}{extra}"""
 
 
 def exchange(
@@ -332,7 +343,7 @@ rules:
             + vmess_record(
                 "invalid-vmess",
                 authority_port,
-                extra="    cipher: invalid\n",
+                cipher="invalid",
             ),
         )
         missing_server = config_validation(

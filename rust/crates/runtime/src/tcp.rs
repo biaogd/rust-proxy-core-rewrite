@@ -527,11 +527,23 @@ async fn connect_vmess_proxy(
         .vmess
         .as_ref()
         .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
+    let security = match vmess.security {
+        rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
+        rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
+        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+        }
+    };
     rewrite_outbound::connect_vmess_with_options(
         server,
         destination,
         allow_ipv6,
-        &vmess.uuid,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            security,
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
         socket_options,
     )
     .await

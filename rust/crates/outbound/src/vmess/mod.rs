@@ -1,4 +1,4 @@
-//! Minimal `VMess` AEAD client for the Phase 6D-A native-TCP boundary.
+//! Minimal `VMess` AEAD client for the Phase 6D-A/B native-TCP boundary.
 //!
 //! No maintained, narrowly scoped embeddable client crate was available at
 //! this phase boundary. Protocol framing is kept here while `RustCrypto` owns
@@ -19,7 +19,40 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
 use body::{BodyReader, BodyWriter};
-use header::{auto_security, command_key, read_response_header, seal_request_header};
+use header::{command_key, read_response_header, seal_request_header};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmessSecurity {
+    Auto,
+    Aes128Gcm,
+    ChaCha20Poly1305,
+}
+
+impl VmessSecurity {
+    const fn resolved(self) -> Self {
+        match self {
+            Self::Auto
+                if cfg!(any(
+                    target_arch = "x86_64",
+                    target_arch = "aarch64",
+                    target_arch = "s390x"
+                )) =>
+            {
+                Self::Aes128Gcm
+            }
+            Self::Auto => Self::ChaCha20Poly1305,
+            explicit => explicit,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VmessTcpOptions {
+    pub uuid: [u8; 16],
+    pub security: VmessSecurity,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
+}
 
 #[derive(Debug, Error)]
 pub enum VmessProxyError {
@@ -33,8 +66,8 @@ pub enum VmessProxyError {
 
 /// Connects a `VMess` AEAD client over native TCP.
 ///
-/// Phase 6D-A intentionally accepts only `AlterID` zero and the oracle's `auto`
-/// security selection; configuration validation owns those restrictions.
+/// Phase 6D-A/B intentionally accepts only `AlterID` zero and the declared AEAD
+/// security/framing options; configuration validation owns those restrictions.
 ///
 /// # Errors
 ///
@@ -45,16 +78,27 @@ pub async fn connect_vmess_with_options(
     server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
-    uuid: &[u8; 16],
+    options: VmessTcpOptions,
     socket_options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, VmessProxyError> {
     let mut remote = connect_with_options(server, allow_ipv6, socket_options).await?;
-    let security = auto_security();
-    let sealed = seal_request_header(&command_key(uuid), security, destination)?;
+    let security = options.security.resolved();
+    let sealed = seal_request_header(
+        &command_key(&options.uuid),
+        security,
+        destination,
+        options.global_padding,
+        options.authenticated_length,
+    )?;
     remote.write_all(&sealed.wire).await?;
 
-    let (body_reader, body_writer, response_key, response_iv) =
-        body::pair(security, &sealed.request_key, &sealed.request_iv);
+    let (body_reader, body_writer, response_key, response_iv) = body::pair(
+        security,
+        &sealed.request_key,
+        &sealed.request_iv,
+        options.global_padding,
+        options.authenticated_length,
+    );
     let cancellation = CancellationToken::new();
     let (application, relay) = tokio::io::duplex(64 * 1024);
     let task_cancellation = cancellation.clone();

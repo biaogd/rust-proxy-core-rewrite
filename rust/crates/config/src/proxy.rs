@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VmessProxyConfig,
+    VmessProxyConfig, VmessSecurity,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -159,6 +159,8 @@ fn parse_remote_proxy(
         || proxy.uuid.is_some()
         || proxy.alter_id.is_some()
         || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -229,6 +231,8 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.uuid.is_some()
         || proxy.alter_id.is_some()
         || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -318,7 +322,6 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.headers.is_some()
         || proxy.alter_id.unwrap_or_default() != 0
         || !matches!(proxy.network.as_deref(), None | Some("tcp"))
-        || proxy.cipher.as_deref().unwrap_or("auto") != "auto"
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
@@ -338,6 +341,17 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .map(|value| *value.as_bytes())
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let security = match proxy.cipher.as_deref().map(str::to_ascii_lowercase) {
+        Some(cipher) if cipher == "auto" => VmessSecurity::Auto,
+        Some(cipher) if cipher == "aes-128-gcm" => VmessSecurity::Aes128Gcm,
+        Some(cipher) if cipher == "chacha20-poly1305" => VmessSecurity::ChaCha20Poly1305,
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+    let cipher = match security {
+        VmessSecurity::Auto => "auto",
+        VmessSecurity::Aes128Gcm => "aes-128-gcm",
+        VmessSecurity::ChaCha20Poly1305 => "chacha20-poly1305",
+    };
     Ok(ProxyConfig {
         name,
         kind: ProxyKind::Vmess,
@@ -345,7 +359,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         port,
         username: None,
         password: None,
-        cipher: Some("auto".to_owned()),
+        cipher: Some(cipher.to_owned()),
         tls: false,
         sni: None,
         skip_cert_verify: false,
@@ -358,7 +372,12 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
-        vmess: Some(VmessProxyConfig { uuid }),
+        vmess: Some(VmessProxyConfig {
+            uuid,
+            security,
+            global_padding: proxy.global_padding.unwrap_or(false),
+            authenticated_length: proxy.authenticated_length.unwrap_or(false),
+        }),
         headers: BTreeMap::new(),
     })
 }
@@ -735,6 +754,8 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.uuid.is_some()
         || proxy.alter_id.is_some()
         || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()
