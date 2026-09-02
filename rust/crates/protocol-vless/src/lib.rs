@@ -231,9 +231,9 @@ mod tests {
             },
         )
         .expect("vision header");
-        assert_eq!(header[18], 0x12, "addon length for xtls-rprx-vision");
-        assert_eq!(&header[19..31], b"\x0a\x10xtls-rprx-vision");
-        assert_eq!(header[31], 1);
+        assert_eq!(header[17], 0x12, "addon length for xtls-rprx-vision");
+        assert_eq!(&header[18..36], b"\x0a\x10xtls-rprx-vision");
+        assert_eq!(header[36], 1);
     }
 
     #[tokio::test]
