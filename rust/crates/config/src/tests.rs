@@ -2991,3 +2991,40 @@ fn parses_phase6e_d_vless_http_scope() {
         );
     }
 }
+
+#[test]
+fn parses_phase6e_e_vless_grpc_scope() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-grpc-default\n    type: vless\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: grpc\n  - name: vless-grpc-custom\n    type: vless\n    server: 127.0.0.1\n    port: 10006\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: grpc\n    tls: true\n    servername: dot.phase4.test\n    grpc-opts:\n      grpc-service-name: /custom/path\n      grpc-user-agent: phase6e-e/1.0\n"
+    ))
+    .expect("Phase 6E-E VLESS gRPC config");
+    let default = config.proxies[0].vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        default.transport,
+        VlessTransport::Grpc {
+            service_name: "GunService".to_owned(),
+            user_agent: "grpc-go/1.36.0".to_owned(),
+        }
+    );
+    let custom = config.proxies[1].vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        custom.transport,
+        VlessTransport::Grpc {
+            service_name: "/custom/path".to_owned(),
+            user_agent: "phase6e-e/1.0".to_owned(),
+        }
+    );
+    assert!(config.proxies[1].tls);
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: grpc\n    grpc-opts:\n      ping-interval: 1\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    grpc-opts:\n      grpc-service-name: secure\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: grpc\n    ws-opts:\n      path: /wrong\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}

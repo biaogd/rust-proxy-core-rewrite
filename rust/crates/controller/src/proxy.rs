@@ -521,7 +521,8 @@ pub(super) async fn measure_http_delay(
                         let alpn: &[&[u8]] = match &vless.transport {
                             rewrite_config::VlessTransport::WebSocket { .. }
                             | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
-                            rewrite_config::VlessTransport::Http2 { .. } => &[b"h2"],
+                            rewrite_config::VlessTransport::Http2 { .. }
+                            | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
                             rewrite_config::VlessTransport::Tcp => &[],
                         };
                         outer = rewrite_outbound::wrap_client_tls_with_options(
@@ -569,6 +570,15 @@ pub(super) async fn measure_http_delay(
                         ),
                         rewrite_config::VlessTransport::Http2 { hosts, path } => {
                             rewrite_outbound::connect_vmess_h2(outer, &hosts[0], path)
+                                .await
+                                .map_err(|_| ())?
+                        }
+                        rewrite_config::VlessTransport::Grpc {
+                            service_name,
+                            user_agent,
+                        } => {
+                            let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+                            rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
                                 .await
                                 .map_err(|_| ())?
                         }

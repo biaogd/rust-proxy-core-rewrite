@@ -241,6 +241,10 @@ pub enum VlessTransport {
         path: String,
         headers: BTreeMap<String, String>,
     },
+    Grpc {
+        service_name: String,
+        user_agent: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

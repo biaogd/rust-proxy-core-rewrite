@@ -430,12 +430,12 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.authenticated_length.is_some()
         || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
-        || !matches!(network, "tcp" | "ws" | "http" | "h2")
+        || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
         || proxy.udp.unwrap_or(false)
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
-        || proxy.grpc_opts.is_some()
+        || (network != "grpc" && proxy.grpc_opts.is_some())
         || proxy.mkcp_opts.is_some()
         || proxy.mekya_opts.is_some()
         || proxy.udp_over_tcp.is_some()
@@ -559,6 +559,39 @@ fn parse_vless_transport(
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
         return Ok(VlessTransport::Http2 { hosts, path });
+    }
+    if network == "grpc" {
+        let options = proxy.grpc_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty()
+            || options.ping_interval.is_some_and(|interval| interval != 0)
+            || options.max_connections.is_some_and(|connections| connections != 0)
+            || options.min_streams.is_some_and(|streams| streams != 0)
+            || options.max_streams.is_some_and(|streams| streams != 0)
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let service_name = options
+            .grpc_service_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "GunService".to_owned());
+        let user_agent = options
+            .grpc_user_agent
+            .filter(|agent| !agent.is_empty())
+            .unwrap_or_else(|| "grpc-go/1.36.0".to_owned());
+        let service_path = if service_name.starts_with('/') {
+            service_name.clone()
+        } else {
+            format!("/{service_name}/Tun")
+        };
+        if service_path.parse::<http::uri::PathAndQuery>().is_err()
+            || http::header::HeaderValue::from_str(&user_agent).is_err()
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VlessTransport::Grpc {
+            service_name,
+            user_agent,
+        });
     }
     let options = proxy.ws_opts.clone().unwrap_or_default();
     if !options.extra.is_empty()
