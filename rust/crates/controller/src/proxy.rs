@@ -504,27 +504,25 @@ pub(super) async fn measure_http_delay(
                         .await
                         .map_err(|_| ())?,
                     );
-                    let websocket = match &vless.transport {
-                        rewrite_config::VlessTransport::Tcp => None,
-                        rewrite_config::VlessTransport::WebSocket { path, headers } => {
-                            Some((path.as_str(), headers))
-                        }
+                    let websocket_host = match &vless.transport {
+                        rewrite_config::VlessTransport::WebSocket { headers, .. } => headers
+                            .iter()
+                            .find_map(|(name, value)| {
+                                name.eq_ignore_ascii_case("host").then_some(value.as_str())
+                            }),
+                        _ => None,
                     };
                     if proxy.tls {
-                        let websocket_host = websocket.and_then(|(_, headers)| {
-                            headers.iter().find_map(|(name, value)| {
-                                name.eq_ignore_ascii_case("host").then_some(value.as_str())
-                            })
-                        });
                         let server_name = proxy
                             .sni
                             .as_deref()
                             .or(websocket_host)
                             .unwrap_or(&proxy.server);
-                        let alpn: &[&[u8]] = if websocket.is_some() {
-                            &[b"http/1.1"]
-                        } else {
-                            &[]
+                        let alpn: &[&[u8]] = match &vless.transport {
+                            rewrite_config::VlessTransport::WebSocket { .. }
+                            | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
+                            rewrite_config::VlessTransport::Http2 { .. } => &[b"h2"],
+                            rewrite_config::VlessTransport::Tcp => &[],
                         };
                         outer = rewrite_outbound::wrap_client_tls_with_options(
                             outer,
@@ -546,19 +544,36 @@ pub(super) async fn measure_http_delay(
                         .await
                         .map_err(|_| ())?;
                     }
-                    if let rewrite_config::VlessTransport::WebSocket { path, headers } =
-                        &vless.transport
-                    {
-                        outer = rewrite_outbound::connect_websocket_with_headers(
+                    outer = match &vless.transport {
+                        rewrite_config::VlessTransport::WebSocket { path, headers } => {
+                            rewrite_outbound::connect_websocket_with_headers(
+                                outer,
+                                &proxy.server,
+                                proxy.port,
+                                path,
+                                headers,
+                            )
+                            .await
+                            .map_err(|_| ())?
+                        }
+                        rewrite_config::VlessTransport::Http {
+                            method,
+                            paths,
+                            headers,
+                        } => rewrite_outbound::connect_vmess_http(
                             outer,
                             &proxy.server,
-                            proxy.port,
-                            path,
+                            method,
+                            paths,
                             headers,
-                        )
-                        .await
-                        .map_err(|_| ())?;
-                    }
+                        ),
+                        rewrite_config::VlessTransport::Http2 { hosts, path } => {
+                            rewrite_outbound::connect_vmess_h2(outer, &hosts[0], path)
+                                .await
+                                .map_err(|_| ())?
+                        }
+                        rewrite_config::VlessTransport::Tcp => outer,
+                    };
                     rewrite_outbound::connect_vless_on_stream(
                         outer,
                         &destination,

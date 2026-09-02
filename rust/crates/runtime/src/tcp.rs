@@ -584,32 +584,50 @@ async fn connect_vless_outer(
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let outer = connect_vless_physical_outer(
+        proxy,
+        server,
+        vless,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    wrap_vless_transport(outer, proxy, vless).await
+}
+
+async fn connect_vless_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vless: &rewrite_config::VlessProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let mut outer = Box::new(
         rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
             .await
             .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
     ) as rewrite_outbound::BoxedOutboundStream;
-    let websocket = match &vless.transport {
-        rewrite_config::VlessTransport::Tcp => None,
-        rewrite_config::VlessTransport::WebSocket { path, headers } => {
-            Some((path.as_str(), headers))
-        }
+    let websocket_host = match &vless.transport {
+        rewrite_config::VlessTransport::WebSocket { headers, .. } => headers
+            .iter()
+            .find_map(|(name, value)| name.eq_ignore_ascii_case("host").then_some(value.as_str())),
+        _ => None,
     };
     if proxy.tls {
-        let websocket_host = websocket.and_then(|(_, headers)| {
-            headers.iter().find_map(|(name, value)| {
-                name.eq_ignore_ascii_case("host").then_some(value.as_str())
-            })
-        });
         let server_name = proxy
             .sni
             .as_deref()
             .or(websocket_host)
             .unwrap_or(&proxy.server);
-        let alpn: &[&[u8]] = if websocket.is_some() {
-            &[b"http/1.1"]
-        } else {
-            &[]
+        let alpn: &[&[u8]] = match &vless.transport {
+            rewrite_config::VlessTransport::WebSocket { .. }
+            | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
+            rewrite_config::VlessTransport::Http2 { .. } => &[b"h2"],
+            rewrite_config::VlessTransport::Tcp => &[],
         };
         outer = rewrite_outbound::wrap_client_tls_with_options(
             outer,
@@ -631,16 +649,41 @@ async fn connect_vless_outer(
         .await
         .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
     }
-    if let rewrite_config::VlessTransport::WebSocket { path, headers } = &vless.transport {
-        outer = rewrite_outbound::connect_websocket_with_headers(
-            outer,
-            &proxy.server,
-            proxy.port,
-            path,
+    Ok(outer)
+}
+
+async fn wrap_vless_transport(
+    mut outer: rewrite_outbound::BoxedOutboundStream,
+    proxy: &rewrite_config::ProxyConfig,
+    vless: &rewrite_config::VlessProxyConfig,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    match &vless.transport {
+        rewrite_config::VlessTransport::WebSocket { path, headers } => {
+            outer = rewrite_outbound::connect_websocket_with_headers(
+                outer,
+                &proxy.server,
+                proxy.port,
+                path,
+                headers,
+            )
+            .await
+            .map_err(|error| format!("VLESS WebSocket upgrade failed: {error}"))?;
+        }
+        rewrite_config::VlessTransport::Http {
+            method,
+            paths,
             headers,
-        )
-        .await
-        .map_err(|error| format!("VLESS WebSocket upgrade failed: {error}"))?;
+        } => {
+            outer =
+                rewrite_outbound::connect_vmess_http(outer, &proxy.server, method, paths, headers);
+        }
+        rewrite_config::VlessTransport::Http2 { hosts, path } => {
+            let index = rand::random_range(0..hosts.len());
+            outer = rewrite_outbound::connect_vmess_h2(outer, &hosts[index], path)
+                .await
+                .map_err(|error| format!("VLESS HTTP/2 transport failed: {error}"))?;
+        }
+        rewrite_config::VlessTransport::Tcp => {}
     }
     Ok(outer)
 }

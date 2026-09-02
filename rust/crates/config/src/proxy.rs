@@ -430,13 +430,11 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.authenticated_length.is_some()
         || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
-        || !matches!(network, "tcp" | "ws")
+        || !matches!(network, "tcp" | "ws" | "http" | "h2")
         || proxy.udp.unwrap_or(false)
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
-        || proxy.http_opts.is_some()
-        || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
         || proxy.mkcp_opts.is_some()
         || proxy.mekya_opts.is_some()
@@ -450,6 +448,8 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.client_fingerprint.is_some()
         || proxy.headers.is_some()
         || (network != "ws" && proxy.ws_opts.is_some())
+        || (network != "http" && proxy.http_opts.is_some())
+        || (network != "h2" && proxy.h2_opts.is_some())
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
@@ -504,6 +504,61 @@ fn parse_vless_transport(
 ) -> Result<VlessTransport, ConfigError> {
     if network == "tcp" {
         return Ok(VlessTransport::Tcp);
+    }
+    if network == "http" {
+        let options = proxy.http_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let method = options
+            .method
+            .filter(|method| !method.is_empty())
+            .unwrap_or_else(|| "GET".to_owned());
+        if http::Method::from_bytes(method.as_bytes()).is_err() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut paths = options.path.unwrap_or_default();
+        if paths.is_empty() {
+            paths.push("/".to_owned());
+        }
+        if paths.iter().any(|path| !path.starts_with('/')) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let headers = options.headers.unwrap_or_default();
+        if headers.iter().any(|(header, values)| {
+            http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                || values
+                    .iter()
+                    .any(|value| http::header::HeaderValue::from_str(value).is_err())
+        }) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VlessTransport::Http {
+            method,
+            paths,
+            headers,
+        });
+    }
+    if network == "h2" {
+        let options = proxy.h2_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut hosts = options.host.unwrap_or_default();
+        if hosts.is_empty() {
+            hosts.push("www.example.com".to_owned());
+        }
+        let path = options
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_owned());
+        if hosts.iter().any(|host| {
+            host.is_empty() || http::uri::Authority::from_maybe_shared(host.clone()).is_err()
+        }) || !path.starts_with('/')
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VlessTransport::Http2 { hosts, path });
     }
     let options = proxy.ws_opts.clone().unwrap_or_default();
     if !options.extra.is_empty()
