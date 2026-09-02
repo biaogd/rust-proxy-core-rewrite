@@ -167,13 +167,14 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-K VMess mKCP TCP | Complete in declared deterministic client scope | Authentication/headers/relay plus exact Go fast-ACK/RTO/congestion contracts, 14%/25% semantic DATA loss, ACK loss, duplicate/reorder recovery, bounded retransmission and both close-direction outcomes pass; randomized long-duration impairment, UDP and server direction remain open |
 | Phase 6D-L VMess Mekya TCP | Complete in declared deterministic client scope | Hyper-backed TLS HTTP/2 and HTTP/1.1 packet carriers pass bundle/poll/pool/nested-mKCP plus oracle-negative client half-close and peer payload+EOF close; plaintext carrier, UDP and server direction remain open |
 | Phase 6E-A VLESS native TCP | Complete in declared client scope | Version-zero native TCP passes exact independent-authority request parsing, canonical/Go-mapped UUIDs, domain/IPv4/IPv6, lazy first-write payload, response addons, 128 KiB relay, half-close, providers/groups/controller and failure lifecycle; UDP/packet modes, TLS/transports, Vision/Reality, mux and server direction remain open |
-| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A pass in their declared scopes |
+| Phase 6E-B VLESS native TCP over TLS | Complete in declared client scope | Shared rustls carrier passes trusted roots, exact SNI, independent verification name, skip verification, untrusted/wrong-name rejection, large relay, half-close and real controller group health; advanced TLS, non-native carriers and other Phase 6E exclusions remain open |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A/B pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-A | Phase 1–6E-A Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6E-B | Phase 1–6E-B Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A/B gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5678,6 +5679,38 @@ now runs the same gate; its native result remains pending until Actions ends.
 Only VLESS version-zero native TCP is claimed. UDP/XUDP packet transport,
 encryption extensions, TLS and all outer transports, Vision, Reality, general
 multiplexing and inbound/server behavior remain later Phase 6E work.
+
+## Phase 6E-B VLESS native-TCP TLS evidence
+
+Phase 6E-B composes the Phase 6E-A stream over the existing
+`rewrite-transport` rustls carrier. The config accepts `tls`, `servername`/`sni`,
+`name-cert-verify`, `skip-cert-verify` and global custom roots. Runtime traffic
+and controller health checks use the same root/name policy, while
+`rewrite-protocol-vless` remains transport-independent. Dormant TLS naming
+fields with TLS disabled follow the Go oracle and are accepted without wrapping
+the socket.
+
+Local Darwin arm64 evidence on 2026-09-02:
+
+```sh
+PHASE6EVLESSTLS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6e_vless_tls.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo fmt --manifest-path rust/Cargo.toml --all --check
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+The independent Python TLS/VLESS authority proves trusted-root validation,
+exact ClientHello SNI with a separate certificate verification name, skip
+verification, untrusted-root and wrong-name rejection, 128 KiB relay,
+half-close, failure survival and a live controller URL-test health request.
+Both products must satisfy explicit positive and negative contracts before
+their normalized observations are compared. The default controller/outbound
+Linux shard runs this gate, but Linux parity remains pending until Actions
+finishes.
+
+Fingerprint pinning, client certificates, ALPN controls, ECH/camouflage,
+WebSocket/HTTP/H2/gRPC/xHTTP, encryption extensions, Vision, Reality, UDP/XUDP,
+mux and inbound/server behavior are not claimed by Phase 6E-B.
 
 ## SS/VMess/VLESS protocol ownership
 

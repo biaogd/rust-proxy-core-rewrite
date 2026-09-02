@@ -495,14 +495,41 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::Vless => {
                     let vless = proxy.vless.as_ref().ok_or(())?;
-                    rewrite_outbound::connect_vless_with_options(
-                        &server,
+                    let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
+                        rewrite_outbound::connect_with_options(
+                            &server,
+                            config.ipv6,
+                            controller_socket_options(config),
+                        )
+                        .await
+                        .map_err(|_| ())?,
+                    );
+                    if proxy.tls {
+                        outer = rewrite_outbound::wrap_client_tls_with_options(
+                            outer,
+                            rewrite_outbound::HttpProxyTls {
+                                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                                verification_name: proxy.name_cert_verify.as_deref(),
+                                skip_certificate_verification: proxy.skip_cert_verify,
+                                fingerprint: None,
+                                certificate: None,
+                                private_key: None,
+                                custom_roots: &config.trust_certificates,
+                                ech_config: None,
+                                alpn_protocols: &[],
+                                tls12_only: false,
+                                tls13_only: false,
+                            },
+                            None,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    }
+                    rewrite_outbound::connect_vless_on_stream(
+                        outer,
                         &destination,
-                        config.ipv6,
                         rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
-                        controller_socket_options(config),
                     )
-                    .await
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::Reject

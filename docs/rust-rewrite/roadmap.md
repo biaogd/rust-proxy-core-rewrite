@@ -2304,6 +2304,33 @@ Vision, Reality, multiplexing and inbound/server behavior remain later Phase
 narrowly scoped VLESS crate preserves the required lazy-write and oracle UUID
 behavior; the local crate uses Tokio primitives and has byte-level contracts.
 
+### Phase 6E-B accepted scope — VLESS native TCP over TLS
+
+Phase 6E-B changes the same configuration and outbound `VLESS` rows plus the
+Darwin/Linux Phase 6E-B rows. It composes the Phase 6E-A VLESS v0 session over
+the existing maintained rustls carrier: YAML -> mixed TCP -> rule/group -> TCP
+dial -> TLS -> VLESS -> destination. The protocol crate remains independent of
+certificate and transport policy.
+
+The accepted configuration adds `tls: true`, `servername`/`sni`,
+`name-cert-verify`, `skip-cert-verify` and global inline custom roots. Like the
+Go oracle, dormant TLS name/verification fields are accepted when TLS is false
+and do not wrap the connection. Native VLESS TLS is also used by controller
+delay and automatic group health checks. Fingerprint pinning, client
+certificates, custom ALPN, ECH and camouflage-specific TLS are not included.
+
+`compat/scripts/phase6e_vless_tls.py` uses Python's TLS stack and an independent
+VLESS parser. It compares trusted-root verification, exact ClientHello SNI with
+an independent certificate verification name, skip verification, rejection of
+an untrusted root and wrong name, large relay, half-close, process survival and
+a real controller group health request. Matching failures cannot satisfy the
+gate because each product must meet explicit positive and negative contracts.
+
+This phase does not add WebSocket/HTTP/H2/gRPC/xHTTP carriers, Vision, Reality,
+VLESS encryption extensions, UDP/XUDP data paths, mux or inbound/server
+behavior. No new dependency is introduced: the shared `rewrite-transport` TLS
+adapter already owns roots, name policy, rustls configuration and handshake.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

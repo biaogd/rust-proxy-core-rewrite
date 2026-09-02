@@ -419,6 +419,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
 fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let encryption = proxy.encryption.as_deref().unwrap_or("");
+    let tls = proxy.tls.unwrap_or(false);
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -430,7 +431,6 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
         || network != "tcp"
-        || proxy.tls.unwrap_or(false)
         || proxy.udp.unwrap_or(false)
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
@@ -445,9 +445,6 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
         || proxy.plugin_opts.is_some()
-        || proxy.sni.is_some()
-        || proxy.skip_cert_verify.is_some()
-        || proxy.name_cert_verify.is_some()
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
@@ -477,10 +474,10 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         username: None,
         password: None,
         cipher: None,
-        tls: false,
-        sni: None,
-        skip_cert_verify: false,
-        name_cert_verify: None,
+        tls,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|name| !name.is_empty()),
         fingerprint: None,
         certificate: None,
         private_key: None,

@@ -439,19 +439,10 @@ pub(super) async fn connect_configured_proxy(
         }
         ProxyKind::Http => {
             let credentials = proxy.http_credentials();
-            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
-                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: &[],
-                tls12_only: false,
-                tls13_only: false,
-            });
+            let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+            let tls = proxy
+                .tls
+                .then(|| proxy_tls_options(proxy, server_name, custom_roots));
             rewrite_outbound::connect_http_with_options(
                 &server,
                 destination,
@@ -466,19 +457,9 @@ pub(super) async fn connect_configured_proxy(
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }
         ProxyKind::Socks5 => {
-            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
-                server_name: &proxy.server,
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: &[],
-                tls12_only: false,
-                tls13_only: false,
-            });
+            let tls = proxy
+                .tls
+                .then(|| proxy_tls_options(proxy, &proxy.server, custom_roots));
             rewrite_outbound::connect_socks5_with_options(
                 &server,
                 destination,
@@ -516,7 +497,16 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Vless => {
-            connect_vless_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
+            connect_vless_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                state,
+                custom_roots,
+                socket_options,
+            )
+            .await
         }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
@@ -534,25 +524,59 @@ fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
     }
 }
 
+fn proxy_tls_options<'a>(
+    proxy: &'a rewrite_config::ProxyConfig,
+    server_name: &'a str,
+    custom_roots: &'a [String],
+) -> rewrite_outbound::HttpProxyTls<'a> {
+    rewrite_outbound::HttpProxyTls {
+        server_name,
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: proxy.fingerprint.as_deref(),
+        certificate: proxy.certificate.as_deref(),
+        private_key: proxy.private_key.as_deref(),
+        custom_roots,
+        ech_config: None,
+        alpn_protocols: &[],
+        tls12_only: false,
+        tls13_only: false,
+    }
+}
+
 async fn connect_vless_proxy(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let vless = proxy
         .vless
         .as_ref()
         .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
-    rewrite_outbound::connect_vless_with_options(
-        server,
+    let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
+        rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+            .await
+            .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
+    );
+    if proxy.tls {
+        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            proxy_tls_options(proxy, server_name, custom_roots),
+            Some(state.clock()),
+        )
+        .await
+        .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
+    }
+    rewrite_outbound::connect_vless_on_stream(
+        outer,
         destination,
-        allow_ipv6,
         rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
-        socket_options,
     )
-    .await
     .map_err(|error| format!("VLESS proxy connection failed: {error}"))
 }
 

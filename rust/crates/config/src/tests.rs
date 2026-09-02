@@ -2887,3 +2887,23 @@ fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     );
     assert!(vless.xudp, "the Go VLESS default advertises XUDP");
 }
+
+#[test]
+fn parses_phase6e_b_vless_native_tls_scope() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-tls\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    tls: true\n    servername: front.phase6e.test\n    name-cert-verify: dot.phase4.test\n    skip-cert-verify: false\n"
+    ))
+    .expect("Phase 6E-B VLESS TLS config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vless);
+    assert!(proxy.tls);
+    assert_eq!(proxy.sni.as_deref(), Some("front.phase6e.test"));
+    assert_eq!(proxy.name_cert_verify.as_deref(), Some("dot.phase4.test"));
+    assert!(!proxy.skip_cert_verify);
+
+    let plaintext = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-ignored-tls-option\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    servername: dot.phase4.test\n"
+    ))
+    .expect("Go accepts dormant TLS fields when TLS is disabled");
+    assert!(!plaintext.proxies[0].tls);
+}

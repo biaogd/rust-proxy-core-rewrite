@@ -26,5 +26,18 @@ pub async fn connect_vless_with_options(
     let remote = connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| VlessProxyError::Transport(error.to_string()))?;
-    rewrite_protocol_vless::connect_vless_on_stream(Box::new(remote), destination, options)
+    connect_vless_on_stream(Box::new(remote), destination, options)
+}
+
+/// Starts VLESS over an established protocol-independent carrier.
+///
+/// # Errors
+///
+/// Returns a VLESS framing error when the destination cannot be represented.
+pub fn connect_vless_on_stream(
+    remote: BoxedOutboundStream,
+    destination: &Destination,
+    options: VlessTcpOptions,
+) -> Result<BoxedOutboundStream, VlessProxyError> {
+    rewrite_protocol_vless::connect_vless_on_stream(remote, destination, options)
 }

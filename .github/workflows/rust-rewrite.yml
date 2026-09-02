@@ -410,6 +410,7 @@ jobs:
             compat/scripts/phase6d_vmess_grpc_pool.py \
             compat/scripts/phase6d_vmess_mkcp_mekya.py \
             compat/scripts/phase6e_vless_tcp.py \
+            compat/scripts/phase6e_vless_tls.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

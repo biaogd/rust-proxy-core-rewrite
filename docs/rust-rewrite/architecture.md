@@ -879,7 +879,9 @@ in outbound socket policy or every outer transport. Configuration YAML remains
 in `rewrite-config`; protocol crates receive normalized typed options only.
 `rewrite-protocol-vless` specifically owns version-zero request/response headers
 and the oracle-compatible lazy first-write relay; TLS and other carriers remain
-outside it.
+outside it. Phase 6E-B composes native VLESS TCP over the same rustls adapter
+used by other outbound clients, so root loading, SNI, independent verification
+names and skip policy remain in `rewrite-transport` rather than protocol code.
 
 ## Architectural risks to track
 
