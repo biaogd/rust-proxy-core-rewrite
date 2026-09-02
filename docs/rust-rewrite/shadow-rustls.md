@@ -29,18 +29,25 @@ tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 
 After publishing a new fork tag, bump both git deps in `rust/crates/transport/Cargo.toml`.
 
-### Publishing `rustls-0.23.43-shadow.2`
+### Publishing a new fork tag
 
+<<<<<<< HEAD
 From a checkout of [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) at tag `rustls-0.23.43-shadow.1`:
+=======
+Work in the **`biaogd/shadow-rustls` repository** (not this repo):
+>>>>>>> e4adcf40 (Fix shadow-rustls dep: use biaogd/shadow-rustls only, not this repo)
 
 ```bash
-cd /path/to/shadow-rustls
+git clone https://github.com/biaogd/shadow-rustls.git
+cd shadow-rustls
 git checkout rustls-0.23.43-shadow.1 -B main
 git apply /path/to/rust-proxy-core-rewrite/docs/rust-rewrite/shadow-rustls-reality.patch
 git commit -am "Add VLESS REALITY client support"
 git tag rustls-0.23.43-shadow.2
 git push origin main --tags
 ```
+
+The patch file lives in this repo only as a convenience for the above workflow; **`rewrite-transport` never depends on `rust-proxy-core-rewrite` for rustls**.
 
 ## Patch summary
 

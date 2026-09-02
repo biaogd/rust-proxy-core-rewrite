@@ -5806,8 +5806,8 @@ direction are not claimed by Phase 6E-G.
 Phase 6E-H adds VLESS REALITY on native TCP with TLS. Config requires `tls: true`,
 `client-fingerprint: chrome`, `servername` and `reality-opts.public-key` /
 `reality-opts.short-id`; reality without TLS or without fingerprint is rejected in
-Rust. The REALITY client handshake lives in the [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls)
-fork (tag `rustls-0.23.43-shadow.2`) and is exposed through
+Rust. The REALITY client handshake lives in [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls)
+(tag `rustls-0.23.43-shadow.2`) and is exposed through
 `rewrite-transport::connect_reality`; normal TLS and ShadowTLS continue to use their
 existing rustls paths.
 
