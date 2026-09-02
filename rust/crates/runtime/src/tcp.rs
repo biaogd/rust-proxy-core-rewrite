@@ -570,7 +570,14 @@ async fn connect_vless_proxy(
     rewrite_outbound::connect_vless_on_stream(
         outer,
         destination,
-        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+        rewrite_outbound::VlessTcpOptions {
+            uuid: vless.uuid,
+            flow: vless.flow.map(|flow| match flow {
+                rewrite_config::VlessFlow::XtlsRprxVision => {
+                    rewrite_outbound::VlessFlow::XtlsRprxVision
+                }
+            }),
+        },
     )
     .map_err(|error| format!("VLESS proxy connection failed: {error}"))
 }
@@ -643,7 +650,7 @@ async fn connect_vless_physical_outer(
                 ech_config: None,
                 alpn_protocols: alpn,
                 tls12_only: false,
-                tls13_only: false,
+                tls13_only: vless.flow.is_some(),
             },
             Some(state.clock()),
         )

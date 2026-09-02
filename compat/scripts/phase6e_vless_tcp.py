@@ -363,7 +363,6 @@ def assert_rust_only_rejections(
     rust_binary: pathlib.Path, scratch: pathlib.Path, authority_port: int
 ) -> None:
     for extra, network in [
-        ("    flow: xtls-rprx-vision\n", "tcp"),
         ("    tls: true\n", "tcp"),
         ("    udp: true\n", "tcp"),
         ("", "ws"),

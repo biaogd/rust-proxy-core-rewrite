@@ -19,6 +19,7 @@ import (
 
 	"github.com/gobwas/ws/wsutil"
 	"github.com/gofrs/uuid/v5"
+	sing_vless "github.com/metacubex/mihomo/listener/sing_vless"
 	"github.com/metacubex/sing-vmess/packetaddr"
 	vless "github.com/metacubex/sing-vmess/vless"
 	E "github.com/metacubex/sing/common/exceptions"
@@ -37,7 +38,9 @@ type authority struct {
 	expectedHTTPHeader    string
 	expectedGrpcUserAgent string
 	packetMode            string
+	flow                  string
 	vlessService          *vless.Service[string]
+	singVlessService      *sing_vless.Service[string]
 }
 
 type packetEchoHandler struct {
@@ -53,6 +56,10 @@ func (handler *packetEchoHandler) NewConnection(_ context.Context, conn net.Conn
 	host := destination.Fqdn
 	if host == "" && destination.Addr.IsValid() {
 		host = destination.Addr.String()
+	}
+	if host == "bad-handshake.phase6e" {
+		_, _ = conn.Write([]byte{1, 0})
+		return nil
 	}
 	handler.output.Lock()
 	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
@@ -487,6 +494,12 @@ func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool
 		a.observe("WS %s %s", host, path)
 		connection = wrapped
 	}
+	if transport == "tcp" && a.singVlessService != nil {
+		if err := a.singVlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
 	if transport == "tcp" && a.vlessService != nil {
 		if err := a.vlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -511,6 +524,7 @@ func main() {
 	expectedHTTPHeader := flag.String("expected-http-header", "", "expected HTTP/1 header as name=value")
 	expectedGrpcUserAgent := flag.String("expected-grpc-user-agent", "", "expected Gun User-Agent")
 	packetMode := flag.String("packet-mode", "", "standard, packetaddr, or xudp")
+	flow := flag.String("flow", "", "optional VLESS flow, e.g. xtls-rprx-vision")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -532,6 +546,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
 		os.Exit(2)
 	}
+	if *flow != "" && *packetMode != "" {
+		fmt.Fprintln(os.Stderr, "-flow and -packet-mode are mutually exclusive")
+		os.Exit(2)
+	}
+	if *flow != "" && *flow != "xtls-rprx-vision" {
+		fmt.Fprintln(os.Stderr, "invalid -flow")
+		os.Exit(2)
+	}
 	if _, err := uuid.FromString(*uuidText); err != nil {
 		_ = uuid.NewV5(uuid.Nil, *uuidText)
 	}
@@ -546,8 +568,14 @@ func main() {
 		expectedHTTPHeader:    *expectedHTTPHeader,
 		expectedGrpcUserAgent: *expectedGrpcUserAgent,
 		packetMode:            *packetMode,
+		flow:                  *flow,
 	}
-	if *packetMode != "" {
+	if *flow != "" {
+		handler := &packetEchoHandler{}
+		service := sing_vless.NewService[string](handler)
+		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
+		auth.singVlessService = service
+	} else if *packetMode != "" {
 		handler := &packetEchoHandler{packetMode: *packetMode}
 		service := vless.NewService[string](nil, handler)
 		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{""})

@@ -587,7 +587,14 @@ pub(super) async fn measure_http_delay(
                     rewrite_outbound::connect_vless_on_stream(
                         outer,
                         &destination,
-                        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+                        rewrite_outbound::VlessTcpOptions {
+                            uuid: vless.uuid,
+                            flow: vless.flow.map(|flow| match flow {
+                                rewrite_config::VlessFlow::XtlsRprxVision => {
+                                    rewrite_outbound::VlessFlow::XtlsRprxVision
+                                }
+                            }),
+                        },
                     )
                     .map_err(|_| ())?
                 }

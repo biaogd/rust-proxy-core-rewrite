@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
     VmessSecurity, VmessTransport,
 };
 use crate::raw::{
@@ -429,7 +429,6 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.alter_id.is_some()
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
-        || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
         || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
         || (udp && network != "tcp")
@@ -456,6 +455,10 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let transport = parse_vless_transport(network, &proxy, &name)?;
+    let flow = parse_vless_flow(&proxy, &name)?;
+    if flow.is_some() && (!tls || network != "tcp" || udp) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
     let packet_mode = if udp {
         parse_vless_packet_mode(&proxy, &name)?
     } else {
@@ -501,12 +504,28 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         vmess: None,
         vless: Some(VlessProxyConfig {
             uuid: *uuid.as_bytes(),
+            flow,
             xudp: xudp_capability,
             packet_mode,
             transport,
         }),
         headers: BTreeMap::new(),
     })
+}
+
+fn parse_vless_flow(proxy: &RawProxy, name: &str) -> Result<Option<VlessFlow>, ConfigError> {
+    let Some(flow) = proxy.flow.as_deref() else {
+        return Ok(None);
+    };
+    if flow.is_empty() {
+        return Ok(None);
+    }
+    let truncated = if flow.len() >= 16 { &flow[..16] } else { flow };
+    if truncated == "xtls-rprx-vision" {
+        Ok(Some(VlessFlow::XtlsRprxVision))
+    } else {
+        Err(ConfigError::UnsupportedProxy(name.to_owned()))
+    }
 }
 
 fn parse_vless_transport(

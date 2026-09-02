@@ -1014,7 +1014,14 @@ pub(super) async fn run_vless_udp_session(
         &server,
         &initial_destination,
         config.ipv6,
-        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+        rewrite_outbound::VlessTcpOptions {
+            uuid: vless.uuid,
+            flow: vless.flow.map(|flow| match flow {
+                rewrite_config::VlessFlow::XtlsRprxVision => {
+                    rewrite_outbound::VlessFlow::XtlsRprxVision
+                }
+            }),
+        },
         packet_mode,
         direct_tcp_options(&config),
     )

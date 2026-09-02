@@ -41,7 +41,7 @@ pub use socks5::{
     connect_socks5_with_options,
 };
 pub use vless::{
-    VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
+    VlessFlow, VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
     associate_vless_udp_with_options, connect_vless_on_stream, connect_vless_with_options,
 };
 pub use vmess::{

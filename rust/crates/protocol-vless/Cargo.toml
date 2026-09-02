@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytes.workspace = true
 rand.workspace = true
 rewrite-io = { path = "../io" }
 rewrite-model = { path = "../model" }

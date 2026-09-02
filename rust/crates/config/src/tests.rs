@@ -3060,3 +3060,28 @@ fn parses_phase6e_f_vless_udp_packet_modes() {
         );
     }
 }
+
+#[test]
+fn parses_phase6e_g_vless_vision_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-vision\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    servername: dot.phase4.test\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6E-G VLESS Vision config");
+    let proxy = &config.proxies[0];
+    assert!(proxy.tls);
+    let vless = proxy.vless.as_ref().expect("typed VLESS config");
+    assert_eq!(vless.flow, Some(VlessFlow::XtlsRprxVision));
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    flow: xtls-rprx-vision\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    udp: true\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    tls: true\n    flow: xtls-rprx-vision\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: unsupported-flow\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}

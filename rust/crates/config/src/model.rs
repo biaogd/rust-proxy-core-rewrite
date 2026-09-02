@@ -218,9 +218,15 @@ pub struct ProxyConfig {
     pub headers: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VlessFlow {
+    XtlsRprxVision,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessProxyConfig {
     pub uuid: [u8; 16],
+    pub flow: Option<VlessFlow>,
     pub xudp: bool,
     pub packet_mode: VlessPacketMode,
     pub transport: VlessTransport,

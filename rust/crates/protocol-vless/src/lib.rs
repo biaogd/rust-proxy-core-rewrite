@@ -4,13 +4,16 @@
 //! dialing, outer transports, routing and configuration stay outside this
 //! crate so later inbound and outbound adapters can share the framing code.
 
+mod addons;
 mod packet;
+mod stream;
+mod vision;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rewrite_io::BoxedStream;
-use rewrite_model::{Destination, Host};
+use rewrite_model::Destination;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
@@ -18,14 +21,16 @@ use tokio_util::sync::CancellationToken;
 pub use packet::{VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream};
 
 const VERSION: u8 = 0;
-const COMMAND_TCP: u8 = 1;
-const ADDRESS_IPV4: u8 = 1;
-const ADDRESS_DOMAIN: u8 = 2;
-const ADDRESS_IPV6: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VlessFlow {
+    XtlsRprxVision,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VlessClientOptions {
     pub uuid: [u8; 16],
+    pub flow: Option<VlessFlow>,
 }
 
 #[derive(Debug, Error)]
@@ -52,6 +57,14 @@ pub fn connect_vless_on_stream(
     destination: &Destination,
     options: VlessClientOptions,
 ) -> Result<BoxedStream, VlessProtocolError> {
+    if options.flow == Some(VlessFlow::XtlsRprxVision) {
+        let vless = stream::VlessTcpStream::new(remote, destination, options)?;
+        return Ok(Box::new(vision::VisionStream::new(
+            Box::new(vless),
+            options.uuid,
+        )));
+    }
+
     let request = request_header(destination, options)?;
     let (application, relay) = tokio::io::duplex(64 * 1024);
     let cancellation = CancellationToken::new();
@@ -72,30 +85,7 @@ fn request_header(
     destination: &Destination,
     options: VlessClientOptions,
 ) -> Result<Vec<u8>, VlessProtocolError> {
-    let mut request = Vec::with_capacity(38);
-    request.push(VERSION);
-    request.extend_from_slice(&options.uuid);
-    request.push(0); // protobuf addon length
-    request.push(COMMAND_TCP);
-    request.extend_from_slice(&destination.port.to_be_bytes());
-    match &destination.host {
-        Host::Ip(std::net::IpAddr::V4(address)) => {
-            request.push(ADDRESS_IPV4);
-            request.extend_from_slice(&address.octets());
-        }
-        Host::Ip(std::net::IpAddr::V6(address)) => {
-            request.push(ADDRESS_IPV6);
-            request.extend_from_slice(&address.octets());
-        }
-        Host::Domain(domain) => {
-            let length = u8::try_from(domain.len()).map_err(|_| {
-                VlessProtocolError::Protocol("destination domain exceeds 255 bytes".to_owned())
-            })?;
-            request.extend_from_slice(&[ADDRESS_DOMAIN, length]);
-            request.extend_from_slice(domain.as_bytes());
-        }
-    }
-    Ok(request)
+    stream::request_header(destination, options)
 }
 
 async fn relay_session(
@@ -178,6 +168,7 @@ impl AsyncWrite for VlessRelayStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rewrite_model::Host;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     const UUID: [u8; 16] = [
@@ -186,7 +177,10 @@ mod tests {
     ];
 
     fn options() -> VlessClientOptions {
-        VlessClientOptions { uuid: UUID }
+        VlessClientOptions {
+            uuid: UUID,
+            flow: None,
+        }
     }
 
     #[test]
@@ -220,8 +214,26 @@ mod tests {
             options(),
         )
         .expect("IPv6 header");
-        assert_eq!(ipv6[21], ADDRESS_IPV6);
+        assert_eq!(ipv6[21], 3);
         assert_eq!(&ipv6[22..], &Ipv6Addr::LOCALHOST.octets());
+    }
+
+    #[test]
+    fn vision_request_header_includes_flow_addon() {
+        let header = request_header(
+            &Destination {
+                host: Host::Domain("vision.example".to_owned()),
+                port: 443,
+            },
+            VlessClientOptions {
+                uuid: UUID,
+                flow: Some(VlessFlow::XtlsRprxVision),
+            },
+        )
+        .expect("vision header");
+        assert_eq!(header[18], 0x12, "addon length for xtls-rprx-vision");
+        assert_eq!(&header[19..31], b"\x0a\x10xtls-rprx-vision");
+        assert_eq!(header[31], 1);
     }
 
     #[tokio::test]

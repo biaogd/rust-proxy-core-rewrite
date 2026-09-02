@@ -8,8 +8,8 @@ use rewrite_model::Destination;
 use crate::{BoxedOutboundStream, DirectTcpOptions, connect_with_options};
 
 pub use rewrite_protocol_vless::{
-    VlessClientOptions as VlessTcpOptions, VlessPacketMode, VlessProtocolError as VlessProxyError,
-    VlessUdpAssociation, associate_vless_udp_on_stream,
+    VlessClientOptions as VlessTcpOptions, VlessFlow, VlessPacketMode,
+    VlessProtocolError as VlessProxyError, VlessUdpAssociation, associate_vless_udp_on_stream,
 };
 
 /// Opens a VLESS client over native TCP using outbound socket policy.
