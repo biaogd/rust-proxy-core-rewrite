@@ -45,6 +45,8 @@ type authority struct {
 
 type packetEchoHandler struct {
 	packetMode string
+	innerTLS   *tls.Config
+	innerPort  uint16
 	output     sync.Mutex
 }
 
@@ -64,6 +66,34 @@ func (handler *packetEchoHandler) NewConnection(_ context.Context, conn net.Conn
 	handler.output.Lock()
 	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
 	handler.output.Unlock()
+	if handler.innerTLS != nil && destination.Port == handler.innerPort {
+		inner := tls.Server(conn, handler.innerTLS)
+		if err := inner.Handshake(); err != nil {
+			return err
+		}
+		handler.output.Lock()
+		fmt.Printf("INNER_TLS %s %x\n", inner.ConnectionState().ServerName, inner.ConnectionState().CipherSuite)
+		handler.output.Unlock()
+		reader := bufio.NewReader(inner)
+		prefix, err := reader.Peek(len("HEAD "))
+		if err != nil {
+			return err
+		}
+		if string(prefix) == "HEAD " {
+			request, err := http.ReadRequest(reader)
+			if err != nil {
+				return err
+			}
+			_ = request.Body.Close()
+			handler.output.Lock()
+			fmt.Printf("HTTP %s\n", request.Host)
+			handler.output.Unlock()
+			_, err = inner.Write([]byte("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+			return err
+		}
+		_, err = io.Copy(inner, reader)
+		return err
+	}
 	_, err := io.Copy(conn, conn)
 	return err
 }
@@ -525,6 +555,7 @@ func main() {
 	expectedGrpcUserAgent := flag.String("expected-grpc-user-agent", "", "expected Gun User-Agent")
 	packetMode := flag.String("packet-mode", "", "standard, packetaddr, or xudp")
 	flow := flag.String("flow", "", "optional VLESS flow, e.g. xtls-rprx-vision")
+	innerTLSPort := flag.Uint("inner-tls-port", 0, "destination port that terminates nested TLS")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -554,6 +585,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -flow")
 		os.Exit(2)
 	}
+	if *innerTLSPort > 65535 {
+		fmt.Fprintln(os.Stderr, "invalid -inner-tls-port")
+		os.Exit(2)
+	}
 	if _, err := uuid.FromString(*uuidText); err != nil {
 		_ = uuid.NewV5(uuid.Nil, *uuidText)
 	}
@@ -571,7 +606,24 @@ func main() {
 		flow:                  *flow,
 	}
 	if *flow != "" {
-		handler := &packetEchoHandler{}
+		var innerTLS *tls.Config
+		if *innerTLSPort != 0 {
+			if *tlsCertificate == "" {
+				fmt.Fprintln(os.Stderr, "-inner-tls-port requires -tls-cert and -tls-key")
+				os.Exit(2)
+			}
+			certificate, err := tls.LoadX509KeyPair(*tlsCertificate, *tlsPrivateKey)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			innerTLS = &tls.Config{
+				Certificates: []tls.Certificate{certificate},
+				MinVersion:   tls.VersionTLS13,
+				MaxVersion:   tls.VersionTLS13,
+			}
+		}
+		handler := &packetEchoHandler{innerTLS: innerTLS, innerPort: uint16(*innerTLSPort)}
 		service := sing_vless.NewService[string](handler)
 		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
 		auth.singVlessService = service

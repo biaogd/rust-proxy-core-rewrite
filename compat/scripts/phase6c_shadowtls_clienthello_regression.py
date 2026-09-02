@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Per-runtime partial Chrome ClientHello regression on production ShadowTLS v3 paths.
+"""Per-runtime Chrome ClientHello regression on production ShadowTLS v3 paths.
 
 Captures on-wire ClientHello bytes through the same production entry points used in
 live traffic (Go: ``shadowtls.NewShadowTLS``; Rust: ``connect_shadow_tls`` →
 ``connect_with_session_id_generator``), then pins each runtime against its own
 documented partial-Chrome baseline.
 
-This is **not** a Go/Rust wire parity differential. Chrome fingerprint parity
-remains partial (Rust 10 cipher suites vs Go/uTLS 16; different extension order
-and counts). Protocol wire parity is covered separately by
+This is **not** a Go/Rust wire parity differential. Cipher advertisement matches
+uTLS Chrome 133, while the production ShadowTLS wrappers retain different
+extension sets. Protocol wire parity is covered separately by
 ``phase6c_shadowsocks_shadow_tls.py``.
 """
 
@@ -28,8 +28,8 @@ FAILURE_ARTIFACT = (
 TARGET_ENV = "PHASE6CSSSHADOWTLSCLIENTHELLO_REGRESSION_CARGO_TARGET"
 TARGET_NAME = "phase6c-shadowtls-clienthello-regression"
 
-# Documented partial Chrome profile in Rust (10 suites incl. leading GREASE).
-RUST_CHROME_CIPHERS = [
+# Go uTLS HelloChrome_133 baseline (16 suites incl. leading GREASE).
+GO_CHROME_CIPHERS = [
     "0x0a0a",
     "0x1301",
     "0x1302",
@@ -40,10 +40,6 @@ RUST_CHROME_CIPHERS = [
     "0xc030",
     "0xcca9",
     "0xcca8",
-]
-
-# Go uTLS HelloChrome_133 baseline (16 suites incl. leading GREASE).
-GO_CHROME_CIPHERS = RUST_CHROME_CIPHERS + [
     "0xc013",
     "0xc014",
     "0x009c",
@@ -51,6 +47,8 @@ GO_CHROME_CIPHERS = RUST_CHROME_CIPHERS + [
     "0x002f",
     "0x0035",
 ]
+
+RUST_CHROME_CIPHERS = GO_CHROME_CIPHERS
 
 # Production ShadowTLS v3 + chrome captures (on-wire ClientHello extension types).
 GO_V3_CHROME_EXTENSIONS = [

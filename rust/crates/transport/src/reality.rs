@@ -16,6 +16,7 @@ pub struct RealityConnectOptions<'a> {
     pub public_key: [u8; 32],
     pub short_id: &'a [u8],
     pub tls13_only: bool,
+    pub support_x25519mlkem768: bool,
 }
 
 fn load_root_store() -> Result<RootCertStore, TlsClientError> {
@@ -39,7 +40,9 @@ fn load_root_store() -> Result<RootCertStore, TlsClientError> {
     Ok(roots)
 }
 
-fn reality_client_config(options: RealityConnectOptions<'_>) -> Result<ClientConfig, TlsClientError> {
+fn reality_client_config(
+    options: RealityConnectOptions<'_>,
+) -> Result<ClientConfig, TlsClientError> {
     let reality = RealityConfig::new(options.public_key, options.short_id.to_vec())
         .map_err(|error| TlsClientError::Configuration(error.to_string()))?
         .with_client_version([1, 8, 2]);
@@ -55,10 +58,13 @@ fn reality_client_config(options: RealityConnectOptions<'_>) -> Result<ClientCon
             .with_safe_default_protocol_versions()
             .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     };
-    Ok(builder
+    let mut config = builder
         .with_root_certificates(roots)
         .with_reality(reality)
-        .with_no_client_auth())
+        .with_no_client_auth();
+    config.client_hello_fingerprint = Some(shadow_rustls::ClientHelloFingerprint::Chrome);
+    config.client_hello_fingerprint_mlkem = options.support_x25519mlkem768;
+    Ok(config)
 }
 
 /// Performs a VLESS REALITY client handshake over an established TCP stream.
@@ -77,8 +83,43 @@ where
         .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
     let config = Arc::new(reality_client_config(options)?);
     let connector = TlsConnector::from(config);
-    tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, stream))
-        .await
-        .map_err(|_| TlsClientError::Timeout)?
-        .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        connector.connect(server_name, stream),
+    )
+    .await
+    .map_err(|_| TlsClientError::Timeout)?
+    .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reality_enables_declared_chrome_profile() {
+        let config = reality_client_config(RealityConnectOptions {
+            server_name: "reality.example",
+            public_key: [7; 32],
+            short_id: &[],
+            tls13_only: false,
+            support_x25519mlkem768: false,
+        })
+        .expect("REALITY client config");
+        assert_eq!(
+            config.client_hello_fingerprint,
+            Some(shadow_rustls::ClientHelloFingerprint::Chrome)
+        );
+        assert!(!config.client_hello_fingerprint_mlkem);
+
+        let hybrid = reality_client_config(RealityConnectOptions {
+            server_name: "reality.example",
+            public_key: [7; 32],
+            short_id: &[],
+            tls13_only: false,
+            support_x25519mlkem768: true,
+        })
+        .expect("hybrid REALITY client config");
+        assert!(hybrid.client_hello_fingerprint_mlkem);
+    }
 }

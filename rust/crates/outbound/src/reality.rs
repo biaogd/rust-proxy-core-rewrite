@@ -21,6 +21,7 @@ pub async fn wrap_client_reality(
             public_key: reality.public_key,
             short_id: &reality.short_id,
             tls13_only,
+            support_x25519mlkem768: reality.support_x25519mlkem768,
         },
     )
     .await?;

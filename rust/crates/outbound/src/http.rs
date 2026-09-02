@@ -15,7 +15,10 @@ use tokio_rustls::rustls::pki_types::ServerName;
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions, connect_with_options};
-use rewrite_transport::{ClientTlsOptions as HttpProxyTls, TlsClientError, client_config};
+use rewrite_transport::{
+    ClientTlsOptions as HttpProxyTls, TlsClientError, VisionDirectControl, client_config,
+    connect_vision_tls,
+};
 
 #[derive(Debug, Error)]
 pub enum HttpProxyError {
@@ -168,6 +171,23 @@ pub async fn wrap_client_tls_with_options(
     wrap_client_tls_with_alpn(stream, tls, clock)
         .await
         .map(|(stream, _)| stream)
+}
+
+/// Wraps an established stream in the record-bounded TLS carrier required by XTLS Vision.
+///
+/// # Errors
+///
+/// Returns configuration, server-name or TLS handshake failures.
+pub async fn wrap_client_vision_tls_with_options(
+    stream: BoxedOutboundStream,
+    tls: HttpProxyTls<'_>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+    control: VisionDirectControl,
+) -> Result<BoxedOutboundStream, HttpProxyError> {
+    let config = client_config(tls, clock)?;
+    connect_vision_tls(stream, tls.server_name, config, control)
+        .await
+        .map_err(Into::into)
 }
 
 /// Wraps an established stream in TLS and returns the negotiated ALPN value.

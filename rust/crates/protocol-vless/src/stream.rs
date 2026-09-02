@@ -22,9 +22,8 @@ pub(crate) fn request_header(
         Some(VlessFlow::XtlsRprxVision) => encode_flow_addon("xtls-rprx-vision"),
         None => Vec::new(),
     };
-    let addon_length = u8::try_from(addons.len()).map_err(|_| {
-        VlessProtocolError::Protocol("VLESS addons exceed 255 bytes".to_owned())
-    })?;
+    let addon_length = u8::try_from(addons.len())
+        .map_err(|_| VlessProtocolError::Protocol("VLESS addons exceed 255 bytes".to_owned()))?;
     let mut request = Vec::with_capacity(38 + addons.len());
     request.push(VERSION);
     request.extend_from_slice(&options.uuid);
@@ -56,8 +55,11 @@ pub(crate) fn request_header(
 pub struct VlessTcpStream {
     inner: BoxedStream,
     request: Vec<u8>,
-    handshake_sent: bool,
-    response_read: bool,
+    request_offset: usize,
+    response_header: [u8; 2],
+    response_header_offset: usize,
+    response_addons_remaining: usize,
+    response_header_validated: bool,
 }
 
 impl VlessTcpStream {
@@ -69,8 +71,11 @@ impl VlessTcpStream {
         Ok(Self {
             inner,
             request: request_header(destination, options)?,
-            handshake_sent: false,
-            response_read: false,
+            request_offset: 0,
+            response_header: [0; 2],
+            response_header_offset: 0,
+            response_addons_remaining: 0,
+            response_header_validated: false,
         })
     }
 }
@@ -81,50 +86,56 @@ impl AsyncRead for VlessTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if !self.response_read {
-            let mut response = [0_u8; 2];
-            let mut read_buf = ReadBuf::new(&mut response);
+        while self.response_header_offset < self.response_header.len() {
+            let mut response = self.response_header;
+            let offset = self.response_header_offset;
+            let mut read_buf = ReadBuf::new(&mut response[offset..]);
             match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "short VLESS response header",
+                    )));
+                }
                 Poll::Ready(Ok(())) => {
-                    if read_buf.filled().len() < 2 {
-                        return Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "short VLESS response header",
-                        )));
-                    }
+                    let read = read_buf.filled().len();
+                    self.response_header = response;
+                    self.response_header_offset += read;
                 }
             }
-            if response[0] != VERSION {
+        }
+        if !self.response_header_validated {
+            if self.response_header[0] != VERSION {
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("unexpected VLESS response version {}", response[0]),
+                    format!(
+                        "unexpected VLESS response version {}",
+                        self.response_header[0]
+                    ),
                 )));
             }
-            if response[1] != 0 {
-                let addon_length = usize::from(response[1]);
-                let mut addons = vec![0_u8; addon_length];
-                let mut addon_buf = ReadBuf::new(&mut addons);
-                loop {
-                    match Pin::new(&mut self.inner).poll_read(cx, &mut addon_buf) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Ready(Ok(())) => {
-                            if addon_buf.filled().len() == addon_length {
-                                break;
-                            }
-                            if addon_buf.filled().is_empty() {
-                                return Poll::Ready(Err(std::io::Error::new(
-                                    std::io::ErrorKind::UnexpectedEof,
-                                    "short VLESS response addons",
-                                )));
-                            }
-                        }
-                    }
+            self.response_addons_remaining = usize::from(self.response_header[1]);
+            self.response_header_validated = true;
+        }
+        while self.response_addons_remaining > 0 {
+            let mut addons = [0_u8; 256];
+            let length = self.response_addons_remaining.min(addons.len());
+            let mut addon_buf = ReadBuf::new(&mut addons[..length]);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut addon_buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) if addon_buf.filled().is_empty() => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "short VLESS response addons",
+                    )));
+                }
+                Poll::Ready(Ok(())) => {
+                    self.response_addons_remaining -= addon_buf.filled().len();
                 }
             }
-            self.response_read = true;
         }
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
@@ -136,24 +147,25 @@ impl AsyncWrite for VlessTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        if !self.handshake_sent {
-            let mut first = Vec::with_capacity(self.request.len() + buf.len());
-            first.extend_from_slice(&self.request);
-            first.extend_from_slice(buf);
-            self.handshake_sent = true;
-            match Pin::new(&mut self.inner).poll_write(cx, &first) {
-                Poll::Pending => {
-                    self.handshake_sent = false;
-                    Poll::Pending
+        while self.request_offset < self.request.len() {
+            let request = self.request.clone();
+            let offset = self.request_offset;
+            match Pin::new(&mut self.inner).poll_write(cx, &request[offset..]) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
-                Poll::Ready(result) => Poll::Ready(result.map(|_| buf.len())),
+                Poll::Ready(Ok(written)) => self.request_offset += written,
             }
-        } else {
-            Pin::new(&mut self.inner).poll_write(cx, buf)
         }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
@@ -162,5 +174,58 @@ impl AsyncWrite for VlessTcpStream {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rewrite_model::Host;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
+
+    const UUID: [u8; 16] = [
+        0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08,
+        0x11,
+    ];
+
+    #[tokio::test]
+    async fn handles_one_byte_transport_fragments() {
+        let destination = Destination {
+            host: Host::Domain("fragmented.example".to_owned()),
+            port: 443,
+        };
+        let options = VlessClientOptions {
+            uuid: UUID,
+            flow: Some(VlessFlow::XtlsRprxVision),
+        };
+        let expected_header = request_header(&destination, options).expect("request header");
+        let (client, mut authority) = tokio::io::duplex(1);
+        let authority_task = tokio::spawn(async move {
+            let mut request = vec![0; expected_header.len() + 7];
+            authority
+                .read_exact(&mut request)
+                .await
+                .expect("fragmented request");
+            assert_eq!(&request[..expected_header.len()], expected_header);
+            assert_eq!(&request[expected_header.len()..], b"request");
+            authority
+                .write_all(b"\0\x03abcresponse")
+                .await
+                .expect("fragmented response");
+            authority.shutdown().await.expect("authority shutdown");
+        });
+
+        let mut stream =
+            VlessTcpStream::new(Box::new(client), &destination, options).expect("VLESS stream");
+        stream.write_all(b"request").await.expect("request");
+        stream.shutdown().await.expect("client shutdown");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("fragmented response");
+        assert_eq!(response, b"response");
+        authority_task.await.expect("authority task");
     }
 }

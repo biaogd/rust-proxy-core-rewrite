@@ -68,6 +68,7 @@ def start_authority(
     expected_grpc_user_agent: str = "",
     packet_mode: str = "",
     flow: str = "",
+    inner_tls_port: int = 0,
 ) -> tuple[Any, Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -100,6 +101,8 @@ def start_authority(
         packet_mode,
         "-flow",
         flow,
+        "-inner-tls-port",
+        str(inner_tls_port),
     ]
     if certificate is not None and private_key is not None:
         command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))

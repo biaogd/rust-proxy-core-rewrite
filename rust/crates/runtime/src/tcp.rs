@@ -557,7 +557,7 @@ async fn connect_vless_proxy(
         .vless
         .as_ref()
         .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
-    let outer = connect_vless_outer(
+    let (outer, vision_control) = connect_vless_outer(
         proxy,
         server,
         vless,
@@ -567,7 +567,7 @@ async fn connect_vless_proxy(
         socket_options,
     )
     .await?;
-    rewrite_outbound::connect_vless_on_stream(
+    rewrite_outbound::connect_vless_on_stream_with_vision_control(
         outer,
         destination,
         rewrite_outbound::VlessTcpOptions {
@@ -578,6 +578,7 @@ async fn connect_vless_proxy(
                 }
             }),
         },
+        vision_control,
     )
     .map_err(|error| format!("VLESS proxy connection failed: {error}"))
 }
@@ -590,8 +591,14 @@ async fn connect_vless_outer(
     state: &RuntimeState,
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
-) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let outer = connect_vless_physical_outer(
+) -> Result<
+    (
+        rewrite_outbound::BoxedOutboundStream,
+        Option<rewrite_outbound::VisionDirectControl>,
+    ),
+    String,
+> {
+    let (outer, vision_control) = connect_vless_physical_outer(
         proxy,
         server,
         vless,
@@ -601,10 +608,11 @@ async fn connect_vless_outer(
         socket_options,
     )
     .await?;
-    wrap_vless_transport(outer, proxy, server, vless).await
+    let outer = wrap_vless_transport(outer, proxy, server, vless).await?;
+    Ok((outer, vision_control))
 }
 
-async fn connect_vless_physical_outer(
+pub(super) async fn connect_vless_physical_outer(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
     vless: &rewrite_config::VlessProxyConfig,
@@ -612,7 +620,13 @@ async fn connect_vless_physical_outer(
     state: &RuntimeState,
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
-) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+) -> Result<
+    (
+        rewrite_outbound::BoxedOutboundStream,
+        Option<rewrite_outbound::VisionDirectControl>,
+    ),
+    String,
+> {
     let mut outer = Box::new(
         rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
             .await
@@ -624,6 +638,7 @@ async fn connect_vless_physical_outer(
             .find_map(|(name, value)| name.eq_ignore_ascii_case("host").then_some(value.as_str())),
         _ => None,
     };
+    let mut vision_control = None;
     if let Some(reality) = proxy.reality.as_ref() {
         let server_name = proxy
             .sni
@@ -651,27 +666,37 @@ async fn connect_vless_physical_outer(
             | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
             rewrite_config::VlessTransport::Tcp => &[],
         };
-        outer = rewrite_outbound::wrap_client_tls_with_options(
-            outer,
-            rewrite_outbound::HttpProxyTls {
-                server_name,
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: alpn,
-                tls12_only: false,
-                tls13_only: vless.flow.is_some(),
-            },
-            Some(state.clock()),
-        )
-        .await
-        .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
+        let tls = rewrite_outbound::HttpProxyTls {
+            server_name,
+            verification_name: proxy.name_cert_verify.as_deref(),
+            skip_certificate_verification: proxy.skip_cert_verify,
+            fingerprint: proxy.fingerprint.as_deref(),
+            certificate: proxy.certificate.as_deref(),
+            private_key: proxy.private_key.as_deref(),
+            custom_roots,
+            ech_config: None,
+            alpn_protocols: alpn,
+            tls12_only: false,
+            tls13_only: vless.flow.is_some(),
+        };
+        if vless.flow.is_some() {
+            let control = rewrite_outbound::VisionDirectControl::default();
+            outer = rewrite_outbound::wrap_client_vision_tls_with_options(
+                outer,
+                tls,
+                Some(state.clock()),
+                control.clone(),
+            )
+            .await
+            .map_err(|error| format!("VLESS Vision outer TLS connection failed: {error}"))?;
+            vision_control = Some(control);
+        } else {
+            outer = rewrite_outbound::wrap_client_tls_with_options(outer, tls, Some(state.clock()))
+                .await
+                .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
+        }
     }
-    Ok(outer)
+    Ok((outer, vision_control))
 }
 
 async fn wrap_vless_transport(

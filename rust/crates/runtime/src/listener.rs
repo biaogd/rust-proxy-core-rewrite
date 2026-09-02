@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::collections::hash_map::RandomState;
 use std::future::pending;
+use std::hash::BuildHasher;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rewrite_config::{Config, ListenerKind, ProxyKind};
@@ -14,8 +16,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::tcp::{
-    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
-    resolve_rematch_target, serve_connection,
+    apply_host_mapping, configured_proxy, connect_vless_physical_outer, direct_tcp_options,
+    mode_decision, resolve_rematch_target, serve_connection,
 };
 use crate::types::LocalTcpListener;
 
@@ -967,7 +969,7 @@ pub(super) async fn run_vmess_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_vless_udp_session(
     listener: Arc<UdpSocket>,
     source: SocketAddr,
@@ -1010,10 +1012,27 @@ pub(super) async fn run_vless_udp_session(
         }
         rewrite_config::VlessPacketMode::Xudp => rewrite_outbound::VlessPacketMode::Xudp,
     };
-    let mut association = match rewrite_outbound::associate_vless_udp_with_options(
+    let (outer, vision_control) = match connect_vless_physical_outer(
+        proxy,
         &server,
-        &initial_destination,
+        vless,
         config.ipv6,
+        &state,
+        &config.trust_certificates,
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(outer) => outer,
+        Err(error) => {
+            state.log("error", format!("VLESS UDP carrier failed: {error}"));
+            return;
+        }
+    };
+    debug_assert!(vision_control.is_none());
+    let mut association = match rewrite_outbound::associate_vless_udp_on_stream(
+        outer,
+        &initial_destination,
         rewrite_outbound::VlessTcpOptions {
             uuid: vless.uuid,
             flow: vless.flow.map(|flow| match flow {
@@ -1023,7 +1042,7 @@ pub(super) async fn run_vless_udp_session(
             }),
         },
         packet_mode,
-        direct_tcp_options(&config),
+        vless_xudp_global_id(source),
     )
     .await
     {
@@ -1092,6 +1111,14 @@ pub(super) async fn run_vless_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
+fn vless_xudp_global_id(source: SocketAddr) -> [u8; 8] {
+    static HASHER: OnceLock<RandomState> = OnceLock::new();
+    HASHER
+        .get_or_init(RandomState::new)
+        .hash_one(source.to_string())
+        .to_ne_bytes()
+}
+
 fn udp_proxy_destination(request: &UdpSessionPacket) -> Destination {
     request.fake_host.as_ref().map_or_else(
         || request.metadata.destination.clone(),
@@ -1149,5 +1176,18 @@ pub(super) async fn resolve_udp_target(
                     )
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use super::vless_xudp_global_id;
+
+    #[test]
+    fn vless_xudp_id_is_stable_per_source() {
+        let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12000);
+        assert_eq!(vless_xudp_global_id(first), vless_xudp_global_id(first));
     }
 }

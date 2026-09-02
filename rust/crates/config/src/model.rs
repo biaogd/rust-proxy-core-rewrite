@@ -223,6 +223,7 @@ pub struct ProxyConfig {
 pub struct RealityProxyConfig {
     pub public_key: [u8; 32],
     pub short_id: Vec<u8>,
+    pub support_x25519mlkem768: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

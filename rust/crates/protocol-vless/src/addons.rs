@@ -4,10 +4,11 @@ const FLOW_FIELD_TAG: u8 = 0x0a; // (field 1 << 3) | wire type 2
 
 fn write_varint(buffer: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
-        buffer.push((value as u8) | 0x80);
+        let byte = u8::try_from(value & 0x7f).expect("masked protobuf varint byte");
+        buffer.push(byte | 0x80);
         value >>= 7;
     }
-    buffer.push(value as u8);
+    buffer.push(u8::try_from(value).expect("final protobuf varint byte"));
 }
 
 /// Encodes the `flow` addon for VLESS request headers.

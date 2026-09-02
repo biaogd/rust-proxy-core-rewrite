@@ -15,7 +15,7 @@ There is **no** `[patch.crates-io]` — the fork is imported as renamed packages
 
 ```toml
 # rewrite-transport/Cargo.toml
-shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.2", package = "rustls" }
+shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", rev = "40a767d6fa3c519167026d4c42e21187c80798f3", package = "rustls" }
 shadow-tokio-rustls = { git = "...", package = "tokio-rustls", ... }
 tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 ```
@@ -26,16 +26,13 @@ tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 |-----|-------------|-------------------|-------|
 | `rustls-0.23.43-shadow.1` | 0.23.43 | 0.26.4 | ShadowTLS ClientHello fingerprint |
 | `rustls-0.23.43-shadow.2` | 0.23.43 | 0.26.4 | + VLESS REALITY client (`with_reality()`) |
+| `40a767d6fa3c519167026d4c42e21187c80798f3` | 0.23.43 | 0.26.4 | Full uTLS Chrome 133 cipher advertisement; used pending the next fork tag |
 
 After publishing a new fork tag, bump both git deps in `rust/crates/transport/Cargo.toml`.
 
 ### Publishing a new fork tag
 
-<<<<<<< HEAD
-From a checkout of [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) at tag `rustls-0.23.43-shadow.1`:
-=======
 Work in the **`biaogd/shadow-rustls` repository** (not this repo):
->>>>>>> e4adcf40 (Fix shadow-rustls dep: use biaogd/shadow-rustls only, not this repo)
 
 ```bash
 git clone https://github.com/biaogd/shadow-rustls.git

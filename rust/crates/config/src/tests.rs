@@ -2941,7 +2941,7 @@ fn parses_phase6e_c_vless_websocket_scope() {
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }
@@ -2961,7 +2961,10 @@ fn parses_phase6e_d_vless_http_scope() {
             method: "POST".to_owned(),
             paths: vec!["/plain-http".to_owned()],
             headers: BTreeMap::from([
-                ("Host".to_owned(), vec!["front-http.phase6e.test".to_owned()]),
+                (
+                    "Host".to_owned(),
+                    vec!["front-http.phase6e.test".to_owned()]
+                ),
                 ("X-Phase".to_owned(), vec!["6e-d".to_owned()]),
             ]),
         }
@@ -2988,7 +2991,7 @@ fn parses_phase6e_d_vless_http_scope() {
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }
@@ -3000,7 +3003,10 @@ fn parses_phase6e_e_vless_grpc_scope() {
         "{MINIMAL}\nproxies:\n  - name: vless-grpc-default\n    type: vless\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: grpc\n  - name: vless-grpc-custom\n    type: vless\n    server: 127.0.0.1\n    port: 10006\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: grpc\n    tls: true\n    servername: dot.phase4.test\n    grpc-opts:\n      grpc-service-name: /custom/path\n      grpc-user-agent: phase6e-e/1.0\n"
     ))
     .expect("Phase 6E-E VLESS gRPC config");
-    let default = config.proxies[0].vless.as_ref().expect("typed VLESS config");
+    let default = config.proxies[0]
+        .vless
+        .as_ref()
+        .expect("typed VLESS config");
     assert_eq!(
         default.transport,
         VlessTransport::Grpc {
@@ -3008,7 +3014,10 @@ fn parses_phase6e_e_vless_grpc_scope() {
             user_agent: "grpc-go/1.36.0".to_owned(),
         }
     );
-    let custom = config.proxies[1].vless.as_ref().expect("typed VLESS config");
+    let custom = config.proxies[1]
+        .vless
+        .as_ref()
+        .expect("typed VLESS config");
     assert_eq!(
         custom.transport,
         VlessTransport::Grpc {
@@ -3025,7 +3034,7 @@ fn parses_phase6e_e_vless_grpc_scope() {
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }
@@ -3039,15 +3048,24 @@ fn parses_phase6e_f_vless_udp_packet_modes() {
     let config = Config::from_yaml(&source).expect("Phase 6E-F VLESS UDP config");
     assert!(config.proxies[0].udp);
     assert_eq!(
-        config.proxies[0].vless.as_ref().map(|vless| vless.packet_mode),
+        config.proxies[0]
+            .vless
+            .as_ref()
+            .map(|vless| vless.packet_mode),
         Some(VlessPacketMode::Xudp)
     );
     assert_eq!(
-        config.proxies[1].vless.as_ref().map(|vless| vless.packet_mode),
+        config.proxies[1]
+            .vless
+            .as_ref()
+            .map(|vless| vless.packet_mode),
         Some(VlessPacketMode::PacketAddr)
     );
     assert_eq!(
-        config.proxies[2].vless.as_ref().map(|vless| vless.packet_mode),
+        config.proxies[2]
+            .vless
+            .as_ref()
+            .map(|vless| vless.packet_mode),
         Some(VlessPacketMode::Xudp)
     );
 
@@ -3057,7 +3075,7 @@ fn parses_phase6e_f_vless_udp_packet_modes() {
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }
@@ -3079,10 +3097,11 @@ fn parses_phase6e_g_vless_vision_scope() {
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    udp: true\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    tls: true\n    flow: xtls-rprx-vision\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: unsupported-flow\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    client-fingerprint: chrome\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }
@@ -3102,6 +3121,28 @@ fn parses_phase6e_h_vless_reality_scope() {
         reality.short_id,
         hex::decode("10f897e26c4b9478").expect("short id")
     );
+    assert!(!reality.support_x25519mlkem768);
+
+    let hybrid_source = source.replace(
+        "      short-id: 10f897e26c4b9478\n",
+        "      short-id: 10f897e26c4b9478\n      support-x25519mlkem768: true\n",
+    );
+    let hybrid = Config::from_yaml(&hybrid_source).expect("hybrid REALITY config");
+    assert!(
+        hybrid.proxies[0]
+            .reality
+            .as_ref()
+            .is_some_and(|reality| reality.support_x25519mlkem768)
+    );
+
+    let without_short_id = source.replace("      short-id: 10f897e26c4b9478\n", "");
+    let config = Config::from_yaml(&without_short_id).expect("empty REALITY short id");
+    assert!(
+        config.proxies[0]
+            .reality
+            .as_ref()
+            .is_some_and(|reality| reality.short_id.is_empty())
+    );
 
     let rejected = [
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
@@ -3111,7 +3152,7 @@ fn parses_phase6e_h_vless_reality_scope() {
     ];
     for body in rejected {
         assert!(
-            Config::from_yaml(&format!("{body}")).is_err(),
+            Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
         );
     }

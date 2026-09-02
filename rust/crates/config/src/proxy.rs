@@ -13,8 +13,9 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    RealityProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
-    VmessSecurity, VmessTransport,
+    RealityProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport,
+    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
+    VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -419,6 +420,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let encryption = proxy.encryption.as_deref().unwrap_or("");
@@ -466,7 +468,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     }
     let transport = parse_vless_transport(network, &proxy, &name)?;
     let flow = parse_vless_flow(&proxy, &name)?;
-    if flow.is_some() && (!tls || network != "tcp" || udp) {
+    if flow.is_some() && (!tls || network != "tcp" || udp || reality.is_some()) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let packet_mode = if udp {
@@ -532,7 +534,6 @@ fn parse_vless_reality_options(
         return Ok(None);
     };
     if !options.extra.is_empty()
-        || options.support_x25519mlkem768.unwrap_or(false)
         || proxy.skip_cert_verify.unwrap_or(false)
         || proxy.name_cert_verify.is_some()
     {
@@ -551,13 +552,9 @@ fn parse_vless_reality_options(
     let public_key: [u8; 32] = public_key
         .try_into()
         .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
-    let short_id_text = options
-        .short_id
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
-    let decoded = hex::decode(short_id_text)
-        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let short_id_text = options.short_id.as_deref().unwrap_or("");
+    let decoded =
+        hex::decode(short_id_text).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
     if decoded.len() > 8 {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
@@ -566,6 +563,7 @@ fn parse_vless_reality_options(
     Ok(Some(RealityProxyConfig {
         public_key,
         short_id,
+        support_x25519mlkem768: options.support_x25519mlkem768.unwrap_or(false),
     }))
 }
 
@@ -597,6 +595,7 @@ fn parse_vless_flow(proxy: &RawProxy, name: &str) -> Result<Option<VlessFlow>, C
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_vless_transport(
     network: &str,
     proxy: &RawProxy,
@@ -664,7 +663,9 @@ fn parse_vless_transport(
         let options = proxy.grpc_opts.clone().unwrap_or_default();
         if !options.extra.is_empty()
             || options.ping_interval.is_some_and(|interval| interval != 0)
-            || options.max_connections.is_some_and(|connections| connections != 0)
+            || options
+                .max_connections
+                .is_some_and(|connections| connections != 0)
             || options.min_streams.is_some_and(|streams| streams != 0)
             || options.max_streams.is_some_and(|streams| streams != 0)
         {
@@ -710,11 +711,13 @@ fn parse_vless_transport(
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     let headers = options.headers.unwrap_or_default();
-    if headers.keys().any(|header| {
-        http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
-    }) || headers.values().any(|value| {
-        http::header::HeaderValue::from_str(value).is_err()
-    }) {
+    if headers
+        .keys()
+        .any(|header| http::header::HeaderName::from_bytes(header.as_bytes()).is_err())
+        || headers
+            .values()
+            .any(|value| http::header::HeaderValue::from_str(value).is_err())
+    {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok(VlessTransport::WebSocket { path, headers })
@@ -734,7 +737,7 @@ fn parse_vless_packet_mode(proxy: &RawProxy, name: &str) -> Result<VlessPacketMo
             packet_addr = true;
             xudp = false;
         }
-        Some(VlessPacketMode::Xudp) | Some(VlessPacketMode::Standard) | None => {
+        Some(VlessPacketMode::Xudp | VlessPacketMode::Standard) | None => {
             if !packet_addr {
                 xudp = true;
             }

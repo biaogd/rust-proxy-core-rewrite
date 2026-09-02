@@ -1799,9 +1799,9 @@ configuration, domain and large-payload TCP relay, process survival and the
 pinned oracle's half-close behavior. The separate
 `compat/scripts/phase6c_shadowtls_clienthello_regression.py` records each
 runtime's production ClientHello baseline; it is not Go/Rust fingerprint wire
-parity. Only the partial Chrome fingerprint is accepted: the Rust path exposes
-10 cipher suites rather than the Go/uTLS Chrome profile's 16, and unsupported
-fingerprint names are rejected instead of silently falling back.
+parity. The Rust path now advertises the complete 16-suite Chrome 133 cipher
+list, but the ShadowTLS wrappers still produce different extension sets.
+Unsupported fingerprint names are rejected instead of silently falling back.
 
 This phase does not claim exact Chrome fingerprint parity, native 2022 UDP,
 multi-hop EIH, inbound/server behavior or other shared security consumers.
@@ -2330,6 +2330,53 @@ This phase does not add WebSocket/HTTP/H2/gRPC/xHTTP carriers, Vision, Reality,
 VLESS encryption extensions, UDP/XUDP data paths, mux or inbound/server
 behavior. No new dependency is introduced: the shared `rewrite-transport` TLS
 adapter already owns roots, name policy, rustls configuration and handshake.
+
+### Phase 6E-C–F accepted scope — VLESS transports and UDP
+
+These slices update the configuration **Proxies and built-in proxy insertion**,
+outbound **VLESS**, **Shared outbound transport/security variants**, and their
+Darwin/Linux Phase 6E platform rows. C–E compose the Phase 6E-A framing with
+the existing WebSocket/WSS, HTTP/1/H2 and single-stream gRPC/Gun carriers. F
+adds plaintext native-TCP UDP packet-address and XUDP associations. XUDP keeps
+a process-stable global ID for each inbound source, and controller capability
+fields remain compatible with Go even when a VLESS proxy has `udp: false`.
+
+The four `compat/scripts/phase6e_vless_{websocket,http,grpc,udp}.py` gates are
+the acceptance evidence. UDP now uses the same physical carrier builder as TCP
+so `tls: true` cannot silently become plaintext; that UDP-over-TLS combination
+remains pending a dedicated Go/Rust differential and is not part of the Phase
+6E-F parity claim. UDP over WS/HTTP/H2/gRPC, pooled Gun, xHTTP, encryption,
+general mux and inbound/server behavior remain open.
+
+### Phase 6E-G accepted scope — VLESS Vision native TCP/TLS
+
+This slice updates outbound **VLESS** and the Phase 6E-G platform rows. It covers
+the protobuf flow addon, bounded padding/end frames, fragmented VLESS response
+headers/addons, server UUID validation and unknown-command rejection over
+native TLS 1.3. A dedicated record-bounded TLS carrier preserves decrypted
+plaintext already buffered by rustls and then switches each direction to the
+underlying raw TCP stream after `commandPaddingDirect`.
+
+`compat/scripts/phase6e_vless_vision.py` performs a real nested-TLS exchange
+through both Go and Rust. This proves the direct splice rather than merely
+observing the Vision command. REALITY+Vision, non-TCP carriers and server mode
+remain later scopes.
+
+### Phase 6E-H accepted scope — VLESS REALITY native TCP/TLS
+
+This slice updates outbound **VLESS**, **Shared outbound transport/security
+variants**, and the Phase 6E-H platform rows. The patched `shadow-rustls` fork
+implements REALITY session-ID authentication and verification. Rust accepts
+zero-to-eight-byte short IDs like Go and actually enables the only accepted
+`client-fingerprint: chrome` profile.
+
+The fork advertises the complete Chrome 133 cipher list and its GREASE,
+extension bodies, key shares, ALPS and ECH shape are checked by a normalized
+raw-ClientHello Go/Rust differential. The same gate proves authenticated relay,
+half-close and both default X25519 and `support-x25519mlkem768` handshakes.
+Random values and shuffled middle-extension order are normalized, but semantic
+fields are not. Other browser fingerprints, legacy-only TLS 1.2 cipher
+selection, Vision combination, non-TCP carriers and server mode remain open.
 
 ### Phase 5C1b accepted scope
 

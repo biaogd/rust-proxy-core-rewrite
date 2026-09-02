@@ -11,11 +11,11 @@ pub use direct::{
 };
 pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
-    wrap_client_tls_with_alpn, wrap_client_tls_with_options,
+    wrap_client_tls_with_alpn, wrap_client_tls_with_options, wrap_client_vision_tls_with_options,
 };
 pub use reality::wrap_client_reality;
-pub use rewrite_transport::BoxedStream as BoxedOutboundStream;
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
+pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};
 pub use rewrite_transport::{
     HttpObfsClient, HttpObfsServer, ShadowTlsAcceptResult, ShadowTlsConnectOptions, ShadowTlsError,
     ShadowTlsHandshakeDial, ShadowTlsServerConfig, TlsObfsClient, TlsObfsServer, V2rayMux,
@@ -44,7 +44,8 @@ pub use socks5::{
 };
 pub use vless::{
     VlessFlow, VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
-    associate_vless_udp_with_options, connect_vless_on_stream, connect_vless_with_options,
+    associate_vless_udp_on_stream, associate_vless_udp_with_options, connect_vless_on_stream,
+    connect_vless_on_stream_with_vision_control, connect_vless_with_options,
 };
 pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,

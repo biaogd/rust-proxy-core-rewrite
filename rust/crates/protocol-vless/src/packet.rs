@@ -1,6 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use rand::RngExt as _;
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,6 +41,11 @@ pub struct VlessUdpAssociation {
 }
 
 impl VlessUdpAssociation {
+    /// Sends one UDP payload to `destination` over this VLESS association.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or framing error when the payload cannot be encoded or sent.
     pub async fn send(
         &mut self,
         destination: &Destination,
@@ -84,6 +88,11 @@ impl VlessUdpAssociation {
         Ok(())
     }
 
+    /// Receives one UDP payload and its remote source from this VLESS association.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or framing error when the remote frame is invalid or truncated.
     pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), VlessProtocolError> {
         self.ensure_response_header().await?;
         match self.mode {
@@ -265,9 +274,8 @@ pub async fn associate_vless_udp_on_stream(
     destination: &Destination,
     options: VlessClientOptions,
     mode: VlessPacketMode,
+    xudp_global_id: [u8; 8],
 ) -> Result<VlessUdpAssociation, VlessProtocolError> {
-    let mut xudp_global_id = [0_u8; 8];
-    rand::rng().fill(&mut xudp_global_id);
     Ok(VlessUdpAssociation {
         remote,
         mode,
@@ -436,9 +444,10 @@ fn decode_xudp_address(input: &[u8]) -> Result<(Destination, usize), VlessProtoc
             (Host::Ip(Ipv4Addr::from(octets).into()), 7)
         }
         2 => {
-            let length = usize::from(*input.get(3).ok_or_else(|| {
-                VlessProtocolError::Protocol("truncated XUDP domain".to_owned())
-            })?);
+            let length =
+                usize::from(*input.get(3).ok_or_else(|| {
+                    VlessProtocolError::Protocol("truncated XUDP domain".to_owned())
+                })?);
             let end = 4 + length;
             let domain = input
                 .get(4..end)

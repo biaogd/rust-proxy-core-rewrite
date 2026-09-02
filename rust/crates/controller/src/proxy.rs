@@ -495,6 +495,7 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::Vless => {
                     let vless = proxy.vless.as_ref().ok_or(())?;
+                    let mut vision_control = None;
                     let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
                         rewrite_outbound::connect_with_options(
                             &server,
@@ -505,11 +506,11 @@ pub(super) async fn measure_http_delay(
                         .map_err(|_| ())?,
                     );
                     let websocket_host = match &vless.transport {
-                        rewrite_config::VlessTransport::WebSocket { headers, .. } => headers
-                            .iter()
-                            .find_map(|(name, value)| {
+                        rewrite_config::VlessTransport::WebSocket { headers, .. } => {
+                            headers.iter().find_map(|(name, value)| {
                                 name.eq_ignore_ascii_case("host").then_some(value.as_str())
-                            }),
+                            })
+                        }
                         _ => None,
                     };
                     if let Some(reality) = proxy.reality.as_ref() {
@@ -539,25 +540,36 @@ pub(super) async fn measure_http_delay(
                             | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
                             rewrite_config::VlessTransport::Tcp => &[],
                         };
-                        outer = rewrite_outbound::wrap_client_tls_with_options(
-                            outer,
-                            rewrite_outbound::HttpProxyTls {
-                                server_name,
-                                verification_name: proxy.name_cert_verify.as_deref(),
-                                skip_certificate_verification: proxy.skip_cert_verify,
-                                fingerprint: None,
-                                certificate: None,
-                                private_key: None,
-                                custom_roots: &config.trust_certificates,
-                                ech_config: None,
-                                alpn_protocols: alpn,
-                                tls12_only: false,
-                                tls13_only: false,
-                            },
-                            None,
-                        )
-                        .await
-                        .map_err(|_| ())?;
+                        let tls = rewrite_outbound::HttpProxyTls {
+                            server_name,
+                            verification_name: proxy.name_cert_verify.as_deref(),
+                            skip_certificate_verification: proxy.skip_cert_verify,
+                            fingerprint: None,
+                            certificate: None,
+                            private_key: None,
+                            custom_roots: &config.trust_certificates,
+                            ech_config: None,
+                            alpn_protocols: alpn,
+                            tls12_only: false,
+                            tls13_only: vless.flow.is_some(),
+                        };
+                        if vless.flow.is_some() {
+                            let control = rewrite_outbound::VisionDirectControl::default();
+                            outer = rewrite_outbound::wrap_client_vision_tls_with_options(
+                                outer,
+                                tls,
+                                None,
+                                control.clone(),
+                            )
+                            .await
+                            .map_err(|_| ())?;
+                            vision_control = Some(control);
+                        } else {
+                            outer =
+                                rewrite_outbound::wrap_client_tls_with_options(outer, tls, None)
+                                    .await
+                                    .map_err(|_| ())?;
+                        }
                     }
                     outer = match &vless.transport {
                         rewrite_config::VlessTransport::WebSocket { path, headers } => {
@@ -592,13 +604,18 @@ pub(super) async fn measure_http_delay(
                             user_agent,
                         } => {
                             let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
-                            rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
-                                .await
-                                .map_err(|_| ())?
+                            rewrite_outbound::connect_vmess_grpc(
+                                outer,
+                                &host,
+                                service_name,
+                                user_agent,
+                            )
+                            .await
+                            .map_err(|_| ())?
                         }
                         rewrite_config::VlessTransport::Tcp => outer,
                     };
-                    rewrite_outbound::connect_vless_on_stream(
+                    rewrite_outbound::connect_vless_on_stream_with_vision_control(
                         outer,
                         &destination,
                         rewrite_outbound::VlessTcpOptions {
@@ -609,6 +626,7 @@ pub(super) async fn measure_http_delay(
                                 }
                             }),
                         },
+                        vision_control,
                     )
                     .map_err(|_| ())?
                 }
@@ -883,9 +901,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
             || (proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp),
         "xudp": proxy.vmess.as_ref().is_some_and(|vmess| {
                 vmess.packet_mode == rewrite_config::VmessPacketMode::Xudp
-            }) || proxy.vless.as_ref().is_some_and(|vless| {
-                vless.packet_mode == rewrite_config::VlessPacketMode::Xudp
-            }),
+            }) || proxy.vless.as_ref().is_some_and(|vless| vless.xudp),
     })
 }
 

@@ -11,6 +11,7 @@ pub use rewrite_protocol_vless::{
     VlessClientOptions as VlessTcpOptions, VlessFlow, VlessPacketMode,
     VlessProtocolError as VlessProxyError, VlessUdpAssociation, associate_vless_udp_on_stream,
 };
+use rewrite_transport::VisionDirectControl;
 
 /// Opens a VLESS client over native TCP using outbound socket policy.
 ///
@@ -43,6 +44,25 @@ pub fn connect_vless_on_stream(
     rewrite_protocol_vless::connect_vless_on_stream(remote, destination, options)
 }
 
+/// Starts VLESS over an established Vision-capable carrier.
+///
+/// # Errors
+///
+/// Returns a VLESS framing error when the destination cannot be represented.
+pub fn connect_vless_on_stream_with_vision_control(
+    remote: BoxedOutboundStream,
+    destination: &Destination,
+    options: VlessTcpOptions,
+    control: Option<VisionDirectControl>,
+) -> Result<BoxedOutboundStream, VlessProxyError> {
+    rewrite_protocol_vless::connect_vless_on_stream_with_vision_control(
+        remote,
+        destination,
+        options,
+        control,
+    )
+}
+
 /// Opens a VLESS UDP association over native TCP using outbound socket policy.
 ///
 /// # Errors
@@ -54,10 +74,12 @@ pub async fn associate_vless_udp_with_options(
     allow_ipv6: bool,
     options: VlessTcpOptions,
     mode: VlessPacketMode,
+    xudp_global_id: [u8; 8],
     socket_options: DirectTcpOptions<'_>,
 ) -> Result<VlessUdpAssociation, VlessProxyError> {
     let remote = connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| VlessProxyError::Transport(error.to_string()))?;
-    associate_vless_udp_on_stream(Box::new(remote), destination, options, mode).await
+    associate_vless_udp_on_stream(Box::new(remote), destination, options, mode, xudp_global_id)
+        .await
 }

@@ -378,8 +378,9 @@ mod chrome_fingerprint_tests {
     use super::*;
     use crate::tls::ClientTlsOptions;
 
-    const CHROME_CIPHERS_PARTIAL: &[u16] = &[
-        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
+    const CHROME_133_CIPHERS: &[u16] = &[
+        0x0a0a, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
+        0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
     ];
 
     const CHROME_EXT_TYPES: &[u16] = &[
@@ -482,13 +483,13 @@ mod chrome_fingerprint_tests {
     }
 
     #[test]
-    fn chrome_partial_fingerprint_cipher_and_extension_set() {
+    fn chrome_133_fingerprint_cipher_and_extension_set() {
         let raw = capture_client_hello(Some("chrome"));
         let (ciphers_raw, extensions_raw, ech_body) = parse_client_hello(&raw);
 
         assert!(is_grease(ciphers_raw[0]), "leading GREASE cipher");
         let ciphers: Vec<u16> = ciphers_raw.iter().copied().map(normalize_grease).collect();
-        assert_eq!(ciphers, CHROME_CIPHERS_PARTIAL, "cipher suite list");
+        assert_eq!(ciphers, CHROME_133_CIPHERS, "cipher suite list");
 
         assert!(is_grease(extensions_raw[0]), "leading GREASE extension");
         assert!(
@@ -552,7 +553,7 @@ mod chrome_fingerprint_tests {
         let (ciphers, _, _) = parse_client_hello(&raw);
         assert!(!ciphers.iter().any(|c| is_grease(*c)));
         let normalized: Vec<u16> = ciphers.iter().copied().map(normalize_grease).collect();
-        assert_ne!(normalized, CHROME_CIPHERS_PARTIAL);
+        assert_ne!(normalized, CHROME_133_CIPHERS);
     }
 
     #[test]

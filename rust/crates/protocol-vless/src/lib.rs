@@ -12,7 +12,7 @@ mod vision;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use rewrite_io::BoxedStream;
+use rewrite_io::{BoxedStream, VisionDirectControl};
 use rewrite_model::Destination;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -57,11 +57,27 @@ pub fn connect_vless_on_stream(
     destination: &Destination,
     options: VlessClientOptions,
 ) -> Result<BoxedStream, VlessProtocolError> {
+    connect_vless_on_stream_with_vision_control(remote, destination, options, None)
+}
+
+/// Starts VLESS over a carrier that can promote XTLS Vision to raw TCP.
+///
+/// # Errors
+///
+/// Returns an error when the destination cannot be represented by the VLESS
+/// version-zero address format.
+pub fn connect_vless_on_stream_with_vision_control(
+    remote: BoxedStream,
+    destination: &Destination,
+    options: VlessClientOptions,
+    vision_control: Option<VisionDirectControl>,
+) -> Result<BoxedStream, VlessProtocolError> {
     if options.flow == Some(VlessFlow::XtlsRprxVision) {
         let vless = stream::VlessTcpStream::new(remote, destination, options)?;
         return Ok(Box::new(vision::VisionStream::new(
             Box::new(vless),
             options.uuid,
+            vision_control,
         )));
     }
 

@@ -2074,11 +2074,8 @@ mod tests {
             header.to_vec()
         });
 
-        let stream = Box::new(
-            tokio::net::TcpStream::connect(addr)
-                .await
-                .expect("connect"),
-        ) as crate::BoxedStream;
+        let stream = Box::new(tokio::net::TcpStream::connect(addr).await.expect("connect"))
+            as crate::BoxedStream;
         let _ = connect_shadow_tls(
             stream,
             ShadowTlsConnectOptions {
@@ -2099,7 +2096,11 @@ mod tests {
         .await;
 
         let header = capture.await.expect("capture join");
-        assert_eq!(header.first().copied(), Some(HANDSHAKE), "TLS handshake record type");
+        assert_eq!(
+            header.first().copied(),
+            Some(HANDSHAKE),
+            "TLS handshake record type"
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BufMut, BytesMut};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use rewrite_io::BoxedStream;
+use rewrite_io::{BoxedStream, VisionDirectControl};
 
 const CMD_PADDING_CONTINUE: u8 = 0x00;
 const CMD_PADDING_END: u8 = 0x01;
@@ -19,12 +19,11 @@ const TLS13_SUPPORTED_VERSIONS: [u8; 6] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
 enum ReadState {
     Framed,
     End,
-    Direct,
 }
 
 impl ReadState {
     fn is_done(self) -> bool {
-        matches!(self, ReadState::End | ReadState::Direct)
+        matches!(self, ReadState::End)
     }
 }
 
@@ -34,7 +33,7 @@ struct TlsFilterState {
     is_tls12_or_above: bool,
     enable_xtls: bool,
     cipher: u16,
-    remaining_server_hello: u16,
+    remaining_server_hello: usize,
 }
 
 impl TlsFilterState {
@@ -57,15 +56,12 @@ impl TlsFilterState {
         self.packets_to_filter -= 1;
 
         if let Some(index) = find_subslice(buffer, &TLS_SERVER_HANDSHAKE_START) {
-            if length > index + 5
-                && buffer[0] == 0x16
-                && buffer[1] == 0x03
-                && buffer[2] == 0x03
-            {
+            if length > index + 5 && buffer[0] == 0x16 && buffer[1] == 0x03 && buffer[2] == 0x03 {
                 self.is_tls = true;
                 if buffer[index + 5] == 0x02 {
                     self.is_tls12_or_above = true;
-                    let remaining = u16::from(buffer[index + 3]) << 8 | u16::from(buffer[index + 4]);
+                    let remaining =
+                        usize::from(u16::from_be_bytes([buffer[index + 3], buffer[index + 4]]));
                     self.remaining_server_hello = remaining.saturating_add(5);
                     if length - index >= 79 && self.remaining_server_hello >= 79 {
                         let session_id_len = usize::from(buffer[index + 43]);
@@ -77,18 +73,19 @@ impl TlsFilterState {
                     }
                 }
             }
-        } else if let Some(index) = find_subslice(buffer, &TLS_CLIENT_HANDSHAKE_START) {
-            if length > index + 5 && buffer[index + 5] == 0x01 {
-                self.is_tls = true;
-            }
+        } else if let Some(index) = find_subslice(buffer, &TLS_CLIENT_HANDSHAKE_START)
+            && length > index + 5
+            && buffer[index + 5] == 0x01
+        {
+            self.is_tls = true;
         }
 
         if self.remaining_server_hello > 0 {
-            let mut end = usize::from(self.remaining_server_hello);
+            let mut end = self.remaining_server_hello;
             let start = 0;
             if start + end > length {
                 end = length;
-                self.remaining_server_hello -= end as u16;
+                self.remaining_server_hello -= end;
             } else {
                 self.remaining_server_hello = 0;
             }
@@ -131,42 +128,50 @@ fn tls13_cipher_name(cipher: u16) -> Option<&'static str> {
 /// Vision framing for `flow: xtls-rprx-vision`.
 pub struct VisionStream {
     inner: BoxedStream,
-    user_uuid: Option<[u8; 16]>,
-    write_direct: bool,
+    write_uuid: Option<[u8; 16]>,
+    expected_server_uuid: [u8; 16],
     write_buf: BytesMut,
-    write_buf_app_data: bool,
+    pending_input_len: usize,
     write_filter_application_data: bool,
     tls_filter: TlsFilterState,
     server_uuid_consumed: bool,
     decoded: BytesMut,
     raw: BytesMut,
     read_state: ReadState,
+    control: Option<VisionDirectControl>,
+    pending_write_direct: bool,
 }
 
 impl VisionStream {
-    pub(crate) fn new(inner: BoxedStream, uuid: [u8; 16]) -> Self {
+    pub(crate) fn new(
+        inner: BoxedStream,
+        uuid: [u8; 16],
+        control: Option<VisionDirectControl>,
+    ) -> Self {
         Self {
             inner,
-            user_uuid: Some(uuid),
-            write_direct: false,
+            write_uuid: Some(uuid),
+            expected_server_uuid: uuid,
             write_buf: BytesMut::new(),
-            write_buf_app_data: false,
+            pending_input_len: 0,
             write_filter_application_data: true,
             tls_filter: TlsFilterState::new(),
             server_uuid_consumed: false,
             decoded: BytesMut::new(),
             raw: BytesMut::new(),
             read_state: ReadState::Framed,
+            control,
+            pending_write_direct: false,
         }
     }
 
     fn build_vision_frame(&mut self, data: &[u8], command: u8, padding_tls: bool) {
-        let is_first_frame = self.user_uuid.is_some();
-        if let Some(uuid) = self.user_uuid.take() {
+        let is_first_frame = self.write_uuid.is_some();
+        if let Some(uuid) = self.write_uuid.take() {
             self.write_buf.put_slice(&uuid);
         }
 
-        let content_len = data.len() as u16;
+        let content_len = u16::try_from(data.len()).expect("Vision frame data is pre-chunked");
         let padding_len: u16 = if data.is_empty() && is_first_frame {
             rand::random::<u16>() % 500 + 400
         } else if usize::from(content_len) < 900 && padding_tls {
@@ -184,21 +189,17 @@ impl VisionStream {
         for _ in 0..padding_len {
             self.write_buf.put_u8(rand::random());
         }
-        self.write_buf_app_data = command == CMD_PADDING_DIRECT;
     }
 
     fn choose_write_command(&mut self, data: &[u8]) -> u8 {
         self.tls_filter.filter(data);
         if data.len() > 6 && data.starts_with(&[TLS_APPLICATION_DATA, 0x03, 0x03]) {
             if self.tls_filter.enable_xtls {
-                self.write_filter_application_data = false;
                 CMD_PADDING_DIRECT
             } else {
-                self.write_filter_application_data = false;
                 CMD_PADDING_END
             }
         } else if !self.tls_filter.is_tls12_or_above && self.tls_filter.packets_to_filter <= 1 {
-            self.write_filter_application_data = false;
             CMD_PADDING_END
         } else {
             CMD_PADDING_CONTINUE
@@ -224,12 +225,17 @@ impl AsyncRead for VisionStream {
                 return Pin::new(&mut this.inner).poll_read(cx, buf);
             }
 
-            let changed = decode_vision_frames(
+            let changed = match decode_vision_frames(
                 &mut this.raw,
                 &mut this.decoded,
                 &mut this.read_state,
                 &mut this.server_uuid_consumed,
-            );
+                &this.expected_server_uuid,
+                this.control.as_ref(),
+            ) {
+                Ok(changed) => changed,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
             if changed || this.read_state.is_done() {
                 continue;
             }
@@ -262,12 +268,20 @@ fn decode_vision_frames(
     decoded: &mut BytesMut,
     read_state: &mut ReadState,
     server_uuid_consumed: &mut bool,
-) -> bool {
+    expected_server_uuid: &[u8; 16],
+    control: Option<&VisionDirectControl>,
+) -> std::io::Result<bool> {
     let before = decoded.len();
     loop {
         if !*server_uuid_consumed {
             if raw.len() < 16 + 5 {
                 break;
+            }
+            if raw[..16] != expected_server_uuid[..] {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "XTLS Vision server responded with an unknown UUID",
+                ));
             }
             raw.advance(16);
             *server_uuid_consumed = true;
@@ -285,20 +299,36 @@ fn decode_vision_frames(
         decoded.extend_from_slice(&raw[..content_len]);
         raw.advance(content_len + padding_len);
 
-        if command == CMD_PADDING_END {
-            *read_state = ReadState::End;
-            decoded.extend_from_slice(raw);
-            raw.clear();
-            break;
-        }
-        if command == CMD_PADDING_DIRECT {
-            *read_state = ReadState::Direct;
-            decoded.extend_from_slice(raw);
-            raw.clear();
-            break;
+        match command {
+            CMD_PADDING_CONTINUE => {}
+            CMD_PADDING_END => {
+                *read_state = ReadState::End;
+                decoded.extend_from_slice(raw);
+                raw.clear();
+                break;
+            }
+            CMD_PADDING_DIRECT => {
+                let Some(control) = control else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "XTLS Vision carrier cannot promote to raw TCP",
+                    ));
+                };
+                decoded.extend_from_slice(raw);
+                raw.clear();
+                control.request_read_direct();
+                *read_state = ReadState::End;
+                break;
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("XTLS Vision read unknown command: {command}"),
+                ));
+            }
         }
     }
-    read_state.is_done() || decoded.len() > before
+    Ok(read_state.is_done() || decoded.len() > before)
 }
 
 impl AsyncWrite for VisionStream {
@@ -308,18 +338,42 @@ impl AsyncWrite for VisionStream {
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = self.get_mut();
-        if this.write_direct {
-            return Pin::new(&mut this.inner).poll_write(cx, buf);
+        if this.pending_write_direct && this.write_buf.is_empty() {
+            match Pin::new(&mut this.inner).poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+            this.control
+                .as_ref()
+                .expect("DIRECT promotion was validated")
+                .request_write_direct();
+            this.pending_write_direct = false;
+            return Poll::Ready(Ok(std::mem::take(&mut this.pending_input_len)));
         }
-        let original_len = buf.len();
         if this.write_buf.is_empty() {
             if this.write_filter_application_data {
-                if buf.is_empty() {
-                    this.build_vision_frame(buf, CMD_PADDING_CONTINUE, true);
+                let accepted = buf.len().min(usize::from(u16::MAX));
+                let input = &buf[..accepted];
+                if input.is_empty() {
+                    this.build_vision_frame(input, CMD_PADDING_CONTINUE, true);
                 } else {
-                    let command = this.choose_write_command(buf);
-                    this.build_vision_frame(buf, command, this.tls_filter.is_tls);
+                    let command = this.choose_write_command(input);
+                    if command == CMD_PADDING_DIRECT {
+                        if this.control.is_none() {
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "XTLS Vision carrier cannot promote to raw TCP",
+                            )));
+                        }
+                        this.pending_write_direct = true;
+                    }
+                    if command != CMD_PADDING_CONTINUE {
+                        this.write_filter_application_data = false;
+                    }
+                    this.build_vision_frame(input, command, this.tls_filter.is_tls);
                 }
+                this.pending_input_len = accepted;
             } else {
                 return Pin::new(&mut this.inner).poll_write(cx, buf);
             }
@@ -343,14 +397,26 @@ impl AsyncWrite for VisionStream {
             }
         }
 
-        if this.write_buf_app_data {
-            this.write_direct = true;
-            this.write_buf_app_data = false;
+        if this.pending_write_direct {
+            match Pin::new(&mut this.inner).poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+            this.control
+                .as_ref()
+                .expect("DIRECT promotion was validated")
+                .request_write_direct();
+            this.pending_write_direct = false;
         }
-        Poll::Ready(Ok(original_len))
+
+        Poll::Ready(Ok(std::mem::take(&mut this.pending_input_len)))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
@@ -359,5 +425,100 @@ impl AsyncWrite for VisionStream {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+
+    use rewrite_io::VisionDirectControl;
+
+    use super::{CMD_PADDING_CONTINUE, CMD_PADDING_DIRECT, ReadState, decode_vision_frames};
+
+    const UUID: [u8; 16] = [
+        0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08,
+        0x11,
+    ];
+
+    fn frame(uuid: [u8; 16], command: u8) -> BytesMut {
+        let mut frame = Vec::from(uuid);
+        frame.extend_from_slice(&[command, 0, 4, 0, 0]);
+        frame.extend_from_slice(b"data");
+        BytesMut::from(frame.as_slice())
+    }
+
+    #[test]
+    fn validates_server_uuid_and_command() {
+        let mut raw = frame(UUID, CMD_PADDING_CONTINUE);
+        let mut decoded = BytesMut::new();
+        let mut state = ReadState::Framed;
+        let mut uuid_consumed = false;
+        assert!(
+            decode_vision_frames(
+                &mut raw,
+                &mut decoded,
+                &mut state,
+                &mut uuid_consumed,
+                &UUID,
+                None,
+            )
+            .expect("valid frame")
+        );
+        assert_eq!(decoded, b"data"[..]);
+
+        let mut raw = frame([0; 16], CMD_PADDING_CONTINUE);
+        let error = decode_vision_frames(
+            &mut raw,
+            &mut BytesMut::new(),
+            &mut ReadState::Framed,
+            &mut false,
+            &UUID,
+            None,
+        )
+        .expect_err("wrong UUID");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let mut raw = frame(UUID, 0xff);
+        let error = decode_vision_frames(
+            &mut raw,
+            &mut BytesMut::new(),
+            &mut ReadState::Framed,
+            &mut false,
+            &UUID,
+            None,
+        )
+        .expect_err("unknown command");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn requires_a_direct_capable_carrier() {
+        let mut raw = frame(UUID, CMD_PADDING_DIRECT);
+        let error = decode_vision_frames(
+            &mut raw,
+            &mut BytesMut::new(),
+            &mut ReadState::Framed,
+            &mut false,
+            &UUID,
+            None,
+        )
+        .expect_err("direct splice");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        let control = VisionDirectControl::default();
+        let mut raw = frame(UUID, CMD_PADDING_DIRECT);
+        assert!(
+            decode_vision_frames(
+                &mut raw,
+                &mut BytesMut::new(),
+                &mut ReadState::Framed,
+                &mut false,
+                &UUID,
+                Some(&control),
+            )
+            .expect("capable carrier")
+        );
+        assert!(control.read_is_direct());
     }
 }
