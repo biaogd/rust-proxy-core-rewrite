@@ -4,6 +4,8 @@
 //! dialing, outer transports, routing and configuration stay outside this
 //! crate so later inbound and outbound adapters can share the framing code.
 
+mod packet;
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -12,6 +14,8 @@ use rewrite_model::{Destination, Host};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
+
+pub use packet::{VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream};
 
 const VERSION: u8 = 0;
 const COMMAND_TCP: u8 = 1;

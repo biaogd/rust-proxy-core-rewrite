@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
@@ -14,21 +15,85 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/gobwas/ws/wsutil"
 	"github.com/gofrs/uuid/v5"
+	"github.com/metacubex/sing-vmess/packetaddr"
+	vless "github.com/metacubex/sing-vmess/vless"
+	E "github.com/metacubex/sing/common/exceptions"
+	M "github.com/metacubex/sing/common/metadata"
+	N "github.com/metacubex/sing/common/network"
 	"golang.org/x/net/http2"
 )
 
 type authority struct {
-	expectedWSHost         string
-	expectedWSPath         string
-	expectedHeader         string
-	expectedHTTPMethod     string
-	expectedHTTPHost       string
-	expectedHTTPPath       string
-	expectedHTTPHeader     string
-	expectedGrpcUserAgent  string
+	expectedWSHost        string
+	expectedWSPath        string
+	expectedHeader        string
+	expectedHTTPMethod    string
+	expectedHTTPHost      string
+	expectedHTTPPath      string
+	expectedHTTPHeader    string
+	expectedGrpcUserAgent string
+	packetMode            string
+	vlessService          *vless.Service[string]
+}
+
+type packetEchoHandler struct {
+	packetMode string
+	output     sync.Mutex
+}
+
+var _ vless.Handler = (*packetEchoHandler)(nil)
+
+func (handler *packetEchoHandler) NewConnection(_ context.Context, conn net.Conn, metadata M.Metadata) error {
+	defer conn.Close()
+	destination := metadata.Destination
+	host := destination.Fqdn
+	if host == "" && destination.Addr.IsValid() {
+		host = destination.Addr.String()
+	}
+	handler.output.Lock()
+	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
+	handler.output.Unlock()
+	_, err := io.Copy(conn, conn)
+	return err
+}
+
+func (handler *packetEchoHandler) NewPacketConnection(_ context.Context, conn N.PacketConn, _ M.Metadata) error {
+	defer conn.Close()
+	packets, ok := conn.(net.PacketConn)
+	if !ok {
+		return E.New("VLESS packet connection lacks net.PacketConn")
+	}
+	if handler.packetMode == "packetaddr" {
+		packets = packetaddr.NewConn(packets, M.Socksaddr{})
+	}
+	buffer := make([]byte, 65_535)
+	for {
+		length, address, err := packets.ReadFrom(buffer)
+		if err != nil {
+			return err
+		}
+		destination := M.SocksaddrFromNet(address)
+		host := destination.Fqdn
+		if host == "" && destination.Addr.IsValid() {
+			host = destination.Addr.String()
+		}
+		handler.output.Lock()
+		fmt.Printf("PACKET %s %s:%d %d\n", handler.packetMode, host, destination.Port, length)
+		handler.output.Unlock()
+		if _, err := packets.WriteTo(buffer[:length], address); err != nil {
+			return err
+		}
+	}
+}
+
+func (handler *packetEchoHandler) NewError(_ context.Context, err error) {
+	handler.output.Lock()
+	fmt.Fprintln(os.Stderr, err)
+	handler.output.Unlock()
 }
 
 type gunConn struct {
@@ -422,6 +487,12 @@ func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool
 		a.observe("WS %s %s", host, path)
 		connection = wrapped
 	}
+	if transport == "tcp" && a.vlessService != nil {
+		if err := a.vlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
 	a.handle(connection)
 }
 
@@ -439,6 +510,7 @@ func main() {
 	expectedHTTPPath := flag.String("expected-http-path", "", "expected HTTP transport request target")
 	expectedHTTPHeader := flag.String("expected-http-header", "", "expected HTTP/1 header as name=value")
 	expectedGrpcUserAgent := flag.String("expected-grpc-user-agent", "", "expected Gun User-Agent")
+	packetMode := flag.String("packet-mode", "", "standard, packetaddr, or xudp")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -454,6 +526,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-tls-cert and -tls-key must be paired")
 		os.Exit(2)
 	}
+	switch *packetMode {
+	case "", "standard", "packetaddr", "xudp":
+	default:
+		fmt.Fprintln(os.Stderr, "invalid -packet-mode")
+		os.Exit(2)
+	}
 	if _, err := uuid.FromString(*uuidText); err != nil {
 		_ = uuid.NewV5(uuid.Nil, *uuidText)
 	}
@@ -467,6 +545,13 @@ func main() {
 		expectedHTTPPath:      *expectedHTTPPath,
 		expectedHTTPHeader:    *expectedHTTPHeader,
 		expectedGrpcUserAgent: *expectedGrpcUserAgent,
+		packetMode:            *packetMode,
+	}
+	if *packetMode != "" {
+		handler := &packetEchoHandler{packetMode: *packetMode}
+		service := vless.NewService[string](nil, handler)
+		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{""})
+		auth.vlessService = service
 	}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {

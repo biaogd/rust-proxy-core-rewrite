@@ -222,7 +222,15 @@ pub struct ProxyConfig {
 pub struct VlessProxyConfig {
     pub uuid: [u8; 16],
     pub xudp: bool,
+    pub packet_mode: VlessPacketMode,
     pub transport: VlessTransport,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VlessPacketMode {
+    Standard,
+    PacketAddr,
+    Xudp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
