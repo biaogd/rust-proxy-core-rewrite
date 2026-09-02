@@ -504,11 +504,32 @@ pub(super) async fn measure_http_delay(
                         .await
                         .map_err(|_| ())?,
                     );
+                    let websocket = match &vless.transport {
+                        rewrite_config::VlessTransport::Tcp => None,
+                        rewrite_config::VlessTransport::WebSocket { path, headers } => {
+                            Some((path.as_str(), headers))
+                        }
+                    };
                     if proxy.tls {
+                        let websocket_host = websocket.and_then(|(_, headers)| {
+                            headers.iter().find_map(|(name, value)| {
+                                name.eq_ignore_ascii_case("host").then_some(value.as_str())
+                            })
+                        });
+                        let server_name = proxy
+                            .sni
+                            .as_deref()
+                            .or(websocket_host)
+                            .unwrap_or(&proxy.server);
+                        let alpn: &[&[u8]] = if websocket.is_some() {
+                            &[b"http/1.1"]
+                        } else {
+                            &[]
+                        };
                         outer = rewrite_outbound::wrap_client_tls_with_options(
                             outer,
                             rewrite_outbound::HttpProxyTls {
-                                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                                server_name,
                                 verification_name: proxy.name_cert_verify.as_deref(),
                                 skip_certificate_verification: proxy.skip_cert_verify,
                                 fingerprint: None,
@@ -516,11 +537,24 @@ pub(super) async fn measure_http_delay(
                                 private_key: None,
                                 custom_roots: &config.trust_certificates,
                                 ech_config: None,
-                                alpn_protocols: &[],
+                                alpn_protocols: alpn,
                                 tls12_only: false,
                                 tls13_only: false,
                             },
                             None,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    }
+                    if let rewrite_config::VlessTransport::WebSocket { path, headers } =
+                        &vless.transport
+                    {
+                        outer = rewrite_outbound::connect_websocket_with_headers(
+                            outer,
+                            &proxy.server,
+                            proxy.port,
+                            path,
+                            headers,
                         )
                         .await
                         .map_err(|_| ())?;

@@ -2907,3 +2907,40 @@ fn parses_phase6e_b_vless_native_tls_scope() {
     .expect("Go accepts dormant TLS fields when TLS is disabled");
     assert!(!plaintext.proxies[0].tls);
 }
+
+#[test]
+fn parses_phase6e_c_vless_websocket_scope() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-ws\n    type: vless\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: ws\n    ws-opts:\n      path: /vless?token=1\n      headers:\n        Host: phase6e-ws.example\n        X-Phase: 6e-c\n"
+    ))
+    .expect("Phase 6E-C VLESS WebSocket config");
+    let proxy = &config.proxies[0];
+    let vless = proxy.vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        vless.transport,
+        VlessTransport::WebSocket {
+            path: "/vless?token=1".to_owned(),
+            headers: BTreeMap::from([
+                ("Host".to_owned(), "phase6e-ws.example".to_owned()),
+                ("X-Phase".to_owned(), "6e-c".to_owned()),
+            ]),
+        }
+    );
+
+    let wss = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-wss\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: ws\n    tls: true\n    servername: dot.phase4.test\n    ws-opts:\n      path: /secure-vless\n      headers:\n        Host: dot.phase4.test\n"
+    ))
+    .expect("Phase 6E-C VLESS WSS config");
+    assert!(wss.proxies[0].tls);
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    ws-opts:\n      max-early-data: 32\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    ws-opts:\n      path: /wrong\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}
