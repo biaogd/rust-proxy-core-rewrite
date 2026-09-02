@@ -1,6 +1,6 @@
 # shadow-rustls dependency
 
-ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so **`rewrite-outbound` alone** depends on the fork [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) (rustls **0.23.43** + tokio-rustls **0.26.4**).
+ShadowTLS needs to shape TLS ClientHello bytes inside rustls. That cannot be done with a thin wrapper, so **`rewrite-transport`** depends on the fork [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) (rustls **0.23.43** + tokio-rustls **0.26.4**).
 
 All other workspace crates use the default **crates.io** `tokio-rustls` / `rustls` (via `[workspace.dependencies]`).
 
@@ -9,24 +9,38 @@ All other workspace crates use the default **crates.io** `tokio-rustls` / `rustl
 | Stack | rustls source | Used by |
 |-------|---------------|---------|
 | Default TLS | crates.io `0.26` / `0.23.43` | HTTP/SOCKS outbound, DNS, controller, runtime, reqwest, quinn, … |
-| ShadowTLS camouflage | git `biaogd/shadow-rustls` | `rewrite-outbound` only (`shadow_tls.rs`, `shadow_tls_config.rs`) |
+| ShadowTLS + REALITY | git `biaogd/shadow-rustls` | `rewrite-transport` (`shadow_tls.rs`, `reality.rs`, …) |
 
 There is **no** `[patch.crates-io]` — the fork is imported as renamed packages:
 
 ```toml
-# rewrite-outbound/Cargo.toml
-shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.1", package = "rustls" }
+# rewrite-transport/Cargo.toml
+shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", tag = "rustls-0.23.43-shadow.2", package = "rustls" }
 shadow-tokio-rustls = { git = "...", package = "tokio-rustls", ... }
-tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths in outbound
+tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 ```
 
 ## Releases
 
-| Tag | rustls base | tokio-rustls base |
-|-----|-------------|-------------------|
-| `rustls-0.23.43-shadow.1` | 0.23.43 | 0.26.4 |
+| Tag | rustls base | tokio-rustls base | Notes |
+|-----|-------------|-------------------|-------|
+| `rustls-0.23.43-shadow.1` | 0.23.43 | 0.26.4 | ShadowTLS ClientHello fingerprint |
+| `rustls-0.23.43-shadow.2` | 0.23.43 | 0.26.4 | + VLESS REALITY client (`with_reality()`) |
 
-After publishing a new fork tag, bump both git deps in `rust/crates/outbound/Cargo.toml`.
+After publishing a new fork tag, bump both git deps in `rust/crates/transport/Cargo.toml`.
+
+### Publishing `rustls-0.23.43-shadow.2`
+
+From a checkout of [biaogd/shadow-rustls](https://github.com/biaogd/shadow-rustls) at tag `rustls-0.23.43-shadow.1`:
+
+```bash
+cd /path/to/shadow-rustls
+git checkout rustls-0.23.43-shadow.1 -B main
+git apply /path/to/rust-proxy-core-rewrite/docs/rust-rewrite/shadow-rustls-reality.patch
+git commit -am "Add VLESS REALITY client support"
+git tag rustls-0.23.43-shadow.2
+git push origin main --tags
+```
 
 ## Patch summary
 
