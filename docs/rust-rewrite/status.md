@@ -177,10 +177,10 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A/B pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
-| CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
+| CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-H | Phase 1–6E-H Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. Phase 6E-G now includes nested TLS through Vision DIRECT, and 6E-H includes normalized raw ClientHello plus default/hybrid REALITY handshakes. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6E-H; three-platform matrix pending | Every Phase Python gate is assigned to one of ten fail-independent shards on Linux x86_64, Windows x86_64 and macOS arm64. The controller/outbound shard now includes Phase 6E (previously omitted by its regex), including nested-TLS Vision DIRECT and normalized REALITY ClientHello/default/hybrid handshakes. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -4780,16 +4780,23 @@ the repository; the unmodified Actions jobs remain the default-timeout gate.
 Existing Phase 5A5a–5A5f and CLI-08 matrix claims remain unchanged; this
 refactor adds no ruleset behavior or platform support claim.
 
-## Native Windows and Apple Silicon build gates
+## Native Linux, Windows and Apple Silicon full gates
 
-The default Rust workflow now has a separate native build matrix for
-`windows-latest` X64 and `macos-latest` ARM64. Each leg verifies the Actions
-runner architecture and the host architecture before building the locked Cargo
-workspace with all targets and all features. The target directory is explicitly
-placed under `runner.temp`, overriding the developer-machine Cargo target path.
-macOS additionally requires `uname -m=arm64`, so an Intel runner cannot satisfy
-the Apple Silicon build gate. Both native build legs passed in Actions run
-`33158824630`; compilation alone does not claim platform runtime parity.
+The default Rust workflow now runs the complete quality sequence independently
+on `ubuntu-latest` X64, `windows-latest` X64 and `macos-latest` ARM64: fmt,
+workspace/all-target/all-feature clippy, workspace/all-feature tests and an
+all-feature release CLI build. Each leg verifies the Actions and native host
+architectures, uses a target directory outside the checkout and locks Cargo
+dependencies. macOS requires `uname -m=arm64`, so an Intel runner cannot satisfy
+the Apple Silicon gate.
+
+The Go baseline (`go test ./...`, the `with_gvisor` test and static build) also
+runs on all three platforms. The 10 differential shards form a 3 × 10 matrix,
+so every listed Phase 1–6E script executes natively on every general-purpose
+platform. Windows named-pipe and root-only Linux `SO_MARK` remain additional
+platform-specific tests. The earlier native build-only legs passed in Actions
+run `33158824630`; the stronger full matrix is configured but its result is not
+pre-claimed.
 
 The first matrix run exposed a separate Linux reload race: runtime sockets
 could become externally reachable before the CLI task had registered SIGHUP.

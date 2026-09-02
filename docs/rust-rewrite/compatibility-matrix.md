@@ -473,21 +473,21 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5F1 LAN/socket policy | Oracle | Pending | Dedicated local-runtime shard includes fixed-listener LAN/TFO/MPTCP/keepalive/config and current dial-policy differential; nonzero routing mark remains a separate privileged claim |
 | Linux amd64 — Phase 5F2 UDP NAT | Oracle | Pending | Dedicated local-runtime shard enables deterministic NAT/fan-out/backpressure plus the real 60-second idle-expiry differential; no result is claimed before completion |
 | Linux amd64 — Phase 5F3 release build | Oracle | Pending | Default quality job builds `rewrite-cli --all-features --release` after fmt, clippy and tests; no result is claimed before completion |
-| macOS arm64 — full Rust workspace build | Oracle | Build passed | Actions run `33158824630` selected the Apple Silicon `macos-latest` runner, asserted both Actions `ARM64` and native `uname -m=arm64`, then built the locked workspace with all targets/features |
+| macOS arm64 — full native CI | Oracle | Build passed; full revalidation pending | Actions run `33158824630` proved the native locked all-target build. The default workflow now additionally runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all ten differential shards; no stronger result is claimed before completion |
 | Linux amd64 — Phase 5F3 routing mark | Oracle | Pending | Separate root-only job calls the production mark helper with global-unicast metadata and requires exact nonzero `SO_MARK` read-back; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |
 | Windows amd64 — Phase 4F4 DHCP resolver | Oracle | Cross-build passed; native pending | Interface enumeration, packet and socket code compile for Rust 1.95 GNU; privileged native client/server parity remains pending |
-| Windows amd64 — full Rust workspace build | Oracle | Revalidation pending | Actions run `33158824630` passed before the storage-backend migration. The pinned `biaogd/bbolt-rs` revision has a green native Windows test run, but the full Rust product workspace must be rebuilt natively before the earlier product build claim is restored |
+| Windows amd64 — full native CI | Oracle | Revalidation pending | The default workflow runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all ten differential shards on `windows-latest`; the named-pipe differential remains an additional native job. No result is claimed before completion |
 | Windows amd64 — Phase 5D named pipe | Oracle | **Parity in named-pipe scope; storage pending** | The native named-pipe Go/Rust differential passed in Actions run `33159534696`. Cross-platform bbolt product code is now present, while native Windows profile restart and Go/Rust cache interchange require separate evidence |
 | Windows arm64/386 and other behavior | Oracle | Not started | Named-pipe/process/socket behavior outside amd64 |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
 | Android 386/amd64/arm/arm64 | Oracle | **Partial contract only** | CMFA injected resolver replace/clear model is host-tested; Android native execution, reset callbacks, NDK/package and TUN behavior remain pending |
 | Linux 386/armv5-7/mips/mips64 | Oracle | Not started | Toolchain/dependency feasibility gate |
 | Linux riscv64/loong64/s390x/ppc64le | Oracle | Not started | Toolchain/dependency feasibility gate |
-| All-feature release build | Oracle | Configured; CI result pending | Default quality job runs fmt/clippy/test then `cargo build --package rewrite-cli --all-features --release`; Go build-profile/feature equivalence remains a separate inventory gate |
+| Linux/Windows/macOS all-feature release builds | Oracle | Configured; CI results pending | Each native quality leg runs fmt/clippy/test then locked `cargo build --package rewrite-cli --all-features --release`; Go build-profile/feature equivalence remains a separate inventory gate |
 | `with_gvisor` | Oracle | Not started | gVisor TUN and Tailscale-enabled tests |
 | `with_low_memory` | Oracle | Not started | Buffer limits/memory benchmarks |
 | `no_fake_tcp` | Oracle | Not started | Hysteria feature exclusion |

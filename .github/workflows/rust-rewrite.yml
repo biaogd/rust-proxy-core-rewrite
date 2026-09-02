@@ -23,63 +23,20 @@ env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: 1.95.0
   GO_VERSION: 1.26.5
-  PHASE5CLOADBALANCEHASH_CARGO_TARGET: /tmp/mihomo-phase5c-load-balance-hashing-target
-  PHASE5CHEALTHSCHEDULE_CARGO_TARGET: /tmp/mihomo-phase5c-health-schedule-target
-  PHASE5CDIALFAILURE_CARGO_TARGET: /tmp/mihomo-phase5c-dial-failure-target
-  PHASE5CSOCKSHEALTH_CARGO_TARGET: /tmp/mihomo-phase5c-socks5-health-target
-  PHASE5CHTTPPROVIDER_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-target
-  PHASE5CHTTPPROVIDERREFRESH_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-refresh-target
-  PHASE5CHTTPPROVIDERCONTRACT_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-contract-target
-  PHASE5CHTTPPROVIDERCACHE_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-cache-target
-  PHASE5CHTTPPROVIDERSTALE_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-stale-target
-  PHASE5CHTTPPROVIDERRELOAD_CARGO_TARGET: /tmp/mihomo-phase5c-http-provider-reload-target
 
 jobs:
   rust-quality:
-    name: Rust quality gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Rust
-        run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
-          rustup default "$RUST_VERSION"
-
-      - name: Restore Cargo cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-
-
-      - name: Check formatting
-        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
-
-      - name: Run Clippy
-        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --manifest-path rust/Cargo.toml --workspace --all-features
-
-      - name: Build release binary
-        run: cargo build --manifest-path rust/Cargo.toml --package rewrite-cli --all-features --release
-
-  native-rust-build:
-    name: Native Rust build (${{ matrix.name }})
+    name: Rust quality gates (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            expected_runner_arch: X64
+            expected_uname_arch: x86_64
           - name: windows-x86_64
             os: windows-latest
             expected_runner_arch: X64
@@ -91,12 +48,16 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../mihomo-rust-quality-target
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Rust
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
           rustup default "$RUST_VERSION"
 
       - name: Verify native runner architecture
@@ -119,19 +80,39 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: native-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: quality-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            native-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
+            quality-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
 
-      - name: Build full Rust workspace natively
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/mihomo-rust-native-target
-        run: cargo build --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace --all-features --locked
+
+      - name: Build release binary
+        run: cargo build --manifest-path rust/Cargo.toml --package rewrite-cli --all-features --release --locked
 
   go-baseline:
-    name: Go oracle baseline
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    name: Go oracle baseline (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: windows-x86_64
+            os: windows-latest
+          - name: macos-arm64
+            os: macos-latest
+    defaults:
+      run:
+        shell: bash
     env:
       CGO_ENABLED: 0
       SKIP_INTEROP_TEST: 1
@@ -152,40 +133,35 @@ jobs:
         run: go test ./... -tags with_gvisor -count=1
 
       - name: Build static gVisor oracle
-        run: go build -tags with_gvisor -trimpath -o /tmp/go-oracle .
+        run: go build -tags with_gvisor -trimpath -o "${RUNNER_TEMP}/go-oracle" .
 
   full-differential:
-    name: Differential (${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    name: Differential (${{ matrix.os }}, ${{ matrix.shard }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 15
       matrix:
-        include:
-          - shard: core
-            regex: 'phase(1|2|3|4|4b|4c|4d[0-9a-z]+)\.py$'
-          - shard: dns-encrypted
-            regex: 'phase4e[0-9]+\.py$'
-          - shard: dns-general
-            regex: 'phase4f[0-9]+\.py$'
-          - shard: cli-config
-            regex: 'phase5a[1-5][0-9a-z]*\.py$'
-          - shard: cli-runtime
-            regex: 'phase5a[6-8][0-9a-z]*\.py$'
-          - shard: rules
-            regex: 'phase5b(_[a-z]+|[0-9a-z]+)\.py$'
-          - shard: groups-providers
-            regex: 'phase5c_[a-z0-9_]+\.py$'
-          - shard: controller-services-outbound
-            regex: 'phase(5d|5e|6b|6c|6d)_[a-z0-9_]+\.py$'
-          - shard: local-runtime
-            regex: 'phase5f_[a-z0-9_]+\.py$'
-          - shard: builtins
-            regex: 'phase6a_[a-z0-9_]+\.py$'
-            drop_timeout_test: "1"
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        shard:
+          - core
+          - dns-encrypted
+          - dns-general
+          - cli-config
+          - cli-runtime
+          - rules
+          - groups-providers
+          - controller-services-outbound
+          - local-runtime
+          - builtins
+    defaults:
+      run:
+        shell: bash
     env:
-      SHARD_REGEX: ${{ matrix.regex }}
       PHASE1_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE2_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE3_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -289,7 +265,7 @@ jobs:
       PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ABUILTINS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ASIMPLE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
-      PHASE6A_DROP_TIMEOUT_TEST: ${{ matrix.drop_timeout_test || '0' }}
+      PHASE6A_DROP_TIMEOUT_TEST: "1"
       PHASE6BHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6BHTTPCONTRACT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -314,6 +290,18 @@ jobs:
       PHASE6CSSV2RAYWS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSV2RAYWSTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6CSSV2RAYPLUGIN_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSSHADOWTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSSHADOWTLSCLIENTHELLO_REGRESSION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6CSSINBOUND_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DKL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSWS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSGRPC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSVISION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -324,6 +312,11 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
 
       - name: Set up Rust
         run: |
@@ -337,12 +330,29 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: differential-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_VERSION }}-
+            differential-${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_VERSION }}-
 
       - name: Run full differential regression
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
+          set -euo pipefail
+          case "$SHARD" in
+            core) SHARD_REGEX='phase(1|2|3|4|4b|4c|4d[0-9a-z]+)\.py$' ;;
+            dns-encrypted) SHARD_REGEX='phase4e[0-9]+\.py$' ;;
+            dns-general) SHARD_REGEX='phase4f[0-9]+\.py$' ;;
+            cli-config) SHARD_REGEX='phase5a[1-5][0-9a-z]*\.py$' ;;
+            cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
+            rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
+            groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|6e)_[a-z0-9_]+\.py$' ;;
+            local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
+            builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
+            *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
+          esac
+          selected=0
           for phase_script in \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
@@ -394,6 +404,8 @@ jobs:
             compat/scripts/phase6c_shadowsocks_ipv6_udp.py \
             compat/scripts/phase6c_shadowsocks_obfs_http.py \
             compat/scripts/phase6c_shadowsocks_obfs_tls.py \
+            compat/scripts/phase6c_shadowsocks_v2ray_websocket.py \
+            compat/scripts/phase6c_shadowsocks_v2ray_websocket_tls.py \
             compat/scripts/phase6c_shadowsocks_v2ray_plugin.py \
             compat/scripts/phase6c_shadowsocks_shadow_tls.py \
             compat/scripts/phase6c_shadowtls_clienthello_regression.py \
@@ -522,15 +534,18 @@ jobs:
             compat/scripts/phase1.py
           do
             if [[ "$phase_script" =~ $SHARD_REGEX ]]; then
-              python3 "$phase_script"
+              selected=$((selected + 1))
+              python "$phase_script"
             fi
           done
+          test "$selected" -gt 0
+          echo "completed ${selected} differential scripts for ${RUNNER_OS}/${RUNNER_ARCH} shard ${SHARD}"
 
       - name: Upload differential failure evidence
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: differential-failure-${{ matrix.shard }}
+          name: differential-failure-${{ runner.os }}-${{ runner.arch }}-${{ matrix.shard }}
           path: compat/artifacts/
           if-no-files-found: ignore
           retention-days: 7
@@ -542,7 +557,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v6
 
@@ -553,7 +571,7 @@ jobs:
           rustup default "$RUST_VERSION"
 
       - name: Run native system resolver contracts
-        run: cargo test --manifest-path rust/Cargo.toml -p rewrite-platform --all-features
+        run: cargo test --manifest-path rust/Cargo.toml -p rewrite-platform --all-features --locked
 
   phase5f-linux-routing-mark:
     name: Phase 5F privileged Linux routing mark
