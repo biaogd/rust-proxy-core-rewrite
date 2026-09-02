@@ -305,6 +305,9 @@ pub struct ClientConfig {
     /// When `client_hello_fingerprint` is Chrome, include X25519MLKEM768
     /// (ShadowTLS v3). Set false for v2 (`BuildRemovedX25519MLKEM768` parity).
     pub client_hello_fingerprint_mlkem: bool,
+
+    /// VLESS REALITY protocol configuration. The default is None (disabled).
+    pub(super) reality_config: Option<Arc<crate::client::reality::RealityConfig>>,
 }
 
 /// Desired session ticket counts for the RFC 9149 `ticket_request` extension.

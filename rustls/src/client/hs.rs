@@ -6,6 +6,7 @@ use core::ops::Deref;
 
 use pki_types::ServerName;
 
+use super::reality;
 #[cfg(feature = "tls12")]
 use super::tls12;
 use super::{ResolvesClientCert, Tls12Resumption};
@@ -28,7 +29,7 @@ use crate::hash_hs::HandshakeHashBuffer;
 use crate::log::{debug, trace};
 use crate::msgs::base::Payload;
 use crate::msgs::codec::Codec;
-use crate::msgs::enums::{Compression, ExtensionType};
+use crate::msgs::enums::{Compression, ExtensionType, NamedGroup};
 use crate::msgs::handshake::{
     CertificateStatusRequest, ClientExtensions, ClientExtensionsInput, ClientHelloPayload,
     ClientSessionTicket, ClientTicketRequest, EncryptedClientHello, HandshakeMessagePayload,
@@ -62,6 +63,7 @@ struct ExpectServerHello {
     offered_key_share: Option<Box<dyn ActiveKeyExchange>>,
     suite: Option<SupportedCipherSuite>,
     ech_state: Option<EchState>,
+    reality_state: Option<reality::RealitySessionState>,
 }
 
 struct ExpectServerHelloOrHelloRetryRequest {
@@ -161,7 +163,23 @@ impl ClientHelloInput {
             transcript_buffer.set_client_auth_enabled();
         }
 
-        let key_share = if self.config.needs_key_share() {
+        let reality_state = self
+            .config
+            .reality_config
+            .as_ref()
+            .map(|reality_config| {
+                reality::RealitySessionState::new(Arc::clone(reality_config), &self.config.provider)
+            })
+            .transpose()?;
+
+        let key_share = if reality_state.is_some() {
+            let x25519_group = self
+                .config
+                .find_kx_group(NamedGroup::X25519, ProtocolVersion::TLSv1_3)
+                .ok_or(Error::General("X25519 group required for Reality".into()))?;
+            cx.common.kx_state = KxState::Start(x25519_group);
+            None
+        } else if self.config.needs_key_share() {
             Some(tls13::initial_key_share(
                 &self.config,
                 &self.server_name,
@@ -187,6 +205,7 @@ impl ClientHelloInput {
             self,
             cx,
             ech_state,
+            reality_state,
         )
     }
 }
@@ -205,7 +224,16 @@ fn emit_client_hello_for_retry(
     mut input: ClientHelloInput,
     cx: &mut ClientContext<'_>,
     mut ech_state: Option<EchState>,
+    reality_state: Option<reality::RealitySessionState>,
 ) -> NextStateOrError<'static> {
+    let (key_share, reality_key_share_entry) = if let Some(ref reality) = reality_state {
+        let entry = reality.key_share_entry();
+        let kx = reality.clone().into_key_exchange();
+        (Some(kx), Some(entry))
+    } else {
+        (key_share, None)
+    };
+
     let config = &input.config;
     // Defense in depth: the ECH state should be None if ECH is disabled based on config
     // builder semantics.
@@ -284,7 +312,9 @@ fn emit_client_hello_for_retry(
         (None, false) => None,
     };
 
-    if let Some(key_share) = &key_share {
+    if let Some(reality_entry) = reality_key_share_entry {
+        exts.key_shares = Some(vec![reality_entry]);
+    } else if let Some(key_share) = &key_share {
         debug_assert!(supported_versions.tls13);
         let mut shares = vec![KeyShareEntry::new(key_share.group(), key_share.pub_key())];
 
@@ -463,19 +493,39 @@ fn emit_client_hello_for_retry(
 
     let mut chp = HandshakeMessagePayload(HandshakePayload::ClientHello(chp_payload));
 
-    if input.use_session_id_generator && retryreq.is_none() {
-        if let Some(generator) = input.session_id_generator.as_ref() {
-            if let HandshakePayload::ClientHello(client_hello) = &mut chp.0 {
-                client_hello.session_id = SessionId::zero_filled();
+    if let Some(ref reality) = reality_state {
+        let mut buffer = Vec::new();
+        if let HandshakePayload::ClientHello(c) = &mut chp.0 {
+            c.session_id = SessionId::zero_filled();
+        }
+        chp.encode(&mut buffer);
+        let hkdf = reality::get_hkdf_sha256_from_config(&config.provider.cipher_suites)?;
+        let session_id_data = reality.compute_session_id(
+            &input.random,
+            &buffer,
+            hkdf,
+            config.time_provider.as_ref(),
+        )?;
+        if let HandshakePayload::ClientHello(c) = &mut chp.0 {
+            c.session_id = SessionId::from_fixed_bytes(session_id_data);
+        }
+    }
+
+    if reality_state.is_none() {
+        if input.use_session_id_generator && retryreq.is_none() {
+            if let Some(generator) = input.session_id_generator.as_ref() {
+                if let HandshakePayload::ClientHello(client_hello) = &mut chp.0 {
+                    client_hello.session_id = SessionId::zero_filled();
+                }
+                let mut buffer = Vec::new();
+                chp.encode(&mut buffer);
+                let session_id = SessionId::from_fixed_bytes(generator(&buffer));
+                if let HandshakePayload::ClientHello(client_hello) = &mut chp.0 {
+                    client_hello.session_id = session_id;
+                }
+                input.session_id = session_id;
+                input.use_session_id_generator = false;
             }
-            let mut buffer = Vec::new();
-            chp.encode(&mut buffer);
-            let session_id = SessionId::from_fixed_bytes(generator(&buffer));
-            if let HandshakePayload::ClientHello(client_hello) = &mut chp.0 {
-                client_hello.session_id = session_id;
-            }
-            input.session_id = session_id;
-            input.use_session_id_generator = false;
         }
     }
 
@@ -561,6 +611,7 @@ fn emit_client_hello_for_retry(
         offered_key_share: key_share,
         suite,
         ech_state,
+        reality_state,
     };
 
     Ok(if supported_versions.tls13 && retryreq.is_none() {
@@ -1077,6 +1128,7 @@ impl ExpectServerHelloOrHelloRetryRequest {
             self.next.input,
             cx,
             self.next.ech_state,
+            self.next.reality_state,
         )
     }
 }

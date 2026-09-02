@@ -587,6 +587,7 @@ pub mod client {
     mod fingerprint;
     pub(super) mod handy;
     mod hs;
+    pub mod reality;
     #[cfg(test)]
     mod test;
     #[cfg(feature = "tls12")]
@@ -605,6 +606,7 @@ pub mod client {
     pub use handy::AlwaysResolvesClientRawPublicKeys;
     #[cfg(any(feature = "std", feature = "hashbrown"))]
     pub use handy::ClientSessionMemoryCache;
+    pub use reality::{RealityConfig, RealityConfigError};
 
     /// Dangerous configuration that should be audited and used with extreme care.
     pub mod danger {

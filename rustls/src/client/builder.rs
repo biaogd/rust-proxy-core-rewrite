@@ -73,6 +73,7 @@ impl ConfigBuilder<ClientConfig, WantsVerifier> {
                 versions: self.state.versions,
                 verifier,
                 client_ech_mode: self.state.client_ech_mode,
+                reality_config: None,
             },
             provider: self.provider,
             time_provider: self.time_provider,
@@ -113,6 +114,7 @@ pub(super) mod danger {
                     versions: self.cfg.state.versions,
                     verifier,
                     client_ech_mode: self.cfg.state.client_ech_mode,
+                    reality_config: None,
                 },
                 provider: self.cfg.provider,
                 time_provider: self.cfg.time_provider,
@@ -131,9 +133,23 @@ pub struct WantsClientCert {
     versions: versions::EnabledVersions,
     verifier: Arc<dyn verify::ServerCertVerifier>,
     client_ech_mode: Option<EchMode>,
+    reality_config: Option<Arc<crate::client::reality::RealityConfig>>,
 }
 
 impl ConfigBuilder<ClientConfig, WantsClientCert> {
+    /// Enable VLESS REALITY client authentication.
+    pub fn with_reality(mut self, config: crate::client::reality::RealityConfig) -> Self {
+        #[cfg(feature = "std")]
+        {
+            use crate::client::reality::RealityServerCertVerifier;
+            let auth_key_slot = Arc::clone(&config.auth_key_slot);
+            let inner = Arc::clone(&self.state.verifier);
+            self.state.verifier = RealityServerCertVerifier::new(auth_key_slot, inner);
+        }
+        self.state.reality_config = Some(Arc::new(config));
+        self
+    }
+
     /// Sets a single certificate chain and matching private key for use
     /// in client authentication.
     ///
@@ -188,6 +204,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
             send_ticket_request: None,
             client_hello_fingerprint: None,
             client_hello_fingerprint_mlkem: true,
+            reality_config: self.state.reality_config,
         }
     }
 }
