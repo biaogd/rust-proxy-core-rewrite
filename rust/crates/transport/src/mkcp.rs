@@ -213,6 +213,16 @@ struct AckItem {
     next_flush: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnState {
+    Active,
+    ReadyToClose,
+    PeerClosed,
+    Terminating,
+    PeerTerminating,
+    Terminated,
+}
+
 enum Segment {
     Data {
         option: u8,
@@ -243,8 +253,16 @@ struct Engine {
     started: Instant,
     mss: usize,
     rto: u32,
+    rtt_variation: u32,
+    smoothed_rtt: u32,
+    minimum_rtt: u32,
+    rto_updated: u32,
+    state: ConnState,
+    state_begin: u32,
+    last_incoming: u32,
     last_ping: u32,
     send_next: u32,
+    first_unacked: u32,
     recv_next: u32,
     remote_recv_window: u32,
     send_window: VecDeque<DataSegment>,
@@ -252,9 +270,10 @@ struct Engine {
     pending_offset: usize,
     recv_cache: BTreeMap<u32, Vec<u8>>,
     acknowledgements: Vec<AckItem>,
-    app_closed: bool,
-    close_started: Option<u32>,
-    peer_terminating: bool,
+    ack_dirty: bool,
+    total_in_flight: u32,
+    control_window: u32,
+    first_unacked_updated: bool,
 }
 
 impl Engine {
@@ -264,14 +283,24 @@ impl Engine {
             .saturating_sub(codec.overhead())
             .saturating_sub(DATA_OVERHEAD)
             .max(576);
+        let control_window = config.sending_flight_size();
+        let minimum_rtt = config.tti();
         Self {
             config,
             conversation,
             started: Instant::now(),
             mss,
             rto: 100,
+            rtt_variation: 0,
+            smoothed_rtt: 0,
+            minimum_rtt,
+            rto_updated: 0,
+            state: ConnState::Active,
+            state_begin: 0,
+            last_incoming: 0,
             last_ping: 0,
             send_next: 0,
+            first_unacked: 0,
             recv_next: 0,
             remote_recv_window: 32,
             send_window: VecDeque::new(),
@@ -279,9 +308,10 @@ impl Engine {
             pending_offset: 0,
             recv_cache: BTreeMap::new(),
             acknowledgements: Vec::new(),
-            app_closed: false,
-            close_started: None,
-            peer_terminating: false,
+            ack_dirty: false,
+            total_in_flight: 0,
+            control_window,
+            first_unacked_updated: false,
         }
     }
 
@@ -290,12 +320,17 @@ impl Engine {
     }
 
     fn enqueue(&mut self, payload: &[u8]) {
+        if self.state != ConnState::Active {
+            return;
+        }
         self.pending_application.push_back(payload.to_vec());
         self.fill_send_window();
     }
 
     fn fill_send_window(&mut self) {
-        while self.send_window.len() < self.config.sending_buffer_size() {
+        while matches!(self.state, ConnState::Active | ConnState::ReadyToClose)
+            && self.send_window.len() <= self.config.sending_buffer_size()
+        {
             let Some(payload) = self.pending_application.front() else {
                 break;
             };
@@ -317,64 +352,85 @@ impl Engine {
 
     fn input(&mut self, segments: Vec<(u16, Segment)>) -> Vec<Vec<u8>> {
         let now = self.elapsed();
+        if segments.is_empty() || self.state == ConnState::Terminated {
+            return Vec::new();
+        }
+        self.last_incoming = now;
         for (conversation, segment) in segments {
             if conversation != self.conversation {
                 break;
             }
             match segment {
                 Segment::Data {
-                    option: _,
+                    option,
                     timestamp,
                     number,
                     sending_next,
                     payload,
                 } => {
-                    self.remove_before(sending_next);
-                    self.acknowledgements
-                        .retain(|ack| ack.number >= sending_next);
+                    self.handle_option(option);
+                    self.process_sending_next(sending_next);
                     if number.wrapping_sub(self.recv_next) < self.config.receiving_flight_size() {
                         self.acknowledgements.push(AckItem {
                             number,
                             timestamp,
                             next_flush: 0,
                         });
+                        self.ack_dirty = true;
                         self.recv_cache.entry(number).or_insert(payload);
                     }
                 }
                 Segment::Ack {
-                    option: _,
+                    option,
                     receiving_window,
                     receiving_next,
                     timestamp,
                     numbers,
                 } => {
+                    self.handle_option(option);
                     self.remote_recv_window = self.remote_recv_window.max(receiving_window);
-                    self.remove_before(receiving_next);
-                    for number in numbers {
-                        self.remove_number(number);
+                    self.process_receiving_next(receiving_next);
+                    if numbers.is_empty() {
+                        continue;
                     }
-                    let sample = now.wrapping_sub(timestamp);
-                    if sample < 10_000 {
-                        self.rto = (sample.max(self.config.tti()).saturating_mul(5) / 4)
-                            .clamp(100, 10_000);
+                    let mut maximum_ack = 0;
+                    let mut maximum_ack_removed = false;
+                    for number in numbers {
+                        let removed = self.process_ack(number);
+                        if maximum_ack < number {
+                            maximum_ack = number;
+                            maximum_ack_removed = removed;
+                        }
+                    }
+                    if maximum_ack_removed {
+                        self.handle_fast_ack(maximum_ack);
+                        let sample = now.wrapping_sub(timestamp);
+                        if sample < 10_000 {
+                            self.update_rtt(sample, now);
+                        }
                     }
                 }
                 Segment::Command {
                     command,
-                    option: _,
+                    option,
                     sending_next,
                     receiving_next,
                     peer_rto,
                 } => {
-                    self.remove_before(receiving_next);
-                    self.acknowledgements
-                        .retain(|ack| ack.number >= sending_next);
-                    if peer_rto != 0 {
-                        self.rto = peer_rto.min(10_000);
-                    }
+                    self.handle_option(option);
                     if command == COMMAND_TERMINATE {
-                        self.peer_terminating = true;
+                        match self.state {
+                            ConnState::Active | ConnState::PeerClosed => {
+                                self.set_state(ConnState::PeerTerminating);
+                            }
+                            ConnState::ReadyToClose => self.set_state(ConnState::Terminating),
+                            ConnState::Terminating => self.set_state(ConnState::Terminated),
+                            ConnState::PeerTerminating | ConnState::Terminated => {}
+                        }
                     }
+                    self.process_receiving_next(receiving_next);
+                    self.process_sending_next(sending_next);
+                    self.update_peer_rto(peer_rto, now);
                 }
             }
         }
@@ -386,7 +442,16 @@ impl Engine {
         delivered
     }
 
-    fn remove_before(&mut self, next: u32) {
+    fn process_sending_next(&mut self, next: u32) {
+        let before = self.acknowledgements.len();
+        self.acknowledgements.retain(|ack| ack.number >= next);
+        if before != self.acknowledgements.len() {
+            self.ack_dirty = true;
+        }
+    }
+
+    fn process_receiving_next(&mut self, next: u32) {
+        let before = self.send_window.len();
         while self
             .send_window
             .front()
@@ -394,105 +459,305 @@ impl Engine {
         {
             self.send_window.pop_front();
         }
+        self.find_first_unacked();
+        if before != self.send_window.len() {
+            self.fill_send_window();
+        }
     }
 
-    fn remove_number(&mut self, number: u32) {
+    fn process_ack(&mut self, number: u32) -> bool {
+        if number.wrapping_sub(self.first_unacked) > 0x7fff_ffff
+            || number.wrapping_sub(self.send_next) < 0x7fff_ffff
+        {
+            return false;
+        }
         if let Some(index) = self
             .send_window
             .iter()
             .position(|segment| segment.number == number)
         {
             self.send_window.remove(index);
+            self.total_in_flight = self.total_in_flight.saturating_sub(1);
+            self.find_first_unacked();
+            self.fill_send_window();
+            return true;
         }
+        false
+    }
+
+    fn handle_fast_ack(&mut self, number: u32) {
+        let reduction = self.rto / 3;
+        if reduction == 0 {
+            return;
+        }
+        for segment in &mut self.send_window {
+            if number == segment.number || number.wrapping_sub(segment.number) > 0x7fff_ffff {
+                return;
+            }
+            if segment.transmit > 0 && segment.timeout > reduction {
+                segment.timeout -= reduction;
+            }
+        }
+    }
+
+    fn find_first_unacked(&mut self) {
+        let previous = self.first_unacked;
+        self.first_unacked = self
+            .send_window
+            .front()
+            .map_or(self.send_next, |segment| segment.number);
+        if previous != self.first_unacked {
+            self.first_unacked_updated = true;
+        }
+    }
+
+    fn handle_option(&mut self, option: u8) {
+        if option & 1 == 0 {
+            return;
+        }
+        match self.state {
+            ConnState::ReadyToClose => self.set_state(ConnState::Terminating),
+            ConnState::Active => self.set_state(ConnState::PeerClosed),
+            ConnState::PeerClosed
+            | ConnState::Terminating
+            | ConnState::PeerTerminating
+            | ConnState::Terminated => {}
+        }
+    }
+
+    fn close(&mut self) {
+        match self.state {
+            ConnState::Active => self.set_state(ConnState::ReadyToClose),
+            ConnState::PeerClosed => self.set_state(ConnState::Terminating),
+            ConnState::PeerTerminating => self.set_state(ConnState::Terminated),
+            ConnState::ReadyToClose | ConnState::Terminating | ConnState::Terminated => {}
+        }
+    }
+
+    fn set_state(&mut self, state: ConnState) {
+        if self.state == state {
+            return;
+        }
+        self.state = state;
+        self.state_begin = self.elapsed();
+        if matches!(
+            state,
+            ConnState::PeerClosed
+                | ConnState::Terminating
+                | ConnState::PeerTerminating
+                | ConnState::Terminated
+        ) {
+            self.send_window.clear();
+            self.pending_application.clear();
+            self.pending_offset = 0;
+        }
+    }
+
+    fn update_rtt(&mut self, rtt: u32, now: u32) {
+        if rtt > 0x7fff_ffff {
+            return;
+        }
+        if self.smoothed_rtt == 0 {
+            self.smoothed_rtt = rtt;
+            self.rtt_variation = rtt / 2;
+        } else {
+            let delta = self.smoothed_rtt.abs_diff(rtt);
+            self.rtt_variation = (3 * self.rtt_variation + delta) / 4;
+            self.smoothed_rtt = (7 * self.smoothed_rtt + rtt) / 8;
+            self.smoothed_rtt = self.smoothed_rtt.max(self.minimum_rtt);
+        }
+        let variation = 4 * self.rtt_variation;
+        let rto = if self.minimum_rtt < variation {
+            self.smoothed_rtt + variation
+        } else {
+            self.smoothed_rtt + self.rtt_variation
+        };
+        self.rto = rto.min(10_000).saturating_mul(5) / 4;
+        self.rto_updated = now;
+    }
+
+    fn update_peer_rto(&mut self, rto: u32, now: u32) {
+        if rto == 0 || now.wrapping_sub(self.rto_updated) < 3000 {
+            return;
+        }
+        self.rto_updated = now;
+        self.rto = rto;
+    }
+
+    fn update_congestion_window(&mut self, loss_rate: u32) {
+        if self.rto == 0 {
+            return;
+        }
+        if loss_rate >= 15 {
+            self.control_window = 3 * self.control_window / 4;
+        } else if loss_rate <= 5 {
+            self.control_window += self.control_window / 4;
+        }
+        self.control_window = self.control_window.max(16);
+        self.control_window = self
+            .control_window
+            .min(2 * self.config.sending_flight_size());
     }
 
     fn flush_segments(&mut self) -> Vec<Segment> {
         self.fill_send_window();
         let now = self.elapsed();
-        if self.app_closed && self.close_started.is_none() {
-            self.close_started = Some(now);
+        if self.state == ConnState::Active && now.wrapping_sub(self.last_incoming) >= 30_000 {
+            self.set_state(ConnState::ReadyToClose);
+        }
+        if self.state == ConnState::ReadyToClose && self.send_window.is_empty() {
+            self.set_state(ConnState::Terminating);
+        }
+        if self.state == ConnState::Terminating {
+            let output = vec![self.command(COMMAND_TERMINATE, now)];
+            if now.wrapping_sub(self.state_begin) > 8000 {
+                self.set_state(ConnState::Terminated);
+            }
+            return output;
+        }
+        if self.state == ConnState::PeerTerminating && now.wrapping_sub(self.state_begin) > 4000 {
+            self.set_state(ConnState::Terminating);
+        }
+        if self.state == ConnState::ReadyToClose && now.wrapping_sub(self.state_begin) > 15_000 {
+            self.set_state(ConnState::Terminating);
         }
         let mut output = Vec::new();
-        if !self.acknowledgements.is_empty() {
-            let mut numbers = Vec::with_capacity(MAX_ACKS);
-            let mut timestamp = 0;
-            for item in &mut self.acknowledgements {
-                if item.next_flush > now && !numbers.is_empty() {
-                    continue;
-                }
-                numbers.push(item.number);
-                timestamp = timestamp.max(item.timestamp);
-                item.next_flush = now + (self.rto / 2).max(20);
-                if numbers.len() == MAX_ACKS {
-                    break;
-                }
-            }
-            output.push(Segment::Ack {
-                option: u8::from(self.app_closed),
-                receiving_window: self
-                    .recv_next
-                    .wrapping_add(self.config.receiving_flight_size()),
-                receiving_next: self.recv_next,
-                timestamp,
-                numbers,
-            });
-        }
-
-        let permitted = self
-            .remote_recv_window
-            .wrapping_sub(
-                self.send_window
-                    .front()
-                    .map_or(self.send_next, |s| s.number),
-            )
-            .min(self.config.sending_flight_size())
-            .saturating_mul(20)
-            .max(1) as usize;
-        let sending_next = self
-            .send_window
-            .front()
-            .map_or(self.send_next, |segment| segment.number);
-        for segment in self.send_window.iter_mut().take(permitted) {
-            if segment.transmit != 0 && now.wrapping_sub(segment.timeout) > 0x7fff_ffff {
-                continue;
-            }
-            segment.transmit = segment.transmit.saturating_add(1);
-            segment.timeout = now.wrapping_add(self.rto.max(self.config.tti()));
-            output.push(Segment::Data {
-                option: u8::from(self.app_closed),
-                timestamp: now,
-                number: segment.number,
-                sending_next,
-                payload: segment.payload.clone(),
-            });
-        }
-        if self.app_closed && self.send_window.is_empty() {
-            output.push(self.command(COMMAND_TERMINATE));
-        } else if now.wrapping_sub(self.last_ping) >= 3000 {
-            output.push(self.command(COMMAND_PING));
-            self.last_ping = now;
+        output.extend(self.flush_acknowledgements(now));
+        output.extend(self.flush_send_window(now));
+        if now.wrapping_sub(self.last_ping) >= 3000 {
+            output.push(self.command(COMMAND_PING, now));
         }
         output
     }
 
-    fn command(&self, command: u8) -> Segment {
+    fn flush_acknowledgements(&mut self, now: u32) -> Vec<Segment> {
+        if self.acknowledgements.is_empty() {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        let mut candidates = Vec::with_capacity(MAX_ACKS);
+        let mut numbers = Vec::with_capacity(MAX_ACKS);
+        let mut timestamp = 0_u32;
+        let option = u8::from(self.state == ConnState::ReadyToClose);
+        let receiving_window = self
+            .recv_next
+            .wrapping_add(self.config.receiving_flight_size());
+        let receiving_next = self.recv_next;
+        for item in &mut self.acknowledgements {
+            if item.next_flush > now {
+                if candidates.len() < MAX_ACKS {
+                    candidates.push(item.number);
+                }
+                continue;
+            }
+            numbers.push(item.number);
+            if item.timestamp.wrapping_sub(timestamp) < 0x7fff_ffff {
+                timestamp = item.timestamp;
+            }
+            item.next_flush = now.wrapping_add((self.rto / 2).max(20));
+            if numbers.len() == MAX_ACKS {
+                output.push(Segment::Ack {
+                    option,
+                    receiving_window,
+                    receiving_next,
+                    timestamp,
+                    numbers: std::mem::take(&mut numbers),
+                });
+                numbers = Vec::with_capacity(MAX_ACKS);
+                timestamp = 0;
+                self.ack_dirty = false;
+            }
+        }
+        if self.ack_dirty || !numbers.is_empty() {
+            for number in candidates {
+                if numbers.len() == MAX_ACKS {
+                    break;
+                }
+                numbers.push(number);
+            }
+            output.push(Segment::Ack {
+                option,
+                receiving_window,
+                receiving_next,
+                timestamp,
+                numbers,
+            });
+            self.ack_dirty = false;
+        }
+        output
+    }
+
+    fn flush_send_window(&mut self, now: u32) -> Vec<Segment> {
+        if self.send_window.is_empty() {
+            if self.first_unacked_updated {
+                self.first_unacked_updated = false;
+                return vec![self.command(COMMAND_PING, now)];
+            }
+            return Vec::new();
+        }
+        let mut window = self.config.sending_flight_size();
+        window = window.min(self.remote_recv_window.wrapping_sub(self.first_unacked));
+        if self.config.congestion {
+            window = window.min(self.control_window);
+        }
+        let permitted = window.saturating_mul(20);
+        let mut output = Vec::new();
+        let mut lost = 0_u32;
+        let mut in_flight = 0_u32;
+        for segment in &mut self.send_window {
+            if now.wrapping_sub(segment.timeout) >= 0x7fff_ffff {
+                continue;
+            }
+            if segment.transmit == 0 {
+                self.total_in_flight = self.total_in_flight.saturating_add(1);
+            } else {
+                lost = lost.saturating_add(1);
+            }
+            segment.transmit = segment.transmit.saturating_add(1);
+            segment.timeout = now.wrapping_add(self.rto.max(self.config.tti()));
+            output.push(Segment::Data {
+                option: u8::from(self.state == ConnState::ReadyToClose),
+                timestamp: now,
+                number: segment.number,
+                sending_next: self.first_unacked,
+                payload: segment.payload.clone(),
+            });
+            in_flight = in_flight.saturating_add(1);
+            if in_flight >= permitted {
+                break;
+            }
+        }
+        if self.config.congestion && in_flight > 0 && self.total_in_flight != 0 {
+            self.update_congestion_window(lost.saturating_mul(100) / self.total_in_flight);
+        }
+        self.first_unacked_updated = false;
+        output
+    }
+
+    fn command(&mut self, command: u8, now: u32) -> Segment {
+        self.last_ping = now;
         Segment::Command {
             command,
-            option: u8::from(self.app_closed),
-            sending_next: self
-                .send_window
-                .front()
-                .map_or(self.send_next, |s| s.number),
+            option: u8::from(self.state == ConnState::ReadyToClose),
+            sending_next: self.first_unacked,
             receiving_next: self.recv_next,
             peer_rto: self.rto,
         }
     }
 
     fn finished(&self) -> bool {
-        self.peer_terminating
-            || self
-                .close_started
-                .is_some_and(|started| self.elapsed().wrapping_sub(started) >= 8000)
+        self.state == ConnState::Terminated
+    }
+
+    fn local_read_closed(&self) -> bool {
+        matches!(
+            self.state,
+            ConnState::ReadyToClose | ConnState::Terminating | ConnState::Terminated
+        )
+    }
+
+    fn accepts_application_writes(&self) -> bool {
+        self.state == ConnState::Active
     }
 }
 
@@ -508,19 +773,24 @@ async fn run_engine(
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut engine = Engine::new(config, conversation, &codec);
+    let mut incoming = Some(incoming);
+    let mut accept_application = true;
     let mut datagram = vec![0_u8; 64 * 1024];
     loop {
         tokio::select! {
-            event = outgoing.recv() => match event {
+            event = outgoing.recv(), if accept_application => match event {
                 Some(ApplicationEvent::Data(payload)) => engine.enqueue(&payload),
-                Some(ApplicationEvent::Closed) | None => engine.app_closed = true,
+                Some(ApplicationEvent::Closed) | None => engine.close(),
             },
             received = endpoint.recv(&mut datagram) => match received {
                 Ok(length) => {
                     let segments = codec.decode(&datagram[..length]);
                     for payload in engine.input(segments) {
-                        if incoming.send(payload).await.is_err() {
-                            engine.app_closed = true;
+                        if let Some(sender) = incoming.as_ref()
+                            && sender.send(payload).await.is_err()
+                        {
+                            engine.close();
+                            incoming = None;
                         }
                     }
                 }
@@ -528,11 +798,26 @@ async fn run_engine(
             },
             _ = ticker.tick() => {}
         }
+        if !engine.accepts_application_writes() && accept_application {
+            accept_application = false;
+            outgoing.close();
+        }
+        if engine.local_read_closed() {
+            incoming = None;
+        }
         for segment in engine.flush_segments() {
             let packet = codec.encode(conversation, &segment);
-            if endpoint.send(&packet).await.is_err() {
-                return;
+            let mut attempts = 0;
+            while endpoint.send(&packet).await.is_err() {
+                attempts += 1;
+                if attempts == 5 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
+        }
+        if engine.local_read_closed() {
+            incoming = None;
         }
         if engine.finished() {
             break;
@@ -912,6 +1197,90 @@ mod tests {
             let mut header = PacketHeader::new(name);
             assert_eq!(header.serialize().len(), size, "{name}");
         }
+    }
+
+    fn test_engine(config: MkcpConfig) -> Engine {
+        let codec = PacketCodec::new(&config).unwrap();
+        Engine::new(config, 42, &codec)
+    }
+
+    #[test]
+    fn congestion_window_matches_go_loss_contract() {
+        let config = MkcpConfig {
+            congestion: true,
+            ..MkcpConfig::default()
+        };
+        let sending_window = config.sending_flight_size();
+        let mut engine = test_engine(config);
+        assert_eq!(engine.control_window, sending_window);
+        engine.update_congestion_window(15);
+        assert_eq!(engine.control_window, 3 * sending_window / 4);
+        let reduced = engine.control_window;
+        engine.update_congestion_window(5);
+        assert_eq!(engine.control_window, reduced + reduced / 4);
+        engine.control_window = 1;
+        engine.update_congestion_window(15);
+        assert_eq!(engine.control_window, 16);
+        engine.control_window = 2 * sending_window;
+        engine.update_congestion_window(5);
+        assert_eq!(engine.control_window, 2 * sending_window);
+    }
+
+    #[test]
+    fn fast_ack_and_rtt_match_go_contract() {
+        let mut engine = test_engine(MkcpConfig::default());
+        engine.rto = 120;
+        engine.send_next = 3;
+        engine.send_window = (0..3)
+            .map(|number| DataSegment {
+                number,
+                payload: vec![number as u8],
+                timeout: 300,
+                transmit: 1,
+            })
+            .collect();
+        engine.handle_fast_ack(2);
+        assert_eq!(engine.send_window[0].timeout, 260);
+        assert_eq!(engine.send_window[1].timeout, 260);
+        assert_eq!(engine.send_window[2].timeout, 300);
+
+        engine.update_rtt(100, 100);
+        assert_eq!(
+            (engine.smoothed_rtt, engine.rtt_variation, engine.rto),
+            (100, 50, 375)
+        );
+        engine.update_rtt(80, 200);
+        assert_eq!(
+            (engine.smoothed_rtt, engine.rtt_variation, engine.rto),
+            (97, 42, 331)
+        );
+    }
+
+    #[test]
+    fn close_states_match_go_directionality_contract() {
+        let mut local = test_engine(MkcpConfig::default());
+        local.close();
+        assert_eq!(local.state, ConnState::ReadyToClose);
+        assert!(local.local_read_closed());
+        assert!(!local.accepts_application_writes());
+
+        let mut peer = test_engine(MkcpConfig::default());
+        let delivered = peer.input(vec![(
+            42,
+            Segment::Data {
+                option: 1,
+                timestamp: 10,
+                number: 0,
+                sending_next: 0,
+                payload: b"final".to_vec(),
+            },
+        )]);
+        assert_eq!(peer.state, ConnState::PeerClosed);
+        assert_eq!(delivered, vec![b"final".to_vec()]);
+        assert!(!peer.local_read_closed());
+        assert!(!peer.accepts_application_writes());
+        peer.close();
+        assert_eq!(peer.state, ConnState::Terminating);
     }
 
     #[tokio::test]

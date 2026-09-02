@@ -866,7 +866,11 @@ TLS, ShadowTLS, simple-obfs, WebSocket/Upgrade, V2Ray HTTP/H2/gRPC, mKCP, Mekya
 and mux live in `rewrite-transport`; only compatibility re-exports remain in
 outbound. The mKCP module owns V2Ray's custom segment/authentication/camouflage
 wire protocol rather than wrapping generic KCP. Mekya owns only packet bundling
-and polling policy and delegates HTTP/1.1 and HTTP/2 framing to Hyper.
+and polling policy and delegates HTTP/1.1 and HTTP/2 framing to Hyper. The mKCP
+engine mirrors the oracle's active/ready-to-close/peer-closed/terminating/
+peer-terminating/terminated state machine; because the oracle has no independent
+mKCP FIN, an application write-half close intentionally closes its local read
+direction as well.
 
 The protocol crates deliberately do not depend on the carrier crate. Both use
 only `rewrite-io::BoxedStream` plus `rewrite-model` destinations, so a future

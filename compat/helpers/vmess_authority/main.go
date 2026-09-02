@@ -247,6 +247,19 @@ func (h *echoHandler) NewConnection(_ context.Context, conn net.Conn, metadata M
 	h.output.Lock()
 	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
 	h.output.Unlock()
+	if strings.HasPrefix(host, "server-close.") {
+		_, err := conn.Write([]byte("server-close"))
+		return err
+	}
+	if strings.HasPrefix(host, "eof-response.") {
+		payload, err := io.ReadAll(conn)
+		h.observe("EOF-READ %s %d\n", host, len(payload))
+		if err != nil {
+			return err
+		}
+		_, err = conn.Write([]byte("after-eof"))
+		return err
+	}
 	if h.streamBarrier > 0 {
 		if h.streamCount.Add(1) >= h.streamBarrier {
 			h.barrierOnce.Do(func() { close(h.barrierReady) })

@@ -164,8 +164,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-H VMess HTTP transports | Complete in declared client scope | HTTP/HTTPS first-write obfuscation and library-backed h2c/H2 PUT streams pass an independent-authority Go/Rust differential with configured/default Host/path, headers/method, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and the oracle's response-dropping H2 half-close; UDP over HTTP/H2, pooling/multi-stream reuse, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-I VMess gRPC/Gun | Complete in declared single-stream client scope | Default, named and exact-path Gun services over h2c/H2 pass an independent-authority Go/Rust differential with exact POST authority/path/content-type/User-Agent and validated Gun envelope lengths, zero/positive AlterID, raw/AEAD/CFB bodies, 128 KiB relay and process survival; UDP, ping/pool controls, advanced TLS, later transports, mux and inbound remain open |
 | Phase 6D-J VMess gRPC/Gun pool | Complete in declared client-pool scope | A shared `h2` pool passes independent-authority Go/Rust comparison for all-zero single-connection reuse, concurrent logical streams, `max-connections`/`min-streams`, `max-streams`, signed option acceptance, health PING and post-ping reuse; exact frame-idle scheduling, ACK-timeout injection, UDP, advanced TLS, later transports, general mux and inbound remain open |
-| Phase 6D-K VMess mKCP TCP | Complete in declared client scope | Default/simple and seeded AES-GCM authentication, six header modes, small/128 KiB relay and independent-authority VMess parsing pass; induced loss, exact congestion behavior, transport half-close, UDP and server direction remain open |
-| Phase 6D-L VMess Mekya TCP | Complete in declared client scope | Hyper-backed TLS HTTP/2 and HTTP/1.1 packet carriers pass packet-bundle, polling, H2-pool, nested mKCP, small/128 KiB and process-survival comparison; transport half-close, plaintext carrier, UDP and server direction remain open |
+| Phase 6D-K VMess mKCP TCP | Complete in declared deterministic client scope | Authentication/headers/relay plus exact Go fast-ACK/RTO/congestion contracts, 14%/25% semantic DATA loss, ACK loss, duplicate/reorder recovery, bounded retransmission and both close-direction outcomes pass; randomized long-duration impairment, UDP and server direction remain open |
+| Phase 6D-L VMess Mekya TCP | Complete in declared deterministic client scope | Hyper-backed TLS HTTP/2 and HTTP/1.1 packet carriers pass bundle/poll/pool/nested-mKCP plus oracle-negative client half-close and peer payload+EOF close; plaintext carrier, UDP and server direction remain open |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks` and `rewrite-protocol-vmess` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound and Phase 6D-A–L pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -5610,8 +5610,9 @@ Phase 6D-K adds V2Ray mKCP as a reusable packet-to-stream carrier in
 `rewrite-transport`; it does not substitute generic KCP, whose segment and
 authentication wire formats differ. Typed YAML covers every Go option and the
 `kcp` network alias. The implementation has simple and seeded AES-GCM packet
-authentication, ACK/retransmit/termination handling, bounded application
-queues and all six no-op/camouflage header modes.
+authentication, Go-equivalent ACK/fast-ACK, smoothed RTT/RTO, congestion window
+and six-state termination handling, bounded application queues and all six
+no-op/camouflage header modes.
 
 Phase 6D-L adds a Hyper-backed Mekya client. It sends and receives length-
 prefixed mKCP packet bundles over TLS HTTP/2 or HTTP/1.1, applies request-size
@@ -5629,16 +5630,22 @@ CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path r
 ```
 
 The differential passes seven direct-mKCP routes (default, seed and every
-camouflage family) plus TLS Mekya over negotiated H2 and HTTP/1.1. It compares
-small and 128 KiB relay bytes, independent Go-authority VMess CONNECT
-observations and process survival. Linux amd64 execution is configured in the
-controller/outbound Actions shard and remains pending until CI completes.
+camouflage family) plus TLS Mekya over negotiated H2 and HTTP/1.1. Four further
+routes apply deterministic 14% and 25% semantic DATA loss with congestion
+disabled/enabled, one ACK loss, a duplicate and reordering to 512 KiB streams.
+Every dropped DATA segment is retransmitted, application bytes remain exact and
+retransmission remains inside the pinned Go oracle's coarse bound. For mKCP and
+both Mekya HTTP versions, client write-half close is repeated ten times and
+must return the oracle's EOF without an EOF-triggered response; peer close is
+repeated three times and must deliver the final payload followed by EOF. Linux
+amd64 execution is configured in the controller/outbound Actions shard and
+remains pending until CI completes.
 
-The current evidence does not cover induced loss, exact congestion control,
-transport half-close, plaintext Mekya, UDP over either carrier, inbound/server
-use or other protocol consumers. The pinned Go oracle itself fails the chosen
-transport-half-close fixture, so that behavior is excluded rather than
-normalized. These are explicit later gates, not implied compatibility.
+The current evidence does not cover randomized long-duration impairment,
+plaintext Mekya, UDP over either carrier, inbound/server use or other protocol
+consumers. mKCP has no independent transport FIN; the accepted half-close
+contract is therefore the pinned oracle's deterministic full-close behavior,
+not successful response-direction preservation.
 
 ## SS/VMess protocol ownership refactor
 

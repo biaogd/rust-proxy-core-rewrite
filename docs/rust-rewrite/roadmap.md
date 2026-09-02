@@ -2250,13 +2250,23 @@ through the same typed mKCP boundary.
 gate. It validates all camouflage variants, seeded and default authentication,
 small and 128 KiB TCP relays, Mekya H2/HTTP1 negotiation, packet aggregation,
 pool configuration, independent-authority VMess CONNECT observations and
-process survival.
+process survival. Its semantic UDP relay additionally strips the simple
+authentication envelope only for inspection and applies the same segment-level
+faults to both products: 14% and 25% first-transmission DATA loss with
+congestion disabled/enabled, one ACK loss, duplication and reordering. Payload
+integrity, retransmission of every dropped segment and a Go-derived runaway
+bound must match.
+
+The same gate fixes close semantics to the oracle rather than inventing a
+transport FIN that mKCP does not have. For each of mKCP, Mekya H2 and Mekya
+HTTP/1.1, ten client write-half closes must produce the oracle's immediate EOF
+without an EOF-triggered response, while three peer closes must deliver the
+final payload followed by EOF. Focused Rust contracts pin Go's six-state
+connection lifecycle, smoothed RTT/RTO, fast-ACK and congestion-window formulas.
 
 This scope does not claim non-native-carrier UDP, an inbound/server endpoint,
-induced-loss or congestion-control equivalence, transport half-close, xHTTP/H3,
-advanced TLS camouflage or general TCP mux. Half-close is intentionally absent
-from this gate because the pinned Go Mekya/mKCP oracle does not complete that
-fixture reliably; it must not be inferred from ordinary VMess TCP success.
+randomized long-duration network impairment, xHTTP/H3, advanced TLS camouflage
+or general TCP mux.
 
 ### Phase 5C1b accepted scope
 
