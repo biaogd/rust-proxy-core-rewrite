@@ -557,27 +557,92 @@ async fn connect_vless_proxy(
         .vless
         .as_ref()
         .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
-    let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
-        rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
-            .await
-            .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
-    );
-    if proxy.tls {
-        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
-        outer = rewrite_outbound::wrap_client_tls_with_options(
-            outer,
-            proxy_tls_options(proxy, server_name, custom_roots),
-            Some(state.clock()),
-        )
-        .await
-        .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
-    }
+    let outer = connect_vless_outer(
+        proxy,
+        server,
+        vless,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
     rewrite_outbound::connect_vless_on_stream(
         outer,
         destination,
         rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
     )
     .map_err(|error| format!("VLESS proxy connection failed: {error}"))
+}
+
+async fn connect_vless_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vless: &rewrite_config::VlessProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let mut outer = Box::new(
+        rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+            .await
+            .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
+    ) as rewrite_outbound::BoxedOutboundStream;
+    let websocket = match &vless.transport {
+        rewrite_config::VlessTransport::Tcp => None,
+        rewrite_config::VlessTransport::WebSocket { path, headers } => {
+            Some((path.as_str(), headers))
+        }
+    };
+    if proxy.tls {
+        let websocket_host = websocket.and_then(|(_, headers)| {
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("host").then_some(value.as_str())
+            })
+        });
+        let server_name = proxy
+            .sni
+            .as_deref()
+            .or(websocket_host)
+            .unwrap_or(&proxy.server);
+        let alpn: &[&[u8]] = if websocket.is_some() {
+            &[b"http/1.1"]
+        } else {
+            &[]
+        };
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: alpn,
+                tls12_only: false,
+                tls13_only: false,
+            },
+            Some(state.clock()),
+        )
+        .await
+        .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
+    }
+    if let rewrite_config::VlessTransport::WebSocket { path, headers } = &vless.transport {
+        outer = rewrite_outbound::connect_websocket_with_headers(
+            outer,
+            &proxy.server,
+            proxy.port,
+            path,
+            headers,
+        )
+        .await
+        .map_err(|error| format!("VLESS WebSocket upgrade failed: {error}"))?;
+    }
+    Ok(outer)
 }
 
 async fn connect_vmess_proxy(

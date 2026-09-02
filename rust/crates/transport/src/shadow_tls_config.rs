@@ -663,8 +663,8 @@ mod chrome_fingerprint_tests {
         });
 
         let config = Arc::new(
-            client_config(
-                HttpProxyTls {
+            shadow_client_config(
+                ClientTlsOptions {
                     server_name: "phase6c-shadow-tls.example",
                     verification_name: None,
                     skip_certificate_verification: true,
@@ -676,9 +676,9 @@ mod chrome_fingerprint_tests {
                     alpn_protocols: &[b"h2", b"http/1.1"],
                     tls12_only: false,
                     tls13_only: false,
-                    client_hello_fingerprint: Some("chrome"),
-                    client_hello_fingerprint_mlkem: true,
                 },
+                Some("chrome"),
+                true,
                 None,
             )
             .expect("config"),
@@ -720,8 +720,8 @@ mod chrome_fingerprint_tests {
         });
 
         let config = Arc::new(
-            client_config(
-                HttpProxyTls {
+            shadow_client_config(
+                ClientTlsOptions {
                     server_name: "phase6c-shadow-tls.example",
                     verification_name: None,
                     skip_certificate_verification: true,
@@ -733,9 +733,9 @@ mod chrome_fingerprint_tests {
                     alpn_protocols: &[b"http/1.1"],
                     tls12_only: false,
                     tls13_only: false,
-                    client_hello_fingerprint: Some("chrome"),
-                    client_hello_fingerprint_mlkem: false,
                 },
+                Some("chrome"),
+                false,
                 None,
             )
             .expect("config"),

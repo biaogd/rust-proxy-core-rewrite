@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VlessProxyConfig, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
     VmessSecurity, VmessTransport,
 };
 use crate::raw::{
@@ -430,12 +430,11 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.authenticated_length.is_some()
         || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
-        || network != "tcp"
+        || !matches!(network, "tcp" | "ws")
         || proxy.udp.unwrap_or(false)
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
-        || proxy.ws_opts.is_some()
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
@@ -450,10 +449,12 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.private_key.is_some()
         || proxy.client_fingerprint.is_some()
         || proxy.headers.is_some()
+        || (network != "ws" && proxy.ws_opts.is_some())
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
+    let transport = parse_vless_transport(network, &proxy, &name)?;
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -490,9 +491,45 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         vless: Some(VlessProxyConfig {
             uuid: *uuid.as_bytes(),
             xudp: true,
+            transport,
         }),
         headers: BTreeMap::new(),
     })
+}
+
+fn parse_vless_transport(
+    network: &str,
+    proxy: &RawProxy,
+    name: &str,
+) -> Result<VlessTransport, ConfigError> {
+    if network == "tcp" {
+        return Ok(VlessTransport::Tcp);
+    }
+    let options = proxy.ws_opts.clone().unwrap_or_default();
+    if !options.extra.is_empty()
+        || options.max_early_data.is_some()
+        || options.early_data_header_name.is_some()
+        || options.v2ray_http_upgrade.unwrap_or(false)
+        || options.v2ray_http_upgrade_fast_open.unwrap_or(false)
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let path = options
+        .path
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "/".to_owned());
+    if !path.starts_with('/') {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let headers = options.headers.unwrap_or_default();
+    if headers.keys().any(|header| {
+        http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+    }) || headers.values().any(|value| {
+        http::header::HeaderValue::from_str(value).is_err()
+    }) {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(VlessTransport::WebSocket { path, headers })
 }
 
 fn parse_vmess_transport(

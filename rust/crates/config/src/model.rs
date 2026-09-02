@@ -222,6 +222,16 @@ pub struct ProxyConfig {
 pub struct VlessProxyConfig {
     pub uuid: [u8; 16],
     pub xudp: bool,
+    pub transport: VlessTransport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VlessTransport {
+    Tcp,
+    WebSocket {
+        path: String,
+        headers: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
