@@ -2268,6 +2268,42 @@ This scope does not claim non-native-carrier UDP, an inbound/server endpoint,
 randomized long-duration network impairment, xHTTP/H3, advanced TLS camouflage
 or general TCP mux.
 
+### Phase 6E-A accepted scope — VLESS version-zero native-TCP client
+
+Phase 6E-A changes the configuration `Proxies and built-in proxy insertion`,
+outbound `VLESS` and Darwin/Linux Phase 6E-A rows. It implements one vertical
+slice: YAML `type: vless` -> mixed HTTP/SOCKS5 TCP -> rule/group/provider
+selection -> VLESS version-zero native TCP -> an independently implemented
+authority -> destination TCP. This is the first partial implementation of
+inventory row `OUT-08`.
+
+`rewrite-protocol-vless` owns the transport-independent request and response
+framing. It preserves the Go oracle's UUID parsing, including UUIDv5 with a nil
+namespace for non-UUID user strings; lazily emits the version-zero request with
+the first application payload in one write; encodes domain, IPv4 and IPv6
+destinations; accepts and consumes response addons; and keeps the TCP
+half-close lifecycle explicit. `rewrite-outbound` remains a thin dial facade,
+while runtime routing and controller/provider views consume the normalized
+typed configuration.
+
+`compat/scripts/phase6e_vless_tcp.py` is the shared Go/Rust differential gate.
+Its Python authority is independent of production protocol code and validates
+the exact request bytes, command and destination. The gate covers a canonical
+UUID and Go-compatible mapped user string, all address types, small and 128 KiB
+relays, a non-empty response addon, half-close, provider/selector/controller
+views, refused dials, bad response versions, process survival and invalid
+configuration. Explicit contracts prevent a matching pair of failures from
+being accepted as parity.
+
+This phase accepts only `network: tcp`, `tls: false`, `udp: false`, empty or
+`none` encryption and no flow or outer transport. The controller reports the
+Go default `xudp: true` capability field, but no UDP/XUDP data path is claimed.
+VLESS UDP/packet modes, encryption extensions, TLS, WebSocket/HTTP/H2/gRPC,
+Vision, Reality, multiplexing and inbound/server behavior remain later Phase
+6E slices. The framing is small and Mihomo-specific enough that no maintained,
+narrowly scoped VLESS crate preserves the required lazy-write and oracle UUID
+behavior; the local crate uses Tokio primitives and has byte-level contracts.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

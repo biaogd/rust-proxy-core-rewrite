@@ -259,6 +259,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
         | ProxyKind::Vmess
+        | ProxyKind::Vless
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }

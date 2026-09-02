@@ -429,13 +429,7 @@ pub(super) async fn connect_configured_proxy(
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let clock = state.clock();
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
-    };
+    let server = proxy_server(proxy);
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -521,10 +515,45 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::Vless => {
+            connect_vless_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
+    Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    }
+}
+
+async fn connect_vless_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let vless = proxy
+        .vless
+        .as_ref()
+        .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
+    rewrite_outbound::connect_vless_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+        socket_options,
+    )
+    .await
+    .map_err(|error| format!("VLESS proxy connection failed: {error}"))
 }
 
 async fn connect_vmess_proxy(

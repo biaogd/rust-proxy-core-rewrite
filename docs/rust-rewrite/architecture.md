@@ -861,7 +861,7 @@ The outbound crate exposes that boundary through a small facade rather than a
 monolithic implementation file. `direct` owns platform-aware TCP dialing,
 `http` owns Hyper CONNECT and its public errors, while `socks5` separates common
 control/TLS, TCP command framing, UDP association and RFC 1929 authentication.
-SS and VMess files are thin dial/composition facades over their protocol crates.
+SS, VMess and VLESS files are thin dial/composition facades over their protocol crates.
 TLS, ShadowTLS, simple-obfs, WebSocket/Upgrade, V2Ray HTTP/H2/gRPC, mKCP, Mekya
 and mux live in `rewrite-transport`; only compatibility re-exports remain in
 outbound. The mKCP module owns V2Ray's custom segment/authentication/camouflage
@@ -872,11 +872,14 @@ peer-terminating/terminated state machine; because the oracle has no independent
 mKCP FIN, an application write-half close intentionally closes its local read
 direction as well.
 
-The protocol crates deliberately do not depend on the carrier crate. Both use
+The protocol crates deliberately do not depend on the carrier crate. All use
 only `rewrite-io::BoxedStream` plus `rewrite-model` destinations, so a future
 inbound server can share byte-exact crypto, headers and framing without pulling
 in outbound socket policy or every outer transport. Configuration YAML remains
 in `rewrite-config`; protocol crates receive normalized typed options only.
+`rewrite-protocol-vless` specifically owns version-zero request/response headers
+and the oracle-compatible lazy first-write relay; TLS and other carriers remain
+outside it.
 
 ## Architectural risks to track
 

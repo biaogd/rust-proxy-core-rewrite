@@ -2,6 +2,7 @@ mod direct;
 mod http;
 mod shadowsocks;
 mod socks5;
+mod vless;
 mod vmess;
 
 pub use direct::{
@@ -39,6 +40,7 @@ pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,
     connect_socks5_with_options,
 };
+pub use vless::{VlessProxyError, VlessTcpOptions, connect_vless_with_options};
 pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
     associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,

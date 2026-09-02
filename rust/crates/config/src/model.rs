@@ -160,6 +160,7 @@ pub enum ProxyKind {
     Socks5,
     Shadowsocks,
     Vmess,
+    Vless,
     Direct,
     Reject,
     Dns,
@@ -213,7 +214,14 @@ pub struct ProxyConfig {
     pub udp_over_tcp_version: u8,
     pub shadowsocks_plugin: Option<ShadowsocksPluginConfig>,
     pub vmess: Option<VmessProxyConfig>,
+    pub vless: Option<VlessProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessProxyConfig {
+    pub uuid: [u8; 16],
+    pub xudp: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

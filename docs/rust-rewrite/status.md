@@ -166,13 +166,14 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6D-J VMess gRPC/Gun pool | Complete in declared client-pool scope | A shared `h2` pool passes independent-authority Go/Rust comparison for all-zero single-connection reuse, concurrent logical streams, `max-connections`/`min-streams`, `max-streams`, signed option acceptance, health PING and post-ping reuse; exact frame-idle scheduling, ACK-timeout injection, UDP, advanced TLS, later transports, general mux and inbound remain open |
 | Phase 6D-K VMess mKCP TCP | Complete in declared deterministic client scope | Authentication/headers/relay plus exact Go fast-ACK/RTO/congestion contracts, 14%/25% semantic DATA loss, ACK loss, duplicate/reorder recovery, bounded retransmission and both close-direction outcomes pass; randomized long-duration impairment, UDP and server direction remain open |
 | Phase 6D-L VMess Mekya TCP | Complete in declared deterministic client scope | Hyper-backed TLS HTTP/2 and HTTP/1.1 packet carriers pass bundle/poll/pool/nested-mKCP plus oracle-negative client half-close and peer payload+EOF close; plaintext carrier, UDP and server direction remain open |
-| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks` and `rewrite-protocol-vmess` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound and Phase 6D-A–L pass in their declared scopes |
-| Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
+| Phase 6E-A VLESS native TCP | Complete in declared client scope | Version-zero native TCP passes exact independent-authority request parsing, canonical/Go-mapped UUIDs, domain/IPv4/IPv6, lazy first-write payload, response addons, 128 KiB relay, half-close, providers/groups/controller and failure lifecycle; UDP/packet modes, TLS/transports, Vision/Reality, mux and server direction remain open |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A pass in their declared scopes |
+| Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
-| Cargo workspace | Implemented | Twenty-one focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6D-L | Phase 1–6D-L Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
+| Differential harness | Implemented through Phase 6E-A | Phase 1–6E-A Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5647,11 +5648,41 @@ consumers. mKCP has no independent transport FIN; the accepted half-close
 contract is therefore the pinned oracle's deterministic full-close behavior,
 not successful response-direction preservation.
 
-## SS/VMess protocol ownership refactor
+## Phase 6E-A VLESS native-TCP evidence
 
-The behavior-neutral ownership refactor changes inventory rows `OUT-04`,
-`OUT-07` and the implementation boundary prepared for `IN-08`; it does not
-expand their supported configuration surface. Four dependency layers are now
+Phase 6E-A adds `rewrite-protocol-vless` and the first `OUT-08` product slice.
+The typed config accepts canonical UUIDs and preserves Go's UUIDv5 nil-namespace
+mapping for arbitrary user strings. The protocol crate lazily joins the VLESS
+v0 request header to the first application payload, supports domain/IPv4/IPv6
+destinations, validates the response version, consumes response addons and
+relays an explicit TCP half-close. Runtime routing, file providers, selectors,
+health dialing and controller capability views share the same normalized proxy.
+
+Local Darwin arm64 evidence on 2026-09-02:
+
+```sh
+PHASE6EVLESS_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python3 compat/scripts/phase6e_vless_tcp.py
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo fmt --manifest-path rust/Cargo.toml --all --check
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+CARGO_TARGET_DIR=/Users/ren/data/rust-target/mihomo cargo test --manifest-path rust/Cargo.toml --workspace --all-features
+```
+
+The differential uses an independent Python authority and asserts exact request
+bytes for canonical and mapped UUIDs, domain/IPv4/IPv6 targets, a non-empty
+response addon, small and 128 KiB relay, half-close, provider/selector routing,
+controller views, refused connection, bad response version and process
+survival. Explicit per-product contract assertions prevent equal failures from
+being treated as compatibility. The default controller/outbound Linux shard
+now runs the same gate; its native result remains pending until Actions ends.
+
+Only VLESS version-zero native TCP is claimed. UDP/XUDP packet transport,
+encryption extensions, TLS and all outer transports, Vision, Reality, general
+multiplexing and inbound/server behavior remain later Phase 6E work.
+
+## SS/VMess/VLESS protocol ownership
+
+The ownership boundary covers inventory rows `OUT-04`, `OUT-07`, `OUT-08` and
+the implementation boundary prepared for `IN-08`. Four dependency layers are now
 explicit:
 
 - `rewrite-io` owns only the type-erased asynchronous duplex-stream contract.
@@ -5659,13 +5690,15 @@ explicit:
   address conversion, native UDP codec boundary and sing-style UoT framing.
 - `rewrite-protocol-vmess` owns VMess KDF, request/response headers, body
   records, legacy AlterID, standard UDP, packet-address and XUDP framing.
+- `rewrite-protocol-vless` owns VLESS version-zero request/response framing and
+  lazy first-write TCP relay.
 - `rewrite-transport` owns reusable TLS/ShadowTLS, simple-obfs, WebSocket,
   HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, mKCP, Mekya and mux carriers.
 
-Neither protocol crate depends on `config`, `inbound`, `outbound`, `runtime` or
+None of the protocol crates depends on `config`, `inbound`, `outbound`, `runtime` or
 the carrier crate. `rewrite-outbound` keeps only socket policy and adapter
 composition, with compatibility re-exports preserving current internal callers.
-This makes a future VMess server able to consume the same crypto/framing crate
+This lets future protocol servers consume the same crypto/framing crates
 without depending on client dialing policy.
 
 Local Darwin arm64 evidence on 2026-09-01:

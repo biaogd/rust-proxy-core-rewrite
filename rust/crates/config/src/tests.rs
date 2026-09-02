@@ -1258,6 +1258,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 udp_over_tcp_version: 1,
                 shadowsocks_plugin: None,
                 vmess: None,
+                vless: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1336,6 +1337,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             udp_over_tcp_version: 1,
             shadowsocks_plugin: None,
             vmess: None,
+            vless: None,
             headers: BTreeMap::new(),
         }],
     };
@@ -2865,4 +2867,23 @@ rules: ['MATCH,DIRECT']
         "AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw=="
     );
     assert!(!inbound.udp);
+}
+
+#[test]
+fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"
+    ))
+    .expect("Phase 6E-A VLESS config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vless);
+    assert!(!proxy.udp);
+    let vless = proxy.vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        vless.uuid,
+        *uuid::Uuid::parse_str("f8598425-92f2-5508-a071-4fc67f9040ac")
+            .expect("Go UUIDMap vector")
+            .as_bytes()
+    );
+    assert!(vless.xudp, "the Go VLESS default advertises XUDP");
 }

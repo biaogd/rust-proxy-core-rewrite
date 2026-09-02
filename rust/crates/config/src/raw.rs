@@ -209,6 +209,8 @@ pub(crate) struct RawProxy {
     pub(crate) password: Option<String>,
     pub(crate) cipher: Option<String>,
     pub(crate) uuid: Option<String>,
+    pub(crate) flow: Option<String>,
+    pub(crate) encryption: Option<String>,
     #[serde(rename = "alterId", alias = "alter-id")]
     pub(crate) alter_id: Option<i64>,
     pub(crate) network: Option<String>,

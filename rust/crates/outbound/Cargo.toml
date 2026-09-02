@@ -16,6 +16,7 @@ hyper-util.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }
 rewrite-services = { path = "../services" }
 rewrite-transport = { path = "../transport" }
