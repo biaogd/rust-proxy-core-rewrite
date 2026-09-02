@@ -240,7 +240,21 @@ pub(crate) struct RawProxy {
     pub(crate) private_key: Option<String>,
     #[serde(rename = "client-fingerprint")]
     pub(crate) client_fingerprint: Option<String>,
+    #[serde(rename = "reality-opts")]
+    pub(crate) reality_opts: Option<RawRealityOptions>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawRealityOptions {
+    #[serde(rename = "public-key")]
+    pub(crate) public_key: Option<String>,
+    #[serde(rename = "short-id")]
+    pub(crate) short_id: Option<String>,
+    pub(crate) support_x25519mlkem768: Option<bool>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

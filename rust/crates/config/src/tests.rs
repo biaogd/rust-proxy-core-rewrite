@@ -1253,6 +1253,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 certificate: None,
                 private_key: None,
                 client_fingerprint: None,
+                reality: None,
                 udp: false,
                 udp_over_tcp: false,
                 udp_over_tcp_version: 1,
@@ -1332,6 +1333,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             certificate: None,
             private_key: None,
             client_fingerprint: None,
+            reality: None,
             udp: false,
             udp_over_tcp: false,
             udp_over_tcp_version: 1,
@@ -3077,6 +3079,35 @@ fn parses_phase6e_g_vless_vision_scope() {
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    udp: true\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    tls: true\n    flow: xtls-rprx-vision\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: unsupported-flow\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}
+
+#[test]
+fn parses_phase6e_h_vless_reality_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-reality\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    tls: true\n    client-fingerprint: chrome\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6E-H VLESS REALITY config");
+    let proxy = &config.proxies[0];
+    assert!(proxy.tls);
+    assert_eq!(proxy.client_fingerprint.as_deref(), Some("chrome"));
+    let reality = proxy.reality.as_ref().expect("typed REALITY config");
+    assert_eq!(
+        reality.short_id,
+        hex::decode("10f897e26c4b9478").expect("short id")
+    );
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    tls: true\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    client-fingerprint: safari\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
     ];
     for body in rejected {
         assert!(

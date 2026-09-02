@@ -13,6 +13,7 @@ futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }

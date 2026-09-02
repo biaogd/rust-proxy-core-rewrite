@@ -1,5 +1,6 @@
 mod direct;
 mod http;
+mod reality;
 mod shadowsocks;
 mod socks5;
 mod vless;
@@ -12,6 +13,7 @@ pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
     wrap_client_tls_with_alpn, wrap_client_tls_with_options,
 };
+pub use reality::wrap_client_reality;
 pub use rewrite_transport::BoxedStream as BoxedOutboundStream;
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{

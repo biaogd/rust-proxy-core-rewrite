@@ -416,6 +416,7 @@ jobs:
             compat/scripts/phase6e_vless_grpc.py \
             compat/scripts/phase6e_vless_udp.py \
             compat/scripts/phase6e_vless_vision.py \
+            compat/scripts/phase6e_vless_reality.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

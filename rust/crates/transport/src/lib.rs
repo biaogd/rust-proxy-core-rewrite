@@ -6,6 +6,7 @@
 mod http_upgrade;
 mod mekya;
 mod mkcp;
+mod reality;
 mod shadow_tls;
 mod shadow_tls_config;
 mod shadow_tls_server;
@@ -20,6 +21,7 @@ mod websocket;
 pub use http_upgrade::{connect_http_upgrade_with_early_data, connect_v2ray_http_upgrade};
 pub use mekya::{MekyaConnection, MekyaConnector, MekyaOptions, connect_mekya};
 pub use mkcp::{MkcpConfig, connect_mkcp};
+pub use reality::{RealityConnectOptions, connect_reality};
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadow_tls_server::{
     ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,

@@ -624,7 +624,21 @@ async fn connect_vless_physical_outer(
             .find_map(|(name, value)| name.eq_ignore_ascii_case("host").then_some(value.as_str())),
         _ => None,
     };
-    if proxy.tls {
+    if let Some(reality) = proxy.reality.as_ref() {
+        let server_name = proxy
+            .sni
+            .as_deref()
+            .or(websocket_host)
+            .unwrap_or(&proxy.server);
+        outer = rewrite_outbound::wrap_client_reality(
+            outer,
+            server_name,
+            reality,
+            vless.flow.is_some(),
+        )
+        .await
+        .map_err(|error| format!("VLESS REALITY connection failed: {error}"))?;
+    } else if proxy.tls {
         let server_name = proxy
             .sni
             .as_deref()

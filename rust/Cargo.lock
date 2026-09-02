@@ -2934,6 +2934,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rewrite-config",
  "rewrite-model",
  "rewrite-platform",
  "rewrite-protocol-shadowsocks",
@@ -3138,15 +3139,15 @@ dependencies = [
  "rand 0.10.2",
  "rewrite-io",
  "rewrite-services",
- "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
+ "rustls 0.23.43",
  "rustls-native-certs",
  "rustls-pemfile",
  "sha1 0.10.7",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
  "tokio-tungstenite",
  "tokio-util",
  "tower",
@@ -3238,12 +3239,11 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "brotli",
  "brotli-decompressor",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3255,12 +3255,12 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
-source = "git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1#9166c9555d04f09e85e418c802b68e4074470657"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "brotli",
  "brotli-decompressor",
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4014,19 +4014,18 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
- "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rustls 0.23.43",
  "tokio",
 ]
 
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
-source = "git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1#9166c9555d04f09e85e418c802b68e4074470657"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
- "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.1)",
+ "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
 ]
 

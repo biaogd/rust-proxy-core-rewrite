@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    RealityProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
     VmessSecurity, VmessTransport,
 };
 use crate::raw::{
@@ -226,6 +226,7 @@ fn parse_remote_proxy(
             .map(|value| resolve_controller_pem(value, home_directory))
             .transpose()?,
         client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        reality: None,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
@@ -313,6 +314,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         certificate: None,
         private_key: None,
         client_fingerprint,
+        reality: None,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
@@ -398,6 +400,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         certificate: None,
         private_key: None,
         client_fingerprint: None,
+        reality: None,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
@@ -421,6 +424,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     let encryption = proxy.encryption.as_deref().unwrap_or("");
     let tls = proxy.tls.unwrap_or(false);
     let udp = proxy.udp.unwrap_or(false);
+    let reality = parse_vless_reality_options(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -445,14 +449,20 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
-        || proxy.client_fingerprint.is_some()
         || proxy.headers.is_some()
         || (network != "ws" && proxy.ws_opts.is_some())
         || (network != "http" && proxy.http_opts.is_some())
         || (network != "h2" && proxy.h2_opts.is_some())
+        || (reality.is_none() && proxy.client_fingerprint.is_some())
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if reality.is_some() {
+        if !tls || network != "tcp" || udp {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        validate_vless_reality_client_fingerprint(&name, proxy.client_fingerprint.as_deref())?;
     }
     let transport = parse_vless_transport(network, &proxy, &name)?;
     let flow = parse_vless_flow(&proxy, &name)?;
@@ -496,7 +506,8 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: None,
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        reality,
         udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
@@ -511,6 +522,64 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         }),
         headers: BTreeMap::new(),
     })
+}
+
+fn parse_vless_reality_options(
+    proxy: &RawProxy,
+    name: &str,
+) -> Result<Option<RealityProxyConfig>, ConfigError> {
+    let Some(options) = proxy.reality_opts.as_ref() else {
+        return Ok(None);
+    };
+    if !options.extra.is_empty()
+        || options.support_x25519mlkem768.unwrap_or(false)
+        || proxy.skip_cert_verify.unwrap_or(false)
+        || proxy.name_cert_verify.is_some()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let public_key_text = options
+        .public_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let public_key = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        public_key_text,
+    )
+    .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let short_id_text = options
+        .short_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let decoded = hex::decode(short_id_text)
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    if decoded.len() > 8 {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let mut short_id = Vec::new();
+    short_id.extend_from_slice(&decoded);
+    Ok(Some(RealityProxyConfig {
+        public_key,
+        short_id,
+    }))
+}
+
+fn validate_vless_reality_client_fingerprint(
+    proxy_name: &str,
+    fingerprint: Option<&str>,
+) -> Result<(), ConfigError> {
+    let Some(raw) = fingerprint.filter(|value| !value.is_empty()) else {
+        return Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()));
+    };
+    if raw.eq_ignore_ascii_case("chrome") {
+        return Ok(());
+    }
+    Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()))
 }
 
 fn parse_vless_flow(proxy: &RawProxy, name: &str) -> Result<Option<VlessFlow>, ConfigError> {
@@ -1363,6 +1432,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         certificate: None,
         private_key: None,
         client_fingerprint: None,
+        reality: None,
         udp: true,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,

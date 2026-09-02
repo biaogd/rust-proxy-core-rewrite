@@ -209,6 +209,7 @@ pub struct ProxyConfig {
     pub certificate: Option<String>,
     pub private_key: Option<String>,
     pub client_fingerprint: Option<String>,
+    pub reality: Option<RealityProxyConfig>,
     pub udp: bool,
     pub udp_over_tcp: bool,
     pub udp_over_tcp_version: u8,
@@ -216,6 +217,12 @@ pub struct ProxyConfig {
     pub vmess: Option<VmessProxyConfig>,
     pub vless: Option<VlessProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RealityProxyConfig {
+    pub public_key: [u8; 32],
+    pub short_id: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

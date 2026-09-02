@@ -512,7 +512,21 @@ pub(super) async fn measure_http_delay(
                             }),
                         _ => None,
                     };
-                    if proxy.tls {
+                    if let Some(reality) = proxy.reality.as_ref() {
+                        let server_name = proxy
+                            .sni
+                            .as_deref()
+                            .or(websocket_host)
+                            .unwrap_or(&proxy.server);
+                        outer = rewrite_outbound::wrap_client_reality(
+                            outer,
+                            server_name,
+                            reality,
+                            vless.flow.is_some(),
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    } else if proxy.tls {
                         let server_name = proxy
                             .sni
                             .as_deref()

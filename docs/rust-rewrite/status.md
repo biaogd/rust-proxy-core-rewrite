@@ -173,13 +173,14 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-E VLESS gRPC/Gun TCP | Complete in declared client scope | Plaintext and TLS Gun reuse `rewrite-transport` single-stream gRPC carrier with service name, User-Agent and SNI; mixed/rule routing passes default/custom paths, 128 KiB relay and process survival; pooled gRPC, xHTTP, Vision, Reality and server direction remain open |
 | Phase 6E-F VLESS UDP/XUDP native TCP | Complete in declared client scope | Native TCP UDP passes default XUDP, packet-address and explicit `packet-encoding: xudp` through `rewrite-protocol-vless` with lazy VLESS response handling; mixed/rule routing passes domain-resolved and IPv4/IPv6 session reuse, controller `udp`/`uot`/`xudp` snapshots and process survival; UDP over TLS/WS/HTTP/gRPC, Vision, Reality and server direction remain open |
 | Phase 6E-G VLESS Vision native TCP/TLS | Complete in declared client scope | `flow: xtls-rprx-vision` on native TCP with TLS 1.3 passes protobuf flow addons and Vision framing through `rewrite-protocol-vless`; mixed/rule routing passes small/large relay, half-close and Rust-only rejection of flow without TLS or with UDP; Reality, non-TCP carriers and server direction remain open |
+| Phase 6E-H VLESS REALITY native TCP/TLS | Complete in declared client scope | `reality-opts` on native TCP with `tls: true` and `client-fingerprint: chrome` passes REALITY handshake via patched `shadow-rustls` fork and `rewrite-transport::connect_reality`; mixed/rule routing passes small/large relay, half-close and Rust-only rejection of reality without TLS or fingerprint; Vision combo, non-TCP carriers and server direction remain open |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A/B pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-G | Phase 1–6E-G Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A/B/C/D/E/F/G gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6E-H | Phase 1–6E-H Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A/B/C/D/E/F/G/H gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5800,6 +5801,24 @@ The gate exercises small/large relay, half-close and trusted TLS SNI through a
 `sing_vless` authority with Vision enabled. Reality, non-TCP carriers and server
 direction are not claimed by Phase 6E-G.
 
+## Phase 6E-H VLESS REALITY evidence
+
+Phase 6E-H adds VLESS REALITY on native TCP with TLS. Config requires `tls: true`,
+`client-fingerprint: chrome`, `servername` and `reality-opts.public-key` /
+`reality-opts.short-id`; reality without TLS or without fingerprint is rejected in
+Rust. The REALITY client handshake is implemented in the vendored
+`third_party/shadow-rustls` fork (ported from Watfaq) and exposed through
+`rewrite-transport::connect_reality`; normal TLS and ShadowTLS continue to use their
+existing rustls paths.
+
+```bash
+PHASE6EVLESSREALITY_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_reality.py
+```
+
+The gate exercises small/large relay, half-close and REALITY camouflage through a
+Mihomo `listener/reality` authority with fixed test key material. Vision combo,
+non-TCP carriers and server direction are not claimed by Phase 6E-H.
+
 ## SS/VMess/VLESS protocol ownership
 
 The ownership boundary covers inventory rows `OUT-04`, `OUT-07`, `OUT-08` and
@@ -5812,9 +5831,10 @@ explicit:
 - `rewrite-protocol-vmess` owns VMess KDF, request/response headers, body
   records, legacy AlterID, standard UDP, packet-address and XUDP framing.
 - `rewrite-protocol-vless` owns VLESS version-zero request/response framing,
-  lazy first-write TCP relay, native TCP UDP packet-address/XUDP framing and
-  Vision (`xtls-rprx-vision`) client framing.
-- `rewrite-transport` owns reusable TLS/ShadowTLS, simple-obfs, WebSocket,
+  lazy first-write TCP relay, native TCP UDP packet-address/XUDP framing,
+  Vision (`xtls-rprx-vision`) client framing and REALITY outer TLS via
+  `rewrite-transport`.
+- `rewrite-transport` owns reusable TLS/ShadowTLS/REALITY, simple-obfs, WebSocket,
   HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, mKCP, Mekya and mux carriers.
 
 None of the protocol crates depends on `config`, `inbound`, `outbound`, `runtime` or
