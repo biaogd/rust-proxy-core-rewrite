@@ -594,7 +594,7 @@ async fn connect_vless_outer(
         socket_options,
     )
     .await?;
-    wrap_vless_transport(outer, proxy, vless).await
+    wrap_vless_transport(outer, proxy, server, vless).await
 }
 
 async fn connect_vless_physical_outer(
@@ -626,7 +626,8 @@ async fn connect_vless_physical_outer(
         let alpn: &[&[u8]] = match &vless.transport {
             rewrite_config::VlessTransport::WebSocket { .. }
             | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
-            rewrite_config::VlessTransport::Http2 { .. } => &[b"h2"],
+            rewrite_config::VlessTransport::Http2 { .. }
+            | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
             rewrite_config::VlessTransport::Tcp => &[],
         };
         outer = rewrite_outbound::wrap_client_tls_with_options(
@@ -655,6 +656,7 @@ async fn connect_vless_physical_outer(
 async fn wrap_vless_transport(
     mut outer: rewrite_outbound::BoxedOutboundStream,
     proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
     vless: &rewrite_config::VlessProxyConfig,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     match &vless.transport {
@@ -682,6 +684,15 @@ async fn wrap_vless_transport(
             outer = rewrite_outbound::connect_vmess_h2(outer, &hosts[index], path)
                 .await
                 .map_err(|error| format!("VLESS HTTP/2 transport failed: {error}"))?;
+        }
+        rewrite_config::VlessTransport::Grpc {
+            service_name,
+            user_agent,
+        } => {
+            let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+            outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
+                .await
+                .map_err(|error| format!("VLESS gRPC transport failed: {error}"))?;
         }
         rewrite_config::VlessTransport::Tcp => {}
     }
