@@ -13,7 +13,7 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    VlessPacketMode, VlessProxyConfig, VlessTransport, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
     VmessSecurity, VmessTransport,
 };
 use crate::raw::{
@@ -420,6 +420,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let encryption = proxy.encryption.as_deref().unwrap_or("");
     let tls = proxy.tls.unwrap_or(false);
+    let udp = proxy.udp.unwrap_or(false);
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -431,10 +432,10 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
         || !matches!(encryption, "" | "none")
         || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
-        || proxy.udp.unwrap_or(false)
-        || proxy.packet_addr.is_some()
-        || proxy.xudp.is_some()
-        || proxy.packet_encoding.is_some()
+        || (udp && network != "tcp")
+        || (!udp && proxy.packet_addr.is_some())
+        || (!udp && proxy.xudp.is_some())
+        || (!udp && proxy.packet_encoding.is_some())
         || (network != "grpc" && proxy.grpc_opts.is_some())
         || proxy.mkcp_opts.is_some()
         || proxy.mekya_opts.is_some()
@@ -455,6 +456,16 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let transport = parse_vless_transport(network, &proxy, &name)?;
+    let packet_mode = if udp {
+        parse_vless_packet_mode(&proxy, &name)?
+    } else {
+        VlessPacketMode::Standard
+    };
+    let xudp_capability = if udp {
+        packet_mode != VlessPacketMode::PacketAddr
+    } else {
+        true
+    };
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -483,14 +494,15 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         certificate: None,
         private_key: None,
         client_fingerprint: None,
-        udp: false,
+        udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
         vmess: None,
         vless: Some(VlessProxyConfig {
             uuid: *uuid.as_bytes(),
-            xudp: true,
+            xudp: xudp_capability,
+            packet_mode,
             transport,
         }),
         headers: BTreeMap::new(),
@@ -618,6 +630,35 @@ fn parse_vless_transport(
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok(VlessTransport::WebSocket { path, headers })
+}
+
+fn parse_vless_packet_mode(proxy: &RawProxy, name: &str) -> Result<VlessPacketMode, ConfigError> {
+    let encoded_packet_mode = match proxy.packet_encoding.as_deref() {
+        None | Some("") => None,
+        Some("packetaddr" | "packet") => Some(VlessPacketMode::PacketAddr),
+        Some("xudp") => Some(VlessPacketMode::Xudp),
+        Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    };
+    let mut packet_addr = proxy.packet_addr.unwrap_or(false);
+    let mut xudp = proxy.xudp.unwrap_or(false);
+    match encoded_packet_mode {
+        Some(VlessPacketMode::PacketAddr) => {
+            packet_addr = true;
+            xudp = false;
+        }
+        Some(VlessPacketMode::Xudp) | Some(VlessPacketMode::Standard) | None => {
+            if !packet_addr {
+                xudp = true;
+            }
+        }
+    }
+    if xudp {
+        Ok(VlessPacketMode::Xudp)
+    } else if packet_addr || encoded_packet_mode == Some(VlessPacketMode::PacketAddr) {
+        Ok(VlessPacketMode::PacketAddr)
+    } else {
+        Ok(VlessPacketMode::Xudp)
+    }
 }
 
 fn parse_vmess_transport(

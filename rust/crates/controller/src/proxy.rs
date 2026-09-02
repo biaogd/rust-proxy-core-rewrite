@@ -832,12 +832,13 @@ pub(super) fn configured_proxy_snapshot_with_provider(
     let udp = match proxy.kind {
         rewrite_config::ProxyKind::Socks5
         | rewrite_config::ProxyKind::Shadowsocks
-        | rewrite_config::ProxyKind::Vmess => proxy.udp,
+        | rewrite_config::ProxyKind::Vmess
+        | rewrite_config::ProxyKind::Vless => proxy.udp,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vless => false,
+        rewrite_config::ProxyKind::Http => false,
     };
     json!({
         "alive": health.alive,
@@ -861,7 +862,9 @@ pub(super) fn configured_proxy_snapshot_with_provider(
             || (proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp),
         "xudp": proxy.vmess.as_ref().is_some_and(|vmess| {
                 vmess.packet_mode == rewrite_config::VmessPacketMode::Xudp
-            }) || proxy.vless.as_ref().is_some_and(|vless| vless.xudp),
+            }) || proxy.vless.as_ref().is_some_and(|vless| {
+                vless.packet_mode == rewrite_config::VlessPacketMode::Xudp
+            }),
     })
 }
 
@@ -985,12 +988,13 @@ pub(super) fn selector_supports_udp(
         return match proxy.kind {
             rewrite_config::ProxyKind::Socks5
             | rewrite_config::ProxyKind::Shadowsocks
-            | rewrite_config::ProxyKind::Vmess => proxy.udp,
+            | rewrite_config::ProxyKind::Vmess
+            | rewrite_config::ProxyKind::Vless => proxy.udp,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vless => false,
+            rewrite_config::ProxyKind::Http => false,
         };
     }
     let Some(group) = config

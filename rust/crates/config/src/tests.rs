@@ -3028,3 +3028,35 @@ fn parses_phase6e_e_vless_grpc_scope() {
         );
     }
 }
+
+#[test]
+fn parses_phase6e_f_vless_udp_packet_modes() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-udp-default\n    type: vless\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    udp: true\n  - name: vless-udp-packet\n    type: vless\n    server: 127.0.0.1\n    port: 10006\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    udp: true\n    packet-encoding: packet\n  - name: vless-udp-xudp\n    type: vless\n    server: 127.0.0.1\n    port: 10007\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    udp: true\n    packet-encoding: xudp\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6E-F VLESS UDP config");
+    assert!(config.proxies[0].udp);
+    assert_eq!(
+        config.proxies[0].vless.as_ref().map(|vless| vless.packet_mode),
+        Some(VlessPacketMode::Xudp)
+    );
+    assert_eq!(
+        config.proxies[1].vless.as_ref().map(|vless| vless.packet_mode),
+        Some(VlessPacketMode::PacketAddr)
+    );
+    assert_eq!(
+        config.proxies[2].vless.as_ref().map(|vless| vless.packet_mode),
+        Some(VlessPacketMode::Xudp)
+    );
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    udp: true\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    udp: true\n    packet-encoding: unsupported\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}

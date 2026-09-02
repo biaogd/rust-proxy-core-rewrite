@@ -170,14 +170,15 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-B VLESS native TCP over TLS | Complete in declared client scope | Shared rustls carrier passes trusted roots, exact SNI, independent verification name, skip verification, untrusted/wrong-name rejection, large relay, half-close and real controller group health; advanced TLS, non-native carriers and other Phase 6E exclusions remain open |
 | Phase 6E-C VLESS WebSocket/WSS TCP | Complete in declared client scope | Plaintext WS and TLS WSS reuse `rewrite-transport` WebSocket/rustls carriers with path, Host and custom headers; mixed/rule/group/provider routing passes first-packet, 128 KiB relay, half-close, skip/untrusted TLS rejection and process survival; early-data, HTTP Upgrade, UDP/XUDP and later Phase 6E transports remain open |
 | Phase 6E-D VLESS HTTP/H2 TCP | Complete in declared client scope | Plaintext HTTP/1 and TLS H2 reuse `rewrite-transport` VMess-style HTTP/H2 carriers with method, path, Host and custom headers; mixed/rule routing passes first-packet, 128 KiB relay, half-close rejection on H2, default option fallbacks and process survival; gRPC/xHTTP, UDP/XUDP, Vision, Reality and server direction remain open |
-| Phase 6E-E VLESS gRPC/Gun TCP | Complete in declared client scope | Plaintext and TLS Gun reuse `rewrite-transport` single-stream gRPC carrier with service name, User-Agent and SNI; mixed/rule routing passes default/custom paths, 128 KiB relay and process survival; pooled gRPC, xHTTP, UDP/XUDP, Vision, Reality and server direction remain open |
+| Phase 6E-E VLESS gRPC/Gun TCP | Complete in declared client scope | Plaintext and TLS Gun reuse `rewrite-transport` single-stream gRPC carrier with service name, User-Agent and SNI; mixed/rule routing passes default/custom paths, 128 KiB relay and process survival; pooled gRPC, xHTTP, Vision, Reality and server direction remain open |
+| Phase 6E-F VLESS UDP/XUDP native TCP | Complete in declared client scope | Native TCP UDP passes default XUDP, packet-address and explicit `packet-encoding: xudp` through `rewrite-protocol-vless` with lazy VLESS response handling; mixed/rule routing passes domain-resolved and IPv4/IPv6 session reuse, controller `udp`/`uot`/`xudp` snapshots and process survival; UDP over TLS/WS/HTTP/gRPC, Vision, Reality and server direction remain open |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A/B pass in their declared scopes |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Implemented; Windows storage revalidation pending | Windows uses the pinned cross-platform `biaogd/bbolt-rs` backend instead of storage no-ops; Phase 4 readiness uses a bounded 11-second startup window, Phase 4F13 reload writes atomically and Phase 5F refreshes the fixed UDP session immediately before reload; native Windows product persistence still needs its own gate |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-E | Phase 1–6E-E Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A/B/C/D/E gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
+| Differential harness | Implemented through Phase 6E-F | Phase 1–6E-F Python gates are assigned to fail-independent GitHub Actions matrix shards; the unified M5 gate subsumes M3/M4 in the default controller/outbound shard. The corrected Phase 6C-N and new 6D-K/L/6E-A/B/C/D/E/F gates pass locally. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI retains explicit per-job targets |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5762,8 +5763,25 @@ PHASE6EVLESSGRPC_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vle
 
 The gate exercises plaintext and TLS Gun through mixed/rule routing, default and
 custom service paths, User-Agent overrides, 128 KiB relay and process survival.
-Pooled gRPC, xHTTP, UDP/XUDP, Vision, Reality, encryption and server direction
+Pooled gRPC, xHTTP, Vision, Reality, encryption and server direction
 are not claimed by Phase 6E-E.
+
+## Phase 6E-F VLESS UDP/XUDP evidence
+
+Phase 6E-F adds native TCP UDP to the Phase 6E-A stream through
+`rewrite-protocol-vless` packet associations. Config accepts `udp: true` on
+`network: tcp` with default XUDP, `packet-encoding: packet` and explicit
+`packet-encoding: xudp`; VLESS packet-mode precedence matches Go Mihomo rather
+than the VMess `packet-addr` + `packet-encoding: xudp` combination.
+
+```bash
+PHASE6EVLESSUDP_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_udp.py
+```
+
+The gate exercises default XUDP, packet-address and explicit XUDP through
+mixed/rule routing, domain-resolved and IPv4/IPv6 session reuse, controller
+`udp`/`uot`/`xudp` snapshots and process survival. UDP over TLS/WS/HTTP/gRPC,
+Vision, Reality, encryption and server direction are not claimed by Phase 6E-F.
 
 ## SS/VMess/VLESS protocol ownership
 
@@ -5776,8 +5794,8 @@ explicit:
   address conversion, native UDP codec boundary and sing-style UoT framing.
 - `rewrite-protocol-vmess` owns VMess KDF, request/response headers, body
   records, legacy AlterID, standard UDP, packet-address and XUDP framing.
-- `rewrite-protocol-vless` owns VLESS version-zero request/response framing and
-  lazy first-write TCP relay.
+- `rewrite-protocol-vless` owns VLESS version-zero request/response framing,
+  lazy first-write TCP relay and native TCP UDP packet-address/XUDP framing.
 - `rewrite-transport` owns reusable TLS/ShadowTLS, simple-obfs, WebSocket,
   HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, mKCP, Mekya and mux carriers.
 

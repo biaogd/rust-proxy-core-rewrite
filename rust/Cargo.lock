@@ -2974,6 +2974,7 @@ dependencies = [
 name = "rewrite-protocol-vless"
 version = "0.1.0"
 dependencies = [
+ "rand 0.10.2",
  "rewrite-io",
  "rewrite-model",
  "thiserror 2.0.20",
