@@ -66,7 +66,10 @@ def build_authority() -> pathlib.Path:
     return output
 
 
-def config_text(plugin_options: str) -> str:
+def config_text(plugin_options: str, client_fingerprint: str | None = None) -> str:
+    fingerprint_line = (
+        f"    client-fingerprint: {client_fingerprint}\n" if client_fingerprint else ""
+    )
     return f"""mixed-port: 17890
 mode: rule
 log-level: info
@@ -78,7 +81,7 @@ proxies:
     port: 8388
     cipher: {CIPHER}
     password: {KEY_256}
-    plugin: shadow-tls
+{fingerprint_line}    plugin: shadow-tls
     plugin-opts:
 {plugin_options}
 rules:
@@ -91,23 +94,35 @@ def validate(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
         (
             "valid-v3",
             f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 3\n      skip-cert-verify: true\n",
+            None,
         ),
         (
             "valid-default-version",
             f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      skip-cert-verify: true\n",
+            None,
         ),
-        ("invalid-version", f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 4\n"),
+        (
+            "invalid-version",
+            f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 4\n",
+            None,
+        ),
         (
             "invalid-unknown-option",
             f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 3\n      mode: tls\n",
+            None,
         ),
-        ("missing-plugin-opts", ""),
+        ("missing-plugin-opts", "", None),
+        (
+            "valid-v3-chrome-fingerprint",
+            f"      host: {HOST}\n      password: {PLUGIN_PASSWORD}\n      version: 3\n      skip-cert-verify: true\n",
+            "chrome",
+        ),
     )
     observations = {}
-    for label, plugin_options in cases:
+    for label, plugin_options, client_fingerprint in cases:
         config = scratch / f"{label}.yaml"
         if plugin_options:
-            config.write_text(config_text(plugin_options))
+            config.write_text(config_text(plugin_options, client_fingerprint))
         else:
             config.write_text(
                 f"""mixed-port: 17890

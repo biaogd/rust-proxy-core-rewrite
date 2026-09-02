@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use lru::LruCache;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 pub use connections::ConnectionGuard;
 pub use model::{
@@ -51,6 +51,8 @@ pub struct RuntimeState {
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
+    vmess_grpc_clients:
+        AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::VmessGrpcClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
 }
 
@@ -81,7 +83,44 @@ impl Default for RuntimeState {
             proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
+            vmess_grpc_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
+        }
+    }
+}
+
+impl RuntimeState {
+    pub async fn vmess_grpc_client(
+        &self,
+        name: &str,
+        identity: String,
+        options: rewrite_outbound::VmessGrpcClientOptions,
+    ) -> Arc<rewrite_outbound::VmessGrpcClient> {
+        let previous = {
+            let mut clients = self.vmess_grpc_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(rewrite_outbound::VmessGrpcClient::new(options));
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_vmess_grpc_clients(&self) {
+        let clients = {
+            let mut clients = self.vmess_grpc_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
         }
     }
 }

@@ -379,6 +379,8 @@ pub(crate) fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
             "HTTPS" => types.push(rewrite_model::InboundProtocol::Https),
             "SOCKS4" => types.push(rewrite_model::InboundProtocol::Socks4),
             "SOCKS5" => types.push(rewrite_model::InboundProtocol::Socks5),
+            "SHADOWSOCKS" | "SS" => types.push(rewrite_model::InboundProtocol::Shadowsocks),
+            "INNER" => types.push(rewrite_model::InboundProtocol::Inner),
             "SOCKS" => types.extend([
                 rewrite_model::InboundProtocol::Socks4,
                 rewrite_model::InboundProtocol::Socks5,

@@ -10,6 +10,7 @@ bbolt.workspace = true
 ipnet.workspace = true
 lru.workspace = true
 rewrite-model = { path = "../model" }
+rewrite-outbound = { path = "../outbound" }
 rewrite-services = { path = "../services" }
 rmpv.workspace = true
 serde.workspace = true

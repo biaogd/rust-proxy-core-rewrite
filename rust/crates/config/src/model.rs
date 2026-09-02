@@ -86,6 +86,7 @@ pub struct ConfigSpec {
     pub rule_providers: BTreeMap<String, RuleProviderConfig>,
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
+    pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -148,6 +149,7 @@ pub struct Config {
     pub(crate) raw_rules: Vec<String>,
     pub(crate) raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub(crate) rematches: Vec<RematchSpec>,
+    pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -157,6 +159,8 @@ pub enum ProxyKind {
     Http,
     Socks5,
     Shadowsocks,
+    Vmess,
+    Vless,
     Direct,
     Reject,
     Dns,
@@ -209,7 +213,101 @@ pub struct ProxyConfig {
     pub udp_over_tcp: bool,
     pub udp_over_tcp_version: u8,
     pub shadowsocks_plugin: Option<ShadowsocksPluginConfig>,
+    pub vmess: Option<VmessProxyConfig>,
+    pub vless: Option<VlessProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessProxyConfig {
+    pub uuid: [u8; 16],
+    pub xudp: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmessProxyConfig {
+    pub uuid: [u8; 16],
+    pub alter_id: i64,
+    pub security: VmessSecurity,
+    pub packet_mode: VmessPacketMode,
+    pub transport: VmessTransport,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmessTransport {
+    Tcp,
+    Mkcp(VmessMkcpOptions),
+    Mekya(VmessMekyaOptions),
+    Http {
+        method: String,
+        paths: Vec<String>,
+        headers: BTreeMap<String, Vec<String>>,
+    },
+    Http2 {
+        hosts: Vec<String>,
+        path: String,
+    },
+    Grpc {
+        service_name: String,
+        user_agent: String,
+        ping_interval: i64,
+        max_connections: i64,
+        min_streams: i64,
+        max_streams: i64,
+    },
+    WebSocket {
+        path: String,
+        headers: BTreeMap<String, String>,
+        max_early_data: usize,
+        early_data_header_name: Option<String>,
+        http_upgrade: bool,
+        http_upgrade_fast_open: bool,
+    },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmessMkcpOptions {
+    pub mtu: u32,
+    pub tti: u32,
+    pub uplink_capacity: u32,
+    pub downlink_capacity: u32,
+    pub congestion: bool,
+    pub write_buffer: u32,
+    pub read_buffer: u32,
+    pub seed: String,
+    pub header: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmessMekyaOptions {
+    pub url: String,
+    pub h2_pool_size: i64,
+    pub max_write_delay: i64,
+    pub max_request_size: i64,
+    pub polling_interval_initial: i64,
+    pub max_write_size: i64,
+    pub max_write_duration_ms: i64,
+    pub max_simultaneous_write_connection: i64,
+    pub packet_writing_buffer: i64,
+    pub kcp: VmessMkcpOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmessPacketMode {
+    Standard,
+    PacketAddr,
+    Xudp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmessSecurity {
+    Auto,
+    None,
+    Aes128Cfb,
+    Aes128Gcm,
+    ChaCha20Poly1305,
 }
 
 impl ProxyConfig {
@@ -729,11 +827,66 @@ pub struct NormalizedConfig {
     pub sub_rules: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksSimpleObfsConfig {
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowTlsUserConfig {
+    pub name: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowTlsHandshakeConfig {
+    pub dest: String,
+    pub proxy: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksShadowTlsConfig {
+    pub version: u8,
+    pub password: Option<String>,
+    pub users: Vec<ShadowTlsUserConfig>,
+    pub handshake: ShadowTlsHandshakeConfig,
+    pub strict_mode: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShadowsocksInboundConfig {
+    pub name: String,
+    pub cipher: String,
+    pub password: String,
+    pub listen: SocketAddr,
+    pub udp: bool,
+    pub simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
+    pub shadow_tls: Option<ShadowsocksShadowTlsConfig>,
+}
+
+impl ShadowsocksInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|cipher={}|password={}|listen={}|udp={}|obfs={:?}|shadow-tls={:?}",
+            self.name,
+            self.cipher,
+            self.password,
+            self.listen,
+            self.udp,
+            self.simple_obfs,
+            self.shadow_tls
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
     Socks,
     Mixed,
+    Shadowsocks,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {

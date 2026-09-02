@@ -1,0 +1,17 @@
+[package]
+name = "rewrite-protocol-shadowsocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+rewrite-model = { path = "../model" }
+rewrite-io = { path = "../io" }
+shadowsocks.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

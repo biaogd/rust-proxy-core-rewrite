@@ -376,8 +376,6 @@ pub(super) async fn measure_http_delay(
                         alpn_protocols: &[],
                         tls12_only: false,
                         tls13_only: false,
-                        client_hello_fingerprint: None,
-                        client_hello_fingerprint_mlkem: true,
                     });
                     rewrite_outbound::connect_http_with_options(
                         &server,
@@ -405,8 +403,6 @@ pub(super) async fn measure_http_delay(
                         alpn_protocols: &[],
                         tls12_only: false,
                         tls13_only: false,
-                        client_hello_fingerprint: None,
-                        client_hello_fingerprint_mlkem: true,
                     });
                     rewrite_outbound::connect_socks5_with_options(
                         &server,
@@ -460,6 +456,80 @@ pub(super) async fn measure_http_delay(
                         },
                     )
                     .await
+                    .map_err(|_| ())?
+                }
+                rewrite_config::ProxyKind::Vmess => {
+                    let vmess = proxy.vmess.as_ref().ok_or(())?;
+                    let security = match vmess.security {
+                        rewrite_config::VmessSecurity::Auto => {
+                            rewrite_outbound::VmessSecurity::Auto
+                        }
+                        rewrite_config::VmessSecurity::None => {
+                            rewrite_outbound::VmessSecurity::None
+                        }
+                        rewrite_config::VmessSecurity::Aes128Cfb => {
+                            rewrite_outbound::VmessSecurity::Aes128Cfb
+                        }
+                        rewrite_config::VmessSecurity::Aes128Gcm => {
+                            rewrite_outbound::VmessSecurity::Aes128Gcm
+                        }
+                        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+                            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+                        }
+                    };
+                    rewrite_outbound::connect_vmess_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        rewrite_outbound::VmessTcpOptions {
+                            uuid: vmess.uuid,
+                            alter_id: vmess.alter_id,
+                            security,
+                            global_padding: vmess.global_padding,
+                            authenticated_length: vmess.authenticated_length,
+                        },
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
+                rewrite_config::ProxyKind::Vless => {
+                    let vless = proxy.vless.as_ref().ok_or(())?;
+                    let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
+                        rewrite_outbound::connect_with_options(
+                            &server,
+                            config.ipv6,
+                            controller_socket_options(config),
+                        )
+                        .await
+                        .map_err(|_| ())?,
+                    );
+                    if proxy.tls {
+                        outer = rewrite_outbound::wrap_client_tls_with_options(
+                            outer,
+                            rewrite_outbound::HttpProxyTls {
+                                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                                verification_name: proxy.name_cert_verify.as_deref(),
+                                skip_certificate_verification: proxy.skip_cert_verify,
+                                fingerprint: None,
+                                certificate: None,
+                                private_key: None,
+                                custom_roots: &config.trust_certificates,
+                                ech_config: None,
+                                alpn_protocols: &[],
+                                tls12_only: false,
+                                tls13_only: false,
+                            },
+                            None,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    }
+                    rewrite_outbound::connect_vless_on_stream(
+                        outer,
+                        &destination,
+                        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+                    )
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::Reject
@@ -693,18 +763,22 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Http => "Http",
         rewrite_config::ProxyKind::Socks5 => "Socks5",
         rewrite_config::ProxyKind::Shadowsocks => "Shadowsocks",
+        rewrite_config::ProxyKind::Vmess => "Vmess",
+        rewrite_config::ProxyKind::Vless => "Vless",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
         rewrite_config::ProxyKind::Rematch => "Rematch",
     };
     let udp = match proxy.kind {
-        rewrite_config::ProxyKind::Socks5 | rewrite_config::ProxyKind::Shadowsocks => proxy.udp,
+        rewrite_config::ProxyKind::Socks5
+        | rewrite_config::ProxyKind::Shadowsocks
+        | rewrite_config::ProxyKind::Vmess => proxy.udp,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vless => false,
     };
     json!({
         "alive": health.alive,
@@ -721,8 +795,14 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         "tfo": false,
         "type": kind,
         "udp": udp,
-        "uot": proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp,
-        "xudp": false,
+        "uot": matches!(
+            proxy.kind,
+            rewrite_config::ProxyKind::Vmess | rewrite_config::ProxyKind::Vless
+        )
+            || (proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp),
+        "xudp": proxy.vmess.as_ref().is_some_and(|vmess| {
+                vmess.packet_mode == rewrite_config::VmessPacketMode::Xudp
+            }) || proxy.vless.as_ref().is_some_and(|vless| vless.xudp),
     })
 }
 
@@ -844,12 +924,14 @@ pub(super) fn selector_supports_udp(
         .find(|proxy| proxy.name == selected)
     {
         return match proxy.kind {
-            rewrite_config::ProxyKind::Socks5 | rewrite_config::ProxyKind::Shadowsocks => proxy.udp,
+            rewrite_config::ProxyKind::Socks5
+            | rewrite_config::ProxyKind::Shadowsocks
+            | rewrite_config::ProxyKind::Vmess => proxy.udp,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Vless => false,
         };
     }
     let Some(group) = config

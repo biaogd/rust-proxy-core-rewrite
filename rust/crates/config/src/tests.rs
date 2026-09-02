@@ -1257,6 +1257,8 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 udp_over_tcp: false,
                 udp_over_tcp_version: 1,
                 shadowsocks_plugin: None,
+                vmess: None,
+                vless: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1334,6 +1336,8 @@ fn filtered_empty_provider_uses_configured_fallback() {
             udp_over_tcp: false,
             udp_over_tcp_version: 1,
             shadowsocks_plugin: None,
+            vmess: None,
+            vless: None,
             headers: BTreeMap::new(),
         }],
     };
@@ -1471,6 +1475,435 @@ fn parses_phase6b_http_and_socks5_tls_options() {
     let invalid_pair = source.replace("    private-key: client.key\n", "");
     assert!(matches!(
         Config::from_yaml(&invalid_pair),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
+}
+
+#[test]
+fn parses_phase6d_a_vmess_native_tcp_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: tcp\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-A VMess config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vmess);
+    assert_eq!(proxy.server, "127.0.0.1");
+    assert_eq!(proxy.port, 10002);
+    assert_eq!(proxy.cipher.as_deref(), Some("auto"));
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| vmess.uuid),
+        Some([
+            0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
+            0x08, 0x11,
+        ])
+    );
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| vmess.security),
+        Some(crate::VmessSecurity::Auto)
+    );
+    assert_eq!(proxy.vmess.as_ref().map(|vmess| vmess.alter_id), Some(0));
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Tcp)
+    );
+    assert!(!proxy.udp);
+}
+
+#[test]
+fn parses_phase6d_f_vmess_tls_and_websocket_transport() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ws-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: ws\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    ws-opts:\n      path: /vmess?token=1\n      headers:\n        Host: front.phase6d.test\n        X-Phase: 6d-f\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-F VMess WSS config");
+    let proxy = &config.proxies[0];
+    assert!(proxy.tls);
+    assert_eq!(proxy.sni.as_deref(), Some("tls.phase6d.test"));
+    assert!(proxy.skip_cert_verify);
+    assert_eq!(
+        proxy.vmess.as_ref().map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::WebSocket {
+            path: "/vmess?token=1".to_owned(),
+            headers: BTreeMap::from([
+                ("Host".to_owned(), "front.phase6d.test".to_owned()),
+                ("X-Phase".to_owned(), "6d-f".to_owned()),
+            ]),
+            max_early_data: 0,
+            early_data_header_name: None,
+            http_upgrade: false,
+            http_upgrade_fast_open: false,
+        })
+    );
+
+    let native_tls = source
+        .replace("    network: ws\n", "    network: tcp\n")
+        .replace(
+            "    ws-opts:\n      path: /vmess?token=1\n      headers:\n        Host: front.phase6d.test\n        X-Phase: 6d-f\n",
+            "",
+        );
+    let config = Config::from_yaml(&native_tls).expect("Phase 6D-F native TLS config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Tcp)
+    );
+}
+
+#[test]
+fn parses_phase6d_g_vmess_websocket_variants() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ws-variant\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-gcm\n    network: ws\n    tls: true\n    ws-opts:\n      path: /variant\n      max-early-data: 2048\n      early-data-header-name: X-Vmess-Early\n      v2ray-http-upgrade: true\n      v2ray-http-upgrade-fast-open: true\n      headers:\n        Host: variant.phase6d.test\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-G VMess variant config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::WebSocket {
+            path: "/variant".to_owned(),
+            headers: BTreeMap::from([("Host".to_owned(), "variant.phase6d.test".to_owned(),)]),
+            max_early_data: 2048,
+            early_data_header_name: Some("X-Vmess-Early".to_owned()),
+            http_upgrade: true,
+            http_upgrade_fast_open: true,
+        })
+    );
+}
+
+#[test]
+fn parses_phase6d_h_vmess_http_transports() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: http-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: http\n    http-opts:\n      method: POST\n      path: [/phase6d-h]\n      headers:\n        Host: [front.phase6d.test]\n        X-Phase: [6d-h]\n  - name: h2-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10004\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: h2\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    h2-opts:\n      host: [front-h2.phase6d.test]\n      path: /vmess-h2\n"
+    ))
+    .expect("phase 6D-H VMess HTTP transports should parse");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http {
+            method: "POST".to_owned(),
+            paths: vec!["/phase6d-h".to_owned()],
+            headers: BTreeMap::from([
+                ("Host".to_owned(), vec!["front.phase6d.test".to_owned()]),
+                ("X-Phase".to_owned(), vec!["6d-h".to_owned()]),
+            ]),
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http2 {
+            hosts: vec!["front-h2.phase6d.test".to_owned()],
+            path: "/vmess-h2".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_phase6d_h_vmess_http_options() {
+    for proxy in [
+        "network: http\n    http-opts:\n      method: 'bad method'",
+        "network: http\n    http-opts:\n      path: [relative]",
+        "network: h2\n    h2-opts:\n      path: relative",
+        "network: tcp\n    http-opts:\n      path: [/unexpected]",
+    ] {
+        let yaml = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-http-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    {proxy}\n"
+        );
+        assert!(
+            Config::from_yaml(&yaml).is_err(),
+            "unexpectedly accepted:\n{yaml}"
+        );
+    }
+}
+
+#[test]
+fn phase6d_h_empty_http_lists_use_oracle_defaults() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: empty-http\n    type: vmess\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: http\n    http-opts:\n      path: []\n      headers:\n        X-Ignored: []\n  - name: empty-h2\n    type: vmess\n    server: 127.0.0.1\n    port: 10004\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: h2\n    h2-opts:\n      host: []\n"
+    );
+    let config = Config::from_yaml(&source).expect("empty lists use oracle defaults");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http {
+            method: "GET".to_owned(),
+            paths: vec!["/".to_owned()],
+            headers: BTreeMap::from([("X-Ignored".to_owned(), Vec::new())]),
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Http2 {
+            hosts: vec!["www.example.com".to_owned()],
+            path: "/".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn parses_phase6d_i_vmess_grpc_single_stream_scope() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: grpc-default\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n  - name: grpc-custom\n    type: vmess\n    server: 127.0.0.1\n    port: 10006\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 1\n    cipher: aes-128-cfb\n    network: grpc\n    tls: true\n    servername: tls.phase6d.test\n    skip-cert-verify: true\n    grpc-opts:\n      grpc-service-name: /custom/path\n      grpc-user-agent: phase6d-i/1.0\n      ping-interval: 0\n      max-connections: 0\n      min-streams: 0\n      max-streams: 0\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-I VMess gRPC config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "GunService".to_owned(),
+            user_agent: "grpc-go/1.36.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
+        })
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "/custom/path".to_owned(),
+            user_agent: "phase6d-i/1.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
+        })
+    );
+}
+
+#[test]
+fn parses_phase6d_j_grpc_pool_and_ping_options() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: pooled-grpc\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n    grpc-opts:\n      ping-interval: 1\n      max-connections: 2\n      min-streams: 3\n      max-streams: 4\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-J pool config");
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Grpc {
+            service_name: "GunService".to_owned(),
+            user_agent: "grpc-go/1.36.0".to_owned(),
+            ping_interval: 1,
+            max_connections: 2,
+            min_streams: 3,
+            max_streams: 4,
+        })
+    );
+}
+
+#[test]
+fn parses_phase6d_k_l_vmess_mkcp_and_mekya_transports() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: mkcp-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10007\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: kcp\n    mkcp-opts:\n      mtu: 1200\n      tti: 15\n      uplink-capacity: 10\n      downlink-capacity: 50\n      congestion: true\n      write-buffer: 1048576\n      read-buffer: 2097152\n      seed: phase6d-k\n      header: srtp\n  - name: mekya-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10008\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: mekya\n    tls: true\n    skip-cert-verify: true\n    mekya-opts:\n      url: example.test/mekya\n      h2-pool-size: 2\n      max-write-delay: 20\n      max-request-size: 96000\n      polling-interval-initial: 20\n      max-write-size: 1048576\n      max-write-duration-ms: 5000\n      max-simultaneous-write-connection: 16\n      packet-writing-buffer: 1024\n      kcp:\n        tti: 15\n        seed: phase6d-l\n        header: dtls\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6D-K/L transports");
+    let mkcp = crate::VmessMkcpOptions {
+        mtu: 1200,
+        tti: 15,
+        uplink_capacity: 10,
+        downlink_capacity: 50,
+        congestion: true,
+        write_buffer: 1_048_576,
+        read_buffer: 2_097_152,
+        seed: "phase6d-k".to_owned(),
+        header: "srtp".to_owned(),
+    };
+    assert_eq!(
+        config.proxies[0]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Mkcp(mkcp))
+    );
+    assert_eq!(
+        config.proxies[1]
+            .vmess
+            .as_ref()
+            .map(|vmess| &vmess.transport),
+        Some(&crate::VmessTransport::Mekya(crate::VmessMekyaOptions {
+            url: "https://example.test/mekya".to_owned(),
+            h2_pool_size: 2,
+            max_write_delay: 20,
+            max_request_size: 96_000,
+            polling_interval_initial: 20,
+            max_write_size: 1_048_576,
+            max_write_duration_ms: 5_000,
+            max_simultaneous_write_connection: 16,
+            packet_writing_buffer: 1_024,
+            kcp: crate::VmessMkcpOptions {
+                tti: 15,
+                seed: "phase6d-l".to_owned(),
+                header: "dtls".to_owned(),
+                ..crate::VmessMkcpOptions::default()
+            },
+        }))
+    );
+
+    for invalid in [
+        "network: mkcp\n    mkcp-opts:\n      mtu: -1",
+        "network: mekya\n    mekya-opts:\n      url: http://example.test/mekya",
+        "network: tcp\n    mkcp-opts:\n      seed: misplaced",
+        "network: mkcp\n    mekya-opts:\n      url: example.test",
+    ] {
+        let yaml = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-transport\n    type: vmess\n    server: 127.0.0.1\n    port: 10009\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    {invalid}\n"
+        );
+        assert!(Config::from_yaml(&yaml).is_err(), "accepted {invalid}");
+    }
+}
+
+#[test]
+fn rejects_invalid_phase6d_j_grpc_metadata() {
+    for option in [
+        "grpc-service-name: 'bad path'",
+        "grpc-user-agent: \"bad\\nagent\"",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: invalid-grpc\n    type: vmess\n    server: 127.0.0.1\n    port: 10005\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    network: grpc\n    grpc-opts:\n      {option}\n"
+        );
+        assert!(Config::from_yaml(&source).is_err(), "accepted {option}");
+    }
+}
+
+#[test]
+fn parses_phase6d_d_positive_legacy_alter_id() {
+    for alter_id in [1_i64, 64, i64::MAX] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: legacy-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: {alter_id}\n    cipher: aes-128-gcm\n    network: tcp\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-D VMess config");
+        assert_eq!(
+            config.proxies[0].vmess.as_ref().map(|vmess| vmess.alter_id),
+            Some(alter_id)
+        );
+    }
+}
+
+#[test]
+fn parses_phase6d_e_vmess_udp_packet_modes_and_precedence() {
+    for (fields, expected) in [
+        ("", crate::VmessPacketMode::Standard),
+        (
+            "    packet-addr: true\n",
+            crate::VmessPacketMode::PacketAddr,
+        ),
+        (
+            "    packet-encoding: packet\n",
+            crate::VmessPacketMode::PacketAddr,
+        ),
+        ("    packet-encoding: xudp\n", crate::VmessPacketMode::Xudp),
+        (
+            "    packet-addr: true\n    xudp: true\n",
+            crate::VmessPacketMode::Xudp,
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: udp-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: aes-128-gcm\n    network: tcp\n    udp: true\n{fields}"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-E VMess UDP config");
+        let proxy = &config.proxies[0];
+        assert!(proxy.udp);
+        assert_eq!(
+            proxy.vmess.as_ref().map(|vmess| vmess.packet_mode),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn parses_phase6d_b_explicit_aead_framing_options() {
+    for (cipher, expected) in [
+        ("AES-128-GCM", crate::VmessSecurity::Aes128Gcm),
+        ("CHACHA20-POLY1305", crate::VmessSecurity::ChaCha20Poly1305),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: explicit-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: {cipher}\n    network: tcp\n    global-padding: true\n    authenticated-length: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-B VMess config");
+        let vmess = config.proxies[0].vmess.as_ref().unwrap();
+        assert_eq!(vmess.security, expected);
+        assert!(vmess.global_padding);
+        assert!(vmess.authenticated_length);
+    }
+}
+
+#[test]
+fn parses_phase6d_c_remaining_native_tcp_security_modes() {
+    for (cipher, expected, normalized) in [
+        ("NONE", crate::VmessSecurity::None, "none"),
+        ("ZERO", crate::VmessSecurity::None, "zero"),
+        (
+            "AES-128-CFB",
+            crate::VmessSecurity::Aes128Cfb,
+            "aes-128-cfb",
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: native-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: {cipher}\n    network: tcp\n    global-padding: true\n    authenticated-length: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6D-C VMess config");
+        let proxy = &config.proxies[0];
+        let vmess = proxy.vmess.as_ref().unwrap();
+        assert_eq!(proxy.cipher.as_deref(), Some(normalized));
+        assert_eq!(vmess.security, expected);
+        assert!(vmess.global_padding);
+        assert!(vmess.authenticated_length);
+    }
+}
+
+#[test]
+fn phase6d_vmess_rejects_fields_outside_phase6d_i_scope() {
+    let base = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-vmess\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n"
+    );
+    for extra in [
+        "    alterId: -1\n",
+        "    cipher: aes-256-gcm\n",
+        "    network: xhttp\n",
+        "    packet-encoding: unsupported\n",
+        "    network: ws\n    udp: true\n",
+        "    network: ws\n    ws-opts:\n      max-early-data: -1\n",
+        "    network: tcp\n    ws-opts:\n      path: /wrong\n",
+        "    name-cert-verify: ignored-without-tls.example\n",
+        "    tls: true\n    fingerprint: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        "    tls: true\n    certificate: client.pem\n    private-key: client-key.pem\n",
+        "    uuid: invalid\n",
+    ] {
+        let source = if extra.starts_with("    uuid:") {
+            base.replace("    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n", extra)
+        } else {
+            format!("{base}{extra}")
+        };
+        assert!(
+            matches!(
+                Config::from_yaml(&source),
+                Err(ConfigError::UnsupportedProxy(_))
+            ),
+            "unexpectedly accepted {extra:?}"
+        );
+    }
+
+    let missing_cipher = base;
+    assert!(matches!(
+        Config::from_yaml(&missing_cipher),
         Err(ConfigError::UnsupportedProxy(_))
     ));
 }
@@ -1915,6 +2348,59 @@ fn parses_shadowsocks_shadow_tls_production_plugin_opts() {
 }
 
 #[test]
+fn rejects_shadow_tls_v1_client_fingerprint_at_load_time() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 1\n      skip-cert-verify: true\n"
+    );
+    assert!(matches!(
+        Config::from_yaml(&source),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
+}
+
+#[test]
+fn rejects_unsupported_shadow_tls_client_fingerprint_at_load_time() {
+    for fingerprint in ["safari", "firefox", "chrome120"] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: {fingerprint}\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+        );
+        assert!(
+            matches!(
+                Config::from_yaml(&source),
+                Err(ConfigError::UnsupportedProxy(_))
+            ),
+            "expected reject for {fingerprint}"
+        );
+    }
+}
+
+#[test]
+fn accepts_shadow_tls_v3_chrome_client_fingerprint_at_load_time() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-256-gcm\n    password: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n    client-fingerprint: chrome\n    plugin: shadow-tls\n    plugin-opts:\n      host: phase6c-shadow-tls.example\n      password: phase6c-shadow-tls-plugin-password\n      version: 3\n      skip-cert-verify: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("v3 chrome fingerprint");
+    assert_eq!(
+        config.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
+    assert_eq!(
+        config.proxies[0].shadowsocks_plugin,
+        Some(rewrite_model::ShadowsocksPluginConfig::ShadowTls {
+            host: "phase6c-shadow-tls.example".to_owned(),
+            password: "phase6c-shadow-tls-plugin-password".to_owned(),
+            version: 3,
+            skip_certificate_verification: true,
+            verification_name: None,
+            certificate_fingerprint: None,
+            certificate: None,
+            private_key: None,
+            alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
+        })
+    );
+}
+
+#[test]
 fn parses_phase6c_shadowsocks_legacy_stream_scope() {
     for cipher in [
         "aes-128-ctr",
@@ -2110,4 +2596,314 @@ fn parses_fixed_listener_lan_policy() {
                 .expect("IPv4-mapped IPv6 address")
         )
     );
+}
+
+#[test]
+fn loads_legacy_shadowsocks_inbound_from_ss_config() {
+    let config = Config::from_yaml(
+        "ss-config: ss://aes-128-gcm:phase6c-inbound-password@127.0.0.1:18390\nmode: rule\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect("ss-config inbound");
+    let inbound = config
+        .shadowsocks_listeners
+        .first()
+        .expect("shadowsocks inbound");
+    assert_eq!(inbound.cipher, "aes-128-gcm");
+    assert_eq!(inbound.password, "phase6c-inbound-password");
+    assert_eq!(
+        inbound.listen,
+        "127.0.0.1:18390".parse().expect("listen address")
+    );
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18390)));
+}
+
+#[test]
+fn loads_shadowsocks_2022_inbound_from_ss_config() {
+    let config = Config::from_yaml(
+        "ss-config: ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@127.0.0.1:18394\nmode: rule\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect("ss-config inbound");
+    let inbound = config
+        .shadowsocks_listeners
+        .first()
+        .expect("shadowsocks inbound");
+    assert_eq!(inbound.cipher, "2022-blake3-aes-128-gcm");
+    assert!(!inbound.udp);
+}
+
+#[test]
+fn loads_named_shadowsocks_obfs_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-obfs
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18398
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    simple-obfs:
+      enable: true
+      mode: http
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-obfs");
+    assert_eq!(inbound.listen, "127.0.0.1:18398".parse().expect("listen"));
+    assert_eq!(
+        inbound.simple_obfs.as_ref().map(|obfs| obfs.mode.as_str()),
+        Some("http")
+    );
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Shadowsocks, 18398)));
+}
+
+#[test]
+fn loads_named_shadowsocks_obfs_tls_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-obfs-tls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18399
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    simple-obfs:
+      enable: true
+      mode: tls
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks tls listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-obfs-tls");
+    assert_eq!(
+        inbound.simple_obfs.as_ref().map(|obfs| obfs.mode.as_str()),
+        Some("tls")
+    );
+}
+
+#[test]
+fn loads_named_shadowsocks_shadow_tls_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    udp: false
+    shadow-tls:
+      enable: true
+      version: 3
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks shadow-tls listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-stls");
+    let shadow_tls = inbound.shadow_tls.as_ref().expect("shadow-tls config");
+    assert_eq!(shadow_tls.version, 3);
+    assert_eq!(shadow_tls.handshake.dest, "127.0.0.1:9443");
+    assert_eq!(shadow_tls.users.len(), 1);
+    assert_eq!(shadow_tls.users[0].name, "phase6c-user");
+}
+
+#[test]
+fn rejects_unimplemented_named_shadowsocks_fields() {
+    for field in [
+        "rule: MATCH,DIRECT",
+        "proxy: DIRECT",
+        "routing-mark: 1",
+        "mux-option: {}",
+        "res-tls: {}",
+        "jls-config: {}",
+        "kcp-tun: {}",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18402\n    cipher: aes-128-gcm\n    password: phase6c-password\n    {field}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("unsupported field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected error for {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unimplemented_or_unknown_shadowsocks_plugin_fields() {
+    for field in [
+        "handshake-for-server-name: {}",
+        "wildcard-sni: example.com",
+        "unknown-shadow-option: true",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-stls-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18403\n    cipher: aes-128-gcm\n    password: phase6c-password\n    shadow-tls:\n      enable: true\n      version: 3\n      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n      handshake:\n        dest: 127.0.0.1:9443\n      {field}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("unsupported field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected error for {field}: {error}"
+        );
+    }
+
+    for nested in [
+        "      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n      handshake:\n        dest: 127.0.0.1:9443\n        unknown-handshake-option: true",
+        "      users:\n        - name: phase6c-user\n          password: phase6c-shadow-tls-plugin-password\n          unknown-user-option: true\n      handshake:\n        dest: 127.0.0.1:9443",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: ss-stls-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18404\n    cipher: aes-128-gcm\n    password: phase6c-password\n    shadow-tls:\n      enable: true\n      version: 3\n{nested}\nrules: ['MATCH,DIRECT']\n"
+        );
+        let error = Config::from_yaml(&source).expect_err("nested unknown field must be rejected");
+        assert!(
+            error.to_string().contains("unsupported field"),
+            "unexpected nested error: {error}"
+        );
+    }
+
+    let obfs = Config::from_yaml(
+        "mode: rule\nlisteners:\n  - name: ss-obfs-unsupported\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: 18405\n    cipher: aes-128-gcm\n    password: phase6c-password\n    simple-obfs:\n      enable: true\n      mode: http\n      host: ignored.example\nrules: ['MATCH,DIRECT']\n",
+    )
+    .expect_err("unknown simple-obfs field must be rejected");
+    assert!(obfs.to_string().contains("unsupported field"));
+}
+
+#[test]
+fn rejects_named_shadowsocks_shadow_tls_v1_at_load_time() {
+    let error = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    shadow-tls:
+      enable: true
+      version: 1
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect_err("v1 shadow-tls should be rejected");
+    assert!(
+        error.to_string().contains("not supported"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_named_shadowsocks_shadow_tls_v2_at_load_time() {
+    let error = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-stls
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18400
+    cipher: aes-128-gcm
+    password: phase6c-password
+    shadow-tls:
+      enable: true
+      version: 2
+      users:
+        - name: phase6c-user
+          password: phase6c-shadow-tls-plugin-password
+      handshake:
+        dest: 127.0.0.1:9443
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect_err("v2 shadow-tls should be rejected");
+    assert!(
+        error.to_string().contains("not supported"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn loads_named_shadowsocks_2022_eih_listener() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: ss-eih
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18401
+    cipher: 2022-blake3-aes-128-gcm
+    password: AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw==
+    udp: false
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named shadowsocks 2022 eih listener");
+    assert_eq!(config.shadowsocks_listeners.len(), 1);
+    let inbound = &config.shadowsocks_listeners[0];
+    assert_eq!(inbound.name, "ss-eih");
+    assert_eq!(
+        inbound.password,
+        "AAECAwQFBgcICQoLDA0ODw==:EBESExQVFhcYGRobHB0eHw=="
+    );
+    assert!(!inbound.udp);
+}
+
+#[test]
+fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"
+    ))
+    .expect("Phase 6E-A VLESS config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vless);
+    assert!(!proxy.udp);
+    let vless = proxy.vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        vless.uuid,
+        *uuid::Uuid::parse_str("f8598425-92f2-5508-a071-4fc67f9040ac")
+            .expect("Go UUIDMap vector")
+            .as_bytes()
+    );
+    assert!(vless.xudp, "the Go VLESS default advertises XUDP");
+}
+
+#[test]
+fn parses_phase6e_b_vless_native_tls_scope() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-tls\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: tcp\n    tls: true\n    servername: front.phase6e.test\n    name-cert-verify: dot.phase4.test\n    skip-cert-verify: false\n"
+    ))
+    .expect("Phase 6E-B VLESS TLS config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Vless);
+    assert!(proxy.tls);
+    assert_eq!(proxy.sni.as_deref(), Some("front.phase6e.test"));
+    assert_eq!(proxy.name_cert_verify.as_deref(), Some("dot.phase4.test"));
+    assert!(!proxy.skip_cert_verify);
+
+    let plaintext = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-ignored-tls-option\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    servername: dot.phase4.test\n"
+    ))
+    .expect("Go accepts dormant TLS fields when TLS is disabled");
+    assert!(!plaintext.proxies[0].tls);
 }

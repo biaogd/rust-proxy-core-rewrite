@@ -10,26 +10,19 @@ base64.workspace = true
 bytes.workspace = true
 fast-socks5.workspace = true
 futures-util.workspace = true
-hex.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-httparse.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
+rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-vless = { path = "../protocol-vless" }
+rewrite-protocol-vmess = { path = "../protocol-vmess" }
 rewrite-services = { path = "../services" }
-hmac.workspace = true
-rand.workspace = true
-sha1.workspace = true
-sha2.workspace = true
-shadowsocks.workspace = true
-rustls-native-certs.workspace = true
-rustls-pemfile.workspace = true
+rewrite-transport = { path = "../transport" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tokio-tungstenite.workspace = true
-url.workspace = true
 
 [lints]
 workspace = true

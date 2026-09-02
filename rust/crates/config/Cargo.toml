@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 hex.workspace = true
+http.workspace = true
 fancy-regex.workspace = true
 ipnet.workspace = true
 md-5.workspace = true
@@ -21,6 +22,7 @@ serde.workspace = true
 serde_yaml_ng.workspace = true
 thiserror.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

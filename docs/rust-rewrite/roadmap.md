@@ -1786,6 +1786,551 @@ mux frames instead of reproducing the pinned Go writer's corrupt-frame edge.
 This documented safety divergence is not normalized or presented as exact
 wire parity for that invalid edge.
 
+### Phase 6C-M6 accepted scope — Shadowsocks ShadowTLS client
+
+A top-level Shadowsocks outbound may use native `plugin: shadow-tls` v1, v2 or
+v3 over the declared SS2022 TCP path. The focused client owns the ShadowTLS
+session-id authentication, camouflage TLS 1.2/1.3 relay and post-handshake
+HMAC/XOR framing while the existing Shadowsocks adapter continues to own SS
+encryption, routing and lifecycle.
+
+`compat/scripts/phase6c_shadowsocks_shadow_tls.py` is the protocol gate for
+configuration, domain and large-payload TCP relay, process survival and the
+pinned oracle's half-close behavior. The separate
+`compat/scripts/phase6c_shadowtls_clienthello_regression.py` records each
+runtime's production ClientHello baseline; it is not Go/Rust fingerprint wire
+parity. Only the partial Chrome fingerprint is accepted: the Rust path exposes
+10 cipher suites rather than the Go/uTLS Chrome profile's 16, and unsupported
+fingerprint names are rejected instead of silently falling back.
+
+This phase does not claim exact Chrome fingerprint parity, native 2022 UDP,
+multi-hop EIH, inbound/server behavior or other shared security consumers.
+
+### Phase 6C-N accepted scope — Shadowsocks inbound first server slice
+
+This gate introduces the first named server-direction slice. It accepts the
+legacy `ss-config` URI and a named `listeners` entry with
+`type: shadowsocks`, one IP address and one port. The external path starts with
+an encrypted Shadowsocks client connection and ends at an observable TCP or
+UDP result selected by the existing rule and outbound engines.
+
+The declared data-plane scope is:
+
+- representative SIP004 AEAD and legacy stream TCP, SS2022 TCP, and pre-2022
+  native UDP;
+- UoT v1 and v2 non-connect framing;
+- DIRECT, DNS, SOCKS5, Shadowsocks and Shadowsocks-UoT UDP targets;
+- named simple-obfs HTTP/TLS server wrapping;
+- ShadowTLS v3 authenticated TCP, plain-TLS fallback, concurrent fallback and
+  SS accepts, proxy-observed leaf/group `handshake.proxy`, and empty-proxy
+  routing with `IN-TYPE,INNER` distinct from the outer Shadowsocks flow;
+- password-identity reload while fallback is active, bounded shutdown and
+  fail-closed rejection of unimplemented listener/security fields.
+
+`compat/scripts/phase6c_shadowsocks_inbound.py` is the Go/Rust differential
+gate. A valid result must prove the selected handshake proxy observed the
+authenticated CONNECT, make an incorrect `SHADOWSOCKS` type reject the
+camouflage handshake destination, and change the listener reload identity
+before requiring replacement credentials. ShadowTLS `IN-USER` and SS2022 EIH
+inbound remain explicitly Rust-only evidence because the pinned Go paths do
+not expose equivalent behavior; they are not normalized into parity.
+
+The exit checks are the repository-wide fmt, clippy and test gates plus a
+passing corrected Phase 6C-N differential on a declared platform. Until the
+corrected differential passes, status remains "implemented; validation
+pending".
+
+This phase does not claim port lists/ranges, common named-listener `rule`,
+`proxy` or `routing-mark` fields, `mux-option`, UoT v2 connect mode, SS2022
+UDP, the complete inbound cipher matrix, ShadowTLS v1/v2 or advanced SNI
+selection, ResTLS, JLS, KCP-TUN, exact UDP timeout/socket parity, or full
+cross-platform runtime evidence. Those fields are rejected when necessary so
+an unimplemented behavior cannot be accepted silently. The common listener
+`proxy` gap is distinct from the implemented
+`shadow-tls.handshake.proxy` field.
+
+### Phase 6D-A accepted scope — VMess AEAD native-TCP client
+
+This slice changes inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, **VMess**,
+**Darwin arm64 — Phase 6D-A VMess AEAD native TCP** and
+**Linux amd64 — Phase 6D-A VMess AEAD native TCP**. `OUT-22` remains open:
+this phase deliberately does not add or claim a shared outer transport.
+
+The external path starts with a top-level YAML `type: vmess` proxy consumed
+directly and through one selector/file-provider path, enters through the
+existing mixed HTTP or SOCKS listener, selects the VMess member through an
+existing rule/group, and ends at an observable TCP echo result behind a local
+VMess AEAD authority. The accepted protocol/configuration scope is:
+
+- `server`, nonzero `port`, RFC 4122 `uuid`, `alterId: 0`, and
+  `cipher: auto`;
+- VMess AEAD request/response headers and AEAD body records over a native TCP
+  transport with no TLS or transport plugin;
+- domain and IPv4 destinations, binary small/large bidirectional relay,
+  connection failure, wrong credentials, server close and bounded process
+  shutdown;
+- fail-closed rejection of unsupported VMess fields and values, including
+  nonzero `alterId`, UDP, TLS, non-TCP `network`, transport/security options
+  and unknown fields;
+- exact controller capability fields and selector/provider membership already
+  shared by implemented adapters.
+
+`compat/scripts/phase6d_vmess_tcp.py` is the Go/Rust differential gate. Both
+clients run the same generated configuration against the same deterministic
+local authority. The authority independently opens the request header,
+validates the destination and records, and emits a conforming response; unit
+tests also pin KDF, Auth ID, header layout, address encoding, response
+verification and record nonces. Random Auth IDs, nonces, padding and timestamps
+are validated structurally rather than normalized into byte equality.
+
+No narrowly scoped, maintained embeddable VMess client crate was available at
+the phase boundary. Depending on an entire alternate proxy core would also
+import unrelated configuration, routing and transport policy. The product
+therefore keeps a small adapter boundary and uses maintained RustCrypto
+primitives (`aes`, `aes-gcm`, `chacha20poly1305`, `md-5`, `sha2`, `sha3`)
+rather than
+implementing cryptographic primitives. This decision must be revisited before
+expanding beyond the declared protocol core.
+
+This phase does not claim `cipher` modes beyond the oracle behavior selected by
+`auto`, legacy VMess headers or AlterID, UDP/XUDP/packet-address modes,
+authenticated-length/global-padding, TLS, WebSocket, HTTP, HTTP/2, gRPC,
+HTTPUpgrade, mKCP, Mekya, Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux,
+health-check breadth, VMess inbound/server behavior or cross-platform runtime
+parity. Every excluded field is rejected rather than silently ignored.
+
+### Phase 6D-B accepted scope — explicit VMess AEAD framing options
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-B VMess explicit AEAD** and
+**Linux amd64 — Phase 6D-B VMess explicit AEAD**. It does not advance
+`OUT-22` or any inbound row.
+
+The external path remains mixed HTTP/SOCKS TCP to a native-TCP VMess client and
+the deterministic local authority. The additional accepted surface is:
+
+- explicit case-insensitive `cipher: aes-128-gcm` and
+  `cipher: chacha20-poly1305`, while retaining explicit `auto`;
+- `global-padding` and `authenticated-length`, independently and together,
+  including the oracle's shared SHAKE stream ordering and per-record AEAD
+  length nonces;
+- domain, IPv4 and IPv6 destination encoding across both explicit ciphers;
+- small and multi-record bidirectional relay, half-close, malformed-option
+  rejection and process survival through the existing lifecycle boundary.
+
+`compat/scripts/phase6d_vmess_aead.py` is the Go/Rust differential gate. It
+runs every explicit cipher × framing-option combination through the same
+independent Go authority, including a 128 KiB record sequence and an explicit
+IPv6 destination. Focused Rust tests separately verify ordinary masked length,
+global-padding ordering and authenticated-length tamper rejection.
+
+This phase still rejects `none`, `zero`, `aes-128-cfb`, nonzero AlterID,
+UDP/XUDP/packet addressing, TLS, every outer transport/security plugin and mux.
+Those are separate vertical gates and are not implied by explicit AEAD framing
+parity.
+
+### Phase 6D-C accepted scope — remaining AlterID-zero native-TCP security modes
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-C VMess native-TCP security modes** and
+**Linux amd64 — Phase 6D-C VMess native-TCP security modes**. It does not
+advance `OUT-22`, any inbound row, or the legacy-header/nonzero-AlterID gate.
+
+The external path remains mixed HTTP/SOCKS TCP to a native-TCP VMess client and
+the deterministic independent Go authority. This slice completes the oracle's
+AlterID-zero `cipher` vocabulary:
+
+- `none` and its `zero` alias use VMess security value 5 and an unframed raw TCP
+  body after the AEAD request/response headers;
+- `aes-128-cfb` uses security value 1, continuous AES-128-CFB encryption and
+  length-prefixed FNV-1a-protected body chunks;
+- cipher labels remain case-insensitive and controller/config views preserve a
+  normalized label;
+- the oracle accepts `global-padding` and `authenticated-length` on these
+  non-AEAD modes but deliberately does not put those flags on the wire; Rust
+  reproduces that observable behavior instead of applying AEAD framing;
+- domain, IPv4 and IPv6 destinations, small and 128 KiB multi-chunk relay,
+  half-close, malformed security rejection and process survival are covered.
+
+`compat/scripts/phase6d_vmess_security.py` is the Go/Rust differential gate.
+RustCrypto's maintained `cfb-mode` crate owns streaming CFB state; the local
+adapter owns only VMess chunk length, checksum and lifecycle policy. This is a
+protocol-compatibility dependency with MIT OR Apache-2.0 licensing, Rust 1.56
+MSRV and portable `no_std` core support.
+
+Nonzero AlterID/legacy request headers and response-key derivation, UDP/XUDP,
+packet addressing, TLS, WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports and mux
+remain independent later gates.
+
+### Phase 6D-D accepted scope — legacy AlterID native-TCP client
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-D VMess legacy AlterID native TCP** and
+**Linux amd64 — Phase 6D-D VMess legacy AlterID native TCP**. It does not
+advance `OUT-22`, any inbound row, UDP/XUDP, packet addressing, mux or an outer
+transport/security layer.
+
+The external path remains mixed HTTP/SOCKS TCP to the native-TCP VMess client
+and the independent Go VMess authority. The accepted configuration and wire
+scope is:
+
+- positive signed `alterId` values select the oracle's legacy-header path; the
+  numeric count is retained in configuration, while the client wire behavior
+  uses the first UUID-derived AlterID exactly as `sing-vmess` 0.2.5 does;
+- the request starts with HMAC-MD5(AlterID, Unix timestamp), followed by the
+  ordinary request plaintext encrypted with AES-128-CFB under the command key
+  and the four-times timestamp MD5 IV;
+- the response header uses MD5-derived body key/IV and AES-128-CFB; for
+  `aes-128-cfb`, that response cipher stream continues into the first body
+  frame instead of being restarted;
+- all Phase 6D-A–C security labels and framing combinations remain available,
+  with domain, IPv4 and IPv6 targets, small/128 KiB relay and half-close;
+- zero `alterId` continues to use the AEAD header path and existing Phase
+  6D-A–C gates remain mandatory regressions.
+
+`compat/scripts/phase6d_vmess_alterid.py` is the Go/Rust differential gate. It
+runs representative positive counts against an authority provisioned with the
+same derived AlterID set and covers every supported body security mode. The
+standard HMAC/MD5/AES-CFB primitives remain library-owned; local code owns only
+VMess key derivation, header layout and the response cipher-continuation rule.
+
+Negative `alterId`, UDP/XUDP, packet addressing, TLS,
+WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, mux and VMess inbound/server
+behavior remain outside this slice.
+
+### Phase 6D-E accepted scope — VMess UDP packet modes over native TCP
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, and only the
+compatibility-matrix rows **Proxies and built-in proxy insertion**, outbound
+**VMess**, **Darwin arm64 — Phase 6D-E VMess UDP packet modes** and
+**Linux amd64 — Phase 6D-E VMess UDP packet modes**. Existing SOCKS5 UDP
+listener/NAT/rule behavior is reused and is not re-claimed as a new inbound
+implementation. `OUT-22`, TLS/outer transports, TCP mux and VMess inbound remain
+outside this phase.
+
+The accepted path is YAML `udp: true` through mixed/SOCKS5 UDP, rules and one
+native-TCP VMess association to the independent Go authority:
+
+- ordinary VMess UDP uses command 2 and one fixed resolved IP destination per
+  association; writes to another destination fail closed as in the Go adapter;
+- `packet-addr: true` and `packet-encoding: packetaddr|packet` target
+  `sp.packet-addr.v2fly.arpa:443` and prefix every body datagram with its IPv4
+  or IPv6 address and port;
+- `xudp: true` and `packet-encoding: xudp` use VMess command 3 to
+  `v1.mux.cool:666`, encode new/keep UDP frames and allow multiple destinations
+  on one client association; XUDP takes precedence when both packet switches
+  are set, matching the oracle;
+- all Phase 6D-A–D body security and AlterID header modes remain usable;
+  focused differential cases cover AEAD/legacy headers, AEAD, raw and CFB body
+  modes rather than multiplying every already-proven cross-product;
+- deterministic tests cover IPv4/IPv6, domain-to-IP resolution, association
+  reuse, multi-destination packet modes, controller `udp`/`uot`/`xudp` shape,
+  bounded datagrams, malformed packet-mode rejection and process survival.
+
+`compat/scripts/phase6d_vmess_udp.py` is the Go/Rust differential gate. The Go
+authority uses `sing-vmess` server, packet-address and XUDP implementations as
+an independent decoder/encoder. Rust owns VMess packet-mode framing while the
+existing RustCrypto-backed body layer retains encryption and authentication.
+
+This phase does not claim FQDN payloads in packet-address mode, jumbo datagrams
+above the VMess 15,000-byte body limit, negative AlterID, TLS,
+WebSocket/HTTP/H2/gRPC/mKCP/Mekya transports, general TCP mux or VMess inbound.
+
+### Phase 6D-F accepted scope — VMess TLS and WebSocket TCP transports
+
+This slice continues inventory rows `CFG-03` and `OUT-07`, begins VMess reuse
+of `OUT-22`, and only changes the compatibility-matrix rows **Proxies and
+built-in proxy insertion**, outbound **VMess**, **Shared outbound
+transport/security variants**, **Darwin arm64 — Phase 6D-F VMess TLS and
+WebSocket TCP** and **Linux amd64 — Phase 6D-F VMess TLS and WebSocket TCP**.
+It does not expand the existing listener, rule or controller API claims.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- native TCP VMess wrapped directly in standard TLS;
+- plaintext RFC 6455 WebSocket carrying VMess binary records;
+- verified or explicitly insecure WebSocket-over-TLS with `http/1.1` ALPN;
+- `network: tcp|ws`, `tls`, `servername`, `skip-cert-verify`,
+  `name-cert-verify`, inline custom roots, and `ws-opts.path` plus string
+  `ws-opts.headers` configuration;
+- explicit `servername` and WebSocket `Host` TLS-name selection, matching the
+  pinned oracle in both exercised branches;
+- every Phase 6D-A–D VMess security/AlterID body mode above the transport,
+  represented by focused AEAD and legacy cases instead of repeating the full
+  already-proven cross-product.
+
+`compat/scripts/phase6d_vmess_websocket.py` is the Go/Rust differential gate.
+It uses the independent Go `sing-vmess` authority behind standard-library TLS
+and an independently parsed RFC 6455 server boundary. The gate compares
+configuration acceptance, exact WebSocket Host/path and TLS SNI observations,
+domain and large IPv4 relay, half-close outcome, trusted/custom-root,
+skip-verification and untrusted failure lifecycle, and process survival.
+
+This phase deliberately rejects UDP over WebSocket, WebSocket early data and
+raw HTTP-upgrade variants. Custom ALPN, ECH, client-fingerprint emulation,
+ShadowTLS/ReSTLS/JLS/Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP,
+Mekya, general TCP mux and VMess inbound remain later `6D`/`7T` gates.
+
+### Phase 6D-G accepted scope — VMess WebSocket early data and HTTP Upgrade
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-G VMess WebSocket variants** and **Linux amd64 — Phase 6D-G
+VMess WebSocket variants**. Existing listener, rule, controller and UDP claims
+do not expand.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- RFC 6455 VMess with `max-early-data` placed in either an explicitly named
+  request header or appended to the configured URL path;
+- the Xray-compatible `path?ed=N` convention, which removes `ed`, canonicalizes
+  the remaining query and places early data in `Sec-WebSocket-Protocol`;
+- unframed `v2ray-http-upgrade` with ordinary response validation and the
+  `v2ray-http-upgrade-fast-open` write-before-response variant;
+- raw HTTP Upgrade combined with the same explicit/query early-data behavior;
+- plaintext and WSS outer transports, with representative zero and positive
+  AlterID/security modes rather than repeating the Phase 6D-A–F cross-product.
+
+`compat/scripts/phase6d_vmess_websocket_variants.py` is the Go/Rust
+differential gate. The independent Go authority parses the HTTP request,
+extracts and decodes early VMess bytes before invoking `sing-vmess`, then uses
+either RFC 6455 framing or the unframed upgraded stream. It compares exact
+Host/request-target/early-data placement, raw-versus-framed mode, large relay,
+half-close outcome, TLS use, fast-open lifecycle and process survival.
+
+This phase does not claim UDP over WebSocket, certificate pinning/client
+identity, custom ALPN, ECH, fingerprint emulation, ShadowTLS/ReSTLS/JLS/
+Reality/TLSMirror, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, general TCP mux or
+VMess inbound. Invalid header names/values and negative early-data sizes fail
+closed; broader Go acceptance/error wording remains outside this gate.
+
+### Phase 6D-H accepted scope — VMess HTTP/1 obfuscation and HTTP/2 streams
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-H VMess HTTP transports** and **Linux amd64 — Phase 6D-H
+VMess HTTP transports**. Existing listener, rule, controller and UDP claims do
+not expand.
+
+The accepted external paths are YAML through mixed HTTP/SOCKS TCP and rules to:
+
+- `network: http`, where the first VMess write is the exact body of one
+  HTTP/1.1 request and later writes are unframed; method, path candidates,
+  multi-value headers and Host override follow the pinned oracle;
+- plaintext HTTP and HTTPS outer connections, with HTTP/1.1 ALPN constrained
+  for TLS;
+- `network: h2`, where one HTTP/2 PUT request carries the VMess byte stream in
+  its request DATA frames and the response DATA frames form the receive stream;
+- configured/default HTTP/2 Host and path, the oracle's `https` pseudo-scheme
+  over plaintext h2c or TLS, SNI/certificate policy, and negotiated `h2` ALPN
+  for TLS;
+- representative zero and positive AlterID/security modes above both transports,
+  plus large relay, the oracle's response-dropping half-close behavior and
+  transport-failure process survival.
+
+`compat/scripts/phase6d_vmess_http.py` is the Go/Rust differential gate. The
+independent Go authority records HTTP/1 request line, Host, selected path,
+headers and exact first-body boundary, or HTTP/2 method/authority/path,
+ALPN and bidirectional stream lifecycle before invoking `sing-vmess`. Fixed
+single-element path/Host lists make the wire comparison deterministic; list
+selection is separately contract-tested as membership rather than order.
+
+This phase does not claim VMess UDP over HTTP/H2, HTTP connection pooling or
+multi-stream reuse, certificate pinning/client identity, custom ALPN, ECH,
+fingerprint emulation, ShadowTLS/ReSTLS/JLS/Reality/TLSMirror, gRPC/Gun,
+xHTTP/H3, mKCP, Mekya, general TCP mux or VMess inbound. Invalid methods,
+paths, header names/values and unsupported transport combinations fail closed;
+broader Go acceptance/error wording remains outside this gate.
+
+### Phase 6D-I accepted scope — VMess gRPC/Gun single streams
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-I VMess gRPC/Gun** and **Linux amd64 — Phase 6D-I VMess
+gRPC/Gun**. Existing listener, rule, controller and UDP claims do not expand.
+
+The accepted external path is YAML through mixed HTTP/SOCKS TCP and rules to
+one Gun stream per application connection:
+
+- `network: grpc` over plaintext h2c or TLS with negotiated `h2` ALPN;
+- HTTP/2 `POST`, `Content-Type: application/grpc`, oracle-default
+  `grpc-go/1.36.0` User-Agent, configured User-Agent override and the oracle's
+  `https` pseudo-scheme even over h2c;
+- default `GunService` and configured service names mapped to
+  `/<service>/Tun`, while names beginning with `/` remain exact custom paths;
+- Gun's five-byte gRPC prefix plus protobuf field-1 varint envelope around each
+  VMess write, with the inverse envelope removed from response DATA frames;
+- default authority selection (`server:port`) and explicit `servername`, plus
+  representative zero/positive AlterID and raw/AEAD/CFB body modes, large
+  relay, close behavior and process survival.
+
+`compat/scripts/phase6d_vmess_grpc.py` is the Go/Rust differential gate. Its
+independent Go authority validates method, authority, path, content type,
+User-Agent, TLS ALPN and Gun frame boundaries before invoking `sing-vmess`.
+It does not reuse Mihomo's Gun client/server implementation.
+
+This gate deliberately exercises only the default zero-valued `ping-interval`,
+`max-connections`, `min-streams` and `max-streams` configuration. Stateful
+transport reuse, concurrent stream balancing, keepalive ping and pool lifecycle
+advance independently in Phase 6D-J below. VMess UDP over Gun, advanced
+TLS/camouflage, xHTTP/H3, mKCP, Mekya, general TCP mux and VMess inbound remain
+outside Phase 6D-I.
+
+### Phase 6D-J accepted scope — VMess gRPC/Gun pooling and health ping
+
+This slice continues inventory rows `CFG-03`, `OUT-07` and `OUT-22`, and only
+changes the compatibility-matrix rows **Proxies and built-in proxy insertion**,
+outbound **VMess**, **Shared outbound transport/security variants**, **Darwin
+arm64 — Phase 6D-J VMess gRPC/Gun pool** and **Linux amd64 — Phase 6D-J VMess
+gRPC/Gun pool**. Existing listener, rule, controller and UDP claims do not
+expand.
+
+The accepted external path remains YAML through mixed HTTP/SOCKS TCP and rules,
+but concurrent application connections now share and balance reusable Gun
+transports:
+
+- all-zero pool controls preserve the oracle default of one physical HTTP/2
+  connection with independent concurrent logical streams;
+- positive `max-connections` and `min-streams` use the least-active transport
+  and create connections at the same threshold as Go;
+- when `max-connections` is not positive, positive `max-streams` caps logical
+  streams per physical connection with the same least-active selection;
+- signed pool values are accepted, including Go's non-positive disable
+  semantics; stream leases are released on every success/error/drop path;
+- positive `ping-interval` emits HTTP/2 health PING frames, requires an ACK
+  within the oracle's 15-second bound and retires failed transports; and
+- successful generation replacement retires the previous generation's idle
+  pool without aborting logical streams that are still active.
+
+`compat/scripts/phase6d_vmess_grpc_pool.py` is the Go/Rust differential gate.
+Its independent authority releases fixed concurrent-stream barriers, assigns
+physical-connection identities and parses raw h2c PING frames. The gate proves
+one-connection default reuse, the `2/2` connection/stream threshold, a
+one-stream-per-connection cap, ping followed by physical-connection reuse,
+signed option acceptance and process survival.
+
+This slice uses the maintained `h2` codec directly; a generated gRPC RPC library
+would add HTTP/2/protobuf policy while Gun requires only a byte-stream envelope
+and Mihomo-specific pool selection. Exact frame-activity-based ping scheduling,
+ACK-timeout fault injection and reload during live streams remain release/stress
+gates. VMess UDP over Gun, advanced TLS/camouflage, xHTTP/H3, mKCP, Mekya,
+general TCP mux and VMess inbound remain outside Phase 6D-J.
+
+### Phase 6D-K/L accepted scope — VMess mKCP and Mekya TCP
+
+These two adjacent transport slices continue inventory rows `CFG-03`, `OUT-07`
+and `OUT-22`. They only change the compatibility-matrix rows **Proxies and
+built-in proxy insertion**, outbound **VMess**, **Shared outbound
+transport/security variants**, and the corresponding Darwin/Linux Phase 6D-K/L
+platform rows. Listener, controller, rule and UDP claims do not expand.
+
+Phase 6D-K carries one VMess TCP session over V2Ray's custom mKCP wire format:
+
+- typed `mkcp-opts` parsing covers MTU, TTI, capacity, congestion, buffer sizes,
+  seed and header, with `network: kcp` retained as an alias;
+- the carrier implements V2Ray segment, ACK, retransmit and close messages,
+  default simple authentication and seeded AES-128-GCM authentication; and
+- no-op, SRTP, uTP, WeChat-video, DTLS and WireGuard camouflage headers are
+  exercised against an independent Go authority.
+
+Phase 6D-L carries the same mKCP packets through Mihomo's Mekya request/response
+packet bundles. The production client uses Hyper for HTTP framing and supports
+TLS with negotiated HTTP/2 or HTTP/1.1, polling intervals, maximum request size,
+long-lived response bodies and H2 pool selection. `mekya-opts.kcp` is normalized
+through the same typed mKCP boundary.
+
+`compat/scripts/phase6d_vmess_mkcp_mekya.py` is the shared Go/Rust differential
+gate. It validates all camouflage variants, seeded and default authentication,
+small and 128 KiB TCP relays, Mekya H2/HTTP1 negotiation, packet aggregation,
+pool configuration, independent-authority VMess CONNECT observations and
+process survival. Its semantic UDP relay additionally strips the simple
+authentication envelope only for inspection and applies the same segment-level
+faults to both products: 14% and 25% first-transmission DATA loss with
+congestion disabled/enabled, one ACK loss, duplication and reordering. Payload
+integrity, retransmission of every dropped segment and a Go-derived runaway
+bound must match.
+
+The same gate fixes close semantics to the oracle rather than inventing a
+transport FIN that mKCP does not have. For each of mKCP, Mekya H2 and Mekya
+HTTP/1.1, ten client write-half closes must produce the oracle's immediate EOF
+without an EOF-triggered response, while three peer closes must deliver the
+final payload followed by EOF. Focused Rust contracts pin Go's six-state
+connection lifecycle, smoothed RTT/RTO, fast-ACK and congestion-window formulas.
+
+This scope does not claim non-native-carrier UDP, an inbound/server endpoint,
+randomized long-duration network impairment, xHTTP/H3, advanced TLS camouflage
+or general TCP mux.
+
+### Phase 6E-A accepted scope — VLESS version-zero native-TCP client
+
+Phase 6E-A changes the configuration `Proxies and built-in proxy insertion`,
+outbound `VLESS` and Darwin/Linux Phase 6E-A rows. It implements one vertical
+slice: YAML `type: vless` -> mixed HTTP/SOCKS5 TCP -> rule/group/provider
+selection -> VLESS version-zero native TCP -> an independently implemented
+authority -> destination TCP. This is the first partial implementation of
+inventory row `OUT-08`.
+
+`rewrite-protocol-vless` owns the transport-independent request and response
+framing. It preserves the Go oracle's UUID parsing, including UUIDv5 with a nil
+namespace for non-UUID user strings; lazily emits the version-zero request with
+the first application payload in one write; encodes domain, IPv4 and IPv6
+destinations; accepts and consumes response addons; and keeps the TCP
+half-close lifecycle explicit. `rewrite-outbound` remains a thin dial facade,
+while runtime routing and controller/provider views consume the normalized
+typed configuration.
+
+`compat/scripts/phase6e_vless_tcp.py` is the shared Go/Rust differential gate.
+Its Python authority is independent of production protocol code and validates
+the exact request bytes, command and destination. The gate covers a canonical
+UUID and Go-compatible mapped user string, all address types, small and 128 KiB
+relays, a non-empty response addon, half-close, provider/selector/controller
+views, refused dials, bad response versions, process survival and invalid
+configuration. Explicit contracts prevent a matching pair of failures from
+being accepted as parity.
+
+This phase accepts only `network: tcp`, `tls: false`, `udp: false`, empty or
+`none` encryption and no flow or outer transport. The controller reports the
+Go default `xudp: true` capability field, but no UDP/XUDP data path is claimed.
+VLESS UDP/packet modes, encryption extensions, TLS, WebSocket/HTTP/H2/gRPC,
+Vision, Reality, multiplexing and inbound/server behavior remain later Phase
+6E slices. The framing is small and Mihomo-specific enough that no maintained,
+narrowly scoped VLESS crate preserves the required lazy-write and oracle UUID
+behavior; the local crate uses Tokio primitives and has byte-level contracts.
+
+### Phase 6E-B accepted scope — VLESS native TCP over TLS
+
+Phase 6E-B changes the same configuration and outbound `VLESS` rows plus the
+Darwin/Linux Phase 6E-B rows. It composes the Phase 6E-A VLESS v0 session over
+the existing maintained rustls carrier: YAML -> mixed TCP -> rule/group -> TCP
+dial -> TLS -> VLESS -> destination. The protocol crate remains independent of
+certificate and transport policy.
+
+The accepted configuration adds `tls: true`, `servername`/`sni`,
+`name-cert-verify`, `skip-cert-verify` and global inline custom roots. Like the
+Go oracle, dormant TLS name/verification fields are accepted when TLS is false
+and do not wrap the connection. Native VLESS TLS is also used by controller
+delay and automatic group health checks. Fingerprint pinning, client
+certificates, custom ALPN, ECH and camouflage-specific TLS are not included.
+
+`compat/scripts/phase6e_vless_tls.py` uses Python's TLS stack and an independent
+VLESS parser. It compares trusted-root verification, exact ClientHello SNI with
+an independent certificate verification name, skip verification, rejection of
+an untrusted root and wrong name, large relay, half-close, process survival and
+a real controller group health request. Matching failures cannot satisfy the
+gate because each product must meet explicit positive and negative contracts.
+
+This phase does not add WebSocket/HTTP/H2/gRPC/xHTTP carriers, Vision, Reality,
+VLESS encryption extensions, UDP/XUDP data paths, mux or inbound/server
+behavior. No new dependency is introduced: the shared `rewrite-transport` TLS
+adapter already owns roots, name policy, rustls configuration and handshake.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice
@@ -2149,6 +2694,37 @@ outside the comparison because the oracle schedules that check asynchronously.
 SOCKS5 health behavior in URL-test/load-balance groups, authentication and
 CONNECT status exhaustiveness, exact failure-window reset, delayed-handshake
 success reset, UDP/UoT and concurrent reload remain later gates.
+
+### Phase 6R-1 accepted scope — SS/VMess protocol ownership refactor
+
+This behavior-neutral slice changes inventory rows `OUT-04` and `OUT-07` and
+prepares, without implementing, the server boundary in `IN-08`. The exact
+compatibility-matrix rows revalidated are **Configuration surface — Proxies and
+built-in proxy insertion**, **Configuration surface — Named listeners**,
+**Inbound listeners — Shadowsocks**, **Remote adapters — Shadowsocks (`ss`)**,
+and the Darwin arm64 Phase 6C/6D platform rows. No VMess inbound or new protocol
+option is claimed.
+
+Accepted ownership boundary:
+
+- `rewrite-io` contains only the type-erased async duplex stream;
+- one crate each owns transport-independent Shadowsocks and VMess wire/session
+  behavior;
+- shared TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun and v2ray
+  mux carriers live in `rewrite-transport` with protocol-neutral names;
+- `rewrite-outbound` retains direct socket policy and thin adapter composition;
+- configuration parsing stays in `rewrite-config`, and runtime retains routing,
+  pooling ownership and listener lifecycle.
+
+Acceptance requires all moved unit tests, the Phase 6C client gates, corrected
+Phase 6C-N inbound gate and Phase 6D-A–J differentials to pass without semantic
+normalization changes. It also requires workspace fmt and all-target/all-feature
+clippy. The full workspace test is also run locally before merge; unrelated
+differential regression remains the GitHub Actions responsibility requested for
+this development workflow.
+
+This slice does not start VMess server framing, non-native-carrier UDP, mKCP,
+Mekya, advanced TLS/camouflage or general mux work.
 
 ## Phase 7 — advanced and project-specific protocols
 

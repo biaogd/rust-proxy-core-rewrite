@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions};
-use crate::tls::HttpProxyTls;
+use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 
 use super::tcp::command_handshake;
 use super::{Socks5ProxyError, connect_control};

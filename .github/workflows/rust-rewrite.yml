@@ -178,7 +178,7 @@ jobs:
           - shard: groups-providers
             regex: 'phase5c_[a-z0-9_]+\.py$'
           - shard: controller-services-outbound
-            regex: 'phase(5d|5e|6b|6c)_[a-z0-9_]+\.py$'
+            regex: 'phase(5d|5e|6b|6c|6d)_[a-z0-9_]+\.py$'
           - shard: local-runtime
             regex: 'phase5f_[a-z0-9_]+\.py$'
           - shard: builtins
@@ -264,6 +264,16 @@ jobs:
       PHASE5DMODES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DPROVIDERS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DPROXIES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DBVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DCVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DDVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DEVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DFVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DGVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DHVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DIVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6DJVMESS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DRULES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DSTORAGE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5DTRANSPORT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -386,6 +396,21 @@ jobs:
             compat/scripts/phase6c_shadowsocks_obfs_tls.py \
             compat/scripts/phase6c_shadowsocks_v2ray_plugin.py \
             compat/scripts/phase6c_shadowsocks_shadow_tls.py \
+            compat/scripts/phase6c_shadowtls_clienthello_regression.py \
+            compat/scripts/phase6c_shadowsocks_inbound.py \
+            compat/scripts/phase6d_vmess_tcp.py \
+            compat/scripts/phase6d_vmess_aead.py \
+            compat/scripts/phase6d_vmess_security.py \
+            compat/scripts/phase6d_vmess_alterid.py \
+            compat/scripts/phase6d_vmess_udp.py \
+            compat/scripts/phase6d_vmess_websocket.py \
+            compat/scripts/phase6d_vmess_websocket_variants.py \
+            compat/scripts/phase6d_vmess_http.py \
+            compat/scripts/phase6d_vmess_grpc.py \
+            compat/scripts/phase6d_vmess_grpc_pool.py \
+            compat/scripts/phase6d_vmess_mkcp_mekya.py \
+            compat/scripts/phase6e_vless_tcp.py \
+            compat/scripts/phase6e_vless_tls.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

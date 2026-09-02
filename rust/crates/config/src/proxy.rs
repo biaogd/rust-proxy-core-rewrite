@@ -13,6 +13,8 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
+    VlessProxyConfig, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -45,6 +47,13 @@ const SHADOWSOCKS_2022_CIPHERS: [&str; 4] = [
     "2022-blake3-chacha20-poly1305",
     "2022-blake3-chacha8-poly1305",
 ];
+
+pub(crate) fn supported_shadowsocks_cipher(cipher: &str) -> bool {
+    SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher)
+        || SHADOWSOCKS_2022_CIPHERS.contains(&cipher)
+}
 
 pub(crate) fn parse_proxies(
     proxies: Vec<RawProxy>,
@@ -122,6 +131,8 @@ pub(crate) fn parse_proxies(
                 )?);
             }
             Some("ss") => outbounds.push(parse_shadowsocks_proxy(name, proxy)?),
+            Some("vmess") => outbounds.push(parse_vmess_proxy(name, proxy)?),
+            Some("vless") => outbounds.push(parse_vless_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -147,6 +158,20 @@ fn parse_remote_proxy(
         || proxy.target_sub_rule.is_some()
         || (!allow_tls && has_tls_options)
         || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -205,6 +230,8 @@ fn parse_remote_proxy(
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -213,6 +240,20 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -244,14 +285,13 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let cipher = proxy
         .cipher
-        .filter(|cipher| {
-            SHADOWSOCKS_SIP004_AEAD_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_LEGACY_STREAM_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_EXTRA_AEAD_CIPHERS.contains(&cipher.as_str())
-                || SHADOWSOCKS_2022_CIPHERS.contains(&cipher.as_str())
-        })
+        .filter(|cipher| supported_shadowsocks_cipher(cipher))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
+    let client_fingerprint = proxy.client_fingerprint.filter(|value| !value.is_empty());
+    if let Some(ShadowsocksPluginConfig::ShadowTls { version, .. }) = &shadowsocks_plugin {
+        validate_shadow_tls_client_fingerprint(&name, client_fingerprint.as_deref(), *version)?;
+    }
     let udp_over_tcp_version = match proxy.udp_over_tcp_version.unwrap_or(0) {
         0 | 1 => 1,
         2 => 2,
@@ -272,12 +312,490 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        client_fingerprint,
         udp: proxy.udp.unwrap_or(false),
         udp_over_tcp: proxy.udp_over_tcp.unwrap_or(false),
         udp_over_tcp_version,
         shadowsocks_plugin,
+        vmess: None,
+        vless: None,
         headers: BTreeMap::new(),
+    })
+}
+
+fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let network = proxy.network.as_deref().unwrap_or("tcp");
+    let tls = proxy.tls.unwrap_or(false);
+    let has_tls_options = proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some();
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.headers.is_some()
+        || proxy.alter_id.unwrap_or_default() < 0
+        || !matches!(
+            network,
+            "tcp" | "ws" | "http" | "h2" | "grpc" | "mkcp" | "kcp" | "mekya"
+        )
+        || (!tls && has_tls_options)
+        || (network != "ws" && proxy.ws_opts.is_some())
+        || (network != "http" && proxy.http_opts.is_some())
+        || (network != "h2" && proxy.h2_opts.is_some())
+        || (network != "grpc" && proxy.grpc_opts.is_some())
+        || (!matches!(network, "mkcp" | "kcp") && proxy.mkcp_opts.is_some())
+        || (network != "mekya" && proxy.mekya_opts.is_some())
+        || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let (security, cipher) = parse_vmess_security(proxy.cipher.as_deref(), &name)?;
+    let packet_mode = parse_vmess_packet_mode(&proxy, &name)?;
+    let transport = parse_vmess_transport(network, &proxy, &name)?;
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let uuid = proxy
+        .uuid
+        .as_deref()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(|value| *value.as_bytes())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Vmess,
+        server,
+        port,
+        username: None,
+        password: None,
+        cipher: Some(cipher),
+        tls,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|name| !name.is_empty()),
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        udp: proxy.udp.unwrap_or(false),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: Some(VmessProxyConfig {
+            uuid,
+            alter_id: proxy.alter_id.unwrap_or_default(),
+            security,
+            packet_mode,
+            transport,
+            global_padding: proxy.global_padding.unwrap_or(false),
+            authenticated_length: proxy.authenticated_length.unwrap_or(false),
+        }),
+        vless: None,
+        headers: BTreeMap::new(),
+    })
+}
+
+fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let network = proxy.network.as_deref().unwrap_or("tcp");
+    let encryption = proxy.encryption.as_deref().unwrap_or("");
+    let tls = proxy.tls.unwrap_or(false);
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.cipher.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.flow.as_deref().is_some_and(|flow| !flow.is_empty())
+        || !matches!(encryption, "" | "none")
+        || network != "tcp"
+        || proxy.udp.unwrap_or(false)
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
+        || proxy.mkcp_opts.is_some()
+        || proxy.mekya_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.headers.is_some()
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let uuid_text = proxy.uuid.as_deref().unwrap_or("");
+    let uuid = uuid::Uuid::parse_str(uuid_text)
+        .unwrap_or_else(|_| uuid::Uuid::new_v5(&uuid::Uuid::nil(), uuid_text.as_bytes()));
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Vless,
+        server,
+        port,
+        username: None,
+        password: None,
+        cipher: None,
+        tls,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|name| !name.is_empty()),
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        udp: false,
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: Some(VlessProxyConfig {
+            uuid: *uuid.as_bytes(),
+            xudp: true,
+        }),
+        headers: BTreeMap::new(),
+    })
+}
+
+fn parse_vmess_transport(
+    network: &str,
+    proxy: &RawProxy,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    if network == "tcp" {
+        return Ok(VmessTransport::Tcp);
+    }
+    if matches!(network, "mkcp" | "kcp") {
+        return parse_vmess_mkcp(proxy.mkcp_opts.as_ref(), name).map(VmessTransport::Mkcp);
+    }
+    if network == "mekya" {
+        return parse_vmess_mekya(proxy.mekya_opts.as_ref(), name);
+    }
+    if network == "http" {
+        let options = proxy.http_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let method = options
+            .method
+            .filter(|method| !method.is_empty())
+            .unwrap_or_else(|| "GET".to_owned());
+        if http::Method::from_bytes(method.as_bytes()).is_err() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut paths = options.path.unwrap_or_default();
+        if paths.is_empty() {
+            paths.push("/".to_owned());
+        }
+        if paths.iter().any(|path| !path.starts_with('/')) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let headers = options.headers.unwrap_or_default();
+        if headers.iter().any(|(header, values)| {
+            http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                || values
+                    .iter()
+                    .any(|value| http::header::HeaderValue::from_str(value).is_err())
+        }) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VmessTransport::Http {
+            method,
+            paths,
+            headers,
+        });
+    }
+    if network == "h2" {
+        let options = proxy.h2_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut hosts = options.host.unwrap_or_default();
+        if hosts.is_empty() {
+            hosts.push("www.example.com".to_owned());
+        }
+        let path = options
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_owned());
+        if hosts.iter().any(|host| {
+            host.is_empty() || http::uri::Authority::from_maybe_shared(host.clone()).is_err()
+        }) || !path.starts_with('/')
+        {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        return Ok(VmessTransport::Http2 { hosts, path });
+    }
+    if network == "grpc" {
+        return parse_vmess_grpc_transport(proxy.grpc_opts.as_ref(), name);
+    }
+    let options = proxy.ws_opts.clone().unwrap_or_default();
+    if !options.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let max_early_data = options
+        .max_early_data
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?
+        .unwrap_or_default();
+    let early_data_header_name = options
+        .early_data_header_name
+        .filter(|name| !name.is_empty());
+    let http_upgrade = options.v2ray_http_upgrade.unwrap_or(false);
+    let http_upgrade_fast_open = options.v2ray_http_upgrade_fast_open.unwrap_or(false);
+    let path = options
+        .path
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "/".to_owned());
+    if !path.starts_with('/') {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(VmessTransport::WebSocket {
+        path,
+        headers: options.headers.unwrap_or_default(),
+        max_early_data,
+        early_data_header_name,
+        http_upgrade,
+        http_upgrade_fast_open,
+    })
+}
+
+fn parse_vmess_mkcp(
+    configured: Option<&crate::raw::RawVmessMkcpOptions>,
+    name: &str,
+) -> Result<VmessMkcpOptions, ConfigError> {
+    let options = configured.cloned().unwrap_or_default();
+    if !options.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let convert = |value: Option<i64>| {
+        value
+            .map(u32::try_from)
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))
+    };
+    Ok(VmessMkcpOptions {
+        mtu: convert(options.mtu)?,
+        tti: convert(options.tti)?,
+        uplink_capacity: convert(options.uplink_capacity)?,
+        downlink_capacity: convert(options.downlink_capacity)?,
+        congestion: options.congestion.unwrap_or(false),
+        write_buffer: convert(options.write_buffer)?,
+        read_buffer: convert(options.read_buffer)?,
+        seed: options.seed.unwrap_or_default(),
+        header: options.header.unwrap_or_default(),
+    })
+}
+
+fn parse_vmess_mekya(
+    configured: Option<&crate::raw::RawVmessMekyaOptions>,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    let options = configured.cloned().unwrap_or_default();
+    if !options.extra.is_empty()
+        || [
+            options.h2_pool_size,
+            options.max_write_delay,
+            options.max_request_size,
+            options.polling_interval_initial,
+            options.max_write_size,
+            options.max_write_duration_ms,
+            options.max_simultaneous_write_connection,
+            options.packet_writing_buffer,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value < 0)
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let url = normalize_mekya_url(options.url.as_deref(), name)?;
+    Ok(VmessTransport::Mekya(VmessMekyaOptions {
+        url,
+        h2_pool_size: options.h2_pool_size.unwrap_or_default(),
+        max_write_delay: options.max_write_delay.unwrap_or_default(),
+        max_request_size: options.max_request_size.unwrap_or_default(),
+        polling_interval_initial: options.polling_interval_initial.unwrap_or_default(),
+        max_write_size: options.max_write_size.unwrap_or_default(),
+        max_write_duration_ms: options.max_write_duration_ms.unwrap_or_default(),
+        max_simultaneous_write_connection: options
+            .max_simultaneous_write_connection
+            .unwrap_or_default(),
+        packet_writing_buffer: options.packet_writing_buffer.unwrap_or_default(),
+        kcp: parse_vmess_mkcp(options.kcp.as_ref(), name)?,
+    }))
+}
+
+fn normalize_mekya_url(configured: Option<&str>, name: &str) -> Result<String, ConfigError> {
+    let Some(configured) = configured.filter(|value| !value.is_empty()) else {
+        return Ok(String::new());
+    };
+    let candidate = if configured.contains("://") {
+        configured.to_owned()
+    } else {
+        format!("https://{configured}")
+    };
+    let parsed =
+        Url::parse(&candidate).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(parsed.to_string())
+}
+
+fn parse_vmess_grpc_transport(
+    grpc: Option<&crate::raw::RawVmessGrpcOptions>,
+    name: &str,
+) -> Result<VmessTransport, ConfigError> {
+    let options = grpc.cloned().unwrap_or_default();
+    if !options.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    let service_name = options
+        .grpc_service_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "GunService".to_owned());
+    let user_agent = options
+        .grpc_user_agent
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or_else(|| "grpc-go/1.36.0".to_owned());
+    let service_path = if service_name.starts_with('/') {
+        service_name.clone()
+    } else {
+        format!("/{service_name}/Tun")
+    };
+    if service_path.parse::<http::uri::PathAndQuery>().is_err()
+        || http::header::HeaderValue::from_str(&user_agent).is_err()
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(VmessTransport::Grpc {
+        service_name,
+        user_agent,
+        ping_interval: options.ping_interval.unwrap_or_default(),
+        max_connections: options.max_connections.unwrap_or_default(),
+        min_streams: options.min_streams.unwrap_or_default(),
+        max_streams: options.max_streams.unwrap_or_default(),
+    })
+}
+
+fn parse_vmess_security(
+    configured: Option<&str>,
+    name: &str,
+) -> Result<(VmessSecurity, String), ConfigError> {
+    let security = match configured.map(str::to_ascii_lowercase) {
+        Some(cipher) if cipher == "auto" => VmessSecurity::Auto,
+        Some(cipher) if matches!(cipher.as_str(), "none" | "zero") => VmessSecurity::None,
+        Some(cipher) if cipher == "aes-128-cfb" => VmessSecurity::Aes128Cfb,
+        Some(cipher) if cipher == "aes-128-gcm" => VmessSecurity::Aes128Gcm,
+        Some(cipher) if cipher == "chacha20-poly1305" => VmessSecurity::ChaCha20Poly1305,
+        _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    };
+    let cipher = match security {
+        VmessSecurity::Auto => "auto",
+        VmessSecurity::None => configured
+            .filter(|cipher| cipher.eq_ignore_ascii_case("zero"))
+            .map_or("none", |_| "zero"),
+        VmessSecurity::Aes128Cfb => "aes-128-cfb",
+        VmessSecurity::Aes128Gcm => "aes-128-gcm",
+        VmessSecurity::ChaCha20Poly1305 => "chacha20-poly1305",
+    };
+    Ok((security, cipher.to_owned()))
+}
+
+fn parse_vmess_packet_mode(proxy: &RawProxy, name: &str) -> Result<VmessPacketMode, ConfigError> {
+    let encoded_packet_mode = match proxy.packet_encoding.as_deref() {
+        None => None,
+        Some("packetaddr" | "packet") => Some(VmessPacketMode::PacketAddr),
+        Some("xudp") => Some(VmessPacketMode::Xudp),
+        Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    };
+    Ok(
+        if proxy.xudp.unwrap_or(false) || encoded_packet_mode == Some(VmessPacketMode::Xudp) {
+            VmessPacketMode::Xudp
+        } else if proxy.packet_addr.unwrap_or(false)
+            || encoded_packet_mode == Some(VmessPacketMode::PacketAddr)
+        {
+            VmessPacketMode::PacketAddr
+        } else {
+            VmessPacketMode::Standard
+        },
+    )
+}
+
+fn validate_shadow_tls_client_fingerprint(
+    proxy_name: &str,
+    fingerprint: Option<&str>,
+    version: u8,
+) -> Result<(), ConfigError> {
+    let Some(raw) = fingerprint.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if raw.eq_ignore_ascii_case("none") {
+        return Ok(());
+    }
+    if version == 1 {
+        return Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()));
+    }
+    if raw.eq_ignore_ascii_case("chrome") {
+        return Ok(());
+    }
+    Err(ConfigError::UnsupportedProxy(proxy_name.to_owned()))
+}
+
+pub(crate) fn shadowsocks_2022_cipher(cipher: &str) -> bool {
+    SHADOWSOCKS_2022_CIPHERS.contains(&cipher)
+}
+
+pub(crate) fn validate_shadowsocks_inbound_key(
+    cipher: &str,
+    password: &str,
+) -> Result<(), ConfigError> {
+    validate_shadowsocks_key("ss-config", cipher, password, false).map_err(|error| match error {
+        ConfigError::UnsupportedProxy(_) => ConfigError::InvalidInbound(format!(
+            "invalid shadowsocks inbound key for cipher {cipher}"
+        )),
+        other => other,
     })
 }
 
@@ -614,6 +1132,20 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.username.is_some()
         || proxy.password.is_some()
         || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()
@@ -650,6 +1182,8 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
         headers: BTreeMap::new(),
     }
 }
@@ -1008,6 +1542,8 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Http => "Http",
             ProxyKind::Socks5 => "Socks5",
             ProxyKind::Shadowsocks => "Shadowsocks",
+            ProxyKind::Vmess => "Vmess",
+            ProxyKind::Vless => "Vless",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",

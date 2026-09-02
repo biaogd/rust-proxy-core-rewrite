@@ -1,3 +1,4 @@
+use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +8,7 @@ use rewrite_config::{
     Config, DnsMode, HostEntry, ListenerKind, LoadBalanceStrategy, Mode, ProxyGroupKind, ProxyKind,
 };
 use rewrite_inbound::{BoxedInboundStream, InboundCommand, ListenerProtocol};
-use rewrite_model::{Destination, Host, Metadata, unmap_ip};
+use rewrite_model::{Destination, Host, InboundProtocol, Metadata, unmap_ip};
 use rewrite_rules::{LazyEvaluation, Route};
 use rewrite_state::{ConnectionGuard, RuntimeState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +35,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
+        ListenerKind::Shadowsocks => return,
     };
     let authentication = if config.skips_inbound_auth(peer.ip()) {
         &[]
@@ -75,6 +77,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => "DEFAULT-HTTP",
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
+        ListenerKind::Shadowsocks => return,
     }
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
@@ -145,6 +148,81 @@ pub(super) async fn serve_connection(
         return;
     }
 
+    relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn serve_shadowsocks_connection(
+    client: BoxedInboundStream,
+    mut metadata: Metadata,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) {
+    if let Ok(peer) = client.peer_addr() {
+        metadata.source_ip = Some(unmap_ip(peer.ip()));
+        metadata.source_port = peer.port();
+    }
+    if let Ok(local) = client.local_addr() {
+        metadata.inbound_port = local.port();
+    }
+    if metadata.inbound_name.is_empty() {
+        "DEFAULT-SHADOWSOCKS".clone_into(&mut metadata.inbound_name);
+    }
+    let fake_host = apply_host_mapping(&mut metadata, config, state);
+    let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+    let Some((decision, outbound_target, traversed_groups)) =
+        resolve_rematch_target(decision, &mut metadata, config, state)
+    else {
+        return;
+    };
+    let route = resolved_route(&outbound_target, config);
+    state.log(
+        "info",
+        format!(
+            "[TCP] {} --> {} match {} using {}",
+            metadata.source_port,
+            metadata.destination.authority(),
+            decision.matched_kind.as_deref().unwrap_or("none"),
+            decision.target
+        ),
+    );
+    let tracker = state.register(
+        &metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    if route == Route::Reject {
+        return;
+    }
+    if route == Route::RejectDrop {
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            () = tokio::time::sleep(Duration::from_mins(1)) => {}
+        }
+        return;
+    }
+    let Some(remote) = connect_tcp_outbound(
+        &metadata,
+        fake_host.as_deref(),
+        &decision.target,
+        (outbound_target, traversed_groups),
+        config,
+        state,
+        shutdown,
+    )
+    .await
+    else {
+        return;
+    };
+    if matches!(remote, TcpOutbound::Dns) {
+        relay_dns_tcp(client, &[], config, state, dns_service, tracker, shutdown).await;
+        return;
+    }
+    let TcpOutbound::Stream(remote) = remote else {
+        unreachable!("DNS outbound was handled")
+    };
     relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
 }
 
@@ -306,7 +384,7 @@ pub(super) async fn connect_tcp_outbound(
                 proxy,
                 &metadata.destination,
                 config.ipv6,
-                state.clock(),
+                state,
                 &config.trust_certificates,
                 config.dns.as_ref(),
                 direct_tcp_options(config),
@@ -345,18 +423,13 @@ pub(super) async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
     allow_ipv6: bool,
-    clock: Arc<rewrite_services::AdjustedClock>,
+    state: &RuntimeState,
     custom_roots: &[String],
     dns: Option<&rewrite_config::DnsConfig>,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
-    };
+    let clock = state.clock();
+    let server = proxy_server(proxy);
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -366,21 +439,10 @@ pub(super) async fn connect_configured_proxy(
         }
         ProxyKind::Http => {
             let credentials = proxy.http_credentials();
-            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
-                server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: &[],
-                tls12_only: false,
-                tls13_only: false,
-                client_hello_fingerprint: None,
-                client_hello_fingerprint_mlkem: true,
-            });
+            let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+            let tls = proxy
+                .tls
+                .then(|| proxy_tls_options(proxy, server_name, custom_roots));
             rewrite_outbound::connect_http_with_options(
                 &server,
                 destination,
@@ -395,21 +457,9 @@ pub(super) async fn connect_configured_proxy(
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
         }
         ProxyKind::Socks5 => {
-            let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
-                server_name: &proxy.server,
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: &[],
-                tls12_only: false,
-                tls13_only: false,
-                client_hello_fingerprint: None,
-                client_hello_fingerprint_mlkem: true,
-            });
+            let tls = proxy
+                .tls
+                .then(|| proxy_tls_options(proxy, &proxy.server, custom_roots));
             rewrite_outbound::connect_socks5_with_options(
                 &server,
                 destination,
@@ -434,10 +484,550 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::Vmess => {
+            connect_vmess_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                state,
+                custom_roots,
+                socket_options,
+            )
+            .await
+        }
+        ProxyKind::Vless => {
+            connect_vless_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                state,
+                custom_roots,
+                socket_options,
+            )
+            .await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
+    Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    }
+}
+
+fn proxy_tls_options<'a>(
+    proxy: &'a rewrite_config::ProxyConfig,
+    server_name: &'a str,
+    custom_roots: &'a [String],
+) -> rewrite_outbound::HttpProxyTls<'a> {
+    rewrite_outbound::HttpProxyTls {
+        server_name,
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: proxy.fingerprint.as_deref(),
+        certificate: proxy.certificate.as_deref(),
+        private_key: proxy.private_key.as_deref(),
+        custom_roots,
+        ech_config: None,
+        alpn_protocols: &[],
+        tls12_only: false,
+        tls13_only: false,
+    }
+}
+
+async fn connect_vless_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let vless = proxy
+        .vless
+        .as_ref()
+        .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
+    let mut outer: rewrite_outbound::BoxedOutboundStream = Box::new(
+        rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+            .await
+            .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
+    );
+    if proxy.tls {
+        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            proxy_tls_options(proxy, server_name, custom_roots),
+            Some(state.clock()),
+        )
+        .await
+        .map_err(|error| format!("VLESS outer TLS connection failed: {error}"))?;
+    }
+    rewrite_outbound::connect_vless_on_stream(
+        outer,
+        destination,
+        rewrite_outbound::VlessTcpOptions { uuid: vless.uuid },
+    )
+    .map_err(|error| format!("VLESS proxy connection failed: {error}"))
+}
+
+async fn connect_vmess_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let clock = state.clock();
+    let vmess = proxy
+        .vmess
+        .as_ref()
+        .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
+    let security = outbound_vmess_security(vmess.security);
+    let outer = if let rewrite_config::VmessTransport::Mkcp(options) = &vmess.transport {
+        connect_vmess_mkcp_outer(
+            proxy,
+            server,
+            options,
+            allow_ipv6,
+            Arc::clone(&clock),
+            custom_roots,
+            socket_options,
+        )
+        .await?
+    } else if let rewrite_config::VmessTransport::Mekya(options) = &vmess.transport {
+        connect_vmess_mekya_outer(
+            proxy,
+            server,
+            options,
+            allow_ipv6,
+            Arc::clone(&clock),
+            custom_roots,
+            socket_options,
+        )?
+    } else if let rewrite_config::VmessTransport::Grpc {
+        service_name,
+        user_agent,
+        ping_interval,
+        max_connections,
+        min_streams,
+        max_streams,
+    } = &vmess.transport
+    {
+        let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+        let options = rewrite_outbound::VmessGrpcClientOptions {
+            host,
+            service_name: service_name.clone(),
+            user_agent: user_agent.clone(),
+            ping_interval: *ping_interval,
+            max_connections: *max_connections,
+            min_streams: *min_streams,
+            max_streams: *max_streams,
+        };
+        let identity =
+            format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+        let client = state
+            .vmess_grpc_client(&proxy.name, identity, options)
+            .await;
+        client
+            .connect(|| async {
+                connect_vmess_physical_outer(
+                    proxy,
+                    server,
+                    vmess,
+                    allow_ipv6,
+                    Arc::clone(&clock),
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+                .map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| format!("VMess gRPC transport failed: {error}"))?
+    } else {
+        connect_vmess_outer(
+            proxy,
+            server,
+            vmess,
+            allow_ipv6,
+            clock,
+            custom_roots,
+            socket_options,
+        )
+        .await?
+    };
+    rewrite_outbound::connect_vmess_on_stream(
+        outer,
+        destination,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
+            security,
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
+    )
+    .await
+    .map_err(|error| format!("VMess proxy connection failed: {error}"))
+}
+
+fn outbound_vmess_security(
+    security: rewrite_config::VmessSecurity,
+) -> rewrite_outbound::VmessSecurity {
+    match security {
+        rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
+        rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
+        rewrite_config::VmessSecurity::Aes128Cfb => rewrite_outbound::VmessSecurity::Aes128Cfb,
+        rewrite_config::VmessSecurity::Aes128Gcm => rewrite_outbound::VmessSecurity::Aes128Gcm,
+        rewrite_config::VmessSecurity::ChaCha20Poly1305 => {
+            rewrite_outbound::VmessSecurity::ChaCha20Poly1305
+        }
+    }
+}
+
+fn mkcp_transport_options(
+    options: &rewrite_config::VmessMkcpOptions,
+) -> rewrite_outbound::MkcpConfig {
+    rewrite_outbound::MkcpConfig {
+        mtu: options.mtu,
+        tti: options.tti,
+        uplink_capacity: options.uplink_capacity,
+        downlink_capacity: options.downlink_capacity,
+        congestion: options.congestion,
+        write_buffer: options.write_buffer,
+        read_buffer: options.read_buffer,
+        seed: options.seed.clone(),
+        header: options.header.clone(),
+    }
+}
+
+async fn connect_vmess_mkcp_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    options: &rewrite_config::VmessMkcpOptions,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let socket = rewrite_outbound::connect_udp_with_options(server, allow_ipv6, socket_options)
+        .await
+        .map_err(|error| format!("VMess mKCP UDP connection failed: {error}"))?;
+    let mut outer = rewrite_outbound::connect_mkcp(socket, mkcp_transport_options(options))
+        .map_err(|error| format!("VMess mKCP transport failed: {error}"))?;
+    if proxy.tls {
+        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: &[],
+                tls12_only: false,
+                tls13_only: false,
+            },
+            Some(clock),
+        )
+        .await
+        .map_err(|error| format!("VMess mKCP TLS connection failed: {error}"))?;
+    }
+    Ok(outer)
+}
+
+fn connect_vmess_mekya_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    options: &rewrite_config::VmessMekyaOptions,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let destination = server.clone();
+    let interface = socket_options.interface.to_owned();
+    let routing_mark = socket_options.routing_mark;
+    let keep_alive_idle = socket_options.keep_alive_idle;
+    let keep_alive_interval = socket_options.keep_alive_interval;
+    let disable_keep_alive = socket_options.disable_keep_alive;
+    let tcp_concurrent = socket_options.tcp_concurrent;
+    let tls = proxy.tls;
+    let server_name = proxy.sni.clone().unwrap_or_else(|| proxy.server.clone());
+    let verification_name = proxy.name_cert_verify.clone();
+    let skip_certificate_verification = proxy.skip_cert_verify;
+    let fingerprint = proxy.fingerprint.clone();
+    let certificate = proxy.certificate.clone();
+    let private_key = proxy.private_key.clone();
+    let roots = custom_roots.to_vec();
+    let connector: Arc<dyn rewrite_outbound::MekyaConnector> = Arc::new(move || {
+        let destination = destination.clone();
+        let interface = interface.clone();
+        let server_name = server_name.clone();
+        let verification_name = verification_name.clone();
+        let fingerprint = fingerprint.clone();
+        let certificate = certificate.clone();
+        let private_key = private_key.clone();
+        let roots = roots.clone();
+        let clock = Arc::clone(&clock);
+        async move {
+            let remote = rewrite_outbound::connect_with_options(
+                &destination,
+                allow_ipv6,
+                rewrite_outbound::DirectTcpOptions {
+                    interface: &interface,
+                    routing_mark,
+                    keep_alive_idle,
+                    keep_alive_interval,
+                    disable_keep_alive,
+                    tcp_concurrent,
+                },
+            )
+            .await
+            .map_err(io::Error::other)?;
+            let stream = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
+            if !tls {
+                return Ok(rewrite_outbound::MekyaConnection {
+                    stream,
+                    negotiated_h2: false,
+                });
+            }
+            let (stream, alpn) = rewrite_outbound::wrap_client_tls_with_alpn(
+                stream,
+                rewrite_outbound::HttpProxyTls {
+                    server_name: &server_name,
+                    verification_name: verification_name.as_deref(),
+                    skip_certificate_verification,
+                    fingerprint: fingerprint.as_deref(),
+                    certificate: certificate.as_deref(),
+                    private_key: private_key.as_deref(),
+                    custom_roots: &roots,
+                    ech_config: None,
+                    alpn_protocols: &[b"h2", b"http/1.1"],
+                    tls12_only: false,
+                    tls13_only: false,
+                },
+                Some(clock),
+            )
+            .await
+            .map_err(io::Error::other)?;
+            Ok(rewrite_outbound::MekyaConnection {
+                stream,
+                negotiated_h2: alpn.as_deref() == Some(b"h2"),
+            })
+        }
+    });
+    let url = if options.url.is_empty() {
+        format!("https://{}", server.authority())
+    } else {
+        options.url.clone()
+    };
+    rewrite_outbound::connect_mekya(
+        &connector,
+        rewrite_outbound::MekyaOptions {
+            url,
+            h2_pool_size: options.h2_pool_size,
+            max_write_delay: options.max_write_delay,
+            max_request_size: options.max_request_size,
+            polling_interval_initial: options.polling_interval_initial,
+            max_write_size: options.max_write_size,
+            max_write_duration_ms: options.max_write_duration_ms,
+            max_simultaneous_write_connection: options.max_simultaneous_write_connection,
+            packet_writing_buffer: options.packet_writing_buffer,
+            kcp: mkcp_transport_options(&options.kcp),
+        },
+    )
+    .map_err(|error| format!("VMess Mekya transport failed: {error}"))
+}
+
+async fn connect_vmess_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let outer = connect_vmess_physical_outer(
+        proxy,
+        server,
+        vmess,
+        allow_ipv6,
+        clock,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    wrap_vmess_transport(outer, proxy, server, vmess).await
+}
+
+async fn connect_vmess_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+    allow_ipv6: bool,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let remote = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+        .await
+        .map_err(|error| format!("VMess outer TCP connection failed: {error}"))?;
+    let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
+    let websocket = match &vmess.transport {
+        rewrite_config::VmessTransport::Tcp
+        | rewrite_config::VmessTransport::Mkcp(_)
+        | rewrite_config::VmessTransport::Mekya(_)
+        | rewrite_config::VmessTransport::Http { .. }
+        | rewrite_config::VmessTransport::Http2 { .. }
+        | rewrite_config::VmessTransport::Grpc { .. } => None,
+        rewrite_config::VmessTransport::WebSocket {
+            path,
+            headers,
+            max_early_data,
+            early_data_header_name,
+            http_upgrade,
+            http_upgrade_fast_open,
+        } => Some((
+            path.as_str(),
+            headers,
+            *max_early_data,
+            early_data_header_name.as_deref(),
+            *http_upgrade,
+            *http_upgrade_fast_open,
+        )),
+    };
+    if proxy.tls {
+        let websocket_host = websocket.and_then(|(_, headers, ..)| {
+            headers.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("host").then_some(value.as_str())
+            })
+        });
+        let server_name = proxy
+            .sni
+            .as_deref()
+            .or(websocket_host)
+            .unwrap_or(&proxy.server);
+        let alpn: &[&[u8]] = match &vmess.transport {
+            rewrite_config::VmessTransport::WebSocket { .. }
+            | rewrite_config::VmessTransport::Http { .. } => &[b"http/1.1"],
+            rewrite_config::VmessTransport::Http2 { .. }
+            | rewrite_config::VmessTransport::Grpc { .. } => &[b"h2"],
+            rewrite_config::VmessTransport::Tcp => &[],
+            rewrite_config::VmessTransport::Mkcp(_) | rewrite_config::VmessTransport::Mekya(_) => {
+                &[]
+            }
+        };
+        outer = rewrite_outbound::wrap_client_tls_with_options(
+            outer,
+            rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: alpn,
+                tls12_only: false,
+                tls13_only: false,
+            },
+            Some(clock),
+        )
+        .await
+        .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
+    }
+    Ok(outer)
+}
+
+async fn wrap_vmess_transport(
+    mut outer: rewrite_outbound::BoxedOutboundStream,
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    match &vmess.transport {
+        rewrite_config::VmessTransport::WebSocket {
+            path,
+            headers,
+            max_early_data,
+            early_data_header_name,
+            http_upgrade,
+            http_upgrade_fast_open,
+        } => {
+            if *http_upgrade {
+                outer = rewrite_outbound::connect_http_upgrade_with_early_data(
+                    outer,
+                    &proxy.server,
+                    path,
+                    headers,
+                    *http_upgrade_fast_open,
+                    *max_early_data,
+                    early_data_header_name.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("VMess HTTP Upgrade failed: {error}"))?;
+            } else {
+                outer = rewrite_outbound::connect_websocket_with_early_data(
+                    outer,
+                    &proxy.server,
+                    proxy.port,
+                    path,
+                    headers,
+                    *max_early_data,
+                    early_data_header_name.as_deref(),
+                )
+                .await
+                .map_err(|error| format!("VMess WebSocket upgrade failed: {error}"))?;
+            }
+        }
+        rewrite_config::VmessTransport::Http {
+            method,
+            paths,
+            headers,
+        } => {
+            outer =
+                rewrite_outbound::connect_vmess_http(outer, &proxy.server, method, paths, headers);
+        }
+        rewrite_config::VmessTransport::Http2 { hosts, path } => {
+            let index = rand::random_range(0..hosts.len());
+            outer = rewrite_outbound::connect_vmess_h2(outer, &hosts[index], path)
+                .await
+                .map_err(|error| format!("VMess HTTP/2 transport failed: {error}"))?;
+        }
+        rewrite_config::VmessTransport::Grpc {
+            service_name,
+            user_agent,
+            ..
+        } => {
+            let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+            outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
+                .await
+                .map_err(|error| format!("VMess gRPC transport failed: {error}"))?;
+        }
+        rewrite_config::VmessTransport::Tcp
+        | rewrite_config::VmessTransport::Mkcp(_)
+        | rewrite_config::VmessTransport::Mekya(_) => {}
+    }
+    Ok(outer)
 }
 
 async fn connect_shadowsocks_proxy(
@@ -533,6 +1123,94 @@ pub(super) fn configured_proxy<'a>(
                 .flat_map(|provider| provider.proxies.iter()),
         )
         .find(|proxy| proxy.name == name)
+}
+
+pub(super) fn parse_handshake_dest(dest: &str) -> Result<Destination, String> {
+    if let Ok(address) = dest.parse::<std::net::SocketAddr>() {
+        return Ok(Destination {
+            host: Host::Ip(address.ip()),
+            port: address.port(),
+        });
+    }
+    let (host, port) = dest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid handshake dest: {dest}"))?;
+    let port = port
+        .parse()
+        .map_err(|_| format!("invalid handshake dest port: {dest}"))?;
+    Ok(Destination {
+        host: Host::Domain(host.to_owned()),
+        port,
+    })
+}
+
+pub(super) async fn dial_shadow_tls_handshake(
+    dest: &str,
+    proxy: Option<&str>,
+    config: &Config,
+    state: &RuntimeState,
+    shutdown: &CancellationToken,
+) -> Result<rewrite_outbound::BoxedOutboundStream, std::io::Error> {
+    let destination = parse_handshake_dest(dest).map_err(std::io::Error::other)?;
+    let mut metadata = Metadata::new(destination, InboundProtocol::Inner);
+    metadata.network = rewrite_model::Network::Tcp;
+
+    let (decision, outbound_target, traversed_groups) =
+        if let Some(proxy_name) = proxy.filter(|name| !name.is_empty()) {
+            let decision = rewrite_rules::Decision {
+                target: proxy_name.to_owned(),
+                matched_kind: None,
+                rematch_cycle: false,
+                rematch_name: String::new(),
+                special_rules: String::new(),
+            };
+            resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("shadow-tls handshake proxy not found: {proxy_name}"),
+                )
+            })?
+        } else {
+            let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+            resolve_rematch_target(decision, &mut metadata, config, state).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "shadow-tls handshake routing failed",
+                )
+            })?
+        };
+    let route = resolved_route(&outbound_target, config);
+    if route == Route::Reject || matches!(outbound_target.as_str(), "REJECT" | "REJECT-DROP") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "shadow-tls handshake route rejected",
+        ));
+    }
+    tokio::select! {
+        () = shutdown.cancelled() => Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "shadow-tls handshake dial cancelled",
+        )),
+        result = connect_tcp_outbound(
+            &metadata,
+            None,
+            &decision.target,
+            (outbound_target, traversed_groups),
+            config,
+            state,
+            shutdown,
+        ) => match result {
+            Some(TcpOutbound::Stream(stream)) => Ok(stream),
+            Some(TcpOutbound::Dns) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "shadow-tls handshake destination resolved to DNS outbound",
+            )),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "shadow-tls handshake outbound connection failed",
+            )),
+        }
+    }
 }
 
 pub(super) fn resolve_rematch_target(

@@ -22,7 +22,7 @@ pub(crate) struct RuntimeTask {
     pub(crate) handle: JoinHandle<()>,
 }
 
-pub(crate) type ListenerKey = (ListenerKind, u16, SocketAddr);
+pub(crate) type ListenerKey = (ListenerKind, u16, SocketAddr, String);
 
 pub(crate) enum LocalTcpListener {
     Plain(TcpListener),

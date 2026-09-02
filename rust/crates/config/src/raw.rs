@@ -11,6 +11,8 @@ pub(crate) struct RawConfig {
     pub(crate) redir_port: Option<i64>,
     pub(crate) tproxy_port: Option<i64>,
     pub(crate) mixed_port: Option<i64>,
+    pub(crate) ss_config: Option<String>,
+    pub(crate) listeners: Option<Vec<Mapping>>,
     pub(crate) allow_lan: Option<bool>,
     pub(crate) bind_address: Option<String>,
     pub(crate) skip_auth_prefixes: Option<Vec<String>>,
@@ -206,12 +208,30 @@ pub(crate) struct RawProxy {
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
     pub(crate) cipher: Option<String>,
+    pub(crate) uuid: Option<String>,
+    pub(crate) flow: Option<String>,
+    pub(crate) encryption: Option<String>,
+    #[serde(rename = "alterId", alias = "alter-id")]
+    pub(crate) alter_id: Option<i64>,
+    pub(crate) network: Option<String>,
+    pub(crate) global_padding: Option<bool>,
+    pub(crate) authenticated_length: Option<bool>,
     pub(crate) tls: Option<bool>,
     pub(crate) udp: Option<bool>,
+    pub(crate) packet_addr: Option<bool>,
+    pub(crate) xudp: Option<bool>,
+    pub(crate) packet_encoding: Option<String>,
+    pub(crate) ws_opts: Option<RawVmessWebSocketOptions>,
+    pub(crate) http_opts: Option<RawVmessHttpOptions>,
+    pub(crate) h2_opts: Option<RawVmessHttp2Options>,
+    pub(crate) grpc_opts: Option<RawVmessGrpcOptions>,
+    pub(crate) mkcp_opts: Option<RawVmessMkcpOptions>,
+    pub(crate) mekya_opts: Option<RawVmessMekyaOptions>,
     pub(crate) udp_over_tcp: Option<bool>,
     pub(crate) udp_over_tcp_version: Option<i64>,
     pub(crate) plugin: Option<String>,
     pub(crate) plugin_opts: Option<BTreeMap<String, Value>>,
+    #[serde(alias = "servername")]
     pub(crate) sni: Option<String>,
     pub(crate) skip_cert_verify: Option<bool>,
     pub(crate) name_cert_verify: Option<String>,
@@ -221,6 +241,84 @@ pub(crate) struct RawProxy {
     #[serde(rename = "client-fingerprint")]
     pub(crate) client_fingerprint: Option<String>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessWebSocketOptions {
+    pub(crate) path: Option<String>,
+    pub(crate) headers: Option<BTreeMap<String, String>>,
+    pub(crate) max_early_data: Option<i64>,
+    pub(crate) early_data_header_name: Option<String>,
+    pub(crate) v2ray_http_upgrade: Option<bool>,
+    pub(crate) v2ray_http_upgrade_fast_open: Option<bool>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessHttpOptions {
+    pub(crate) method: Option<String>,
+    pub(crate) path: Option<Vec<String>>,
+    pub(crate) headers: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessHttp2Options {
+    pub(crate) host: Option<Vec<String>>,
+    pub(crate) path: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessGrpcOptions {
+    pub(crate) grpc_service_name: Option<String>,
+    pub(crate) grpc_user_agent: Option<String>,
+    pub(crate) ping_interval: Option<i64>,
+    pub(crate) max_connections: Option<i64>,
+    pub(crate) min_streams: Option<i64>,
+    pub(crate) max_streams: Option<i64>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessMkcpOptions {
+    pub(crate) mtu: Option<i64>,
+    pub(crate) tti: Option<i64>,
+    pub(crate) uplink_capacity: Option<i64>,
+    pub(crate) downlink_capacity: Option<i64>,
+    pub(crate) congestion: Option<bool>,
+    pub(crate) write_buffer: Option<i64>,
+    pub(crate) read_buffer: Option<i64>,
+    pub(crate) seed: Option<String>,
+    pub(crate) header: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawVmessMekyaOptions {
+    pub(crate) url: Option<String>,
+    pub(crate) h2_pool_size: Option<i64>,
+    pub(crate) max_write_delay: Option<i64>,
+    pub(crate) max_request_size: Option<i64>,
+    pub(crate) polling_interval_initial: Option<i64>,
+    pub(crate) max_write_size: Option<i64>,
+    pub(crate) max_write_duration_ms: Option<i64>,
+    pub(crate) max_simultaneous_write_connection: Option<i64>,
+    pub(crate) packet_writing_buffer: Option<i64>,
+    pub(crate) kcp: Option<RawVmessMkcpOptions>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }
