@@ -2944,3 +2944,50 @@ fn parses_phase6e_c_vless_websocket_scope() {
         );
     }
 }
+
+#[test]
+fn parses_phase6e_d_vless_http_scope() {
+    let config = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-http\n    type: vless\n    server: 127.0.0.1\n    port: 10003\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: http\n    http-opts:\n      method: POST\n      path: [/plain-http]\n      headers:\n        Host: [front-http.phase6e.test]\n        X-Phase: [6e-d]\n"
+    ))
+    .expect("Phase 6E-D VLESS HTTP config");
+    let proxy = &config.proxies[0];
+    let vless = proxy.vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        vless.transport,
+        VlessTransport::Http {
+            method: "POST".to_owned(),
+            paths: vec!["/plain-http".to_owned()],
+            headers: BTreeMap::from([
+                ("Host".to_owned(), vec!["front-http.phase6e.test".to_owned()]),
+                ("X-Phase".to_owned(), vec!["6e-d".to_owned()]),
+            ]),
+        }
+    );
+
+    let h2 = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: vless-h2\n    type: vless\n    server: 127.0.0.1\n    port: 10444\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    encryption: none\n    network: h2\n    tls: true\n    servername: dot.phase4.test\n    h2-opts:\n      host: [front-h2.phase6e.test]\n      path: /secure-h2\n"
+    ))
+    .expect("Phase 6E-D VLESS H2 config");
+    assert!(h2.proxies[0].tls);
+    let h2_vless = h2.proxies[0].vless.as_ref().expect("typed VLESS config");
+    assert_eq!(
+        h2_vless.transport,
+        VlessTransport::Http2 {
+            hosts: vec!["front-h2.phase6e.test".to_owned()],
+            path: "/secure-h2".to_owned(),
+        }
+    );
+
+    let rejected = [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: http\n    ws-opts:\n      path: /wrong\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: h2\n    http-opts:\n      method: GET\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    h2-opts:\n      path: /wrong\n",
+    ];
+    for body in rejected {
+        assert!(
+            Config::from_yaml(&format!("{body}")).is_err(),
+            "expected rejection for {body}"
+        );
+    }
+}

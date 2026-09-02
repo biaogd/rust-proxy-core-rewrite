@@ -228,6 +228,15 @@ pub struct VlessProxyConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VlessTransport {
     Tcp,
+    Http {
+        method: String,
+        paths: Vec<String>,
+        headers: BTreeMap<String, Vec<String>>,
+    },
+    Http2 {
+        hosts: Vec<String>,
+        path: String,
+    },
     WebSocket {
         path: String,
         headers: BTreeMap<String, String>,
