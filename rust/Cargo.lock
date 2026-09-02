@@ -269,9 +269,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.18.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -280,9 +280,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.44.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
@@ -2520,9 +2520,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.226"
+version = "2.1.227"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc88482eea924ca3a2f56a547454169af58deef35567965eb4fc2392a834841"
+checksum = "3f0cffaf73d7ddfcac086f59915dfadbc20fca870867e5efbfbc6e904416e0f6"
 dependencies = [
  "psl-types",
 ]
@@ -2847,7 +2847,7 @@ dependencies = [
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-util",
  "tower",
- "tower-http 0.7.0",
+ "tower-http 0.7.1",
  "url",
 ]
 
@@ -3139,15 +3139,15 @@ dependencies = [
  "rand 0.10.2",
  "rewrite-io",
  "rewrite-services",
- "rustls 0.23.43",
+ "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.2)",
  "rustls-native-certs",
  "rustls-pemfile",
  "sha1 0.10.7",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
- "tokio-rustls 0.26.4",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.2)",
  "tokio-tungstenite",
  "tokio-util",
  "tower",
@@ -3239,11 +3239,12 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "brotli",
  "brotli-decompressor",
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3255,12 +3256,12 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+source = "git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.2#36891781254e1e0189f02d52313c4b8a1c126f04"
 dependencies = [
  "aws-lc-rs",
  "brotli",
  "brotli-decompressor",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3731,9 +3732,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "sntpc"
@@ -4014,18 +4015,19 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
- "rustls 0.23.43",
+ "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
 ]
 
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+source = "git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.2#36891781254e1e0189f02d52313c4b8a1c126f04"
 dependencies = [
- "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?tag=rustls-0.23.43-shadow.2)",
  "tokio",
 ]
 
@@ -4128,9 +4130,9 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
+checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
 dependencies = [
  "bitflags",
  "bytes",
