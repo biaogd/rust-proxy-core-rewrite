@@ -150,6 +150,12 @@ pub async fn serve_unix(
 
 #[cfg(windows)]
 /// Creates the first Windows named-pipe server instance as a bind barrier.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::InvalidInput`] when `name` is not a Windows
+/// named-pipe path, or the operating-system error returned while creating the
+/// first server instance.
 pub fn prepare_named_pipe(name: &str) -> std::io::Result<NamedPipeServer> {
     if !name.starts_with(r"\\.\pipe\") {
         return Err(std::io::Error::new(
