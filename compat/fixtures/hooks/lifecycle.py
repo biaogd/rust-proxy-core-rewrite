@@ -61,6 +61,11 @@ def record_observation(path: pathlib.Path, observation: str) -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "mark":
+        if len(sys.argv) != 4:
+            raise ValueError("mark expects exactly a record path and an observation")
+        record_observation(pathlib.Path(sys.argv[2]), sys.argv[3])
+        return
     action, record_name, mixed, controller, dns = sys.argv[1:]
     ports = [int(mixed), int(controller), int(dns)]
     record = pathlib.Path(record_name)

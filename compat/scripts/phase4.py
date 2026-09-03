@@ -189,7 +189,7 @@ def tcp_query(port: int, query: bytes) -> bytes:
 def wait_dns_ready(process: subprocess.Popen[bytes], port: int) -> None:
     # Startup competes with parallel build/test shards on CI. This is only the
     # process-readiness window; individual DNS I/O still uses IO_DEADLINE.
-    deadline = time.monotonic() + (2 * IO_DEADLINE) + 1
+    deadline = time.monotonic() + max(30.0, (4 * IO_DEADLINE) + 1)
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"DNS candidate exited with {process.returncode}")

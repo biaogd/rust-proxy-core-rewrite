@@ -79,7 +79,20 @@ def start_case(
         + f"external-controller: 127.0.0.1:{reserve_port()}\n"
     )
     process, stdout, stderr = launch(binary, config, scratch)
-    wait_dns_ready(process, dns_port)
+    try:
+        wait_dns_ready(process, dns_port)
+    except Exception as error:
+        stdout.flush()
+        stderr.flush()
+        output = (scratch / "stdout.log").read_text(errors="replace") + (
+            scratch / "stderr.log"
+        ).read_text(errors="replace")
+        if process.poll() is None:
+            stop(process)
+        stdout.close()
+        stderr.close()
+        stop_authority(authority)
+        raise AssertionError(f"{error}; candidate output: {output[-4000:]!r}") from error
     time.sleep(0.1)
     return authority, observation, dns_port, config, stdout, stderr, process
 
@@ -150,6 +163,13 @@ def exercise_bounded_retry(binary: pathlib.Path, scratch: pathlib.Path) -> dict[
     )
     try:
         first = query(dns_port, "before-retry.doq.phase4.test", 0xB310)
+        read_authority(
+            path,
+            lambda current: current["connections"] == 1
+            and current["active_connections"] == 1
+            and current["queries"] == 1
+            and current["active_streams"] == 0,
+        )
         second = query(dns_port, "during-retry.doq.phase4.test", 0xB320)
         snapshot = read_authority(
             path,

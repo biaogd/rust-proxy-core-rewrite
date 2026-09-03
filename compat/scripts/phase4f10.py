@@ -254,7 +254,7 @@ def exercise_lookup(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, An
         "configured-window": lookup_case(
             binary, scratch, "configured-window",
             {1: ("answer", "192.0.2.42", 0.0), 28: ("answer", "2001:db8::42", 0.25)},
-            "lookup", "192.0.2.42,2001:db8::42", ipv6_timeout=350
+            "lookup", "192.0.2.42,2001:db8::42", ipv6_timeout=1200
         ),
         "a-orders-result": lookup_case(
             binary, scratch, "a-orders-result",

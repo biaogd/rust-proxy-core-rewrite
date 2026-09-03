@@ -184,8 +184,10 @@ rules: ['MATCH,DIRECT']
         wait_controller(process, controller_port)
         # Fixed listeners become connectable before the Go apply path has
         # necessarily published the process-global inbound prefix policy.  A
-        # successful config snapshot is the observable apply barrier.
+        # successful config snapshot proves the controller view; require one
+        # authenticated-policy data-plane round trip as the publication barrier.
         snapshot = controller_snapshot(controller_port)
+        wait_route_at(process, "127.0.0.1", http_port, echo.port, "direct")
         return {
             "http": http_route(http_port, echo.port),
             "socks": socks_route(socks_port, echo.port),

@@ -5996,3 +5996,26 @@ refresh/concurrency/selector/HTTP reload, 5D
 CORS, 5F LAN policy/UDP NAT, 6B TLS identity, 6C Shadowsocks inbound, 6D
 VMess gRPC pooling and 6E native VLESS. Native Linux/Windows/macOS matrix
 results remain unclaimed until the corresponding GitHub Actions run completes.
+
+The first Windows rerun exposed four independent native-only failures and the
+follow-up fixes are covered by the same existing gates:
+
+- closing the optional CLI reload channel no longer parks the runtime select
+  loop, so REST config transactions and file-provider refresh events continue
+  to be consumed on Windows;
+- shared fixture ports are accepted only after simultaneous TCP and UDP binds,
+  and are not reused within one runner process, avoiding Windows
+  excluded/reserved UDP ports and accidental mixed/DNS/controller collisions;
+- the named-pipe client reads a complete HTTP message from `Content-Length`
+  instead of assuming the persistent pipe closes after one response;
+- lifecycle hook markers use the Python helper on Windows, retaining the
+  `&&` shell-ordering assertion without `cmd.exe` quoted-redirection ambiguity.
+- cold data-plane probes now wait for routing/provider publication instead of
+  treating a connectable socket as full readiness; DNS listener startup has a
+  CI-load-sized bound, the dual-stack configured window has wider scheduling
+  margin, and the DoQ retry case observes the first pooled connection before
+  injecting resets.
+
+Workspace fmt, all-target/all-feature clippy and tests pass locally on Darwin
+arm64. Native Windows parity remains revalidation-pending until the updated
+GitHub Actions run completes.

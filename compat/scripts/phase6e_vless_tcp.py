@@ -158,6 +158,23 @@ def exchange(
         return recv_exact(stream, len(payload)) == payload
 
 
+def wait_exchange(
+    process: Any, mixed_port: int, host: str, port: int, payload: bytes
+) -> bool:
+    """Cross the cold Go adapter/provider publication boundary deterministically."""
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during VLESS readiness: {process.returncode}")
+        try:
+            if exchange(mixed_port, host, port, payload):
+                return True
+        except (OSError, EOFError, ConnectionResetError, BrokenPipeError):
+            pass
+        time.sleep(0.02)
+    raise TimeoutError("VLESS data plane did not become ready")
+
+
 def rejected_exchange(mixed_port: int, host: str, port: int) -> bool:
     try:
         with connect_domain(mixed_port, host, port) as stream:
@@ -250,7 +267,9 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
-        domain_small = exchange(mixed_port, "phase6e.example", 443, b"vless-native-tcp")
+        domain_small = wait_exchange(
+            process, mixed_port, "phase6e.example", 443, b"vless-native-tcp"
+        )
         ipv4_large = exchange(mixed_port, "192.0.2.8", 8443, LARGE_PAYLOAD)
         ipv6 = exchange(mixed_port, "2001:db8::8", 9443, b"vless-ipv6")
         response_addon = exchange(mixed_port, "addon.phase6e", 10443, b"response-addon")

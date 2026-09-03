@@ -122,30 +122,32 @@ pub(super) async fn run_with_reload_inner(
         },
     );
     let mut restart_requested = false;
+    let mut reloads_open = true;
 
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            next = reloads.recv() => {
-                let Some(next) = next else {
-                    shutdown.cancelled().await;
-                    break;
-                };
-                if let Err(error) = apply_generation(
-                    next,
-                    &config_sender,
-                    &config_receiver,
-                    &state,
-                    &dns_service,
-                    &controller_update_sender,
-                    &mut listeners,
-                    &mut controllers,
-                    &mut dns,
-                ).await {
-                    state.log("error", format!("configuration reload failed: {error}"));
-                    eprintln!("configuration reload failed: {error}");
-                } else {
-                    state.log("info", "configuration reloaded");
+            next = reloads.recv(), if reloads_open => {
+                match next {
+                    Some(next) => {
+                        if let Err(error) = apply_generation(
+                            next,
+                            &config_sender,
+                            &config_receiver,
+                            &state,
+                            &dns_service,
+                            &controller_update_sender,
+                            &mut listeners,
+                            &mut controllers,
+                            &mut dns,
+                        ).await {
+                            state.log("error", format!("configuration reload failed: {error}"));
+                            eprintln!("configuration reload failed: {error}");
+                        } else {
+                            state.log("info", "configuration reloaded");
+                        }
+                    }
+                    None => reloads_open = false,
                 }
             }
             update = controller_updates.recv() => {
@@ -295,3 +297,73 @@ pub(super) fn restart_current_process() {
 
 #[cfg(not(any(unix, windows)))]
 pub(super) fn restart_current_process() {}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rewrite_config::Config;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::run_with_reload;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn controller_updates_continue_after_reload_source_closes() {
+        rewrite_services::install_default_crypto_provider();
+        let mixed = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve mixed port");
+        let mixed_port = mixed.local_addr().expect("mixed address").port();
+        let controller =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve controller port");
+        let controller_port = controller.local_addr().expect("controller address").port();
+        drop((mixed, controller));
+        let initial = Config::from_yaml(&format!(
+            "mixed-port: {mixed_port}\nexternal-controller: 127.0.0.1:{controller_port}\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n"
+        ))
+        .expect("initial config");
+        let (reload_sender, reload_receiver) = mpsc::channel(1);
+        drop(reload_sender);
+        let shutdown = CancellationToken::new();
+        let runtime = tokio::spawn(run_with_reload(initial, reload_receiver, shutdown.clone()));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("HTTP client");
+        let url = format!("http://127.0.0.1:{controller_port}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if client
+                .get(format!("{url}/version"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "controller did not become ready; runtime finished: {}",
+                runtime.is_finished()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let response = client
+            .put(format!("{url}/configs"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(format!(
+                r#"{{"path":"","payload":"mixed-port: {mixed_port}\nmode: direct\nipv6: false\nrules: ['MATCH,DIRECT']\n"}}"#
+            ))
+            .send()
+            .await
+            .expect("controller update completes");
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        drop(response);
+        drop(client);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), runtime)
+            .await
+            .expect("runtime stops")
+            .expect("runtime task joins")
+            .expect("runtime succeeds");
+    }
+}

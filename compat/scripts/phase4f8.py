@@ -63,8 +63,12 @@ def endpoint(authority: LocalAuthority, transport: str = "udp") -> str:
 
 
 def render_config(path: pathlib.Path, authorities: dict[str, LocalAuthority]) -> None:
+    mixed_port = reserve_port()
+    dns_port = reserve_port()
+    while dns_port == mixed_port:
+        dns_port = reserve_port()
     path.write_text(
-        f"""mixed-port: {reserve_port()}
+        f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
 ipv6: false
@@ -81,7 +85,7 @@ rule-providers:
       - 'DOMAIN-KEYWORD,classic-token'
 dns:
   enable: true
-  listen: 127.0.0.1:{reserve_port()}
+  listen: 127.0.0.1:{dns_port}
   ipv6: false
   use-hosts: false
   use-system-hosts: false
@@ -170,7 +174,14 @@ def validate_products(
             "-f",
             str(config),
         ],
-        "rust": [str(binaries["rust-product"]), "-t", "-f", str(config)],
+        "rust": [
+            str(binaries["rust-product"]),
+            "-d",
+            str(config.parent),
+            "-t",
+            "-f",
+            str(config),
+        ],
     }
     return {
         name: subprocess.run(

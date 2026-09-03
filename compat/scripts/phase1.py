@@ -39,6 +39,8 @@ MIGRATION_PATHS = {
     "dns/phase4f5_contract_test.go",
     "dns/phase4f6_contract_test.go",
 }
+_RESERVED_PORTS: set[int] = set()
+_RESERVED_PORTS_LOCK = threading.Lock()
 
 
 def assert_go_oracle_baseline() -> None:
@@ -422,9 +424,22 @@ def start_server(
 
 
 def reserve_port() -> int:
-    with socket.socket() as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        return int(candidate.getsockname()[1])
+    """Select a loopback port that Windows permits for both mixed transports."""
+    for _ in range(100):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = int(tcp.getsockname()[1])
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                    udp.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            with _RESERVED_PORTS_LOCK:
+                if port in _RESERVED_PORTS:
+                    continue
+                _RESERVED_PORTS.add(port)
+                return port
+    raise OSError("could not reserve a loopback port usable by both TCP and UDP")
 
 
 def recv_exact(stream: socket.socket, length: int) -> bytes:

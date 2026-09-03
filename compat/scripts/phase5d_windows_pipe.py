@@ -31,10 +31,32 @@ $client = [System.IO.Pipes.NamedPipeClientStream]::new(
 $client.Connect(1000)
 $client.Write($request, 0, $request.Length)
 $client.Flush()
-$buffer = New-Object byte[] 4096
 $memory = [System.IO.MemoryStream]::new()
-while (($count = $client.Read($buffer, 0, $buffer.Length)) -gt 0) {
+$one = New-Object byte[] 1
+$headerComplete = $false
+while (-not $headerComplete) {
+  $count = $client.Read($one, 0, 1)
+  if ($count -eq 0) { throw "pipe closed before the HTTP response headers" }
+  $memory.WriteByte($one[0])
+  if ($memory.Length -gt 65536) { throw "HTTP response headers exceed 64 KiB" }
+  if ($memory.Length -ge 4) {
+    $bytes = $memory.GetBuffer()
+    $end = [int]$memory.Length
+    $headerComplete = (
+      $bytes[$end - 4] -eq 13 -and $bytes[$end - 3] -eq 10 -and
+      $bytes[$end - 2] -eq 13 -and $bytes[$end - 1] -eq 10)
+  }
+}
+$header = [Text.Encoding]::ASCII.GetString($memory.ToArray())
+$match = [regex]::Match($header, '(?im)^Content-Length:\s*(\d+)\s*$')
+if (-not $match.Success) { throw "HTTP response has no Content-Length" }
+$remaining = [int]$match.Groups[1].Value
+$buffer = New-Object byte[] 4096
+while ($remaining -gt 0) {
+  $count = $client.Read($buffer, 0, [Math]::Min($buffer.Length, $remaining))
+  if ($count -eq 0) { throw "pipe closed before the HTTP response body" }
   $memory.Write($buffer, 0, $count)
+  $remaining -= $count
 }
 $client.Dispose()
 [Convert]::ToBase64String($memory.ToArray())

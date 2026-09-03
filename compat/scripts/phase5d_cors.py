@@ -148,6 +148,27 @@ def preflight(port: int, origin: str, *, private: bool = True) -> dict[str, Any]
     )
 
 
+def wait_data_plane(process: Any, mixed_port: int, echo_port: int) -> None:
+    """Wait for the Go listener and its published routing state as one barrier."""
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"proxy exited during data-plane readiness: {process.returncode}")
+        try:
+            barrier, response = http_request(mixed_port, echo_port, None)
+            with barrier:
+                if " 200 " not in status(response):
+                    time.sleep(0.02)
+                    continue
+                barrier.sendall(b"signal-ready")
+                if recv_exact(barrier, 12) == b"signal-ready":
+                    return
+        except (OSError, EOFError, ConnectionResetError, BrokenPipeError):
+            pass
+        time.sleep(0.02)
+    raise TimeoutError("provider/signal readiness echo did not become observable")
+
+
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     mixed_port, controller_port = reserve_port(), reserve_port()
@@ -157,13 +178,7 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
-        barrier, response = http_request(mixed_port, echo.port, None)
-        with barrier:
-            if " 200 " not in status(response):
-                raise AssertionError(response)
-            barrier.sendall(b"signal-ready")
-            if recv_exact(barrier, 12) != b"signal-ready":
-                raise AssertionError("provider/signal readiness echo failed")
+        wait_data_plane(process, mixed_port, echo.port)
         observations = {
             "default-actual": request(
                 controller_port, "GET", "https://default.example.test"

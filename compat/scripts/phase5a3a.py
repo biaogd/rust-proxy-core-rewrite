@@ -152,6 +152,7 @@ rules:
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     try:
         wait_selected(process, selected_port, selected_secret)
@@ -164,7 +165,10 @@ rules:
         }
         if os.name != "nt":
             write_config(geodata_mode=True, yaml_secret="reloaded-yaml-secret")
-            wait_for_linux_signal_handlers(process)
+            if not wait_for_linux_signal_handlers(process):
+                # Darwin exposes no /proc signal mask; the Go controller can
+                # become reachable a few milliseconds before SIGHUP is caught.
+                time.sleep(0.1)
             os.kill(process.pid, signal.SIGHUP)
             wait_reloaded(process, selected_port, reload_selected_secret)
             observations.update(
@@ -179,6 +183,17 @@ rules:
             )
         observations["exit-code"] = stop(process)
         return observations
+    except Exception as error:
+        if process.poll() is None:
+            kill_process(process)
+        stdout.close()
+        stderr.close()
+        output = (scratch / "stdout.log").read_text(errors="replace") + (
+            scratch / "stderr.log"
+        ).read_text(errors="replace")
+        raise AssertionError(
+            f"{error}; candidate output tail: {output[-4000:]!r}"
+        ) from error
     finally:
         if process.poll() is None:
             kill_process(process)

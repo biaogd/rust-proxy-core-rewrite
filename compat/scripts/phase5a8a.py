@@ -57,7 +57,9 @@ def hook_command(
     command = [sys.executable, str(HELPER), action, str(record), *map(str, ports)]
     if os.name == "nt":
         probe = subprocess.list2cmdline(command)
-        append = f'echo {action}:shell>>"{record}"'
+        append = subprocess.list2cmdline(
+            [sys.executable, str(HELPER), "mark", str(record), f"{action}:shell"]
+        )
     else:
         probe = " ".join(shlex.quote(value) for value in command)
         append = f"printf '{action}:shell\\n' >> {shlex.quote(str(record))}"
@@ -229,8 +231,14 @@ def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
 def run_up_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     record = scratch / "hooks.log"
     if os.name == "nt":
-        up = f'echo up:failed>>"{record}" & exit /b 7'
-        down = f'echo down:unexpected>>"{record}"'
+        marker = subprocess.list2cmdline(
+            [sys.executable, str(HELPER), "mark", str(record), "up:failed"]
+        )
+        unexpected = subprocess.list2cmdline(
+            [sys.executable, str(HELPER), "mark", str(record), "down:unexpected"]
+        )
+        up = f"{marker} & exit /b 7"
+        down = unexpected
     else:
         up = f"printf 'up:failed\\n' >> {shlex.quote(str(record))}; exit 7"
         down = f"printf 'down:unexpected\\n' >> {shlex.quote(str(record))}"
@@ -248,8 +256,13 @@ def run_up_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
 def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     record = scratch / "hooks.log"
     if os.name == "nt":
-        up = f'echo up:ok>>"{record}"'
-        down = f'echo down:failed>>"{record}" & exit /b 9'
+        up = subprocess.list2cmdline(
+            [sys.executable, str(HELPER), "mark", str(record), "up:ok"]
+        )
+        marker = subprocess.list2cmdline(
+            [sys.executable, str(HELPER), "mark", str(record), "down:failed"]
+        )
+        down = f"{marker} & exit /b 9"
     else:
         up = f"printf 'up:ok\\n' >> {shlex.quote(str(record))}"
         down = f"printf 'down:failed\\n' >> {shlex.quote(str(record))}; exit 9"
