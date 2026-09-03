@@ -20,6 +20,8 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
+    request_graceful_shutdown,
     reserve_port,
     wait_for_linux_signal_handlers,
     wait_ready,
@@ -52,8 +54,12 @@ def hook_command(
     action: str, record: pathlib.Path, ports: tuple[int, int, int]
 ) -> str:
     command = [sys.executable, str(HELPER), action, str(record), *map(str, ports)]
-    probe = " ".join(shlex.quote(value) for value in command)
-    append = f"printf '{action}:shell\\n' >> {shlex.quote(str(record))}"
+    if os.name == "nt":
+        probe = subprocess.list2cmdline(command)
+        append = f'echo {action}:shell>>"{record}"'
+    else:
+        probe = " ".join(shlex.quote(value) for value in command)
+        append = f"printf '{action}:shell\\n' >> {shlex.quote(str(record))}"
     return f"{probe} && {append}"
 
 
@@ -105,6 +111,7 @@ def launch(
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     return process, stdout, stderr, record, ports
 
@@ -160,12 +167,13 @@ def run_success(
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     try:
         wait_record(process, record, "up:shell")
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
-        os.kill(process.pid, signal.SIGTERM)
+        request_graceful_shutdown(process)
         exit_code, output = finish(process, stdout, stderr, scratch)
         return {
             "exit-code": exit_code,
@@ -174,8 +182,7 @@ def run_success(
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
 
 
 def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
@@ -189,7 +196,7 @@ def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
         wait_ready(process, ports[0])
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
-        os.kill(process.pid, signal.SIGTERM)
+        request_graceful_shutdown(process)
         exit_code, output = finish(process, stdout, stderr, scratch)
         return {
             "exit-code": exit_code,
@@ -198,14 +205,17 @@ def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
 
 
 def run_up_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     record = scratch / "hooks.log"
-    up = f"printf 'up:failed\\n' >> {shlex.quote(str(record))}; exit 7"
-    down = f"printf 'down:unexpected\\n' >> {shlex.quote(str(record))}"
+    if os.name == "nt":
+        up = f'echo up:failed>>"{record}" & exit /b 7'
+        down = f'echo down:unexpected>>"{record}"'
+    else:
+        up = f"printf 'up:failed\\n' >> {shlex.quote(str(record))}; exit 7"
+        down = f"printf 'down:unexpected\\n' >> {shlex.quote(str(record))}"
     process, stdout, stderr, launched_record, _ = launch(
         binary, scratch, ["-post-up", up, "-post-down", down], {}
     )
@@ -219,8 +229,12 @@ def run_up_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
 
 def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     record = scratch / "hooks.log"
-    up = f"printf 'up:ok\\n' >> {shlex.quote(str(record))}"
-    down = f"printf 'down:failed\\n' >> {shlex.quote(str(record))}; exit 9"
+    if os.name == "nt":
+        up = f'echo up:ok>>"{record}"'
+        down = f'echo down:failed>>"{record}" & exit /b 9'
+    else:
+        up = f"printf 'up:ok\\n' >> {shlex.quote(str(record))}"
+        down = f"printf 'down:failed\\n' >> {shlex.quote(str(record))}; exit 9"
     process, stdout, stderr, launched_record, ports = launch(
         binary, scratch, ["-post-up", up, "-post-down", down], {}
     )
@@ -229,7 +243,7 @@ def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, A
         wait_record(process, launched_record, "up:ok")
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
-        os.kill(process.pid, signal.SIGTERM)
+        request_graceful_shutdown(process)
         exit_code, output = finish(process, stdout, stderr, scratch)
         return {
             "exit-code": exit_code,
@@ -238,8 +252,7 @@ def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, A
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
 
 
 def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:

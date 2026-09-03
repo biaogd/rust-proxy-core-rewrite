@@ -362,10 +362,18 @@ proxies:
 def assert_rust_only_rejections(
     rust_binary: pathlib.Path, scratch: pathlib.Path, authority_port: int
 ) -> None:
-    for extra, network in [
-        ("    tls: true\n", "tcp"),
-        ("    udp: true\n", "tcp"),
-        ("", "ws"),
+    for extra, network, label in [
+        ("", "unsupported-transport", "unknown transport"),
+        (
+            "    ws-opts:\n      max-early-data: 2048\n",
+            "ws",
+            "WebSocket early data",
+        ),
+        (
+            "    xhttp-opts:\n      download-settings: {}\n",
+            "xhttp",
+            "xHTTP download settings",
+        ),
     ]:
         accepted = config_validation(
             rust_binary,
@@ -376,7 +384,7 @@ def assert_rust_only_rejections(
             ),
         )
         if accepted:
-            raise AssertionError(f"Rust accepted out-of-scope VLESS field: {extra!r}")
+            raise AssertionError(f"Rust accepted out-of-scope VLESS feature: {label}")
 
 
 def contract_errors(name: str, observations: dict[str, Any]) -> list[str]:

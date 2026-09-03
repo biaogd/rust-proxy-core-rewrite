@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, reserve_port, start_server, wait_for_linux_signal_handlers, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, reload_via_controller, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, debug_files
 from phase5c_http_provider import ProviderServer
@@ -74,13 +73,12 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
     try:
         wait_ready(process, mixed)
         wait_controller(process, controller)
-        wait_for_linux_signal_handlers(process)
         wait_names(process, controller, ["provider-one"])
         time.sleep(0.1)
         before_reload = len(provider.observations)
 
         write_config(config, mixed, controller, provider.port, 1)
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller, config)
         wait_names(process, controller, ["provider-two"])
         selected = select(controller, "provider-two")
         routed = route(mixed, echo.port)
@@ -98,7 +96,7 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
             600,
             "reload-next.yaml",
         )
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller, config)
         wait_names(process, controller, ["provider-three"])
         replacement_selected = select(controller, "provider-three")
         replacement_route = route(mixed, echo.port)

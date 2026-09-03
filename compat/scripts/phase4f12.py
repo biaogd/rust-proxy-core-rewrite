@@ -378,9 +378,22 @@ rules:
         for name in ("route.phase4f12.test", "route-alias.phase4f12.test"):
             values = set()
             encoded = name.encode("ascii")
-            for _ in range(48):
-                with socks_connect(mixed_port, 3, bytes([len(encoded)]) + encoded, port) as stream:
-                    values.add(recv_exact(stream, 1).decode())
+            successes = 0
+            deadline = time.monotonic() + (2 * IO_DEADLINE)
+            while successes < 48 and time.monotonic() < deadline:
+                try:
+                    with socks_connect(
+                        mixed_port, 3, bytes([len(encoded)]) + encoded, port
+                    ) as stream:
+                        values.add(recv_exact(stream, 1).decode())
+                        successes += 1
+                except (EOFError, OSError):
+                    # A just-accepted connection may race listener startup on
+                    # loaded runners.  It contributes no routing observation,
+                    # so retry until the same 48 successful samples exist.
+                    time.sleep(0.01)
+            if successes != 48:
+                raise TimeoutError(f"only {successes}/48 hosts tunnel samples succeeded")
             markers[name] = sorted(values)
         time.sleep(0.3)
         return {"available": True, "markers": markers, "exit-code": stop(process)}

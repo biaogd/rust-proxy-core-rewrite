@@ -695,7 +695,7 @@ pub(crate) fn system_hosts_path() -> std::path::PathBuf {
     #[cfg(windows)]
     {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-        return std::path::PathBuf::from(root).join("System32/drivers/etc/hosts");
+        std::path::PathBuf::from(root).join("System32/drivers/etc/hosts")
     }
     #[cfg(not(windows))]
     {

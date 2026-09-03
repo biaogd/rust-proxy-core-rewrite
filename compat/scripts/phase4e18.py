@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import pathlib
-import signal
 import subprocess
 import tempfile
 import time
 from typing import Any, Callable
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port
+from phase1 import IO_DEADLINE, ROOT, reload_via_declared_controller, reserve_port
 from phase4 import build_binaries, dns_query, launch, observe_response, stop, wait_dns_ready
 from phase4e5 import encrypted_udp_query
 from phase4e17 import (
@@ -75,6 +73,10 @@ def start_case(
         dns_port=dns_port,
         upstream_port=upstream_port,
         server_name=SERVER_NAME,
+    )
+    config.write_text(
+        config.read_text()
+        + f"external-controller: 127.0.0.1:{reserve_port()}\n"
     )
     process, stdout, stderr = launch(binary, config, scratch)
     wait_dns_ready(process, dns_port)
@@ -179,7 +181,7 @@ def exercise_reload_reset(binary: pathlib.Path, scratch: pathlib.Path) -> dict[s
             and current["active_streams"] == 0,
         )
         config.touch()
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_declared_controller(process, config)
         reset = read_authority(
             path, lambda current: current["active_connections"] == 0
         )

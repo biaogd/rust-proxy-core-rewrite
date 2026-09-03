@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import signal
 import subprocess
 import tempfile
 import time
@@ -18,6 +17,8 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
+    reload_via_controller,
     reserve_port,
     wait_for_linux_signal_handlers,
 )
@@ -45,9 +46,12 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
     return {"go": go_binary, "rust": target / "debug" / "rewrite-core"}
 
 
-def write_config(path: pathlib.Path, port: int, target: str) -> None:
+def write_config(
+    path: pathlib.Path, port: int, controller_port: int, target: str
+) -> None:
     path.write_text(
         f"""mixed-port: {port}
+external-controller: 127.0.0.1:{controller_port}
 mode: rule
 log-level: info
 ipv6: false
@@ -60,9 +64,9 @@ rules:
 def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     scratch.mkdir(parents=True)
     echo = start_server(EchoHandler)
-    mixed_port = reserve_port()
+    mixed_port, controller_port = reserve_port(), reserve_port()
     config = scratch / "config.yaml"
-    write_config(config, mixed_port, "DIRECT")
+    write_config(config, mixed_port, controller_port, "DIRECT")
     stdout = (scratch / "stdout.log").open("wb")
     stderr = (scratch / "stderr.log").open("wb")
     process = subprocess.Popen(
@@ -76,10 +80,8 @@ def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     try:
         wait_ready(process, mixed_port)
         wait_route(process, mixed_port, echo.port, "direct")
-        wait_for_linux_signal_handlers(process)
-
         config.write_text("mixed-port: [")
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config, expected_status=400)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -88,8 +90,8 @@ def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
                 raise AssertionError("invalid reload changed the active generation")
             time.sleep(0.02)
 
-        write_config(config, mixed_port, "REJECT")
-        os.kill(process.pid, signal.SIGHUP)
+        write_config(config, mixed_port, controller_port, "REJECT")
+        reload_via_controller(process, controller_port, config)
         wait_route(process, mixed_port, echo.port, "reject")
         return {
             "invalid-reload": "old-generation-active",
@@ -98,8 +100,7 @@ def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
         echo.close()

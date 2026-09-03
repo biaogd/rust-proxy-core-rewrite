@@ -21,6 +21,8 @@ from phase1 import (
     assert_go_oracle_baseline,
     cargo_target_path,
     connect_tunnel,
+    kill_process,
+    request_graceful_shutdown,
     reserve_port,
     wait_for_linux_signal_handlers,
     wait_ready,
@@ -93,7 +95,9 @@ def bind_udp(port: int) -> None:
 
 
 def run_case(
-    binary: pathlib.Path, scratch: pathlib.Path, shutdown_signal: signal.Signals
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    shutdown_signal: signal.Signals | None,
 ) -> dict[str, Any]:
     scratch.mkdir(parents=True)
     echo = start_server(EchoHandler)
@@ -127,6 +131,7 @@ rules:
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     idle: socket.socket | None = None
     try:
@@ -138,7 +143,11 @@ rules:
             time.sleep(0.05)
 
         started = time.monotonic()
-        os.kill(process.pid, shutdown_signal)
+        if os.name == "nt":
+            request_graceful_shutdown(process)
+        else:
+            assert shutdown_signal is not None
+            os.kill(process.pid, shutdown_signal)
         exit_code = process.wait(timeout=IO_DEADLINE)
         duration = time.monotonic() - started
         try:
@@ -165,14 +174,15 @@ rules:
         if idle is not None:
             idle.close()
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
         echo.close()
 
 
 def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
+    if os.name == "nt":
+        return {"ctrl-break": run_case(binary, scratch / "ctrl-break", None)}
     return {
         "sigint": run_case(binary, scratch / "sigint", signal.SIGINT),
         "sigterm": run_case(binary, scratch / "sigterm", signal.SIGTERM),
@@ -196,7 +206,11 @@ def main() -> None:
             "dns-tcp": "released",
             "dns-udp": "released",
         }
-        expected = {"sigint": expected_case, "sigterm": expected_case}
+        expected = (
+            {"ctrl-break": expected_case}
+            if os.name == "nt"
+            else {"sigint": expected_case, "sigterm": expected_case}
+        )
         if observations["go"] != observations["rust"] or observations["go"] != expected:
             FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
             raise SystemExit(f"Phase 5A7b mismatch; see {FAILURE_ARTIFACT}")

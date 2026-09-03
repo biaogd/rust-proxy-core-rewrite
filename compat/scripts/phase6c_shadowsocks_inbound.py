@@ -21,6 +21,7 @@ from phase1 import (
     IO_DEADLINE,
     ROOT,
     cargo_target_path,
+    reload_via_controller,
     reserve_port,
     start_server,
     wait_for_linux_signal_handlers,
@@ -1505,10 +1506,11 @@ def exercise_shadow_tls_fallback_reload(
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
     camouflage, camouflage_port = start_camouflage_tls(scratch)
-    ss_port = reserve_tcp_udp_port()
+    ss_port, controller_port = reserve_tcp_udp_port(), reserve_port()
     config = scratch / "shadow-tls-fallback-reload-config.yaml"
     config.write_text(
         f"""mode: rule
+external-controller: 127.0.0.1:{controller_port}
 log-level: info
 ipv6: false
 listeners:
@@ -1573,10 +1575,8 @@ rules:
   - MATCH,DIRECT
 """
         )
-        if os.name != "nt":
-            wait_for_linux_signal_handlers(process)
         reload_started = time.monotonic()
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config)
         wait_ss_route(
             process,
             client,
@@ -1907,10 +1907,11 @@ def exercise_password_reload(
     scratch: pathlib.Path,
 ) -> dict[str, bool]:
     echo = start_server(EchoHandler)
-    ss_port = reserve_tcp_udp_port()
+    ss_port, controller_port = reserve_tcp_udp_port(), reserve_port()
     config = scratch / "reload-password-config.yaml"
     config.write_text(
         f"""ss-config: ss://{CIPHER}:{PASSWORD}@127.0.0.1:{ss_port}
+external-controller: 127.0.0.1:{controller_port}
 mode: rule
 log-level: info
 ipv6: false
@@ -1936,7 +1937,7 @@ rules:
   - MATCH,DIRECT
 """
         )
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config)
         wait_ss_route(
             process,
             client,

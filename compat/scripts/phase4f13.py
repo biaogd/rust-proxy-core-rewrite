@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
-import signal
 import socket
 import socketserver
 import tempfile
@@ -14,7 +12,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from phase1 import IO_DEADLINE, ROOT, EchoHandler, recv_exact, recv_until, reserve_port
+from phase1 import IO_DEADLINE, ROOT, EchoHandler, recv_exact, recv_until, reload_via_declared_controller, reserve_port
 from phase4 import build_binaries, launch, stop, wait_dns_ready
 from phase4b import (
     AllInterfacesServer,
@@ -273,6 +271,10 @@ def launch_case(
             upstream_port=servers.authority.server_address[1],
         )
     )
+    config.write_text(
+        config.read_text()
+        + f"external-controller: 127.0.0.1:{reserve_port()}\n"
+    )
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_dns_ready(process, dns_port)
@@ -392,7 +394,7 @@ def reload_case(
         config.read_text().replace(f"DOMAIN,{name},REJECT", f"DOMAIN,{name},DIRECT")
     )
     updated.replace(config)
-    os.kill(process.pid, signal.SIGHUP)
+    reload_via_declared_controller(process, config)
     after = wait_tcp_echo(socks5_connect, mixed_port, address, tcp_port, "reloaded")
     return {"before": before, "after": after}
 

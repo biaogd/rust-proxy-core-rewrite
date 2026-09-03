@@ -3151,6 +3151,7 @@ fn parses_common_vless_carrier_extensions() {
 
     for body in [
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: http\n    udp: true\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: unsupported-transport\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: unsupported\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: stream-one\n      x-padding-bytes: 64-32\n",
     ] {

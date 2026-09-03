@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -94,6 +95,117 @@ def wait_for_linux_signal_handlers(process: subprocess.Popen[Any]) -> bool:
     raise AssertionError("candidate signal handlers did not become observable")
 
 
+def terminate_process(
+    process: subprocess.Popen[Any], *, normalize_requested: bool = False
+) -> int:
+    """Stop one candidate and its POSIX process group without Windows-only crashes.
+
+    Python exposes no portable process-group signal API.  On Windows the child
+    itself is terminated; on POSIX the whole session is signalled so helper
+    descendants cannot outlive a differential case.
+    """
+    requested = process.poll() is None
+    if requested:
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    try:
+        exit_code = process.wait(timeout=IO_DEADLINE)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+        return process.wait(timeout=IO_DEADLINE)
+    if normalize_requested and requested:
+        if os.name == "nt" or exit_code == -signal.SIGTERM:
+            return 0
+    return exit_code
+
+
+def request_graceful_shutdown(process: subprocess.Popen[Any]) -> None:
+    """Deliver the platform's catchable console/process termination event."""
+    if os.name == "nt":
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        os.killpg(process.pid, signal.SIGTERM)
+
+
+def kill_process(process: subprocess.Popen[Any]) -> int:
+    """Force-stop one candidate using the platform's supported primitive."""
+    if process.poll() is None:
+        if os.name == "nt":
+            process.kill()
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    return process.wait(timeout=IO_DEADLINE)
+
+
+def reload_via_controller(
+    process: subprocess.Popen[Any],
+    controller_port: int,
+    config: pathlib.Path,
+    *,
+    secret: str = "",
+    expected_status: int = 204,
+) -> bytes:
+    """Request the same config replacement through the portable REST surface."""
+    body = json.dumps({"path": "", "payload": config.read_text()}).encode()
+    deadline = time.monotonic() + IO_DEADLINE
+    last_error: Exception | tuple[int, bytes] | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited during controller reload: {process.returncode}"
+            )
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", controller_port, timeout=min(1.0, IO_DEADLINE)
+        )
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            headers["Authorization"] = f"Bearer {secret}"
+        try:
+            connection.request("PUT", "/configs?force=true", body=body, headers=headers)
+            response = connection.getresponse()
+            payload = response.read()
+            if response.status == expected_status:
+                return payload
+            last_error = (response.status, payload)
+        except OSError as error:
+            last_error = error
+        finally:
+            connection.close()
+        time.sleep(0.02)
+    raise TimeoutError(
+        f"controller config reload did not return {expected_status}: {last_error}"
+    )
+
+
+def reload_via_declared_controller(
+    process: subprocess.Popen[Any],
+    config: pathlib.Path,
+    *,
+    expected_status: int = 204,
+) -> bytes:
+    """Reload through an ``external-controller`` declared in a test config."""
+    address = next(
+        (
+            line.split(":", 1)[1].strip()
+            for line in config.read_text().splitlines()
+            if line.startswith("external-controller:")
+        ),
+        "",
+    )
+    try:
+        port = int(address.rsplit(":", 1)[1])
+    except (IndexError, ValueError) as error:
+        raise AssertionError(f"config has no TCP external-controller: {config}") from error
+    return reload_via_controller(
+        process, port, config, expected_status=expected_status
+    )
+
+
 def run_checked(command: list[str], *, cwd: pathlib.Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
@@ -169,7 +281,9 @@ def config_observations(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str
             cwd=scratch,
             text=True,
             capture_output=True,
-            timeout=IO_DEADLINE,
+            # Native CI can take more than one network-I/O deadline to start a
+            # freshly linked binary; this command has no network semantics.
+            timeout=2 * IO_DEADLINE,
             env={**os.environ, "HOME": str(scratch)},
         )
         accepted = result.returncode == 0
@@ -416,6 +530,7 @@ def exercise_proxy(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         try:
             wait_ready(process, proxy_port)
@@ -503,7 +618,7 @@ def exercise_proxy(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
             connect_proxy(proxy_port).close()
             with connect_tunnel(proxy_port, "127.0.0.1", echo.port) as idle:
                 started = time.monotonic()
-                os.killpg(process.pid, signal.SIGTERM)
+                request_graceful_shutdown(process)
                 return_code = process.wait(timeout=IO_DEADLINE)
                 duration = time.monotonic() - started
                 try:
@@ -518,12 +633,7 @@ def exercise_proxy(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any
             return observation
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=IO_DEADLINE)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=IO_DEADLINE)
+                terminate_process(process)
             stdout.close()
             stderr.close()
     finally:

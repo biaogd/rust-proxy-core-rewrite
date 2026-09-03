@@ -8,7 +8,6 @@ import http.client
 import json
 import os
 import pathlib
-import signal
 import socket
 import socketserver
 import subprocess
@@ -30,6 +29,8 @@ from phase1 import (
     recv_exact,
     recv_until,
     reserve_port,
+    reload_via_controller,
+    terminate_process,
     start_server,
     wait_ready,
 )
@@ -83,24 +84,13 @@ def launch(binary: pathlib.Path, config: pathlib.Path, scratch: pathlib.Path) ->
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     return process, stdout, stderr
 
 
 def stop(process: subprocess.Popen[bytes]) -> int:
-    if process.poll() is None:
-        if os.name == "nt":
-            process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-    try:
-        return process.wait(timeout=IO_DEADLINE)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        return process.wait(timeout=IO_DEADLINE)
+    return terminate_process(process)
 
 
 def closed(stream: socket.socket) -> bool:
@@ -563,12 +553,15 @@ def exercise_controller(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str
     return observation
 
 
-def write_reload_config(path: pathlib.Path, port: int, target: str) -> None:
+def write_reload_config(
+    path: pathlib.Path, port: int, controller_port: int, target: str
+) -> None:
     path.write_text(
         (FIXTURES / "reload.yaml.tmpl")
         .read_text()
         .replace("${MIXED_PORT}", str(port))
         .replace("${TARGET}", target)
+        + f"external-controller: 127.0.0.1:{controller_port}\n"
     )
 
 
@@ -616,9 +609,9 @@ def wait_closed_port(process: subprocess.Popen[bytes], port: int) -> None:
 
 def exercise_reload(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
-    first_port, second_port = reserve_port(), reserve_port()
+    first_port, second_port, controller_port = reserve_port(), reserve_port(), reserve_port()
     config = scratch / "config.yaml"
-    write_reload_config(config, first_port, "DIRECT")
+    write_reload_config(config, first_port, controller_port, "DIRECT")
     process, stdout, stderr = launch(binary, config, scratch)
     observation: dict[str, Any] = {}
     try:
@@ -626,21 +619,21 @@ def exercise_reload(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, An
         wait_route(process, first_port, echo.port, "direct")
         observation["initial"] = "direct"
 
-        write_reload_config(config, first_port, "REJECT")
-        os.kill(process.pid, signal.SIGHUP)
+        write_reload_config(config, first_port, controller_port, "REJECT")
+        reload_via_controller(process, controller_port, config)
         wait_route(process, first_port, echo.port, "reject")
         observation["same-port-rule"] = "reject"
 
         config.write_text("mixed-port: [")
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config, expected_status=400)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
             if route_behavior(first_port, echo.port) != "reject":
                 raise AssertionError("invalid reload changed active rules")
         observation["invalid-config-rollback"] = "reject"
 
-        write_reload_config(config, second_port, "DIRECT")
-        os.kill(process.pid, signal.SIGHUP)
+        write_reload_config(config, second_port, controller_port, "DIRECT")
+        reload_via_controller(process, controller_port, config)
         wait_route(process, second_port, echo.port, "direct")
         wait_closed_port(process, first_port)
         observation["port-move"] = {
@@ -659,27 +652,23 @@ def exercise_transactional_bind_rollback(
     binary: pathlib.Path, scratch: pathlib.Path
 ) -> dict[str, Any]:
     echo = start_server(EchoHandler)
-    active_port, occupied_port = reserve_port(), reserve_port()
+    active_port, occupied_port, controller_port = reserve_port(), reserve_port(), reserve_port()
     blocker = socket.socket()
     blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     blocker.bind(("127.0.0.1", occupied_port))
     blocker.listen()
     config = scratch / "config.yaml"
-    write_reload_config(config, active_port, "DIRECT")
+    write_reload_config(config, active_port, controller_port, "DIRECT")
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, active_port)
         wait_route(process, active_port, echo.port, "direct")
-        write_reload_config(config, occupied_port, "REJECT")
-        os.kill(process.pid, signal.SIGHUP)
-        deadline = time.monotonic() + IO_DEADLINE
-        while time.monotonic() < deadline:
-            text = (scratch / "stderr.log").read_text(errors="replace")
-            if "configuration reload failed" in text:
-                break
-            time.sleep(0.02)
-        else:
-            raise TimeoutError("Rust runtime did not report failed transactional bind")
+        write_reload_config(config, occupied_port, controller_port, "REJECT")
+        failure = reload_via_controller(
+            process, controller_port, config, expected_status=400
+        )
+        if not failure:
+            raise AssertionError("transactional bind failure returned an empty error")
         return {
             "old-generation": route_behavior(active_port, echo.port),
             "occupied-port-preserved": blocker.getsockname()[1] == occupied_port,

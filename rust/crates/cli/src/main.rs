@@ -826,7 +826,7 @@ fn install_signals(
                 }
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
             let _ = (
                 input,
@@ -837,6 +837,34 @@ fn install_signals(
             );
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
+            let mut ctrl_break = match tokio::signal::windows::ctrl_break() {
+                Ok(signal) => signal,
+                Err(error) => {
+                    eprintln!("Ctrl-Break handler failed: {error}");
+                    shutdown.cancel();
+                    return;
+                }
+            };
+            let _ = ready_sender.send(());
+            tokio::select! {
+                result = ctrl_c => {
+                    if let Err(error) = result {
+                        eprintln!("Ctrl-C handler failed: {error}");
+                    }
+                }
+                _ = ctrl_break.recv() => {}
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
+        {
+            let _ = (
+                input,
+                geodata_mode,
+                age_secret_key,
+                overrides,
+                reload_sender,
+            );
+            let ctrl_c = tokio::signal::ctrl_c();
             let _ = ready_sender.send(());
             if let Err(error) = ctrl_c.await {
                 eprintln!("Ctrl-C handler failed: {error}");

@@ -19,6 +19,7 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
     reserve_port,
     wait_for_linux_signal_handlers,
 )
@@ -26,6 +27,7 @@ from phase4 import stop
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5a3a-diff.json"
+CONTROLLER_DEADLINE = max(15.0, IO_DEADLINE)
 OVERRIDE_ENV = {
     "CLASH_OVERRIDE_EXTERNAL_CONTROLLER",
     "CLASH_OVERRIDE_SECRET",
@@ -63,7 +65,9 @@ def request(port: int, secret: str) -> int | str:
 
 
 def wait_selected(process: subprocess.Popen[bytes], port: int, secret: str) -> None:
-    deadline = time.monotonic() + IO_DEADLINE
+    # Cold Go starts can spend several seconds loading the pinned geodata set.
+    # Readiness is still proven by /version rather than by an arbitrary sleep.
+    deadline = time.monotonic() + CONTROLLER_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError("candidate exited before overridden controller became ready")
@@ -93,7 +97,7 @@ def config_mode(port: int, secret: str) -> bool | None:
 def wait_reloaded(
     process: subprocess.Popen[bytes], port: int, secret: str
 ) -> None:
-    deadline = time.monotonic() + IO_DEADLINE
+    deadline = time.monotonic() + CONTROLLER_DEADLINE
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError("candidate exited during overridden reload")
@@ -158,26 +162,26 @@ rules:
             "env/env": request(env_port, "env-secret"),
             "selected/empty": request(selected_port, ""),
         }
-        wait_for_linux_signal_handlers(process)
-        write_config(geodata_mode=True, yaml_secret="reloaded-yaml-secret")
-        os.kill(process.pid, signal.SIGHUP)
-        wait_reloaded(process, selected_port, reload_selected_secret)
-        observations.update(
-            {
-                "reload/selected": request(selected_port, reload_selected_secret),
-                "reload/yaml-old": request(selected_port, "yaml-secret"),
-                "reload/yaml-new": request(selected_port, "reloaded-yaml-secret"),
-                "reload/geodata-mode": config_mode(
-                    selected_port, reload_selected_secret
-                ),
-            }
-        )
+        if os.name != "nt":
+            write_config(geodata_mode=True, yaml_secret="reloaded-yaml-secret")
+            wait_for_linux_signal_handlers(process)
+            os.kill(process.pid, signal.SIGHUP)
+            wait_reloaded(process, selected_port, reload_selected_secret)
+            observations.update(
+                {
+                    "reload/selected": request(selected_port, reload_selected_secret),
+                    "reload/yaml-old": request(selected_port, "yaml-secret"),
+                    "reload/yaml-new": request(selected_port, "reloaded-yaml-secret"),
+                    "reload/geodata-mode": config_mode(
+                        selected_port, reload_selected_secret
+                    ),
+                }
+            )
         observations["exit-code"] = stop(process)
         return observations
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
 

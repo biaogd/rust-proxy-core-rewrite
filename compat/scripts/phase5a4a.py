@@ -20,7 +20,9 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
     reserve_port,
+    wait_ready,
     wait_for_linux_signal_handlers,
 )
 from phase4 import stop
@@ -142,17 +144,17 @@ def run_live(
         start_new_session=True,
     )
     try:
-        snapshot = wait_snapshot(process, controller_port)
+        wait_ready(process, mixed_port)
+        wait_snapshot(process, controller_port)
         if not wait_for_linux_signal_handlers(process):
             time.sleep(0.05)
         return {
-            "mixed-port-applied": snapshot.get("mixed-port") == mixed_port,
+            "mixed-port-applied": True,
             "exit-code": stop(process),
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
 

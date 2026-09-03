@@ -77,7 +77,7 @@ def route(proxy_port: int, host: str, destination_port: int) -> str:
         try:
             stream.sendall(b"rule-route")
             return "direct" if recv_exact(stream, 10) == b"rule-route" else "unexpected"
-        except (EOFError, ConnectionResetError, BrokenPipeError):
+        except (EOFError, OSError):
             return "reject"
 
 

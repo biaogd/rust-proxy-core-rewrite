@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import signal
 import socket
 import socketserver
 import tempfile
@@ -14,7 +13,7 @@ import threading
 import time
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, reserve_port, start_server, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, reload_via_controller, reserve_port, start_server, wait_ready
 from phase3 import (
     decode_socks_udp,
     launch,
@@ -86,11 +85,16 @@ class NatUdpHandler(socketserver.BaseRequestHandler):
 
 
 def write_config(
-    path: pathlib.Path, socks_port: int, mixed_port: int, target: str
+    path: pathlib.Path,
+    socks_port: int,
+    mixed_port: int,
+    controller_port: int,
+    target: str,
 ) -> None:
     path.write_text(
         f"""socks-port: {socks_port}
 mixed-port: {mixed_port}
+external-controller: 127.0.0.1:{controller_port}
 mode: rule
 log-level: info
 ipv6: false
@@ -166,9 +170,9 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     authority = NatUdpServer()
     second_authority = NatUdpServer()
     tcp_echo = start_server(EchoHandler)
-    socks_port, mixed_port = reserve_port(), reserve_port()
+    socks_port, mixed_port, controller_port = reserve_port(), reserve_port(), reserve_port()
     config = scratch / "config.yaml"
-    write_config(config, socks_port, mixed_port, "DIRECT")
+    write_config(config, socks_port, mixed_port, controller_port, "DIRECT")
     process, stdout, stderr = launch(binary, config, scratch)
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client.bind(("127.0.0.1", 0))
@@ -229,8 +233,8 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         round_trip(
             fixed_client, socks_port, authority.port, b"fixed-before-reload"
         )
-        write_config(config, socks_port, mixed_port, "REJECT")
-        os.kill(process.pid, signal.SIGHUP)
+        write_config(config, socks_port, mixed_port, controller_port, "REJECT")
+        reload_via_controller(process, controller_port, config)
         wait_route(process, mixed_port, tcp_echo.port, "reject")
         retained = round_trip(client, mixed_port, authority.port, b"retained")
         fixed_retained = round_trip(

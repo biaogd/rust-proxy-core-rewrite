@@ -42,7 +42,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | DoH HTTP/1 Hyper refactor | Complete in the existing Phase 4E scope | Hand-written HTTP/1 serialization/parsing removed; 4E5–4E8 and 4E12–4E15 Go/Rust differentials re-pass |
 | Phase 4E16 DoH HTTP/3 | Complete in declared scope | `DNS-08`; forced/preferred H3, H2 fallback, RFC 8484 GET, sequential QUIC reuse, reconnect and oracle-compatible no-accepted-0RTT differential suite passed |
 | Phase 4E17 verified DoQ framing | Complete in declared scope | `DNS-09`; verified loopback QUIC, ALPN `doq`, one-stream two-octet framing, zero ID/FIN, restoration and failure differential suite passed |
-| Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, SIGHUP reset and full-handshake observations passed |
+| Phase 4E18 DoQ lifecycle | Complete in declared scope | `DNS-09`; shared sequential/concurrent streams, bounded `NO_ERROR` reconnects, config-generation reset and full-handshake observations passed |
 | Phase 4E19 encrypted DNS wrappers | Complete in declared scope | `DNS-10`; verified-DoQ ECS inject/preserve/override, disabled request types and one disabled response-RR filter differential suite passed |
 | Phase 4F1 local DNS semantics | Complete in declared scope | `DNS-01`; UDP/TCP validation, RR/RCODE, EDNS echo/preservation and UDP-size truncation differential suite passed |
 | Phase 4F2 classic DNS upstreams | Complete in declared scope | `DNS-02`; domain bootstrap, concurrent selection, connection/RCODE failover, five-second timeout and UDP-TC retry differential suite passed |
@@ -80,8 +80,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5A6e ECH keypair generation | Complete in declared scope; CLI-09 remains partial | Parsed ECHConfigList/PEM fields, public name/cipher suites, independent X25519 relation and missing-name lifecycle differential pass |
 | Phase 5A6f VLESS ML-KEM-768 generation | Complete in declared scope; CLI-09 remains partial | Fixed-seed byte-exact encapsulation key/Hash32/lazy config, invalid length and startup lifecycle differential pass |
 | Phase 5A6g Sudoku keypair generation | Complete; closes pinned-baseline CLI-09 | Canonical split scalars, independent Edwards25519 public recovery, lowercase hex output and startup lifecycle differential pass |
-| Phase 5A7a invalid SIGHUP recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the same signal loop applies a following valid generation |
-| Phase 5A7b local-resource shutdown | Complete in declared scope; CLI-11 remains partial | SIGINT/SIGTERM close an idle tunnel and release current mixed/controller/DNS TCP and DNS UDP resources before zero exit |
+| Phase 5A7a invalid reload recovery | Complete in declared scope; CLI-11 remains partial | Malformed YAML preserves live routing and the portable controller transaction applies a following valid generation |
+| Phase 5A7b local-resource shutdown | Complete on Unix; native Windows revalidation pending; CLI-11 remains partial | SIGINT/SIGTERM on Unix and `CTRL_BREAK_EVENT` on Windows close an idle tunnel and release current mixed/controller/DNS TCP and DNS UDP resources before zero exit; Windows is not claimed before the next matrix result |
 | Phase 5A8a Unix lifecycle hooks | Complete in declared Unix/local-resource scope; CLI-12 remains partial | CLI/environment precedence, shell execution, bounded startup readiness, stable post-down invocation/completion and failure asymmetry pass; shutdown listener state is diagnostic because the Go oracle races closure |
 | Phase 5B1a domain regex routing | Complete in declared syntax/local-TCP scope; RULE-03 remains partial | Ignore-case lookahead and comma-bearing quantifier parsing, invalid syntax, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
 | Phase 5B1b domain wildcard routing | Complete in declared byte-wildcard/local-TCP scope; RULE-03 remains partial | Exact Go byte-level `*`/`?` matching, empty/non-ASCII unit boundaries, mixed HTTP CONNECT DIRECT hit and REJECT fallback pass |
@@ -100,7 +100,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5B current SOCKS5 UDP metadata | Complete across the fixed SOCKS/mixed UDP scope; RULE-06/08 retain future-inbound gaps | One live rule chain proves UDP SRC/DST/IN ports, network, DSCP, SOCKS5 type, oracle-compatible name and empty user behavior |
 | Phase 5B aggregate core domain/IP rules | Complete in declared current-local scope; RULE-02/04/05 retain contextual/native-IPv6 gaps | Three domain families, source/destination CIDR, no-resolve, partial suffix bits, mapped IPv4 and IPv6 pure/error cases pass |
 | Phase 5D controller completion boundary | Complete for every currently executable Rust service; API-04/API-11/API-12 retain only explicit 5E/5F service/platform dependencies | TCP/TLS/Unix and native-pipe CI, streams, safe config paths, current proxy/rule/provider surfaces, persistent Go-compatible storage, restart and public UI/DoH/debug are covered |
-| Phase 5F1 local TCP/socket completion | Implementation complete in declared local/current-adapter scope; privileged Linux evidence pending | Fixed HTTP/SOCKS/mixed use TFO, Linux MPTCP fallback and keepalive; interface/mark/concurrent dialing reaches DIRECT plus current HTTP/SOCKS5 adapters, while LAN/rebind/native-address differential passes |
+| Phase 5F1 local TCP/socket completion | Implementation complete for isolated LAN/TFO/keepalive/current-adapter scope; MPTCP and privileged Linux evidence pending | Fixed HTTP/SOCKS/mixed bind/filter/auth/rebind, TFO, keepalive and concurrent dialing pass without conflating the result with native MPTCP; interface/mark support retains its separately declared platform limits |
 | Phase 5F2 UDP NAT completion | Implementation complete in declared local scope; exact-timeout Linux CI result pending | IPv4/IPv6 reuse, fan-out, multi-response, control-close, generation retention and bounded-pressure recovery pass locally; CI enables the real 60-second expiry comparison |
 | Phase 5F3 release/platform gate | Configured; native CI result pending | Default quality CI builds the all-feature release binary; a root-only Linux job writes and reads back nonzero `SO_MARK` through the production socket helper |
 | Phase 6A1 built-ins and GLOBAL | Implementation complete in declared fast mixed-TCP/control scope; exact expiry evidence pending | COMPATIBLE/PASS/REJECT/REJECT-DROP behavior, dynamic/default and custom GLOBAL data-plane selection, controller views and name-collision validation pass the Go/Rust differential |
@@ -115,7 +115,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C2e HTTP provider request contract | Complete in declared plaintext/process-local ETag scope; CFG-05/PROV-01 remain partial | Repeated custom headers, global ETag enable/disable, If-None-Match/304 cache reuse, changed-ETag publication and configured size-limit rollback pass |
 | Phase 5C2f HTTP provider default cache/restart | Complete in declared CLI-home/plaintext scope; CFG-05/PROV-01 remain partial | URL-MD5 default path, first atomic write, network-free cache startup, post-restart PUT replacement/routing and malformed-payload rollback pass |
 | Phase 5C2g HTTP provider cache age/recovery | Complete in declared plaintext/serial lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Stale-start immediate refresh, corrupt-cache remote repair and failed-refresh old-cache/provider/selection/TCP retention pass |
-| Phase 5C2h HTTP provider SIGHUP scheduling | Complete in declared serial plaintext lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Long-to-short interval mutation plus stale URL/path/cache replacement re-key pending deadlines and publish the new provider/data plane |
+| Phase 5C2h HTTP provider reload scheduling | Complete in declared serial plaintext lifecycle scope; CFG-05/PROV-01/PROV-03 remain partial | Portable config-generation long-to-short interval mutation plus stale URL/path/cache replacement re-key pending deadlines and publish the new provider/data plane |
 | Phase 5C1c group filter/include-all composition | Complete in declared flat select scope; CFG-04/GRP-03 remain partial | Ordered multi-regex provider filters, exclusion, all include-all forms, empty fallback and selected HTTP routing pass |
 | Phase 5C1d nested selectors | Complete in declared select-DAG TCP scope; CFG-04/GRP-01 remain partial | Forward references, recursive HTTP/REJECT/DIRECT selection, UDP capability projection, compatible views and cycle rejection pass |
 | Phase 5C1e group type exclusion | Complete in current adapter-type scope; CFG-04/GRP-03 remain partial | Case-insensitive built-in, HTTP, SOCKS5 and nested-selector exclusion plus empty fallback and compatible-view separation pass |
@@ -131,7 +131,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 5C1o SOCKS5 fallback health | Complete in declared authenticated SOCKS5/fallback TCP scope; GRP-02/03 remain partial | Real startup/manual/eager health probes, high-threshold refused activation, unhealthy failover and survivor routing pass |
 | Phase 5C3 provider completion | Complete for current HTTP/SOCKS5 adapters; PROV-01 retains later-protocol/dialer/override-expression gaps | Inline/file/HTTP/HTTPS, filters/name transforms, provider health, trusted roots and durable digest-bound ETag restart pass |
 | Phase 5C4 rule providers | Complete in declared current rule/runtime scope; PROV-02 retains later-consumer/dialer gaps | Inline/file/HTTP/HTTPS, YAML/text/MRS, domain/IP/classical RULE-SET, REST, interval/file-watch refresh, cache and rollback pass |
-| Phase 5C5 provider transactions/lifecycle | Complete in declared process/runtime scope; PROV-03 retains native-platform stress gates | Concurrent valid/invalid PUT bursts serialize transactionally; SIGHUP removal clears API/health/schedules and watcher tasks cancel cleanly |
+| Phase 5C5 provider transactions/lifecycle | Complete in declared process/runtime scope; PROV-03 retains native-platform stress gates | Concurrent valid/invalid PUT bursts serialize transactionally; portable config-generation removal clears API/health/schedules and watcher tasks cancel cleanly |
 | Phase 5C aggregate | Complete for the pre-Phase-6 adapter surface | All 27 `phase5c*.py` Go/Rust differential gates pass consecutively; later protocols must add their own provider evidence |
 | Phase 6B2 SOCKS5 outbound | Complete for the native adapter boundary | Plain/TLS CONNECT, auth and overlength wire shapes, address/reply lifecycle, UDP ASSOCIATE reuse and exact UDP/UoT view pass |
 | Phase 6B aggregate | Complete for native HTTP/SOCKS5 on the current mixed data plane | Four original plus two completion differentials cover TCP, TLS identity/client auth, HTTP errors and SOCKS5 UDP; cross-cutting dialer chains remain OUT-21/Phase 7T |
@@ -5964,3 +5964,34 @@ DoH scheduling, broader DoQ endpoint/trust/token/error behavior, upstream
 selection and broader REST control, `respect-rules`, intercepted DNS, TUN, remote proxy
 protocols, external providers and broader REST/platform
 compatibility are planned but not implied by this status.
+
+## 2026-09-03 native-CI stabilization
+
+The post-Phase-6E native matrix was hardened without expanding protocol scope:
+
+- process cleanup now uses Windows `terminate`/`kill` and POSIX process-group
+  signals, so a failed case cannot mask its real assertion with `killpg` errors
+  or leave `cache.db` locked;
+- portable hot-reload assertions use the already compatible `/configs`
+  transaction where signal-source semantics are not under test; Windows keeps
+  configuration/override coverage while omitting only Unix SIGHUP subcases,
+  drives lifecycle hooks and shutdown with `CTRL_BREAK_EVENT`, and reports the
+  SIGHUP-only dynamic-CORS contract as non-applicable;
+- age configuration proves the applied mixed listener directly instead of
+  treating Go's transient `/configs` display value as listener evidence;
+- file-provider replacement is atomic, VMess gRPC pooling has a separate
+  unbarriered end-to-end readiness exchange, and DNS/hosts tunnel sampling
+  retries only connections that produced no observation;
+- Phase 4F10 no longer compares subprocess-exit timing with authority-thread
+  timing; the semantic timeout output remains asserted, and the dual-fast case
+  uses a deterministic collection window;
+- VLESS negative coverage now rejects unknown transports and still-unimplemented
+  WebSocket early-data/xHTTP download settings instead of rejecting TLS, UDP
+  and WebSocket combinations that Phase 6E already implements.
+
+Local Darwin arm64 reruns pass Phase 1, 3, 4E11, 4E18, 4F10, 4F11, 4F12,
+4F13, 5A1, 5A3a, 5A4a, 5A7b, 5A8a, 5C provider
+refresh/concurrency/selector/HTTP reload, 5D
+CORS, 5F LAN policy/UDP NAT, 6B TLS identity, 6C Shadowsocks inbound, 6D
+VMess gRPC pooling and 6E native VLESS. Native Linux/Windows/macOS matrix
+results remain unclaimed until the corresponding GitHub Actions run completes.

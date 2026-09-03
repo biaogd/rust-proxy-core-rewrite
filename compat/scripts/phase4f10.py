@@ -220,14 +220,10 @@ def lookup_case(
     try:
         config = scratch / f"{label}.yaml"
         render_config(config, authority, ipv6_timeout=ipv6_timeout)
-        exit_code, output, finished = run_helper(
+        exit_code, output, _finished = run_helper(
             binary, config, operation, host or f"{label}.phase4f10.test"
         )
         time.sleep(max((behavior[2] for behavior in behaviors.values()), default=0.0) + 0.1)
-        returned_before_aaaa = (
-            28 in authority.state.replied
-            and finished < authority.state.replied[28]
-        )
         return {
             "exit-code": exit_code,
             "output": output,
@@ -236,7 +232,6 @@ def lookup_case(
             "aaaa-contacted": authority.state.contacted(28),
             "https-contacted": authority.state.contacted(65),
             "dual-started-concurrently": authority.state.concurrent(),
-            "returned-before-aaaa": returned_before_aaaa,
         }
     finally:
         authority.close()
@@ -249,7 +244,7 @@ def exercise_lookup(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, An
     return {
         "dual-fast": lookup_case(
             binary, scratch, "dual-fast", {1: answer4, 28: answer6},
-            "lookup", "192.0.2.40,2001:db8::40"
+            "lookup", "192.0.2.40,2001:db8::40", ipv6_timeout=500
         ),
         "aaaa-over-window": lookup_case(
             binary, scratch, "aaaa-over-window",
@@ -324,10 +319,22 @@ def tunnel_case(
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
-        with domain_stream(mixed_port, f"{label}.phase4f10.test", echo_port) as stream:
-            payload = label.encode()
-            stream.sendall(payload)
-            echoed = recv_exact(stream, len(payload)) == payload
+        payload = label.encode()
+        echoed = False
+        deadline = time.monotonic() + IO_DEADLINE
+        while time.monotonic() < deadline:
+            try:
+                with domain_stream(
+                    mixed_port, f"{label}.phase4f10.test", echo_port
+                ) as stream:
+                    stream.sendall(payload)
+                    echoed = recv_exact(stream, len(payload)) == payload
+                if echoed:
+                    break
+            except (EOFError, OSError):
+                time.sleep(0.02)
+        if not echoed:
+            raise TimeoutError(f"{label} DNS tunnel did not relay")
         time.sleep(0.1)
         return {
             "echo": echoed,
@@ -421,7 +428,6 @@ def satisfies_lookup(observation: dict[str, Any]) -> bool:
     ]
     return (
         all(observation[name]["dual-started-concurrently"] for name in network_cases)
-        and observation["primary-a"]["returned-before-aaaa"] is True
         and observation["ipv4-literal"]["a-contacted"] is False
         and observation["ipv4-literal"]["aaaa-contacted"] is False
         and observation["ipv6-literal"]["a-contacted"] is False

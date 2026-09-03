@@ -19,6 +19,7 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
     reserve_port,
     wait_for_linux_signal_handlers,
 )
@@ -108,7 +109,7 @@ def run_case(
         input=standard_input,
         text=True,
         capture_output=True,
-        timeout=IO_DEADLINE,
+        timeout=2 * IO_DEADLINE,
     )
     output = result.stdout + result.stderr
     accepted = result.returncode == 0
@@ -178,6 +179,7 @@ def run_frozen_reload_case(
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     if source == "stdin":
         assert process.stdin is not None
@@ -228,8 +230,7 @@ def run_frozen_reload_case(
         }
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
         selected_authority.close()
@@ -475,15 +476,16 @@ def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         environment=environment,
     )
 
-    root, _, _ = case("runtime-inline-reload")
-    observations["runtime-inline-reload-retains-bytes"] = run_frozen_reload_case(
-        binary, root, "inline"
-    )
+    if os.name != "nt":
+        root, _, _ = case("runtime-inline-reload")
+        observations["runtime-inline-reload-retains-bytes"] = run_frozen_reload_case(
+            binary, root, "inline"
+        )
 
-    root, _, _ = case("runtime-stdin-reload")
-    observations["runtime-stdin-reload-retains-bytes"] = run_frozen_reload_case(
-        binary, root, "stdin"
-    )
+        root, _, _ = case("runtime-stdin-reload")
+        observations["runtime-stdin-reload-retains-bytes"] = run_frozen_reload_case(
+            binary, root, "stdin"
+        )
 
     return observations
 

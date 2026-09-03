@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port, wait_for_linux_signal_handlers
+from phase1 import IO_DEADLINE, ROOT, reload_via_declared_controller, reserve_port, wait_for_linux_signal_handlers
 from phase4 import build_binaries, launch, stop, wait_dns_ready
 from phase4b import local_interface_ip, make_query, udp_query
 from phase4c import AuthorityHandler, AuthorityServer, AuthorityState, fake_address
@@ -138,22 +138,10 @@ def run_filter_case(
         stderr.close()
 
 
-def wait_for_real(
-    port: int, name: str, *, reload_process: Any | None = None
-) -> str:
+def wait_for_real(port: int, name: str) -> str:
     deadline = time.monotonic() + IO_DEADLINE
     identifier = 0x7200
-    next_reload = 0.0
     while time.monotonic() < deadline:
-        now = time.monotonic()
-        if reload_process is not None and now >= next_reload:
-            if reload_process.poll() is not None:
-                raise AssertionError("candidate exited before fake-IP reload became observable")
-            os.kill(reload_process.pid, signal.SIGHUP)
-            # SIGHUP is edge-triggered. Repeating the same idempotent reload at
-            # a bounded cadence avoids losing the only edge between listener
-            # readiness and the async reload receiver becoming runnable.
-            next_reload = now + 0.25
         try:
             data = query_data(port, name, identifier)
             if data == REAL_ADDRESS:
@@ -204,6 +192,10 @@ def run_reload_case(
             store=persistent,
         )
     )
+    config.write_text(
+        config.read_text()
+        + f"external-controller: 127.0.0.1:{reserve_port()}\n"
+    )
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         try:
@@ -211,14 +203,6 @@ def run_reload_case(
         except RuntimeError as error:
             stderr.flush()
             raise RuntimeError(f"{error}: {(scratch / 'stderr.log').read_text()}") from error
-        # Socket readiness can precede the CLI's signal.Notify registration.
-        # SIGHUP is edge-triggered, so sending it in that window loses the
-        # reload permanently. Linux exposes the caught-signal mask as a
-        # deterministic barrier; other platforms retain a bounded fallback.
-        if not wait_for_linux_signal_handlers(process):
-            time.sleep(0.05)
-            if process.poll() is not None:
-                raise AssertionError("candidate exited before reload signal readiness")
         old = query_data(dns_port, "old.range.phase4f14.test", 0x7210)
         config.write_text(
             config_text(
@@ -229,13 +213,15 @@ def run_reload_case(
                 filters=["reload-ready.phase4f14.test"],
                 store=persistent,
             )
-        )
-        try:
-            ready = wait_for_real(
-                dns_port,
-                "reload-ready.phase4f14.test",
-                reload_process=process,
+            + next(
+                line + "\n"
+                for line in config.read_text().splitlines()
+                if line.startswith("external-controller:")
             )
+        )
+        reload_via_declared_controller(process, config)
+        try:
+            ready = wait_for_real(dns_port, "reload-ready.phase4f14.test")
         except AssertionError as error:
             stdout.flush()
             stderr.flush()

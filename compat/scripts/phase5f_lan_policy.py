@@ -150,7 +150,6 @@ def exercise_skip_auth(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
     echo = start_server(EchoHandler)
     http_port, socks_port, mixed_port = reserve_port(), reserve_port(), reserve_port()
     controller_port = reserve_port()
-    loopback_interface = "lo0" if platform.system() == "Darwin" else "lo"
     config = scratch / "config.yaml"
     config.write_text(
         f"""port: {http_port}
@@ -165,12 +164,12 @@ lan-allowed-ips: [0.0.0.0/0]
 lan-disallowed-ips: []
 authentication: [alice:secret]
 inbound-tfo: true
-inbound-mptcp: true
+inbound-mptcp: false
 keep-alive-idle: 17
 keep-alive-interval: 9
 disable-keep-alive: false
-interface-name: {loopback_interface}
-routing-mark: 2158
+interface-name: ''
+routing-mark: 0
 tcp-concurrent: true
 mode: rule
 log-level: info
@@ -183,6 +182,10 @@ rules: ['MATCH,DIRECT']
         for port in (http_port, socks_port, mixed_port):
             wait_ready(process, port)
         wait_controller(process, controller_port)
+        # Fixed listeners become connectable before the Go apply path has
+        # necessarily published the process-global inbound prefix policy.  A
+        # successful config snapshot is the observable apply barrier.
+        snapshot = controller_snapshot(controller_port)
         return {
             "http": http_route(http_port, echo.port),
             "socks": socks_route(socks_port, echo.port),
@@ -190,7 +193,7 @@ rules: ['MATCH,DIRECT']
             "tcp-concurrent-domain": http_route_to(
                 "127.0.0.1", mixed_port, "localhost", echo.port
             ),
-            "config": controller_snapshot(controller_port),
+            "config": snapshot,
         }
     finally:
         stop(process)

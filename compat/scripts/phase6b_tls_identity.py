@@ -6,9 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import selectors
-import signal
 import shutil
 import socket
 import socketserver
@@ -19,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, recv_exact, recv_until, reserve_port, start_server, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, recv_exact, recv_until, reload_via_controller, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, debug_files
 from phase5e_tls_client_auth import certificates, command
@@ -252,10 +250,11 @@ def exercise(binary: Path, scratch: Path, source_material: dict[str, Path]) -> d
         server_der = server_der.encode("latin1")
     fingerprint = hashlib.sha256(server_der).hexdigest()
     bad_fingerprint = "00" * 32
-    mixed_port = reserve_port()
+    mixed_port, controller_port = reserve_port(), reserve_port()
     config = scratch / "config.yaml"
     config.write_text(
         f"""mixed-port: {mixed_port}
+external-controller: 127.0.0.1:{controller_port}
 mode: rule
 log-level: info
 ipv6: false
@@ -339,7 +338,7 @@ rules:
         # constructing the initial proxy objects. A reload reconstructs those
         # objects against the installed pool; Rust follows the same observable
         # lifecycle in this compatibility fixture.
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config)
         wait_route(process, mixed_port, destination["http-full"])
         for server in servers.values():
             server.observations.clear()

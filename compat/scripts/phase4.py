@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import signal
 import socket
 import socketserver
 import subprocess
@@ -21,6 +20,7 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    terminate_process,
     reserve_port,
 )
 
@@ -238,26 +238,15 @@ def launch(
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     return process, stdout, stderr
 
 
 def stop(process: subprocess.Popen[bytes]) -> int:
-    sent_sigterm = False
-    if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
-        sent_sigterm = True
-    try:
-        exit_code = process.wait(timeout=IO_DEADLINE)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        return process.wait(timeout=IO_DEADLINE)
-    # A listener can become ready just before the Go main goroutine installs
-    # its SIGTERM handler. Normalize only the signal sent above by this cleanup
-    # helper; spontaneous signal exits and forced SIGKILL remain observable.
-    if sent_sigterm and exit_code == -signal.SIGTERM:
-        return 0
-    return exit_code
+    # Normalize only termination requested by this cleanup helper; spontaneous
+    # exits and forced-kill escalation remain observable.
+    return terminate_process(process, normalize_requested=True)
 
 
 def render_config(

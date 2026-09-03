@@ -19,6 +19,7 @@ from phase1 import (
     RUST_ROOT,
     assert_go_oracle_baseline,
     cargo_target_path,
+    kill_process,
     reserve_port,
     wait_for_linux_signal_handlers,
 )
@@ -109,8 +110,7 @@ def run_case(
         return {"geodata-mode": mode, "exit-code": stop(process)}
     finally:
         if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=IO_DEADLINE)
+            kill_process(process)
         stdout.close()
         stderr.close()
 

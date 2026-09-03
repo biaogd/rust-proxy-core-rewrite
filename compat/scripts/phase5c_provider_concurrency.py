@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
-import signal
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, reserve_port, start_server, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, reload_via_controller, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, debug_files
 from phase5c_http_provider import ProviderServer
@@ -145,7 +143,7 @@ rules:
   - MATCH,DIRECT
 """
         )
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller, config)
         wait_removed(process, controller)
         return {
             "valid": valid,

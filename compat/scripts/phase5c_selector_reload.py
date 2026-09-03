@@ -4,14 +4,12 @@
 from __future__ import annotations
 
 import json
-import os
-import signal
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, reserve_port, start_server, wait_for_linux_signal_handlers, wait_ready
+from phase1 import EchoHandler, IO_DEADLINE, ROOT, reload_via_controller, reserve_port, start_server, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, debug_files
 from phase5c_selector import route
@@ -93,7 +91,6 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
-        wait_for_linux_signal_handlers(process)
         selected = request(
             controller_port,
             "PUT",
@@ -113,7 +110,7 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
             ["DIRECT", "local-http", "REJECT"],
             "REJECT",
         )
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config)
         wait_group(
             controller_port,
             ["DIRECT", "local-http", "REJECT"],
@@ -122,7 +119,7 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
         retained_route = route(mixed_port, echo.port)
 
         config.write_text("mixed-port: [")
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config, expected_status=400)
         time.sleep(0.1)
         invalid_snapshot = group(controller_port)
 
@@ -134,7 +131,7 @@ def exercise(binary: Path, scratch: Path) -> dict[str, Any]:
             ["DIRECT", "REJECT"],
             "REJECT",
         )
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_controller(process, controller_port, config)
         wait_group(controller_port, ["DIRECT", "REJECT"], "DIRECT")
         return {
             "valid-retained": retained_route,

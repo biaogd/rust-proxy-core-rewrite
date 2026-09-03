@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import pathlib
-import signal
 import socket
 import socketserver
 import ssl
@@ -17,7 +15,7 @@ import threading
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, recv_exact, reserve_port
+from phase1 import IO_DEADLINE, ROOT, recv_exact, reload_via_declared_controller, reserve_port
 from phase4 import AuthorityState, build_binaries, dns_query, launch, observe_response
 from phase4 import stop, wait_dns_ready
 from phase4e2 import rejected_query
@@ -208,6 +206,10 @@ def start_case(
         dns_port=dns_port,
         upstream_port=authority.port,
     )
+    config.write_text(
+        config.read_text()
+        + f"external-controller: 127.0.0.1:{reserve_port()}\n"
+    )
     process, stdout, stderr = launch(binary, config, scratch)
     wait_dns_ready(process, dns_port)
     time.sleep(0.1)
@@ -362,7 +364,7 @@ def exercise_reload_reset(binary: pathlib.Path, scratch: pathlib.Path) -> dict[s
             lambda current: current["connections"] == 1 and current["active"] == 1,
         )
         config.touch()
-        os.kill(process.pid, signal.SIGHUP)
+        reload_via_declared_controller(process, config)
         reset = wait_authority(authority.server, lambda current: current["active"] == 0)
         second_id = 0x8C20
         second = observe_response(

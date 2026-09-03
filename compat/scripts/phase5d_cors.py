@@ -256,6 +256,9 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 
 
 def main() -> int:
+    if os.name == "nt":
+        print("Phase 5D SIGHUP CORS reload differential is not applicable on Windows")
+        return 0
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase5d-cors-") as temporary:
         root = pathlib.Path(temporary)

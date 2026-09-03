@@ -107,12 +107,13 @@ def wait_for_ping(output: pathlib.Path) -> bool:
 def exercise(
     binary: pathlib.Path, authority_binary: pathlib.Path, scratch: pathlib.Path
 ) -> dict[str, Any]:
-    ports = [reserve_port() for _ in range(4)]
+    ports = [reserve_port() for _ in range(5)]
     authority_options = [
         {"stream_barrier": 3},
         {"stream_barrier": 4},
         {"stream_barrier": 3},
         {"observe_h2_ping": True},
+        {},
     ]
     authorities = []
     handles = []
@@ -143,7 +144,9 @@ log-level: info
 ipv6: false
 proxies:
 {record("grpc-default", ports[0])}{record("grpc-max-connections", ports[1], "      max-connections: 2\n      min-streams: 2\n")}{record("grpc-max-streams", ports[2], "      max-connections: 0\n      max-streams: 1\n")}{record("grpc-ping", ports[3], "      ping-interval: 1\n")}
+{record("grpc-readiness", ports[4])}
 rules:
+  - DST-PORT,29000,grpc-readiness
   - DST-PORT,29001,grpc-default
   - DST-PORT,29002,grpc-max-connections
   - DST-PORT,29003,grpc-max-streams
@@ -154,6 +157,11 @@ rules:
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_ready(process, mixed_port)
+        # Listener readiness alone precedes Go's compatible-provider startup.
+        # A separate unbarriered exchange proves the complete VMess/gRPC path
+        # before the concurrency barriers begin holding logical streams open.
+        if not exchange(mixed_port, "ready.phase6d", 29000, b"ready"):
+            raise AssertionError("VMess gRPC readiness exchange failed")
         default = run_concurrent(mixed_port, 29001, 3, authorities[0][1])
         bounded_connections = run_concurrent(mixed_port, 29002, 4, authorities[1][1])
         bounded_streams = run_concurrent(mixed_port, 29003, 3, authorities[2][1])

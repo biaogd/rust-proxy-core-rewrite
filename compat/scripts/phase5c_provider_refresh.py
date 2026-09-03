@@ -24,7 +24,8 @@ FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5c-provider-refresh-dif
 
 
 def write_provider(path: Path, name: str, port: int, modified: int) -> None:
-    path.write_text(
+    staged = path.with_name(f".{path.name}.next")
+    staged.write_text(
         f"""proxies:
   - name: {name}
     type: http
@@ -34,7 +35,8 @@ def write_provider(path: Path, name: str, port: int, modified: int) -> None:
     password: proxy-pass
 """
     )
-    os.utime(path, (modified, modified))
+    os.utime(staged, (modified, modified))
+    staged.replace(path)
 
 
 def provider_names(controller_port: int) -> list[str]:

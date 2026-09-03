@@ -788,6 +788,9 @@ fn parse_vless_transport(
             reuse,
         });
     }
+    if network != "ws" {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
     let options = proxy.ws_opts.clone().unwrap_or_default();
     if !options.extra.is_empty()
         || options.max_early_data.is_some()

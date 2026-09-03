@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
-import signal
 import socket
 import socketserver
 import tempfile
@@ -15,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, reserve_port, wait_for_linux_signal_handlers
+from phase1 import IO_DEADLINE, ROOT, reload_via_declared_controller, reserve_port
 from phase4 import (
     build_binaries,
     dns_question_end,
@@ -238,6 +236,10 @@ def with_candidate(
     dns_port = reserve_port()
     config = scratch / "config.yaml"
     render_config(config, authority, dns_port, algorithm, max_size)
+    config.write_text(
+        config.read_text()
+        + f"external-controller: 127.0.0.1:{reserve_port()}\n"
+    )
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         wait_dns_ready(process, dns_port)
@@ -344,9 +346,7 @@ def reload_case(
     first = observe(udp_query(dns_port, dns_query(name, 0x4B50)), 0x4B50)
     cached = observe(udp_query(dns_port, dns_query(name, 0x4B51)), 0x4B51)
     config.touch()
-    if not wait_for_linux_signal_handlers(process):
-        time.sleep(0.05)
-    os.kill(process.pid, signal.SIGHUP)
+    reload_via_declared_controller(process, config)
     time.sleep(0.35)
     deadline = time.monotonic() + IO_DEADLINE
     while True:
