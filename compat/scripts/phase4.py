@@ -233,6 +233,10 @@ def launch(
         env={
             **os.environ,
             "HOME": str(scratch),
+            # os.UserHomeDir reads USERPROFILE on Windows, while the Rust
+            # state adapter prefers HOME. Keep both candidates on the same
+            # fixture-local cache.db for persistence/interchange cases.
+            "USERPROFILE": str(scratch),
             "XDG_CONFIG_HOME": str(scratch / ".config"),
         },
         stdout=stdout,

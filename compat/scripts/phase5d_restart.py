@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import time
 from typing import Any
@@ -30,11 +32,47 @@ def request(port: int, method: str) -> tuple[int, bytes]:
         connection.close()
 
 
-def wait_reexec(process: Any, controller: int) -> None:
+def windows_listener_pid(port: int) -> int | None:
+    """Return the PID owning a Windows TCP listener without extra modules."""
+    if os.name != "nt":
+        return None
+    result = subprocess.run(
+        ["netstat", "-ano", "-p", "tcp"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 5 or fields[0].upper() != "TCP":
+            continue
+        if fields[3].upper() != "LISTENING":
+            continue
+        try:
+            local_port = int(fields[1].rsplit(":", 1)[1])
+            pid = int(fields[4])
+        except (IndexError, ValueError):
+            continue
+        if local_port == port:
+            return pid
+    return None
+
+
+def stop_windows_listener(pid: int) -> None:
+    subprocess.run(
+        ["taskkill", "/F", "/T", "/PID", str(pid)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def wait_reexec(process: Any, controller: int) -> int:
     deadline = time.monotonic() + IO_DEADLINE * 2
     saw_unavailable = False
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        original_exited = process.poll() is not None
+        if original_exited and os.name != "nt":
             raise RuntimeError(f"restart process exited with {process.returncode}")
         try:
             connection = http.client.HTTPConnection("127.0.0.1", controller, timeout=0.1)
@@ -43,15 +81,19 @@ def wait_reexec(process: Any, controller: int) -> None:
             body = response.read()
             response.close()
             connection.close()
-            if saw_unavailable and response.status == 200 and json.loads(body)["hello"] == "mihomo":
-                return
+            ready = response.status == 200 and json.loads(body)["hello"] == "mihomo"
+            if ready and (saw_unavailable or original_exited):
+                return windows_listener_pid(controller) or process.pid
         except (OSError, TimeoutError):
             saw_unavailable = True
         time.sleep(0.01)
     # Very fast local exec can reopen between polling samples. A live endpoint
     # after the bounded re-exec window is still required, while process death is
     # always a failure.
+    if os.name == "nt" and process.poll() is not None:
+        raise RuntimeError("restarted child did not reopen the controller")
     wait_controller(process, controller)
+    return windows_listener_pid(controller) or process.pid
 
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
@@ -70,21 +112,31 @@ rules:
     )
     process, stdout, stderr = launch(binary, config, scratch)
     original_pid = process.pid
+    restarted_pid = original_pid
     try:
         wait_ready(process, mixed)
         wait_controller(process, controller)
         wrong_method = request(controller, "GET")
         restarted = request(controller, "POST")
-        wait_reexec(process, controller)
+        restarted_pid = wait_reexec(process, controller)
         return {
             "wrong-method-status": wrong_method[0],
             "restart-status": restarted[0],
             "restart-body": json.loads(restarted[1]),
-            "same-pid": process.pid == original_pid,
-            "alive-after-reexec": process.poll() is None,
+            "same-pid": restarted_pid == original_pid,
+            "alive-after-reexec": windows_listener_pid(controller) is not None
+            if os.name == "nt"
+            else process.poll() is None,
         }
     finally:
-        stop(process)
+        listener_pid = windows_listener_pid(controller)
+        if os.name == "nt" and listener_pid is not None:
+            stop_windows_listener(listener_pid)
+            deadline = time.monotonic() + IO_DEADLINE
+            while windows_listener_pid(controller) is not None and time.monotonic() < deadline:
+                time.sleep(0.02)
+        if process.poll() is None:
+            stop(process)
         stdout.close()
         stderr.close()
 

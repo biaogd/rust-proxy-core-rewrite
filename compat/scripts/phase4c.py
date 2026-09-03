@@ -204,9 +204,26 @@ def exercise_reverse(
         time.sleep(0.1)
         response = fake_address(dns_port, "route.phase4.test", 1, 0x6201)
         address = response["records"][0]["data"]
-        with socks5_connect(mixed_port, address, echo.server_address[1]) as stream:
-            stream.sendall(b"fake-route")
-            echoed = recv_exact(stream, 10).decode()
+        deadline = time.monotonic() + IO_DEADLINE
+        last_error: BaseException | None = None
+        echoed = ""
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"candidate exited during fake-IP route readiness: {process.returncode}"
+                )
+            try:
+                with socks5_connect(
+                    mixed_port, address, echo.server_address[1]
+                ) as stream:
+                    stream.sendall(b"fake-route")
+                    echoed = recv_exact(stream, 10).decode()
+                break
+            except (EOFError, OSError, TimeoutError) as error:
+                last_error = error
+                time.sleep(0.02)
+        if echoed != "fake-route":
+            raise AssertionError("fake-IP reverse route did not become ready") from last_error
         return {
             "fake-response": response,
             "relay": echoed,

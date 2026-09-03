@@ -11,7 +11,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 0 baseline and governance | Complete | Six migration documents and root `AGENTS.md` |
 | Phase 0B exhaustive Go capability census | Complete | Stable CLI/config/inbound/rule/outbound/DNS/runtime/API/service/platform inventory IDs and planned gates |
 | Go reference implementation | Preserved | No existing Go source modified or deleted |
-| Native CI portability hardening | Local gates pass; Windows rerun pending | Controller reload fixtures submit one transaction and wait for its result, Windows home resolution is isolated through `USERPROFILE`, lifecycle-hook failures release log handles, and file-provider watches accept normalized atomic-replace events; Phase 3, 5A1, 5A8a and 5C provider-refresh differentials plus workspace fmt/clippy/test pass locally |
+| Native CI portability hardening | Local gates pass; Windows rerun pending | Windows `.exe`, home/cache isolation, restart child-process cleanup, Winsock error text and cold data-plane boundaries are represented explicitly; the seven directly affected Phase 4C/4E15/4F14/5A1/5C/5D/6E differentials pass locally, with native parity unclaimed until CI |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |
@@ -6015,6 +6015,24 @@ follow-up fixes are covered by the same existing gates:
   CI-load-sized bound, the dual-stack configured window has wider scheduling
   margin, and the DoQ retry case observes the first pooled connection before
   injecting resets.
+
+The next native run exposed five further fixture assumptions rather than one
+shared Rust product failure:
+
+- the DoH/2 helper resolves Cargo's `.exe` output on Windows;
+- classic-DNS launches isolate `USERPROFILE` with `HOME`, so the pinned Go
+  oracle and Rust state adapter exchange the same fixture-local bbolt file;
+- restart evidence models Windows' spawn-and-exit lifecycle, discovers the
+  replacement controller PID, and terminates that child before closing logs;
+- the dial-failure gate records the pinned oracle's literal-error behavior:
+  Winsock's “actively refused” text follows the ordinary failure counter,
+  unlike Unix's immediate `connection refused` trigger;
+- fake-IP reverse routing and the first VLESS/TLS exchange cross an observable
+  data-plane readiness boundary before comparing payloads.
+
+Phase 4C, 4E15, 4F14, 5A1, 5C dial-failure, 5D restart and 6E VLESS/TLS all
+re-pass locally after these changes. Native Windows and macOS results remain
+unclaimed until the updated GitHub Actions run completes.
 
 Workspace fmt, all-target/all-feature clippy and tests pass locally on Darwin
 arm64. Native Windows parity remains revalidation-pending until the updated

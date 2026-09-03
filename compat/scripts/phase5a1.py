@@ -82,7 +82,12 @@ def classify_error(output: str) -> str:
         return "invalid-mode"
     if "illegal base64" in lowered or "invalid symbol" in lowered:
         return "base64"
-    if "no such file" in lowered or "cannot read configuration" in lowered:
+    if (
+        "no such file" in lowered
+        or "cannot read configuration" in lowered
+        or "the system cannot find the file specified" in lowered
+        or "the system cannot find the path specified" in lowered
+    ):
         return "missing-file"
     if "yaml" in lowered or "unmarshal" in lowered:
         return "yaml"

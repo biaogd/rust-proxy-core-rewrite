@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import socketserver
 import tempfile
@@ -218,11 +219,22 @@ def exercise_refused(binary: Path, scratch: Path) -> dict[str, Any]:
         first.close()
         first_closed = True
         _ = failed_route(mixed_port, echo.port)
-        failed = wait_health(process, controller_port, "proxy-a", health_url, False)
-        routed = proxy_route(mixed_port, echo.port, first, second)
+        if os.name == "nt":
+            # The pinned Go oracle detects this special case with a literal
+            # "connection refused" substring. Winsock renders WSAECONNREFUSED
+            # as "actively refused it", so Windows follows the ordinary
+            # failure counter and does not activate at max-failed-times=99.
+            time.sleep(0.5)
+            failed = health_snapshot(controller_port, "proxy-a", health_url)
+            routed = None
+        else:
+            failed = wait_health(
+                process, controller_port, "proxy-a", health_url, False
+            )
+            routed = proxy_route(mixed_port, echo.port, first, second)
         return {
             "health-triggered": not failed[0] and failed[1] > initial[1],
-            "survivor-route": routed == "proxy-b",
+            "survivor-route": None if routed is None else routed == "proxy-b",
         }
     finally:
         stop(process)

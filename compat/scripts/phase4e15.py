@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -31,7 +32,8 @@ SERVER_NAME = "dot.phase4.test"
 
 def authority_binary() -> pathlib.Path:
     target = cargo_target_path("PHASE4_CARGO_TARGET", "phase4-rust")
-    return target / "debug" / "rewrite-h2-authority"
+    suffix = ".exe" if os.name == "nt" else ""
+    return target / "debug" / f"rewrite-h2-authority{suffix}"
 
 
 def start_authority(

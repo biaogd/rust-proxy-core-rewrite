@@ -23,7 +23,7 @@ from phase5b1a import build_binaries, debug_files
 from phase5d_proxies import request
 from phase5d_streams import SECRET, wait_controller
 from phase6d_vmess_tcp import rejected_exchange
-from phase6e_vless_tcp import STANDARD_UUID, config_validation, exchange
+from phase6e_vless_tcp import STANDARD_UUID, config_validation, exchange, wait_exchange
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6e-vless-tls-diff.json"
@@ -223,7 +223,9 @@ rules:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
         try:
-            trusted = exchange(mixed_port, "tls.phase6e", 26011, b"vless-tls")
+            trusted = wait_exchange(
+                process, mixed_port, "tls.phase6e", 26011, b"vless-tls"
+            )
         except Exception as error:
             raise AssertionError(
                 f"trusted VLESS TLS failed; authority={authority.snapshot()}"
