@@ -31,6 +31,7 @@ from phase1 import (
 HELPER = ROOT / "compat" / "fixtures" / "hooks" / "lifecycle.py"
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase5a8a-diff.json"
 HOOK_ENV = {"CLASH_POST_UP", "CLASH_POST_DOWN"}
+HOOK_RESOURCE_DEADLINE = 10.0
 
 
 def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
@@ -134,10 +135,12 @@ def wait_record(
     # The post-up helper probes three listeners sequentially and gives each
     # one its own bounded readiness window. The outer barrier must cover that
     # complete sequence on loaded CI runners.
-    deadline = time.monotonic() + (3 * IO_DEADLINE)
+    deadline = time.monotonic() + (3 * HOOK_RESOURCE_DEADLINE + IO_DEADLINE)
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise AssertionError(f"candidate exited before hook record {marker!r}")
+            raise AssertionError(
+                f"candidate exited with {process.returncode} before hook record {marker!r}"
+            )
         if record.exists() and marker in record.read_text():
             return
         time.sleep(0.02)
@@ -180,9 +183,22 @@ def run_success(
             "events": record.read_text().splitlines(),
             "hook-error": "script error" in output,
         }
+    except Exception as error:
+        if process.poll() is None:
+            kill_process(process)
+        stdout.close()
+        stderr.close()
+        output = (scratch / "stdout.log").read_text(errors="replace") + (
+            scratch / "stderr.log"
+        ).read_text(errors="replace")
+        raise AssertionError(
+            f"{error}; candidate output tail: {output[-4000:]!r}"
+        ) from error
     finally:
         if process.poll() is None:
             kill_process(process)
+        stdout.close()
+        stderr.close()
 
 
 def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
@@ -206,6 +222,8 @@ def run_empty_override(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
     finally:
         if process.poll() is None:
             kill_process(process)
+        stdout.close()
+        stderr.close()
 
 
 def run_up_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
@@ -253,6 +271,8 @@ def run_down_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, A
     finally:
         if process.poll() is None:
             kill_process(process)
+        stdout.close()
+        stderr.close()
 
 
 def observe(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:

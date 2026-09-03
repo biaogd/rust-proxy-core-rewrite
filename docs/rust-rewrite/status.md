@@ -1,6 +1,6 @@
 # Rust rewrite status
 
-Last updated: 2026-09-01
+Last updated: 2026-09-03
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
@@ -11,6 +11,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 0 baseline and governance | Complete | Six migration documents and root `AGENTS.md` |
 | Phase 0B exhaustive Go capability census | Complete | Stable CLI/config/inbound/rule/outbound/DNS/runtime/API/service/platform inventory IDs and planned gates |
 | Go reference implementation | Preserved | No existing Go source modified or deleted |
+| Native CI portability hardening | Local gates pass; Windows rerun pending | Controller reload fixtures submit one transaction and wait for its result, Windows home resolution is isolated through `USERPROFILE`, lifecycle-hook failures release log handles, and file-provider watches accept normalized atomic-replace events; Phase 3, 5A1, 5A8a and 5C provider-refresh differentials plus workspace fmt/clippy/test pass locally |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |

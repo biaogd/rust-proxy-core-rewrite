@@ -9,13 +9,16 @@ import sys
 import time
 
 
+RESOURCE_DEADLINE = 10.0
+
+
 def probe_tcp(port: int) -> None:
     with socket.create_connection(("127.0.0.1", port), timeout=1):
         pass
 
 
 def wait_tcp(port: int) -> None:
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + RESOURCE_DEADLINE
     while time.monotonic() < deadline:
         try:
             probe_tcp(port)

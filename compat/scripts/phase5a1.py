@@ -32,6 +32,9 @@ CONTROLLED_ENV = {
     "CLASH_CONFIG_STRING",
     "CLASH_HOME_DIR",
     "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
     "XDG_CONFIG_HOME",
 }
 VALID = """mixed-port: 7890
@@ -66,6 +69,10 @@ def clean_environment(home: pathlib.Path) -> dict[str, str]:
         key: value for key, value in os.environ.items() if key not in CONTROLLED_ENV
     }
     environment["HOME"] = str(home)
+    # Go's os.UserHomeDir and Rust's home crate both use USERPROFILE on
+    # Windows.  Isolate it alongside HOME so the candidate cannot create the
+    # fixture config in the hosted runner account instead of the case root.
+    environment["USERPROFILE"] = str(home)
     return environment
 
 

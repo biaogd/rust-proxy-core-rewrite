@@ -150,36 +150,62 @@ def reload_via_controller(
     secret: str = "",
     expected_status: int = 204,
 ) -> bytes:
-    """Request the same config replacement through the portable REST surface."""
+    """Request one config replacement through the portable REST surface.
+
+    Connecting is safe to retry because no request bytes have been submitted.
+    Once connected, however, a response timeout is ambiguous: the runtime may
+    already be applying the generation.  Never enqueue duplicate replacements
+    merely because a loaded native runner needs more than one second to reply.
+    """
     body = json.dumps({"path": "", "payload": config.read_text()}).encode()
     deadline = time.monotonic() + IO_DEADLINE
-    last_error: Exception | tuple[int, bytes] | None = None
+    last_error: OSError | None = None
+    connection: http.client.HTTPConnection | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(
                 f"proxy exited during controller reload: {process.returncode}"
             )
-        connection = http.client.HTTPConnection(
-            "127.0.0.1", controller_port, timeout=min(1.0, IO_DEADLINE)
+        remaining = deadline - time.monotonic()
+        candidate = http.client.HTTPConnection(
+            "127.0.0.1", controller_port, timeout=min(0.5, remaining)
         )
-        headers = {"Content-Type": "application/json"}
-        if secret:
-            headers["Authorization"] = f"Bearer {secret}"
         try:
-            connection.request("PUT", "/configs?force=true", body=body, headers=headers)
-            response = connection.getresponse()
-            payload = response.read()
-            if response.status == expected_status:
-                return payload
-            last_error = (response.status, payload)
+            candidate.connect()
         except OSError as error:
             last_error = error
-        finally:
-            connection.close()
-        time.sleep(0.02)
-    raise TimeoutError(
-        f"controller config reload did not return {expected_status}: {last_error}"
-    )
+            candidate.close()
+            time.sleep(0.02)
+            continue
+        connection = candidate
+        break
+    if connection is None:
+        raise TimeoutError(f"controller did not accept a reload connection: {last_error}")
+
+    remaining = max(0.1, deadline - time.monotonic())
+    connection.timeout = remaining
+    if connection.sock is not None:
+        connection.sock.settimeout(remaining)
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
+    try:
+        connection.request("PUT", "/configs?force=true", body=body, headers=headers)
+        response = connection.getresponse()
+        payload = response.read()
+    except OSError as error:
+        raise TimeoutError(
+            "controller reload response was not received; request was not retried "
+            f"because application may already be in progress: {error}"
+        ) from error
+    finally:
+        connection.close()
+    if response.status != expected_status:
+        raise AssertionError(
+            f"controller config reload returned {response.status}, expected "
+            f"{expected_status}: {payload!r}"
+        )
+    return payload
 
 
 def reload_via_declared_controller(

@@ -269,9 +269,18 @@ pub(super) async fn run_file_provider_watcher(
                 let mut due = std::collections::BTreeSet::new();
                 for path in changed_paths {
                     let path = normalize_provider_watch_path(&path);
-                    if let Some(providers) = files.get(&path) {
-                        for provider in providers {
-                            due.insert(provider.clone());
+                    for (watched, providers) in &files {
+                        // Atomic writers commonly create a sibling temporary
+                        // file and rename it over the watched path. Windows'
+                        // ReadDirectoryChangesW backend may report only the
+                        // sibling create/rename half of that sequence. Since
+                        // we deliberately watch a non-recursive provider
+                        // directory, any event in the same directory is a
+                        // safe trigger to re-read its declared providers.
+                        if provider_watch_event_matches(&path, watched) {
+                            for provider in providers {
+                                due.insert(provider.clone());
+                            }
                         }
                     }
                 }
@@ -348,7 +357,53 @@ pub(super) fn reset_provider_file_watches(
 }
 
 pub(super) fn normalize_provider_watch_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        // `canonicalize` returns verbatim (`\\?\`) paths on Windows while
+        // notify may report ordinary drive paths, particularly after an
+        // atomic rename made the temporary event path disappear. Convert both
+        // forms to the same case-insensitive key before matching directories.
+        let value = resolved.to_string_lossy();
+        let ordinary = value
+            .strip_prefix(r"\\?\UNC\")
+            .map_or_else(
+                || value.strip_prefix(r"\\?\").map(str::to_owned),
+                |rest| Some(format!(r"\\{rest}")),
+            )
+            .unwrap_or_else(|| value.into_owned());
+        PathBuf::from(ordinary.to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        resolved
+    }
+}
+
+fn provider_watch_event_matches(event: &Path, watched: &Path) -> bool {
+    event == watched || event.parent() == watched.parent()
+}
+
+#[cfg(test)]
+mod provider_watch_tests {
+    use super::provider_watch_event_matches;
+    use std::path::Path;
+
+    #[test]
+    fn atomic_replace_sibling_event_matches_provider() {
+        let provider = Path::new("/providers/provider.yaml");
+        assert!(provider_watch_event_matches(provider, provider));
+        assert!(provider_watch_event_matches(
+            Path::new("/providers/.provider.yaml.next"),
+            provider,
+        ));
+        assert!(!provider_watch_event_matches(
+            Path::new("/elsewhere/.provider.yaml.next"),
+            provider,
+        ));
+    }
 }
 
 #[allow(clippy::too_many_lines)]
