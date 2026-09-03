@@ -173,6 +173,7 @@ fn parse_remote_proxy(
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
         || proxy.udp_over_tcp.is_some()
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
@@ -256,6 +257,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
         || proxy.tls.is_some()
         || proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
@@ -360,6 +362,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || (network != "http" && proxy.http_opts.is_some())
         || (network != "h2" && proxy.h2_opts.is_some())
         || (network != "grpc" && proxy.grpc_opts.is_some())
+        || proxy.xhttp_opts.is_some()
         || (!matches!(network, "mkcp" | "kcp") && proxy.mkcp_opts.is_some())
         || (network != "mekya" && proxy.mekya_opts.is_some())
         || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
@@ -436,12 +439,13 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
         || !matches!(encryption, "" | "none")
-        || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc")
-        || (udp && network != "tcp")
+        || !matches!(network, "tcp" | "ws" | "http" | "h2" | "grpc" | "xhttp")
+        || (udp && !matches!(network, "tcp" | "ws" | "grpc"))
         || (!udp && proxy.packet_addr.is_some())
         || (!udp && proxy.xudp.is_some())
         || (!udp && proxy.packet_encoding.is_some())
         || (network != "grpc" && proxy.grpc_opts.is_some())
+        || (network != "xhttp" && proxy.xhttp_opts.is_some())
         || proxy.mkcp_opts.is_some()
         || proxy.mekya_opts.is_some()
         || proxy.udp_over_tcp.is_some()
@@ -468,7 +472,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
     }
     let transport = parse_vless_transport(network, &proxy, &name)?;
     let flow = parse_vless_flow(&proxy, &name)?;
-    if flow.is_some() && (!tls || network != "tcp" || udp || reality.is_some()) {
+    if flow.is_some() && (!tls || network != "tcp" || udp) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     let packet_mode = if udp {
@@ -694,6 +698,57 @@ fn parse_vless_transport(
             user_agent,
         });
     }
+    if network == "xhttp" {
+        let options = proxy.xhttp_opts.clone().unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mode = options.mode.as_deref().unwrap_or("auto");
+        if mode != "stream-one" {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let mut path = options
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_owned());
+        if !path.starts_with('/') || path.contains(['?', '#']) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        let host = options
+            .host
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| {
+                proxy
+                    .sni
+                    .clone()
+                    .unwrap_or_else(|| proxy.server.clone().unwrap_or_default())
+            });
+        if host.is_empty() || http::uri::Authority::from_maybe_shared(host.clone()).is_err() {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let headers = options.headers.unwrap_or_default();
+        if headers.iter().any(|(header, value)| {
+            http::header::HeaderName::from_bytes(header.as_bytes()).is_err()
+                || http::header::HeaderValue::from_str(value).is_err()
+        }) {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
+        let (padding_min, padding_max) = parse_xhttp_range(
+            options.x_padding_bytes.as_deref().unwrap_or("100-1000"),
+            name,
+        )?;
+        return Ok(VlessTransport::XHttp {
+            host,
+            path,
+            headers,
+            no_grpc_header: options.no_grpc_header.unwrap_or(false),
+            padding_min,
+            padding_max,
+        });
+    }
     let options = proxy.ws_opts.clone().unwrap_or_default();
     if !options.extra.is_empty()
         || options.max_early_data.is_some()
@@ -721,6 +776,25 @@ fn parse_vless_transport(
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok(VlessTransport::WebSocket { path, headers })
+}
+
+fn parse_xhttp_range(value: &str, name: &str) -> Result<(usize, usize), ConfigError> {
+    let mut parts = value.split('-');
+    let minimum = parts
+        .next()
+        .and_then(|part| part.trim().parse::<usize>().ok())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    let maximum = match parts.next() {
+        Some(part) => part
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?,
+        None => minimum,
+    };
+    if parts.next().is_some() || maximum < minimum || maximum > 16_384 {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok((minimum, maximum))
 }
 
 fn parse_vless_packet_mode(proxy: &RawProxy, name: &str) -> Result<VlessPacketMode, ConfigError> {
@@ -1403,6 +1477,7 @@ fn proxy_has_transport_fields(proxy: &RawProxy) -> bool {
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
         || proxy.tls.is_some()
         || proxy.udp.is_some()
         || proxy.udp_over_tcp.is_some()

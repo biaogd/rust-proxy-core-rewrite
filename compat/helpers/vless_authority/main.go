@@ -12,20 +12,21 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/gobwas/ws/wsutil"
 	"github.com/gofrs/uuid/v5"
+	http "github.com/metacubex/http"
+	"github.com/metacubex/http/http2"
 	sing_vless "github.com/metacubex/mihomo/listener/sing_vless"
 	"github.com/metacubex/sing-vmess/packetaddr"
 	vless "github.com/metacubex/sing-vmess/vless"
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
-	"golang.org/x/net/http2"
 )
 
 type authority struct {
@@ -381,6 +382,35 @@ func (a *authority) serveH2(connection net.Conn, transport string) error {
 				request.Header.Get("User-Agent"),
 			)
 			writer.Header().Set("Content-Type", "application/grpc")
+		} else if transport == "xhttp" {
+			if request.Method != http.MethodPost ||
+				(a.expectedHTTPHost != "" && request.Host != a.expectedHTTPHost) ||
+				(a.expectedHTTPPath != "" && request.URL.RequestURI() != a.expectedHTTPPath) {
+				http.Error(writer, "invalid xHTTP stream-one request", http.StatusBadRequest)
+				return
+			}
+			paddingLength := -1
+			if referer, err := url.Parse(request.Header.Get("Referer")); err == nil {
+				paddingLength = len(referer.Query().Get("x_padding"))
+			}
+			headerValue := ""
+			if a.expectedHTTPHeader != "" {
+				name, value, found := strings.Cut(a.expectedHTTPHeader, "=")
+				if !found || request.Header.Get(name) != value {
+					http.Error(writer, "invalid xHTTP custom header", http.StatusBadRequest)
+					return
+				}
+				headerValue = name + "=" + value
+			}
+			a.observe(
+				"XHTTP POST %s %s %s PADDING %d %s",
+				request.Host,
+				request.URL.RequestURI(),
+				request.Header.Get("Content-Type"),
+				paddingLength,
+				headerValue,
+			)
+			writer.Header().Set("X-Padding", "XXXXXXXX")
 		} else if request.Method != http.MethodPut ||
 			(a.expectedHTTPHost != "" && request.Host != a.expectedHTTPHost) ||
 			(a.expectedHTTPPath != "" && request.URL.RequestURI() != a.expectedHTTPPath) ||
@@ -396,10 +426,10 @@ func (a *authority) serveH2(connection net.Conn, transport string) error {
 		}
 		stream := &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
 		if transport == "grpc" {
-			a.handle(&gunConn{Conn: stream})
+			a.handleProtocol(&gunConn{Conn: stream})
 			return
 		}
-		a.handle(stream)
+		a.handleProtocol(stream)
 	})})
 	return nil
 }
@@ -485,6 +515,22 @@ func (a *authority) handle(connection net.Conn) {
 	_, _ = io.Copy(connection, connection)
 }
 
+func (a *authority) handleProtocol(connection net.Conn) {
+	if a.singVlessService != nil {
+		if err := a.singVlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
+	if a.vlessService != nil {
+		if err := a.vlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return
+	}
+	a.handle(connection)
+}
+
 func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool) {
 	if tlsEnabled {
 		if tlsConnection, ok := connection.(*tls.Conn); ok {
@@ -497,13 +543,13 @@ func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool
 			} else {
 				a.observe("TLS <none>")
 			}
-			if transport == "h2" || transport == "grpc" {
+			if transport == "h2" || transport == "grpc" || transport == "xhttp" {
 				a.observe("ALPN %s", state.NegotiatedProtocol)
 			}
 		}
 	}
 	switch transport {
-	case "h2", "grpc":
+	case "h2", "grpc", "xhttp":
 		if err := a.serveH2(connection, transport); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -524,25 +570,13 @@ func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool
 		a.observe("WS %s %s", host, path)
 		connection = wrapped
 	}
-	if transport == "tcp" && a.singVlessService != nil {
-		if err := a.singVlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-		}
-		return
-	}
-	if transport == "tcp" && a.vlessService != nil {
-		if err := a.vlessService.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-		}
-		return
-	}
-	a.handle(connection)
+	a.handleProtocol(connection)
 }
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:0", "TCP listen address")
 	uuidText := flag.String("uuid", "", "accepted VLESS UUID")
-	transport := flag.String("transport", "tcp", "tcp, ws, http, h2, or grpc")
+	transport := flag.String("transport", "tcp", "tcp, ws, http, h2, grpc, or xhttp")
 	tlsCertificate := flag.String("tls-cert", "", "optional TLS certificate")
 	tlsPrivateKey := flag.String("tls-key", "", "optional TLS private key")
 	expectedWSHost := flag.String("expected-ws-host", "", "expected WebSocket Host")
@@ -562,7 +596,7 @@ func main() {
 		os.Exit(2)
 	}
 	switch *transport {
-	case "tcp", "ws", "http", "h2", "grpc":
+	case "tcp", "ws", "http", "h2", "grpc", "xhttp":
 	default:
 		fmt.Fprintln(os.Stderr, "invalid -transport")
 		os.Exit(2)
@@ -648,7 +682,7 @@ func main() {
 			os.Exit(1)
 		}
 		nextProtocol := "http/1.1"
-		if *transport == "h2" || *transport == "grpc" {
+		if *transport == "h2" || *transport == "grpc" || *transport == "xhttp" {
 			nextProtocol = "h2"
 		}
 		config := &tls.Config{

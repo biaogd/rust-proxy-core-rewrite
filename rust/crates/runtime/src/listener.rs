@@ -1030,6 +1030,13 @@ pub(super) async fn run_vless_udp_session(
         }
     };
     debug_assert!(vision_control.is_none());
+    let outer = match super::tcp::wrap_vless_transport(outer, proxy, &server, vless).await {
+        Ok(outer) => outer,
+        Err(error) => {
+            state.log("error", format!("VLESS UDP transport failed: {error}"));
+            return;
+        }
+    };
     let mut association = match rewrite_outbound::associate_vless_udp_on_stream(
         outer,
         &initial_destination,

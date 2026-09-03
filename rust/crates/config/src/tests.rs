@@ -3070,7 +3070,6 @@ fn parses_phase6e_f_vless_udp_packet_modes() {
     );
 
     let rejected = [
-        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    udp: true\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    udp: true\n    packet-encoding: unsupported\n",
     ];
     for body in rejected {
@@ -3097,12 +3096,56 @@ fn parses_phase6e_g_vless_vision_scope() {
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    udp: true\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    tls: true\n    flow: xtls-rprx-vision\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: unsupported-flow\n",
-        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    client-fingerprint: chrome\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n",
     ];
     for body in rejected {
         assert!(
             Config::from_yaml(body).is_err(),
             "expected rejection for {body}"
+        );
+    }
+}
+
+#[test]
+fn parses_common_vless_carrier_extensions() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: udp-ws\n    type: vless\n    server: 127.0.0.1\n    port: 10443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: ws\n    udp: true\n    ws-opts:\n      path: /udp\n  - name: udp-grpc\n    type: vless\n    server: 127.0.0.1\n    port: 10444\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: grpc\n    tls: true\n    udp: true\n    grpc-opts:\n      grpc-service-name: udp\n  - name: reality-vision\n    type: vless\n    server: 127.0.0.1\n    port: 10445\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    tls: true\n    flow: xtls-rprx-vision\n    client-fingerprint: chrome\n    servername: itunes.apple.com\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n  - name: xhttp\n    type: vless\n    server: 127.0.0.1\n    port: 10446\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    tls: true\n    servername: dot.phase4.test\n    xhttp-opts:\n      mode: stream-one\n      host: front.example\n      path: /xhttp\n      no-grpc-header: true\n      x-padding-bytes: 32-64\n      headers:\n        User-Agent: phase6e-xhttp\n"
+    );
+    let config = Config::from_yaml(&source).expect("common VLESS carriers");
+    assert!(config.proxies[0].udp);
+    assert!(config.proxies[1].udp && config.proxies[1].tls);
+    assert_eq!(
+        config.proxies[2]
+            .vless
+            .as_ref()
+            .and_then(|vless| vless.flow),
+        Some(VlessFlow::XtlsRprxVision)
+    );
+    assert!(config.proxies[2].reality.is_some());
+    assert_eq!(
+        config.proxies[3]
+            .vless
+            .as_ref()
+            .map(|vless| &vless.transport),
+        Some(&VlessTransport::XHttp {
+            host: "front.example".to_owned(),
+            path: "/xhttp/".to_owned(),
+            headers: [("User-Agent".to_owned(), "phase6e-xhttp".to_owned())]
+                .into_iter()
+                .collect(),
+            no_grpc_header: true,
+            padding_min: 32,
+            padding_max: 64,
+        })
+    );
+
+    for body in [
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: http\n    udp: true\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: packet-up\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: stream-one\n      x-padding-bytes: 64-32\n",
+    ] {
+        assert!(
+            Config::from_yaml(body).is_err(),
+            "unexpectedly accepted {body}"
         );
     }
 }

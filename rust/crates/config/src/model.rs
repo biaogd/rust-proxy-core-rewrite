@@ -267,6 +267,14 @@ pub enum VlessTransport {
         service_name: String,
         user_agent: String,
     },
+    XHttp {
+        host: String,
+        path: String,
+        headers: BTreeMap<String, String>,
+        no_grpc_header: bool,
+        padding_min: usize,
+        padding_max: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

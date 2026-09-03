@@ -2342,11 +2342,10 @@ a process-stable global ID for each inbound source, and controller capability
 fields remain compatible with Go even when a VLESS proxy has `udp: false`.
 
 The four `compat/scripts/phase6e_vless_{websocket,http,grpc,udp}.py` gates are
-the acceptance evidence. UDP now uses the same physical carrier builder as TCP
-so `tls: true` cannot silently become plaintext; that UDP-over-TLS combination
-remains pending a dedicated Go/Rust differential and is not part of the Phase
-6E-F parity claim. UDP over WS/HTTP/H2/gRPC, pooled Gun, xHTTP, encryption,
-general mux and inbound/server behavior remain open.
+the acceptance evidence. Phase 6E-F is limited to plaintext native TCP;
+composed carrier evidence is added separately in Phase 6E-I. UDP over HTTP/H2,
+pooled Gun, xHTTP, encryption, general mux and inbound/server behavior remain
+open.
 
 ### Phase 6E-G accepted scope — VLESS Vision native TCP/TLS
 
@@ -2359,8 +2358,8 @@ underlying raw TCP stream after `commandPaddingDirect`.
 
 `compat/scripts/phase6e_vless_vision.py` performs a real nested-TLS exchange
 through both Go and Rust. This proves the direct splice rather than merely
-observing the Vision command. REALITY+Vision, non-TCP carriers and server mode
-remain later scopes.
+observing the Vision command. Its REALITY composition is added in Phase 6E-J;
+non-TCP carriers and server mode remain later scopes.
 
 ### Phase 6E-H accepted scope — VLESS REALITY native TCP/TLS
 
@@ -2376,7 +2375,49 @@ raw-ClientHello Go/Rust differential. The same gate proves authenticated relay,
 half-close and both default X25519 and `support-x25519mlkem768` handshakes.
 Random values and shuffled middle-extension order are normalized, but semantic
 fields are not. Other browser fingerprints, legacy-only TLS 1.2 cipher
-selection, Vision combination, non-TCP carriers and server mode remain open.
+selection, non-TCP carriers and server mode remain open. The common
+REALITY+Vision composition is accepted separately in Phase 6E-J.
+
+### Phase 6E-I accepted scope — VLESS UDP over common carriers
+
+This slice updates outbound **VLESS**, **Shared outbound transport/security
+variants**, and the Phase 6E-I platform rows. It composes the existing XUDP
+association with native TLS, plaintext WebSocket and TLS gRPC/Gun. The carrier
+is established before VLESS UDP framing, so `tls: true` cannot silently dial
+plaintext and WS/gRPC request metadata remains observable.
+
+`compat/scripts/phase6e_vless_udp_carriers.py` compares Go and Rust through an
+independent `sing-vless` packet authority. It proves exact TLS SNI/ALPN,
+WebSocket Host/path, gRPC path/User-Agent, XUDP destinations and payloads, and
+process survival. UDP over HTTP/H2, WSS as a separate matrix point, xHTTP,
+Vision/REALITY, pooled gRPC and server mode are not claimed.
+
+### Phase 6E-J accepted scope — VLESS REALITY + Vision
+
+This slice composes the Phase 6E-G record-bounded Vision stream with the Phase
+6E-H authenticated REALITY client. REALITY uses the same bounded TLS-record
+reader, drains any already-decrypted plaintext, and promotes reads and writes
+independently to the underlying raw TCP stream after Vision DIRECT commands.
+
+`compat/scripts/phase6e_vless_reality_vision.py` compares small and large relay,
+half-close and a nested TLS 1.3 exchange against a Go `sing-vless` authority
+with the same REALITY keys and Vision flow. This is behavioral evidence for the
+common native-TCP Chrome-133 combination; other fingerprints, non-TCP
+carriers, UDP and server mode remain open.
+
+### Phase 6E-K accepted scope — basic VLESS xHTTP stream-one
+
+This slice adds the common HTTP/2 `stream-one` client over TLS. It accepts only
+explicit `xhttp-opts.mode: stream-one`, normalizes the path with Go's trailing
+slash behavior, and supports Host/path, string-valued custom headers,
+`no-grpc-header` and bounded `x-padding-bytes`. Unsupported modes and unknown
+xHTTP fields fail configuration instead of silently degrading.
+
+`compat/scripts/phase6e_vless_xhttp.py` compares Go and Rust request metadata,
+TLS SNI/ALPN, fixed padding, small/128-KiB relay and process survival through an
+independent HTTP/2 VLESS authority. HTTP/1.1 and HTTP/3, `auto`, `stream-up`,
+`packet-up`, XMUX/reuse/download settings, obfuscation-placement controls, UDP,
+REALITY composition and server mode remain open.
 
 ### Phase 5C1b accepted scope
 

@@ -302,6 +302,9 @@ jobs:
       PHASE6EVLESSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSVISION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSUDPCARRIERS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSREALITYVISION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSXHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -429,6 +432,9 @@ jobs:
             compat/scripts/phase6e_vless_udp.py \
             compat/scripts/phase6e_vless_vision.py \
             compat/scripts/phase6e_vless_reality.py \
+            compat/scripts/phase6e_vless_udp_carriers.py \
+            compat/scripts/phase6e_vless_reality_vision.py \
+            compat/scripts/phase6e_vless_xhttp.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

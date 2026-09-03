@@ -645,14 +645,22 @@ pub(super) async fn connect_vless_physical_outer(
             .as_deref()
             .or(websocket_host)
             .unwrap_or(&proxy.server);
-        outer = rewrite_outbound::wrap_client_reality(
-            outer,
-            server_name,
-            reality,
-            vless.flow.is_some(),
-        )
-        .await
-        .map_err(|error| format!("VLESS REALITY connection failed: {error}"))?;
+        if vless.flow.is_some() {
+            let control = rewrite_outbound::VisionDirectControl::default();
+            outer = rewrite_outbound::wrap_client_reality_with_vision(
+                outer,
+                server_name,
+                reality,
+                control.clone(),
+            )
+            .await
+            .map_err(|error| format!("VLESS REALITY+Vision connection failed: {error}"))?;
+            vision_control = Some(control);
+        } else {
+            outer = rewrite_outbound::wrap_client_reality(outer, server_name, reality, false)
+                .await
+                .map_err(|error| format!("VLESS REALITY connection failed: {error}"))?;
+        }
     } else if proxy.tls {
         let server_name = proxy
             .sni
@@ -663,7 +671,8 @@ pub(super) async fn connect_vless_physical_outer(
             rewrite_config::VlessTransport::WebSocket { .. }
             | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
             rewrite_config::VlessTransport::Http2 { .. }
-            | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
+            | rewrite_config::VlessTransport::Grpc { .. }
+            | rewrite_config::VlessTransport::XHttp { .. } => &[b"h2"],
             rewrite_config::VlessTransport::Tcp => &[],
         };
         let tls = rewrite_outbound::HttpProxyTls {
@@ -699,7 +708,7 @@ pub(super) async fn connect_vless_physical_outer(
     Ok((outer, vision_control))
 }
 
-async fn wrap_vless_transport(
+pub(super) async fn wrap_vless_transport(
     mut outer: rewrite_outbound::BoxedOutboundStream,
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
@@ -739,6 +748,28 @@ async fn wrap_vless_transport(
             outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
                 .await
                 .map_err(|error| format!("VLESS gRPC transport failed: {error}"))?;
+        }
+        rewrite_config::VlessTransport::XHttp {
+            host,
+            path,
+            headers,
+            no_grpc_header,
+            padding_min,
+            padding_max,
+        } => {
+            outer = rewrite_outbound::connect_xhttp_stream_one(
+                outer,
+                &rewrite_outbound::XHttpStreamOneOptions {
+                    host: host.clone(),
+                    path: path.clone(),
+                    headers: headers.clone(),
+                    no_grpc_header: *no_grpc_header,
+                    padding_min: *padding_min,
+                    padding_max: *padding_max,
+                },
+            )
+            .await
+            .map_err(|error| format!("VLESS xHTTP stream-one transport failed: {error}"))?;
         }
         rewrite_config::VlessTransport::Tcp => {}
     }

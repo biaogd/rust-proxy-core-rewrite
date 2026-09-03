@@ -13,7 +13,7 @@ pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
     wrap_client_tls_with_alpn, wrap_client_tls_with_options, wrap_client_vision_tls_with_options,
 };
-pub use reality::wrap_client_reality;
+pub use reality::{wrap_client_reality, wrap_client_reality_with_vision};
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};
 pub use rewrite_transport::{
@@ -32,6 +32,7 @@ pub use rewrite_transport::{
     connect_v2ray_grpc as connect_vmess_grpc, connect_v2ray_h2 as connect_vmess_h2,
     connect_v2ray_http as connect_vmess_http,
 };
+pub use rewrite_transport::{XHttpStreamOneOptions, connect_xhttp_stream_one};
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,

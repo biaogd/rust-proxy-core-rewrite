@@ -18,11 +18,12 @@ mod v2ray_http;
 mod v2ray_mux;
 mod vision_tls;
 mod websocket;
+mod xhttp;
 
 pub use http_upgrade::{connect_http_upgrade_with_early_data, connect_v2ray_http_upgrade};
 pub use mekya::{MekyaConnection, MekyaConnector, MekyaOptions, connect_mekya};
 pub use mkcp::{MkcpConfig, connect_mkcp};
-pub use reality::{RealityConnectOptions, connect_reality};
+pub use reality::{RealityConnectOptions, connect_reality, connect_reality_vision};
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadow_tls_server::{
     ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,
@@ -38,5 +39,6 @@ pub use websocket::{
     WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
     connect_websocket_with_headers,
 };
+pub use xhttp::{XHttpStreamOneOptions, connect_xhttp_stream_one};
 
 pub use rewrite_io::{BoxedStream, DuplexStream, VisionDirectControl};

@@ -171,16 +171,17 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-C VLESS WebSocket/WSS TCP | Complete in declared client scope | Plaintext WS and TLS WSS reuse `rewrite-transport` WebSocket/rustls carriers with path, Host and custom headers; mixed/rule/group/provider routing passes first-packet, 128 KiB relay, half-close, skip/untrusted TLS rejection and process survival; early-data, HTTP Upgrade, UDP/XUDP and later Phase 6E transports remain open |
 | Phase 6E-D VLESS HTTP/H2 TCP | Complete in declared client scope | Plaintext HTTP/1 and TLS H2 reuse `rewrite-transport` VMess-style HTTP/H2 carriers with method, path, Host and custom headers; mixed/rule routing passes first-packet, 128 KiB relay, half-close rejection on H2, default option fallbacks and process survival; gRPC/xHTTP, UDP/XUDP, Vision, Reality and server direction remain open |
 | Phase 6E-E VLESS gRPC/Gun TCP | Complete in declared client scope | Plaintext and TLS Gun reuse `rewrite-transport` single-stream gRPC carrier with service name, User-Agent and SNI; mixed/rule routing passes default/custom paths, 128 KiB relay and process survival; pooled gRPC, xHTTP, Vision, Reality and server direction remain open |
-| Phase 6E-F VLESS UDP/XUDP native TCP | Complete in declared plaintext client scope; TLS differential pending | Native TCP passes default XUDP, packet-address and explicit `packet-encoding: xudp` through `rewrite-protocol-vless`; UDP now composes the shared TLS carrier instead of silently dialing plaintext, but Go/Rust UDP-over-TLS evidence remains pending. The XUDP global ID is stable per inbound source for the process lifetime, and controller `udp`/`uot`/`xudp` snapshots retain the Go capability semantics. UDP over WS/HTTP/gRPC, Vision, Reality and server direction remain open |
-| Phase 6E-G VLESS Vision native TCP/TLS | **Complete in declared client scope** | Protobuf flow addons, fragmented response handling, UUID/command validation and bounded framing are implemented. The record-bounded TLS carrier drains buffered plaintext before independently promoting read/write to raw TCP; a real nested-TLS Go/Rust differential proves `commandPaddingDirect`, relay, half-close and controller HTTPS health measurement. REALITY combination, non-TCP carriers and server mode remain open |
-| Phase 6E-H VLESS REALITY native TCP/TLS | **Complete in declared Chrome 133 client scope** | `reality-opts` uses patched `shadow-rustls`, accepts Go-compatible short IDs, rejects unsupported fingerprint names, supports optional X25519+ML-KEM-768, and passes authenticated relay/half-close. The gate compares complete normalized ClientHello semantic structure against Go/uTLS: 16 ciphers, 18 extensions, GREASE bookends, groups/key shares, signatures, ALPN/ALPS, versions, compression and ECH shape. Legacy-only TLS 1.2 cipher selection, Vision combination, non-TCP carriers and server mode remain open |
-| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` is reduced to dial/policy facades. Phase 6C client gates, corrected 6C-N inbound, Phase 6D-A–L and Phase 6E-A/B pass in their declared scopes |
+| Phase 6E-F/I VLESS UDP/XUDP common carriers | Complete in declared client scope | Native TCP passes default XUDP, packet-address and explicit `packet-encoding: xudp`; Phase 6E-I proves the same XUDP association over native TLS, plaintext WS and TLS gRPC/Gun with Go/Rust carrier and packet observations. UDP over HTTP/H2, WSS as a separate gate, xHTTP, Vision/Reality and server direction remain open |
+| Phase 6E-G VLESS Vision native TCP/TLS | **Complete in declared client scope** | Protobuf flow addons, fragmented response handling, UUID/command validation and bounded framing are implemented. The record-bounded TLS carrier drains buffered plaintext before independently promoting read/write to raw TCP; a real nested-TLS Go/Rust differential proves `commandPaddingDirect`, relay, half-close and controller HTTPS health measurement. Phase 6E-J adds REALITY composition; non-TCP carriers and server mode remain open |
+| Phase 6E-H/J VLESS REALITY and Vision composition | **Complete in declared Chrome 133 native-TCP client scope** | `reality-opts` uses patched `shadow-rustls`, accepts Go-compatible short IDs, rejects unsupported fingerprint names, supports optional X25519+ML-KEM-768, and passes authenticated relay/half-close plus complete normalized ClientHello semantics. Phase 6E-J reuses the bounded TLS-record boundary and proves REALITY+Vision DIRECT with nested TLS. Legacy-only TLS 1.2 cipher selection, other fingerprints, non-TCP carriers and server mode remain open |
+| Phase 6E-K VLESS xHTTP | Complete in basic TLS/H2 `stream-one` client scope | Explicit `stream-one` accepts Host/path, string headers, `no-grpc-header` and bounded padding; Go-compatible trailing-slash normalization, request metadata and small/large relay pass one independent-authority differential. HTTP/1.1/H3, auto/stream-up/packet-up, XMUX/reuse/download settings, obfuscation controls, UDP, REALITY and server direction remain open |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, basic xHTTP, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-H; three-platform matrix pending | Every Phase Python gate is assigned to one of ten fail-independent shards on Linux x86_64, Windows x86_64 and macOS arm64. The controller/outbound shard now includes Phase 6E (previously omitted by its regex), including nested-TLS Vision DIRECT and normalized REALITY ClientHello/default/hybrid handshakes. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI uses one external target per job |
+| Differential harness | Implemented through Phase 6E-K; three-platform matrix pending | Every Phase Python gate is assigned to one of ten fail-independent shards on Linux x86_64, Windows x86_64 and macOS arm64. The controller/outbound shard includes UDP carrier, REALITY+Vision and basic xHTTP evidence in addition to prior Phase 6E gates. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5832,7 +5833,54 @@ key material. A capture-only authority also compares the full normalized
 Chrome 133 ClientHello semantic structure produced by Go and Rust. Random
 GREASE/ECH bytes and shuffled middle order are normalized; cipher order,
 extension presence and extension semantics are not. Legacy-only TLS 1.2 cipher
-selection, Vision combination, non-TCP carriers and server direction remain
+selection, non-TCP carriers and server direction remain unclaimed by Phase
+6E-H; Phase 6E-J below adds the common Vision composition.
+
+## Phase 6E-I VLESS UDP carrier evidence
+
+Phase 6E-I applies the existing XUDP association after the configured physical
+carrier instead of bypassing it. The accepted combinations are native TCP with
+TLS, plaintext WebSocket, and gRPC/Gun with TLS:
+
+```bash
+PHASE6EVLESSUDPCARRIERS_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_udp_carriers.py
+```
+
+The independent Go authority terminates each carrier and hands the resulting
+stream to `sing-vless`. Go/Rust observations match exact SNI/ALPN, WS Host/path,
+gRPC path/User-Agent, XUDP destination/payload and process survival. UDP over
+HTTP/H2, WSS as a separate gate, xHTTP, Vision/REALITY and server direction are
+not claimed.
+
+## Phase 6E-J VLESS REALITY + Vision evidence
+
+Phase 6E-J composes authenticated REALITY with Vision's record-bounded DIRECT
+transition. The REALITY carrier drains buffered TLS plaintext before raw reads
+and promotes each direction independently:
+
+```bash
+PHASE6EVLESSREALITYVISION_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_reality_vision.py
+```
+
+Small/large relay, half-close and a real nested TLS 1.3 exchange match Go
+through a REALITY-enabled `sing-vless` authority. This evidence is limited to
+the native-TCP Chrome-133 client profile; other fingerprints, non-TCP carriers,
+UDP and server direction remain unclaimed.
+
+## Phase 6E-K VLESS xHTTP stream-one evidence
+
+Phase 6E-K adds an HTTP/2 `stream-one` carrier with explicit fail-closed
+configuration:
+
+```bash
+PHASE6EVLESSXHTTP_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_xhttp.py
+```
+
+The independent HTTP/2 authority proves TLS SNI/ALPN, Go's trailing-slash path
+normalization, Host, custom headers, `application/grpc` presence/absence,
+fixed `x_padding`, small/128-KiB relay and process survival. HTTP/1.1/H3,
+`auto`, `stream-up`, `packet-up`, XMUX/reuse/download settings, advanced
+padding placement, UDP, REALITY composition and server direction remain
 unclaimed.
 
 ## SS/VMess/VLESS protocol ownership
@@ -5851,7 +5899,8 @@ explicit:
   Vision (`xtls-rprx-vision`) client framing and REALITY outer TLS via
   `rewrite-transport`.
 - `rewrite-transport` owns reusable TLS/ShadowTLS/REALITY, simple-obfs, WebSocket,
-  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, mKCP, Mekya and mux carriers.
+  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, basic xHTTP `stream-one`, mKCP,
+  Mekya and mux carriers.
 
 None of the protocol crates depends on `config`, `inbound`, `outbound`, `runtime` or
 the carrier crate. `rewrite-outbound` keeps only socket policy and adapter

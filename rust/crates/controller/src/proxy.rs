@@ -519,14 +519,27 @@ pub(super) async fn measure_http_delay(
                             .as_deref()
                             .or(websocket_host)
                             .unwrap_or(&proxy.server);
-                        outer = rewrite_outbound::wrap_client_reality(
-                            outer,
-                            server_name,
-                            reality,
-                            vless.flow.is_some(),
-                        )
-                        .await
-                        .map_err(|_| ())?;
+                        if vless.flow.is_some() {
+                            let control = rewrite_outbound::VisionDirectControl::default();
+                            outer = rewrite_outbound::wrap_client_reality_with_vision(
+                                outer,
+                                server_name,
+                                reality,
+                                control.clone(),
+                            )
+                            .await
+                            .map_err(|_| ())?;
+                            vision_control = Some(control);
+                        } else {
+                            outer = rewrite_outbound::wrap_client_reality(
+                                outer,
+                                server_name,
+                                reality,
+                                false,
+                            )
+                            .await
+                            .map_err(|_| ())?;
+                        }
                     } else if proxy.tls {
                         let server_name = proxy
                             .sni
@@ -537,7 +550,8 @@ pub(super) async fn measure_http_delay(
                             rewrite_config::VlessTransport::WebSocket { .. }
                             | rewrite_config::VlessTransport::Http { .. } => &[b"http/1.1"],
                             rewrite_config::VlessTransport::Http2 { .. }
-                            | rewrite_config::VlessTransport::Grpc { .. } => &[b"h2"],
+                            | rewrite_config::VlessTransport::Grpc { .. }
+                            | rewrite_config::VlessTransport::XHttp { .. } => &[b"h2"],
                             rewrite_config::VlessTransport::Tcp => &[],
                         };
                         let tls = rewrite_outbound::HttpProxyTls {
@@ -613,6 +627,26 @@ pub(super) async fn measure_http_delay(
                             .await
                             .map_err(|_| ())?
                         }
+                        rewrite_config::VlessTransport::XHttp {
+                            host,
+                            path,
+                            headers,
+                            no_grpc_header,
+                            padding_min,
+                            padding_max,
+                        } => rewrite_outbound::connect_xhttp_stream_one(
+                            outer,
+                            &rewrite_outbound::XHttpStreamOneOptions {
+                                host: host.clone(),
+                                path: path.clone(),
+                                headers: headers.clone(),
+                                no_grpc_header: *no_grpc_header,
+                                padding_min: *padding_min,
+                                padding_max: *padding_max,
+                            },
+                        )
+                        .await
+                        .map_err(|_| ())?,
                         rewrite_config::VlessTransport::Tcp => outer,
                     };
                     rewrite_outbound::connect_vless_on_stream_with_vision_control(

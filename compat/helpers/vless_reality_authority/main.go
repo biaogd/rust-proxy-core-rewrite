@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -27,7 +28,9 @@ const (
 )
 
 type echoHandler struct {
-	output sync.Mutex
+	output       sync.Mutex
+	innerTLS     *tls.Config
+	innerTLSPort uint16
 }
 
 var _ sing_vless.Handler = (*echoHandler)(nil)
@@ -42,6 +45,17 @@ func (handler *echoHandler) NewConnection(_ context.Context, conn net.Conn, meta
 	handler.output.Lock()
 	fmt.Printf("CONNECT %s:%d\n", host, destination.Port)
 	handler.output.Unlock()
+	if handler.innerTLS != nil && destination.Port == handler.innerTLSPort {
+		inner := tls.Server(conn, handler.innerTLS)
+		if err := inner.Handshake(); err != nil {
+			return err
+		}
+		handler.output.Lock()
+		fmt.Printf("INNER_TLS %s %x\n", inner.ConnectionState().ServerName, inner.ConnectionState().CipherSuite)
+		handler.output.Unlock()
+		_, err := io.Copy(inner, inner)
+		return err
+	}
 	_, err := io.Copy(conn, conn)
 	return err
 }
@@ -83,6 +97,10 @@ func main() {
 	shortID := flag.String("reality-short-id", defaultShortID, "REALITY short id (hex)")
 	serverName := flag.String("reality-server-name", defaultServerName, "REALITY server name")
 	dest := flag.String("reality-dest", defaultDest, "REALITY dest host:port")
+	flow := flag.String("flow", "", "optional VLESS flow")
+	innerTLSCertificate := flag.String("inner-tls-cert", "", "optional nested TLS certificate")
+	innerTLSPrivateKey := flag.String("inner-tls-key", "", "optional nested TLS private key")
+	innerTLSPort := flag.Uint("inner-tls-port", 0, "destination port that terminates nested TLS")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -90,6 +108,14 @@ func main() {
 	}
 	if _, err := uuid.FromString(*uuidText); err != nil {
 		_ = uuid.NewV5(uuid.Nil, *uuidText)
+	}
+	if *flow != "" && *flow != "xtls-rprx-vision" {
+		fmt.Fprintln(os.Stderr, "invalid -flow")
+		os.Exit(2)
+	}
+	if (*innerTLSCertificate == "") != (*innerTLSPrivateKey == "") || *innerTLSPort > 65535 {
+		fmt.Fprintln(os.Stderr, "invalid nested TLS configuration")
+		os.Exit(2)
 	}
 
 	tunnel := destTunnel{}
@@ -114,9 +140,22 @@ func main() {
 	defer listener.Close()
 	listener = builder.NewListener(listener)
 
-	handler := &echoHandler{}
+	var innerTLS *tls.Config
+	if *innerTLSCertificate != "" {
+		certificate, err := tls.LoadX509KeyPair(*innerTLSCertificate, *innerTLSPrivateKey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		innerTLS = &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS13,
+			MaxVersion:   tls.VersionTLS13,
+		}
+	}
+	handler := &echoHandler{innerTLS: innerTLS, innerTLSPort: uint16(*innerTLSPort)}
 	service := sing_vless.NewService[string](handler)
-	service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{""})
+	service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
 
 	fmt.Printf("READY %s\n", listener.Addr().String())
 	for {

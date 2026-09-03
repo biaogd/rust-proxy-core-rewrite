@@ -13,14 +13,14 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use crate::tls::TlsClientError;
 
 const TLS_RECORD_HEADER_LEN: usize = 5;
-const COPY_BUFFER_LEN: usize = 8 * 1024;
+pub(crate) const COPY_BUFFER_LEN: usize = 8 * 1024;
 
 /// Prevents rustls from reading beyond one outer TLS record.
 ///
 /// Vision changes the byte interpretation immediately after a framed DIRECT command. Limiting
 /// each rustls read to the current record leaves any coalesced raw inner-TLS bytes in the socket,
 /// where the promoted stream can consume them without attempting outer-TLS decryption.
-struct TlsRecordStream {
+pub(crate) struct TlsRecordStream {
     inner: BoxedStream,
     header: [u8; TLS_RECORD_HEADER_LEN],
     header_filled: usize,
@@ -29,7 +29,7 @@ struct TlsRecordStream {
 }
 
 impl TlsRecordStream {
-    fn new(inner: BoxedStream) -> Self {
+    pub(crate) fn new(inner: BoxedStream) -> Self {
         Self {
             inner,
             header: [0; TLS_RECORD_HEADER_LEN],
@@ -49,7 +49,7 @@ impl TlsRecordStream {
         self.body_remaining = 0;
     }
 
-    fn poll_raw_read(
+    pub(crate) fn poll_raw_read(
         &mut self,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,

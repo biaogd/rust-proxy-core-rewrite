@@ -225,6 +225,7 @@ pub(crate) struct RawProxy {
     pub(crate) http_opts: Option<RawVmessHttpOptions>,
     pub(crate) h2_opts: Option<RawVmessHttp2Options>,
     pub(crate) grpc_opts: Option<RawVmessGrpcOptions>,
+    pub(crate) xhttp_opts: Option<RawXHttpOptions>,
     pub(crate) mkcp_opts: Option<RawVmessMkcpOptions>,
     pub(crate) mekya_opts: Option<RawVmessMekyaOptions>,
     pub(crate) udp_over_tcp: Option<bool>,
@@ -300,6 +301,19 @@ pub(crate) struct RawVmessGrpcOptions {
     pub(crate) max_connections: Option<i64>,
     pub(crate) min_streams: Option<i64>,
     pub(crate) max_streams: Option<i64>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawXHttpOptions {
+    pub(crate) path: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) mode: Option<String>,
+    pub(crate) headers: Option<BTreeMap<String, String>>,
+    pub(crate) no_grpc_header: Option<bool>,
+    pub(crate) x_padding_bytes: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

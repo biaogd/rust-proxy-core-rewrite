@@ -1,14 +1,18 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use rewrite_io::{BoxedStream, VisionDirectControl};
 use shadow_rustls::client::RealityConfig;
 use shadow_rustls::pki_types::ServerName;
 use shadow_rustls::{ClientConfig, RootCertStore};
 use shadow_tokio_rustls::TlsConnector;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::tls::TlsClientError;
+use crate::vision_tls::{COPY_BUFFER_LEN, TlsRecordStream};
 
 #[derive(Clone, Copy, Debug)]
 pub struct RealityConnectOptions<'a> {
@@ -90,6 +94,98 @@ where
     .await
     .map_err(|_| TlsClientError::Timeout)?
     .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))
+}
+
+struct RealityVisionStream {
+    inner: shadow_tokio_rustls::client::TlsStream<TlsRecordStream>,
+    control: VisionDirectControl,
+}
+
+impl AsyncRead for RealityVisionStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.control.read_is_direct() {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut plaintext = [0_u8; COPY_BUFFER_LEN];
+        let amount = plaintext.len().min(buf.remaining());
+        match self
+            .inner
+            .get_mut()
+            .1
+            .reader()
+            .read(&mut plaintext[..amount])
+        {
+            Ok(0) => {}
+            Ok(read) => {
+                buf.put_slice(&plaintext[..read]);
+                return Poll::Ready(Ok(()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Poll::Ready(Err(error)),
+        }
+        self.inner.get_mut().0.poll_raw_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for RealityVisionStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.control.write_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_write(cx, buf);
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.control.write_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_flush(cx);
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if self.control.any_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_shutdown(cx);
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Performs REALITY and returns a stream that can promote XTLS Vision to raw TCP.
+///
+/// # Errors
+///
+/// Returns [`TlsClientError`] when configuration or the REALITY handshake fails.
+pub async fn connect_reality_vision(
+    stream: BoxedStream,
+    options: RealityConnectOptions<'_>,
+    control: VisionDirectControl,
+) -> Result<BoxedStream, TlsClientError> {
+    let server_name = ServerName::try_from(options.server_name.to_owned())
+        .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
+    let config = Arc::new(reality_client_config(options)?);
+    let tls = tokio::time::timeout(
+        Duration::from_secs(15),
+        TlsConnector::from(config).connect(server_name, TlsRecordStream::new(stream)),
+    )
+    .await
+    .map_err(|_| TlsClientError::Timeout)?
+    .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))?;
+    Ok(Box::new(RealityVisionStream {
+        inner: tls,
+        control,
+    }))
 }
 
 #[cfg(test)]
