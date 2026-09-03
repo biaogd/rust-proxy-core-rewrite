@@ -156,6 +156,7 @@ jobs:
           - rules
           - groups-providers
           - controller-services-outbound
+          - vless
           - local-runtime
           - builtins
     defaults:
@@ -299,12 +300,17 @@ jobs:
       PHASE6EVLESSWS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSGRPC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSGRPCPOOL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSVISION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSUDPCARRIERS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSREALITYVISION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6EVLESSXHTTP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSXHTTPMODES_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSXHTTPPOOL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSXHTTPREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6EVLESSPRODUCTION_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -350,7 +356,8 @@ jobs:
             cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
             rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
-            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|6e)_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d)_[a-z0-9_]+\.py$' ;;
+            vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
             local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
@@ -429,12 +436,17 @@ jobs:
             compat/scripts/phase6e_vless_websocket.py \
             compat/scripts/phase6e_vless_http.py \
             compat/scripts/phase6e_vless_grpc.py \
+            compat/scripts/phase6e_vless_grpc_pool.py \
             compat/scripts/phase6e_vless_udp.py \
             compat/scripts/phase6e_vless_vision.py \
             compat/scripts/phase6e_vless_reality.py \
             compat/scripts/phase6e_vless_udp_carriers.py \
             compat/scripts/phase6e_vless_reality_vision.py \
             compat/scripts/phase6e_vless_xhttp.py \
+            compat/scripts/phase6e_vless_xhttp_modes.py \
+            compat/scripts/phase6e_vless_xhttp_pool.py \
+            compat/scripts/phase6e_vless_xhttp_reality.py \
+            compat/scripts/phase6e_vless_production_gate.py \
             compat/scripts/phase5d_providers.py \
             compat/scripts/phase5d_modes.py \
             compat/scripts/phase5d_proxies.py \

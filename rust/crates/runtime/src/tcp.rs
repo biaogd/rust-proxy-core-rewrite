@@ -583,7 +583,7 @@ async fn connect_vless_proxy(
     .map_err(|error| format!("VLESS proxy connection failed: {error}"))
 }
 
-async fn connect_vless_outer(
+pub(super) async fn connect_vless_outer(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
     vless: &rewrite_config::VlessProxyConfig,
@@ -598,6 +598,65 @@ async fn connect_vless_outer(
     ),
     String,
 > {
+    if let rewrite_config::VlessTransport::Grpc {
+        service_name,
+        user_agent,
+        ping_interval,
+        max_connections,
+        min_streams,
+        max_streams,
+    } = &vless.transport
+    {
+        let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+        let options = rewrite_outbound::GrpcClientOptions {
+            host,
+            service_name: service_name.clone(),
+            user_agent: user_agent.clone(),
+            ping_interval: *ping_interval,
+            max_connections: *max_connections,
+            min_streams: *min_streams,
+            max_streams: *max_streams,
+        };
+        let identity =
+            format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+        let client = state.grpc_client(&proxy.name, identity, options).await;
+        let outer = client
+            .connect(|| async {
+                connect_vless_physical_outer(
+                    proxy,
+                    server,
+                    vless,
+                    allow_ipv6,
+                    state,
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+                .map(|(outer, control)| {
+                    debug_assert!(control.is_none());
+                    outer
+                })
+                .map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| format!("VLESS gRPC transport failed: {error}"))?;
+        return Ok((outer, None));
+    }
+    if matches!(
+        vless.transport,
+        rewrite_config::VlessTransport::XHttp { reuse: Some(_), .. }
+    ) {
+        return connect_vless_xhttp_pool(
+            proxy,
+            server,
+            vless,
+            allow_ipv6,
+            state,
+            custom_roots,
+            socket_options,
+        )
+        .await;
+    }
     let (outer, vision_control) = connect_vless_physical_outer(
         proxy,
         server,
@@ -610,6 +669,86 @@ async fn connect_vless_outer(
     .await?;
     let outer = wrap_vless_transport(outer, proxy, server, vless).await?;
     Ok((outer, vision_control))
+}
+
+async fn connect_vless_xhttp_pool(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vless: &rewrite_config::VlessProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<
+    (
+        rewrite_outbound::BoxedOutboundStream,
+        Option<rewrite_outbound::VisionDirectControl>,
+    ),
+    String,
+> {
+    let rewrite_config::VlessTransport::XHttp {
+        mode,
+        host,
+        path,
+        headers,
+        no_grpc_header,
+        padding_min,
+        padding_max,
+        max_each_post_min,
+        max_each_post_max,
+        reuse: Some(reuse),
+    } = &vless.transport
+    else {
+        unreachable!("xHTTP pool helper requires reuse settings")
+    };
+    let mode = match mode {
+        rewrite_config::VlessXHttpMode::StreamOne => rewrite_outbound::XHttpMode::StreamOne,
+        rewrite_config::VlessXHttpMode::StreamUp => rewrite_outbound::XHttpMode::StreamUp,
+        rewrite_config::VlessXHttpMode::PacketUp => rewrite_outbound::XHttpMode::PacketUp,
+    };
+    let options = rewrite_outbound::XHttpOptions {
+        mode,
+        host: host.clone(),
+        path: path.clone(),
+        headers: headers.clone(),
+        no_grpc_header: *no_grpc_header,
+        padding_min: *padding_min,
+        padding_max: *padding_max,
+        max_each_post_min: *max_each_post_min,
+        max_each_post_max: *max_each_post_max,
+    };
+    let reuse = rewrite_outbound::XHttpReuseOptions {
+        max_concurrency_min: reuse.max_concurrency_min,
+        max_concurrency_max: reuse.max_concurrency_max,
+        max_connections_min: reuse.max_connections_min,
+        max_connections_max: reuse.max_connections_max,
+    };
+    let identity =
+        format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+    let client = state
+        .xhttp_client(&proxy.name, identity, options, reuse)
+        .await;
+    let outer = client
+        .connect(|| async {
+            connect_vless_physical_outer(
+                proxy,
+                server,
+                vless,
+                allow_ipv6,
+                state,
+                custom_roots,
+                socket_options,
+            )
+            .await
+            .map(|(outer, control)| {
+                debug_assert!(control.is_none());
+                outer
+            })
+            .map_err(std::io::Error::other)
+        })
+        .await
+        .map_err(|error| format!("VLESS xHTTP XMUX transport failed: {error}"))?;
+    Ok((outer, None))
 }
 
 pub(super) async fn connect_vless_physical_outer(
@@ -743,6 +882,7 @@ pub(super) async fn wrap_vless_transport(
         rewrite_config::VlessTransport::Grpc {
             service_name,
             user_agent,
+            ..
         } => {
             let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
             outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
@@ -750,26 +890,38 @@ pub(super) async fn wrap_vless_transport(
                 .map_err(|error| format!("VLESS gRPC transport failed: {error}"))?;
         }
         rewrite_config::VlessTransport::XHttp {
+            mode,
             host,
             path,
             headers,
             no_grpc_header,
             padding_min,
             padding_max,
+            max_each_post_min,
+            max_each_post_max,
+            reuse: _,
         } => {
-            outer = rewrite_outbound::connect_xhttp_stream_one(
+            let mode = match mode {
+                rewrite_config::VlessXHttpMode::StreamOne => rewrite_outbound::XHttpMode::StreamOne,
+                rewrite_config::VlessXHttpMode::StreamUp => rewrite_outbound::XHttpMode::StreamUp,
+                rewrite_config::VlessXHttpMode::PacketUp => rewrite_outbound::XHttpMode::PacketUp,
+            };
+            outer = rewrite_outbound::connect_xhttp(
                 outer,
-                &rewrite_outbound::XHttpStreamOneOptions {
+                &rewrite_outbound::XHttpOptions {
+                    mode,
                     host: host.clone(),
                     path: path.clone(),
                     headers: headers.clone(),
                     no_grpc_header: *no_grpc_header,
                     padding_min: *padding_min,
                     padding_max: *padding_max,
+                    max_each_post_min: *max_each_post_min,
+                    max_each_post_max: *max_each_post_max,
                 },
             )
             .await
-            .map_err(|error| format!("VLESS xHTTP stream-one transport failed: {error}"))?;
+            .map_err(|error| format!("VLESS xHTTP transport failed: {error}"))?;
         }
         rewrite_config::VlessTransport::Tcp => {}
     }
@@ -833,9 +985,7 @@ async fn connect_vmess_proxy(
         };
         let identity =
             format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
-        let client = state
-            .vmess_grpc_client(&proxy.name, identity, options)
-            .await;
+        let client = state.grpc_client(&proxy.name, identity, options).await;
         client
             .connect(|| async {
                 connect_vmess_physical_outer(

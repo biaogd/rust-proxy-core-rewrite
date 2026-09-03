@@ -170,18 +170,19 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-B VLESS native TCP over TLS | Complete in declared client scope | Shared rustls carrier passes trusted roots, exact SNI, independent verification name, skip verification, untrusted/wrong-name rejection, large relay, half-close and real controller group health; advanced TLS, non-native carriers and other Phase 6E exclusions remain open |
 | Phase 6E-C VLESS WebSocket/WSS TCP | Complete in declared client scope | Plaintext WS and TLS WSS reuse `rewrite-transport` WebSocket/rustls carriers with path, Host and custom headers; mixed/rule/group/provider routing passes first-packet, 128 KiB relay, half-close, skip/untrusted TLS rejection and process survival; early-data, HTTP Upgrade, UDP/XUDP and later Phase 6E transports remain open |
 | Phase 6E-D VLESS HTTP/H2 TCP | Complete in declared client scope | Plaintext HTTP/1 and TLS H2 reuse `rewrite-transport` VMess-style HTTP/H2 carriers with method, path, Host and custom headers; mixed/rule routing passes first-packet, 128 KiB relay, half-close rejection on H2, default option fallbacks and process survival; gRPC/xHTTP, UDP/XUDP, Vision, Reality and server direction remain open |
-| Phase 6E-E VLESS gRPC/Gun TCP | Complete in declared client scope | Plaintext and TLS Gun reuse `rewrite-transport` single-stream gRPC carrier with service name, User-Agent and SNI; mixed/rule routing passes default/custom paths, 128 KiB relay and process survival; pooled gRPC, xHTTP, Vision, Reality and server direction remain open |
+| Phase 6E-E/L VLESS gRPC/Gun TCP | Complete in declared client/pool scope | Plaintext and TLS Gun cover service metadata and large relay; Phase 6E-L adds the shared reusable pool, default reuse, connection/stream controls, signed values and closed-H2 reconnection. General mux, non-Gun consumers and server direction remain open |
 | Phase 6E-F/I VLESS UDP/XUDP common carriers | Complete in declared client scope | Native TCP passes default XUDP, packet-address and explicit `packet-encoding: xudp`; Phase 6E-I proves the same XUDP association over native TLS, plaintext WS and TLS gRPC/Gun with Go/Rust carrier and packet observations. UDP over HTTP/H2, WSS as a separate gate, xHTTP, Vision/Reality and server direction remain open |
 | Phase 6E-G VLESS Vision native TCP/TLS | **Complete in declared client scope** | Protobuf flow addons, fragmented response handling, UUID/command validation and bounded framing are implemented. The record-bounded TLS carrier drains buffered plaintext before independently promoting read/write to raw TCP; a real nested-TLS Go/Rust differential proves `commandPaddingDirect`, relay, half-close and controller HTTPS health measurement. Phase 6E-J adds REALITY composition; non-TCP carriers and server mode remain open |
 | Phase 6E-H/J VLESS REALITY and Vision composition | **Complete in declared Chrome 133 native-TCP client scope** | `reality-opts` uses patched `shadow-rustls`, accepts Go-compatible short IDs, rejects unsupported fingerprint names, supports optional X25519+ML-KEM-768, and passes authenticated relay/half-close plus complete normalized ClientHello semantics. Phase 6E-J reuses the bounded TLS-record boundary and proves REALITY+Vision DIRECT with nested TLS. Legacy-only TLS 1.2 cipher selection, other fingerprints, non-TCP carriers and server mode remain open |
-| Phase 6E-K VLESS xHTTP | Complete in basic TLS/H2 `stream-one` client scope | Explicit `stream-one` accepts Host/path, string headers, `no-grpc-header` and bounded padding; Go-compatible trailing-slash normalization, request metadata and small/large relay pass one independent-authority differential. HTTP/1.1/H3, auto/stream-up/packet-up, XMUX/reuse/download settings, obfuscation controls, UDP, REALITY and server direction remain open |
-| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, basic xHTTP, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
+| Phase 6E-K/M VLESS xHTTP | Complete in declared common HTTP/2 client scope | `stream-one`, `stream-up`, `packet-up` and Go-compatible `auto` selection pass; authenticated REALITY composition and basic XMUX `max-concurrency`/`max-connections` reuse/reconnection also pass. HTTP/1.1/H3, download settings, alternate metadata/data placement, advanced reuse/padding controls, UDP and server direction remain open |
+| Phase 6E-N VLESS bounded production gate | Complete locally; three-platform CI pending | Real `sing-vless` authorities pass 32 concurrent pooled Gun streams, 16 concurrent xHTTP/XMUX streams, 16 HTTP-status failures followed by recovery, and process survival. A deterministic malformed-response corpus is bounded and panic-free. Multi-hour soak, public-server interop and resource ceilings remain release work |
+| Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
 | Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
-| Differential harness | Implemented through Phase 6E-K; three-platform matrix pending | Every Phase Python gate is assigned to one of ten fail-independent shards on Linux x86_64, Windows x86_64 and macOS arm64. The controller/outbound shard includes UDP carrier, REALITY+Vision and basic xHTTP evidence in addition to prior Phase 6E gates. Local default Cargo targets resolve from Cargo metadata instead of creating repository-local `target/compat`, while CI uses one external target per job |
+| Differential harness | Implemented through Phase 6E-N; three-platform matrix pending | VLESS now has a dedicated fail-independent shard on Linux x86_64, Windows x86_64 and macOS arm64, including pooled Gun, common xHTTP, REALITY/XMUX and bounded production gates. Local Cargo targets remain outside the repository while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
 | Broader Mihomo functionality | Not started | Exhaustively planned in `go-capability-inventory.md`; behavior outside the declared slices and partial Phase 4F3–4F15 boundaries remains unimplemented |
@@ -5883,6 +5884,35 @@ fixed `x_padding`, small/128-KiB relay and process survival. HTTP/1.1/H3,
 padding placement, UDP, REALITY composition and server direction remain
 unclaimed.
 
+## Phase 6E-L–N VLESS production-readiness evidence
+
+The next three gates move VLESS beyond single-carrier happy paths:
+
+```bash
+PHASE6EVLESSGRPCPOOL_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_grpc_pool.py
+PHASE6EVLESSXHTTPMODES_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_xhttp_modes.py
+PHASE6EVLESSXHTTPPOOL_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_xhttp_pool.py
+PHASE6EVLESSXHTTPREALITY_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_xhttp_reality.py
+PHASE6EVLESSPRODUCTION_CARGO_TARGET=/path/to/target python3 compat/scripts/phase6e_vless_production_gate.py
+```
+
+Phase 6E-L proves VLESS-specific Gun reuse, pool controls and closed-H2
+replacement. Phase 6E-M implements HTTP/2 `stream-up` and ordered `packet-up`,
+Go's `auto` choice, authenticated REALITY composition and the basic
+max-concurrency/max-connections XMUX subset. Phase 6E-N drives real
+`sing-vless` services with 32 concurrent Gun sessions, 16 concurrent xHTTP
+sessions, repeated HTTP-status failures and post-failure recovery; the protocol
+crate also runs a deterministic truncated/arbitrary-response corpus under a
+one-second per-case bound.
+
+All five scripts pass locally on Darwin arm64 on 2026-09-03. They are assigned
+to the dedicated `vless` CI shard on Linux x86_64, Windows x86_64 and macOS
+arm64; those native results remain pending until GitHub Actions completes.
+HTTP/1.1/H3 xHTTP, download-settings, alternate session/sequence/data
+placements, advanced padding and XMUX lifetime/request limits, UDP over xHTTP,
+non-Chrome REALITY fingerprints, VLESS inbound/server behavior, multi-hour soak
+and external-version interoperability remain explicitly unclaimed.
+
 ## SS/VMess/VLESS protocol ownership
 
 The ownership boundary covers inventory rows `OUT-04`, `OUT-07`, `OUT-08` and
@@ -5899,7 +5929,7 @@ explicit:
   Vision (`xtls-rprx-vision`) client framing and REALITY outer TLS via
   `rewrite-transport`.
 - `rewrite-transport` owns reusable TLS/ShadowTLS/REALITY, simple-obfs, WebSocket,
-  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, basic xHTTP `stream-one`, mKCP,
+  HTTP Upgrade, V2Ray HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP modes/basic XMUX, mKCP,
   Mekya and mux carriers.
 
 None of the protocol crates depends on `config`, `inbound`, `outbound`, `runtime` or

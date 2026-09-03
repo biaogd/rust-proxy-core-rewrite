@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/metacubex/mihomo/listener/sing_vless"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
+	"golang.org/x/net/http2"
 )
 
 const (
@@ -71,6 +73,50 @@ func (handler *echoHandler) NewError(_ context.Context, err error) {
 
 type destTunnel struct{}
 
+type h2StreamConn struct {
+	net.Conn
+	reader io.Reader
+	writer http.ResponseWriter
+}
+
+func (conn *h2StreamConn) Read(payload []byte) (int, error) {
+	return conn.reader.Read(payload)
+}
+
+func (conn *h2StreamConn) Write(payload []byte) (int, error) {
+	written, err := conn.writer.Write(payload)
+	if flusher, ok := conn.writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return written, err
+}
+
+func (conn *h2StreamConn) Close() error { return nil }
+
+func serveXHTTP(
+	connection net.Conn,
+	service *sing_vless.Service[string],
+	expectedHost string,
+	expectedPath string,
+) {
+	server := &http2.Server{}
+	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.Host != expectedHost || request.URL.RequestURI() != expectedPath {
+			http.Error(writer, "invalid REALITY xHTTP request", http.StatusBadRequest)
+			return
+		}
+		fmt.Printf("XHTTP POST %s %s %s\n", request.Host, request.URL.RequestURI(), request.Header.Get("Content-Type"))
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		stream := &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
+		if err := service.NewConnection(request.Context(), stream, M.Metadata{}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	})})
+}
+
 func (destTunnel) HandleTCPConn(conn net.Conn, metadata *C.Metadata) {
 	defer conn.Close()
 	address := metadata.String()
@@ -101,6 +147,9 @@ func main() {
 	innerTLSCertificate := flag.String("inner-tls-cert", "", "optional nested TLS certificate")
 	innerTLSPrivateKey := flag.String("inner-tls-key", "", "optional nested TLS private key")
 	innerTLSPort := flag.Uint("inner-tls-port", 0, "destination port that terminates nested TLS")
+	transport := flag.String("transport", "tcp", "tcp or xhttp")
+	expectedHTTPHost := flag.String("expected-http-host", "", "expected xHTTP authority")
+	expectedHTTPPath := flag.String("expected-http-path", "/", "expected xHTTP path")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -117,7 +166,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid nested TLS configuration")
 		os.Exit(2)
 	}
-
+	if *transport != "tcp" && *transport != "xhttp" {
+		fmt.Fprintln(os.Stderr, "invalid transport")
+		os.Exit(2)
+	}
 	tunnel := destTunnel{}
 	inner.New(tunnel)
 
@@ -169,6 +221,10 @@ func main() {
 		}
 		go func(connection net.Conn) {
 			defer connection.Close()
+			if *transport == "xhttp" {
+				serveXHTTP(connection, service, *expectedHTTPHost, *expectedHTTPPath)
+				return
+			}
 			if err := service.NewConnection(context.Background(), connection, M.Metadata{}); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 			}

@@ -283,4 +283,47 @@ mod tests {
         assert_eq!(response, b"response");
         authority_task.await.expect("authority task");
     }
+
+    #[tokio::test]
+    async fn malformed_response_corpus_is_bounded_and_never_panics() {
+        let mut corpus = vec![vec![], vec![0], vec![1, 0], vec![0, 1], vec![0, 255]];
+        for length in 0..=64_usize {
+            corpus.push(
+                (0..length)
+                    .map(|index| {
+                        u8::try_from((index * 73 + length * 19) & 0xff)
+                            .expect("corpus byte is masked to u8")
+                    })
+                    .collect(),
+            );
+        }
+
+        for response in corpus {
+            let (remote, mut authority) = tokio::io::duplex(1024);
+            let (mut application, relay) = tokio::io::duplex(1024);
+            let request = b"request".to_vec();
+            let request_length = request.len();
+            let task =
+                tokio::spawn(async move { relay_session(Box::new(remote), relay, &request).await });
+            application
+                .write_all(b"x")
+                .await
+                .expect("application write");
+            let mut observed = vec![0_u8; request_length + 1];
+            authority
+                .read_exact(&mut observed)
+                .await
+                .expect("request reaches authority");
+            authority
+                .write_all(&response)
+                .await
+                .expect("corpus response write");
+            authority.shutdown().await.expect("authority shutdown");
+            drop(application);
+            let joined = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("malformed response handling is bounded");
+            assert!(joined.is_ok(), "malformed response task panicked");
+        }
+    }
 }

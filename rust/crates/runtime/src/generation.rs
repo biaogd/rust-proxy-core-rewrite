@@ -148,7 +148,8 @@ pub(super) async fn apply_generation(
     };
 
     sync_selector_state(state, &next);
-    state.clear_vmess_grpc_clients().await;
+    state.clear_grpc_clients().await;
+    state.clear_xhttp_clients().await;
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
@@ -464,6 +465,8 @@ pub(super) fn cleanup_controller_key(key: &ControllerKey) {
     if let ControllerKey::Unix(path, ..) = key {
         let _ = std::fs::remove_file(path);
     }
+    #[cfg(not(unix))]
+    let _ = key;
 }
 
 pub(super) async fn apply_dns_task(

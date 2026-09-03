@@ -51,8 +51,8 @@ pub struct RuntimeState {
     proxy_health: Mutex<BTreeMap<String, ProxyHealth>>,
     dns_mappings: Mutex<DnsMappingCache>,
     fake_ips: Mutex<FakeIpRegistry>,
-    vmess_grpc_clients:
-        AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::VmessGrpcClient>)>>,
+    grpc_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::GrpcClient>)>>,
+    xhttp_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::XHttpClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
 }
 
@@ -83,28 +83,29 @@ impl Default for RuntimeState {
             proxy_health: Mutex::new(BTreeMap::new()),
             dns_mappings: Mutex::new(DnsMappingCache::default()),
             fake_ips: Mutex::new(FakeIpRegistry::default()),
-            vmess_grpc_clients: AsyncMutex::new(BTreeMap::new()),
+            grpc_clients: AsyncMutex::new(BTreeMap::new()),
+            xhttp_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
         }
     }
 }
 
 impl RuntimeState {
-    pub async fn vmess_grpc_client(
+    pub async fn grpc_client(
         &self,
         name: &str,
         identity: String,
-        options: rewrite_outbound::VmessGrpcClientOptions,
-    ) -> Arc<rewrite_outbound::VmessGrpcClient> {
+        options: rewrite_outbound::GrpcClientOptions,
+    ) -> Arc<rewrite_outbound::GrpcClient> {
         let previous = {
-            let mut clients = self.vmess_grpc_clients.lock().await;
+            let mut clients = self.grpc_clients.lock().await;
             if let Some((current_identity, client)) = clients.get(name)
                 && current_identity == &identity
             {
                 return Arc::clone(client);
             }
             let previous = clients.remove(name).map(|(_, client)| client);
-            let client = Arc::new(rewrite_outbound::VmessGrpcClient::new(options));
+            let client = Arc::new(rewrite_outbound::GrpcClient::new(options));
             clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
             (client, previous)
         };
@@ -114,9 +115,44 @@ impl RuntimeState {
         previous.0
     }
 
-    pub async fn clear_vmess_grpc_clients(&self) {
+    pub async fn clear_grpc_clients(&self) {
         let clients = {
-            let mut clients = self.vmess_grpc_clients.lock().await;
+            let mut clients = self.grpc_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
+        }
+    }
+
+    pub async fn xhttp_client(
+        &self,
+        name: &str,
+        identity: String,
+        options: rewrite_outbound::XHttpOptions,
+        reuse: rewrite_outbound::XHttpReuseOptions,
+    ) -> Arc<rewrite_outbound::XHttpClient> {
+        let previous = {
+            let mut clients = self.xhttp_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(rewrite_outbound::XHttpClient::new(options, reuse));
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_xhttp_clients(&self) {
+        let clients = {
+            let mut clients = self.xhttp_clients.lock().await;
             std::mem::take(&mut *clients)
         };
         for (_, client) in clients.into_values() {

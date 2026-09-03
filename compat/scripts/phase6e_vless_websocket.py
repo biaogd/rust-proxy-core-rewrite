@@ -69,6 +69,9 @@ def start_authority(
     packet_mode: str = "",
     flow: str = "",
     inner_tls_port: int = 0,
+    stream_barrier: int = 0,
+    observe_h2_ping: bool = False,
+    close_h2_after_stream: bool = False,
 ) -> tuple[Any, Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -103,7 +106,13 @@ def start_authority(
         flow,
         "-inner-tls-port",
         str(inner_tls_port),
+        "-stream-barrier",
+        str(stream_barrier),
     ]
+    if observe_h2_ping:
+        command.append("-observe-h2-ping")
+    if close_h2_after_stream:
+        command.append("-close-h2-after-stream")
     if certificate is not None and private_key is not None:
         command.extend(("-tls-cert", str(certificate), "-tls-key", str(private_key)))
     process = subprocess.Popen(

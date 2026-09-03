@@ -16,8 +16,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::tcp::{
-    apply_host_mapping, configured_proxy, connect_vless_physical_outer, direct_tcp_options,
-    mode_decision, resolve_rematch_target, serve_connection,
+    apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
+    resolve_rematch_target, serve_connection,
 };
 use crate::types::LocalTcpListener;
 
@@ -1012,7 +1012,7 @@ pub(super) async fn run_vless_udp_session(
         }
         rewrite_config::VlessPacketMode::Xudp => rewrite_outbound::VlessPacketMode::Xudp,
     };
-    let (outer, vision_control) = match connect_vless_physical_outer(
+    let (outer, vision_control) = match super::tcp::connect_vless_outer(
         proxy,
         &server,
         vless,
@@ -1030,13 +1030,6 @@ pub(super) async fn run_vless_udp_session(
         }
     };
     debug_assert!(vision_control.is_none());
-    let outer = match super::tcp::wrap_vless_transport(outer, proxy, &server, vless).await {
-        Ok(outer) => outer,
-        Err(error) => {
-            state.log("error", format!("VLESS UDP transport failed: {error}"));
-            return;
-        }
-    };
     let mut association = match rewrite_outbound::associate_vless_udp_on_stream(
         outer,
         &initial_destination,

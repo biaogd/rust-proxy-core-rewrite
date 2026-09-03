@@ -28,11 +28,15 @@ pub use rewrite_transport::{
     MekyaConnection, MekyaConnector, MekyaOptions, MkcpConfig, connect_mekya, connect_mkcp,
 };
 pub use rewrite_transport::{
-    V2rayGrpcClient as VmessGrpcClient, V2rayGrpcClientOptions as VmessGrpcClientOptions,
+    V2rayGrpcClient as GrpcClient, V2rayGrpcClient as VmessGrpcClient,
+    V2rayGrpcClientOptions as GrpcClientOptions, V2rayGrpcClientOptions as VmessGrpcClientOptions,
     connect_v2ray_grpc as connect_vmess_grpc, connect_v2ray_h2 as connect_vmess_h2,
     connect_v2ray_http as connect_vmess_http,
 };
-pub use rewrite_transport::{XHttpStreamOneOptions, connect_xhttp_stream_one};
+pub use rewrite_transport::{
+    XHttpClient, XHttpMode, XHttpOptions, XHttpReuseOptions, XHttpStreamOneOptions, connect_xhttp,
+    connect_xhttp_stream_one,
+};
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,

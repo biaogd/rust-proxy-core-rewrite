@@ -2419,6 +2419,48 @@ independent HTTP/2 VLESS authority. HTTP/1.1 and HTTP/3, `auto`, `stream-up`,
 `packet-up`, XMUX/reuse/download settings, obfuscation-placement controls, UDP,
 REALITY composition and server mode remain open.
 
+### Phase 6E-L accepted scope — VLESS gRPC/Gun pool lifecycle
+
+This slice changes outbound **VLESS**, **Shared outbound transport/security
+variants**, the Phase 6E platform rows, and the **Differential harness**. VLESS
+now uses the same reusable Gun client boundary as VMess. The all-zero default,
+`max-connections`/`min-streams`, `max-streams`, signed configuration values and
+closed-H2 reconnection are compared in
+`compat/scripts/phase6e_vless_grpc_pool.py`. The VLESS gates have their own
+Linux x86_64, Windows x86_64 and macOS arm64 CI shard, so unrelated controller
+tests cannot consume their execution budget. Native non-gRPC transports and
+general-purpose mux are not implied.
+
+### Phase 6E-M accepted scope — common xHTTP modes, REALITY and basic XMUX
+
+This slice extends xHTTP to Go's common HTTP/2 modes: `stream-one`,
+`stream-up`, `packet-up`, and `auto` (`packet-up` normally and `stream-one`
+with REALITY). Split modes use one physical H2 connection for their download
+and upload requests. Basic `reuse-settings.max-concurrency` and
+`max-connections` ranges create a reusable cross-session H2 pool with
+closed-connection replacement.
+
+Three differentials cover mode selection/chunked upload, one/two-connection
+XMUX reuse and reconnection, and authenticated xHTTP-over-REALITY. HTTP/1.1,
+H3, download-settings, alternate metadata/data placement, padding obfuscation,
+the remaining reuse lifetime/request-count controls and UDP over xHTTP remain
+fail-closed and are not claimed.
+
+### Phase 6E-N accepted scope — bounded VLESS production gate
+
+This gate uses Mihomo's maintained `sing-vless` service rather than the small
+manual parser. It compares 32 concurrent pooled gRPC streams, 16 concurrent
+xHTTP/XMUX streams, 16 rejected HTTP-status sessions, recovery after those
+failures, and process survival. A deterministic malformed-response corpus also
+proves that truncated and arbitrary VLESS response prefixes finish within a
+bounded timeout without panicking.
+
+These are CI-sized regression and pressure gates, not a long-running soak or a
+public-Internet interoperability claim. Release qualification still requires
+multi-hour churn/packet-loss testing, real external server versions, resource
+ceilings, H3, broader xHTTP controls, additional REALITY fingerprints and the
+VLESS inbound/server direction.
+
 ### Phase 5C1b accepted scope
 
 Selector state now participates in transactional SIGHUP generations. A choice

@@ -247,6 +247,21 @@ pub enum VlessPacketMode {
     Xudp,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VlessXHttpMode {
+    StreamOne,
+    StreamUp,
+    PacketUp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VlessXHttpReuseOptions {
+    pub max_concurrency_min: usize,
+    pub max_concurrency_max: usize,
+    pub max_connections_min: usize,
+    pub max_connections_max: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VlessTransport {
     Tcp,
@@ -266,14 +281,22 @@ pub enum VlessTransport {
     Grpc {
         service_name: String,
         user_agent: String,
+        ping_interval: i64,
+        max_connections: i64,
+        min_streams: i64,
+        max_streams: i64,
     },
     XHttp {
+        mode: VlessXHttpMode,
         host: String,
         path: String,
         headers: BTreeMap<String, String>,
         no_grpc_header: bool,
         padding_min: usize,
         padding_max: usize,
+        max_each_post_min: usize,
+        max_each_post_max: usize,
+        reuse: Option<VlessXHttpReuseOptions>,
     },
 }
 

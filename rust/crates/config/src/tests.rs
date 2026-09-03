@@ -3012,6 +3012,10 @@ fn parses_phase6e_e_vless_grpc_scope() {
         VlessTransport::Grpc {
             service_name: "GunService".to_owned(),
             user_agent: "grpc-go/1.36.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
         }
     );
     let custom = config.proxies[1]
@@ -3023,12 +3027,15 @@ fn parses_phase6e_e_vless_grpc_scope() {
         VlessTransport::Grpc {
             service_name: "/custom/path".to_owned(),
             user_agent: "phase6e-e/1.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 0,
+            min_streams: 0,
+            max_streams: 0,
         }
     );
     assert!(config.proxies[1].tls);
 
     let rejected = [
-        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: grpc\n    grpc-opts:\n      ping-interval: 1\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: tcp\n    grpc-opts:\n      grpc-service-name: secure\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: grpc\n    ws-opts:\n      path: /wrong\n",
     ];
@@ -3127,6 +3134,7 @@ fn parses_common_vless_carrier_extensions() {
             .as_ref()
             .map(|vless| &vless.transport),
         Some(&VlessTransport::XHttp {
+            mode: VlessXHttpMode::StreamOne,
             host: "front.example".to_owned(),
             path: "/xhttp/".to_owned(),
             headers: [("User-Agent".to_owned(), "phase6e-xhttp".to_owned())]
@@ -3135,12 +3143,15 @@ fn parses_common_vless_carrier_extensions() {
             no_grpc_header: true,
             padding_min: 32,
             padding_max: 64,
+            max_each_post_min: 1_000_000,
+            max_each_post_max: 1_000_000,
+            reuse: None,
         })
     );
 
     for body in [
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: http\n    udp: true\n",
-        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: packet-up\n",
+        "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: unsupported\n",
         "{MINIMAL}\nproxies:\n  - name: bad\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    network: xhttp\n    xhttp-opts:\n      mode: stream-one\n      x-padding-bytes: 64-32\n",
     ] {
         assert!(

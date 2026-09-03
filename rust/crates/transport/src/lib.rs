@@ -39,6 +39,9 @@ pub use websocket::{
     WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
     connect_websocket_with_headers,
 };
-pub use xhttp::{XHttpStreamOneOptions, connect_xhttp_stream_one};
+pub use xhttp::{
+    XHttpClient, XHttpMode, XHttpOptions, XHttpReuseOptions, XHttpStreamOneOptions, connect_xhttp,
+    connect_xhttp_stream_one,
+};
 
 pub use rewrite_io::{BoxedStream, DuplexStream, VisionDirectControl};

@@ -14,8 +14,8 @@ use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
     RealityProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport,
-    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
-    VmessTransport,
+    VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode,
+    VmessProxyConfig, VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -465,7 +465,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         return Err(ConfigError::UnsupportedProxy(name));
     }
     if reality.is_some() {
-        if !tls || network != "tcp" || udp {
+        if !tls || !matches!(network, "tcp" | "xhttp") || udp {
             return Err(ConfigError::UnsupportedProxy(name));
         }
         validate_vless_reality_client_fingerprint(&name, proxy.client_fingerprint.as_deref())?;
@@ -665,14 +665,7 @@ fn parse_vless_transport(
     }
     if network == "grpc" {
         let options = proxy.grpc_opts.clone().unwrap_or_default();
-        if !options.extra.is_empty()
-            || options.ping_interval.is_some_and(|interval| interval != 0)
-            || options
-                .max_connections
-                .is_some_and(|connections| connections != 0)
-            || options.min_streams.is_some_and(|streams| streams != 0)
-            || options.max_streams.is_some_and(|streams| streams != 0)
-        {
+        if !options.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
         let service_name = options
@@ -696,6 +689,10 @@ fn parse_vless_transport(
         return Ok(VlessTransport::Grpc {
             service_name,
             user_agent,
+            ping_interval: options.ping_interval.unwrap_or_default(),
+            max_connections: options.max_connections.unwrap_or_default(),
+            min_streams: options.min_streams.unwrap_or_default(),
+            max_streams: options.max_streams.unwrap_or_default(),
         });
     }
     if network == "xhttp" {
@@ -703,10 +700,36 @@ fn parse_vless_transport(
         if !options.extra.is_empty() {
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
-        let mode = options.mode.as_deref().unwrap_or("auto");
-        if mode != "stream-one" {
-            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
-        }
+        let mode = match options.mode.as_deref().unwrap_or("auto") {
+            "auto" if proxy.reality_opts.is_some() => VlessXHttpMode::StreamOne,
+            "auto" | "packet-up" => VlessXHttpMode::PacketUp,
+            "stream-one" => VlessXHttpMode::StreamOne,
+            "stream-up" => VlessXHttpMode::StreamUp,
+            _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+        };
+        let reuse = if let Some(reuse) = options.reuse_settings.as_ref() {
+            if !reuse.extra.is_empty() {
+                return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+            }
+            let (max_concurrency_min, max_concurrency_max) = parse_xhttp_range(
+                reuse.max_concurrency.as_deref().unwrap_or("0"),
+                name,
+                1_000_000,
+            )?;
+            let (max_connections_min, max_connections_max) = parse_xhttp_range(
+                reuse.max_connections.as_deref().unwrap_or("0"),
+                name,
+                1_000_000,
+            )?;
+            Some(VlessXHttpReuseOptions {
+                max_concurrency_min,
+                max_concurrency_max,
+                max_connections_min,
+                max_connections_max,
+            })
+        } else {
+            None
+        };
         let mut path = options
             .path
             .filter(|path| !path.is_empty())
@@ -739,14 +762,30 @@ fn parse_vless_transport(
         let (padding_min, padding_max) = parse_xhttp_range(
             options.x_padding_bytes.as_deref().unwrap_or("100-1000"),
             name,
+            16_384,
         )?;
+        let (max_each_post_min, max_each_post_max) = parse_xhttp_range(
+            options
+                .sc_max_each_post_bytes
+                .as_deref()
+                .unwrap_or("1000000"),
+            name,
+            16 * 1024 * 1024,
+        )?;
+        if max_each_post_min == 0 {
+            return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+        }
         return Ok(VlessTransport::XHttp {
+            mode,
             host,
             path,
             headers,
             no_grpc_header: options.no_grpc_header.unwrap_or(false),
             padding_min,
             padding_max,
+            max_each_post_min,
+            max_each_post_max,
+            reuse,
         });
     }
     let options = proxy.ws_opts.clone().unwrap_or_default();
@@ -778,7 +817,7 @@ fn parse_vless_transport(
     Ok(VlessTransport::WebSocket { path, headers })
 }
 
-fn parse_xhttp_range(value: &str, name: &str) -> Result<(usize, usize), ConfigError> {
+fn parse_xhttp_range(value: &str, name: &str, limit: usize) -> Result<(usize, usize), ConfigError> {
     let mut parts = value.split('-');
     let minimum = parts
         .next()
@@ -791,7 +830,7 @@ fn parse_xhttp_range(value: &str, name: &str) -> Result<(usize, usize), ConfigEr
             .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?,
         None => minimum,
     };
-    if parts.next().is_some() || maximum < minimum || maximum > 16_384 {
+    if parts.next().is_some() || maximum < minimum || maximum > limit {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok((minimum, maximum))

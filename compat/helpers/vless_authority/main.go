@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gobwas/ws/wsutil"
 	"github.com/gofrs/uuid/v5"
@@ -40,15 +41,27 @@ type authority struct {
 	expectedGrpcUserAgent string
 	packetMode            string
 	flow                  string
+	streamBarrier         int64
+	streamCount           atomic.Int64
+	barrierReady          chan struct{}
+	barrierOnce           sync.Once
+	nextH2Connection      atomic.Uint64
+	observeH2Ping         bool
+	closeH2AfterStream    bool
+	xhttpSessions         sync.Map
 	vlessService          *vless.Service[string]
 	singVlessService      *sing_vless.Service[string]
 }
 
 type packetEchoHandler struct {
-	packetMode string
-	innerTLS   *tls.Config
-	innerPort  uint16
-	output     sync.Mutex
+	packetMode    string
+	innerTLS      *tls.Config
+	innerPort     uint16
+	streamBarrier int64
+	streamCount   atomic.Int64
+	barrierReady  chan struct{}
+	barrierOnce   sync.Once
+	output        sync.Mutex
 }
 
 var _ vless.Handler = (*packetEchoHandler)(nil)
@@ -94,6 +107,12 @@ func (handler *packetEchoHandler) NewConnection(_ context.Context, conn net.Conn
 		}
 		_, err = io.Copy(inner, reader)
 		return err
+	}
+	if handler.streamBarrier > 0 {
+		if handler.streamCount.Add(1) >= handler.streamBarrier {
+			handler.barrierOnce.Do(func() { close(handler.barrierReady) })
+		}
+		<-handler.barrierReady
 	}
 	_, err := io.Copy(conn, conn)
 	return err
@@ -166,6 +185,96 @@ type h2StreamConn struct {
 	writer http.ResponseWriter
 }
 
+type xhttpSession struct {
+	output    chan []byte
+	input     *io.PipeWriter
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+type xhttpSessionConn struct {
+	net.Conn
+	reader io.Reader
+	output chan<- []byte
+}
+
+func (conn *xhttpSessionConn) Read(payload []byte) (int, error) {
+	return conn.reader.Read(payload)
+}
+
+func (conn *xhttpSessionConn) Write(payload []byte) (int, error) {
+	copyPayload := append([]byte(nil), payload...)
+	conn.output <- copyPayload
+	return len(payload), nil
+}
+
+func (conn *xhttpSessionConn) Close() error { return nil }
+
+func (a *authority) xhttpSession(id string) *xhttpSession {
+	created := &xhttpSession{output: make(chan []byte, 16)}
+	actual, _ := a.xhttpSessions.LoadOrStore(id, created)
+	return actual.(*xhttpSession)
+}
+
+func (a *authority) startPacketSession(
+	session *xhttpSession,
+	connection net.Conn,
+) {
+	session.startOnce.Do(func() {
+		reader, writer := io.Pipe()
+		session.input = writer
+		go func() {
+			a.handleProtocol(&xhttpSessionConn{
+				Conn:   connection,
+				reader: reader,
+				output: session.output,
+			})
+			session.closeOnce.Do(func() { close(session.output) })
+		}()
+	})
+}
+
+type h2FrameObservingConn struct {
+	net.Conn
+	authority   *authority
+	buffer      []byte
+	prefaceRead bool
+}
+
+func (conn *h2FrameObservingConn) Read(payload []byte) (int, error) {
+	read, err := conn.Conn.Read(payload)
+	if read != 0 {
+		conn.buffer = append(conn.buffer, payload[:read]...)
+		conn.observeFrames()
+	}
+	return read, err
+}
+
+func (conn *h2FrameObservingConn) observeFrames() {
+	if !conn.prefaceRead {
+		const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+		if len(conn.buffer) < len(preface) {
+			return
+		}
+		if string(conn.buffer[:len(preface)]) != preface {
+			conn.buffer = nil
+			return
+		}
+		conn.buffer = conn.buffer[len(preface):]
+		conn.prefaceRead = true
+	}
+	for len(conn.buffer) >= 9 {
+		length := int(conn.buffer[0])<<16 | int(conn.buffer[1])<<8 | int(conn.buffer[2])
+		if len(conn.buffer) < 9+length {
+			return
+		}
+		if conn.buffer[3] == 0x6 && conn.buffer[4]&0x1 == 0 {
+			conn.authority.observe("H2-PING")
+		}
+		conn.buffer = conn.buffer[9+length:]
+	}
+}
+
 func (conn *prefixedConn) Read(payload []byte) (int, error) {
 	if conn.prefix.Len() != 0 {
 		return conn.prefix.Read(payload)
@@ -184,6 +293,8 @@ func (conn *h2StreamConn) Write(payload []byte) (int, error) {
 	}
 	return written, err
 }
+
+func (conn *h2StreamConn) Close() error { return nil }
 
 func (conn *websocketConn) Read(payload []byte) (int, error) {
 	for conn.buffer.Len() == 0 {
@@ -363,8 +474,120 @@ func (a *authority) httpTransport(connection net.Conn) (net.Conn, error) {
 	return prefixed, nil
 }
 
+func (a *authority) serveXHTTP(
+	connection net.Conn,
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if a.expectedHTTPHost != "" && request.Host != a.expectedHTTPHost {
+		http.Error(writer, "invalid xHTTP host", http.StatusBadRequest)
+		return
+	}
+	if a.expectedHTTPHeader != "" {
+		name, value, found := strings.Cut(a.expectedHTTPHeader, "=")
+		if !found || request.Header.Get(name) != value {
+			http.Error(writer, "invalid xHTTP custom header", http.StatusBadRequest)
+			return
+		}
+	}
+	base := a.expectedHTTPPath
+	if base == "" {
+		base = "/"
+	}
+	if request.Method == http.MethodPost && request.URL.Path == base {
+		paddingLength := -1
+		if referer, err := url.Parse(request.Header.Get("Referer")); err == nil {
+			paddingLength = len(referer.Query().Get("x_padding"))
+		}
+		a.observe(
+			"XHTTP POST %s %s %s PADDING %d %s",
+			request.Host,
+			request.URL.RequestURI(),
+			request.Header.Get("Content-Type"),
+			paddingLength,
+			a.expectedHTTPHeader,
+		)
+		writer.Header().Set("X-Padding", "XXXXXXXX")
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		a.handleProtocol(&h2StreamConn{Conn: connection, reader: request.Body, writer: writer})
+		if a.closeH2AfterStream {
+			_ = connection.Close()
+		}
+		return
+	}
+	if !strings.HasPrefix(request.URL.Path, base) {
+		http.Error(writer, "invalid xHTTP path", http.StatusBadRequest)
+		return
+	}
+	parts := strings.Split(strings.Trim(request.URL.Path[len(base):], "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(writer, "missing xHTTP session", http.StatusBadRequest)
+		return
+	}
+	sessionID := parts[0]
+	session := a.xhttpSession(sessionID)
+	if request.Method == http.MethodGet && len(parts) == 1 {
+		a.observe("XHTTP GET %s %s/<session>", request.Host, strings.TrimSuffix(base, "/"))
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		for {
+			select {
+			case payload, ok := <-session.output:
+				if !ok {
+					a.xhttpSessions.Delete(sessionID)
+					return
+				}
+				if _, err := writer.Write(payload); err != nil {
+					return
+				}
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			case <-request.Context().Done():
+				return
+			}
+		}
+	}
+	if request.Method == http.MethodPost && len(parts) == 1 {
+		a.observe("XHTTP STREAM-UP %s %s/<session>", request.Host, strings.TrimSuffix(base, "/"))
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		a.handleProtocol(&xhttpSessionConn{
+			Conn:   connection,
+			reader: request.Body,
+			output: session.output,
+		})
+		session.closeOnce.Do(func() { close(session.output) })
+		return
+	}
+	if request.Method == http.MethodPost && len(parts) == 2 {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(writer, "invalid xHTTP packet", http.StatusBadRequest)
+			return
+		}
+		a.startPacketSession(session, connection)
+		a.observe("XHTTP PACKET-UP %s %s/<session>/%s %d", request.Host, strings.TrimSuffix(base, "/"), parts[1], len(body))
+		if _, err := session.input.Write(body); err != nil {
+			http.Error(writer, "closed xHTTP session", http.StatusGone)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Error(writer, "invalid xHTTP request", http.StatusBadRequest)
+}
+
 func (a *authority) serveH2(connection net.Conn, transport string) error {
 	server := &http2.Server{}
+	var connectionOnce sync.Once
 	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if transport == "grpc" {
 			if request.Method != http.MethodPost ||
@@ -375,6 +598,9 @@ func (a *authority) serveH2(connection net.Conn, transport string) error {
 				http.Error(writer, "invalid gRPC VLESS request", http.StatusBadRequest)
 				return
 			}
+			connectionOnce.Do(func() {
+				a.observe("GRPC-CONN %d", a.nextH2Connection.Add(1))
+			})
 			a.observe(
 				"GRPC POST %s %s application/grpc %s",
 				request.Host,
@@ -383,34 +609,11 @@ func (a *authority) serveH2(connection net.Conn, transport string) error {
 			)
 			writer.Header().Set("Content-Type", "application/grpc")
 		} else if transport == "xhttp" {
-			if request.Method != http.MethodPost ||
-				(a.expectedHTTPHost != "" && request.Host != a.expectedHTTPHost) ||
-				(a.expectedHTTPPath != "" && request.URL.RequestURI() != a.expectedHTTPPath) {
-				http.Error(writer, "invalid xHTTP stream-one request", http.StatusBadRequest)
-				return
-			}
-			paddingLength := -1
-			if referer, err := url.Parse(request.Header.Get("Referer")); err == nil {
-				paddingLength = len(referer.Query().Get("x_padding"))
-			}
-			headerValue := ""
-			if a.expectedHTTPHeader != "" {
-				name, value, found := strings.Cut(a.expectedHTTPHeader, "=")
-				if !found || request.Header.Get(name) != value {
-					http.Error(writer, "invalid xHTTP custom header", http.StatusBadRequest)
-					return
-				}
-				headerValue = name + "=" + value
-			}
-			a.observe(
-				"XHTTP POST %s %s %s PADDING %d %s",
-				request.Host,
-				request.URL.RequestURI(),
-				request.Header.Get("Content-Type"),
-				paddingLength,
-				headerValue,
-			)
-			writer.Header().Set("X-Padding", "XXXXXXXX")
+			connectionOnce.Do(func() {
+				a.observe("XHTTP-CONN %d", a.nextH2Connection.Add(1))
+			})
+			a.serveXHTTP(connection, writer, request)
+			return
 		} else if request.Method != http.MethodPut ||
 			(a.expectedHTTPHost != "" && request.Host != a.expectedHTTPHost) ||
 			(a.expectedHTTPPath != "" && request.URL.RequestURI() != a.expectedHTTPPath) ||
@@ -427,6 +630,9 @@ func (a *authority) serveH2(connection net.Conn, transport string) error {
 		stream := &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}
 		if transport == "grpc" {
 			a.handleProtocol(&gunConn{Conn: stream})
+			if a.closeH2AfterStream {
+				_ = connection.Close()
+			}
 			return
 		}
 		a.handleProtocol(stream)
@@ -512,6 +718,12 @@ func (a *authority) handle(connection net.Conn) {
 		_, _ = connection.Write([]byte{1, 0})
 		return
 	}
+	if a.streamBarrier > 0 {
+		if a.streamCount.Add(1) >= a.streamBarrier {
+			a.barrierOnce.Do(func() { close(a.barrierReady) })
+		}
+		<-a.barrierReady
+	}
 	_, _ = io.Copy(connection, connection)
 }
 
@@ -547,6 +759,9 @@ func (a *authority) serve(connection net.Conn, transport string, tlsEnabled bool
 				a.observe("ALPN %s", state.NegotiatedProtocol)
 			}
 		}
+	}
+	if transport == "grpc" && !tlsEnabled && a.observeH2Ping {
+		connection = &h2FrameObservingConn{Conn: connection, authority: a}
 	}
 	switch transport {
 	case "h2", "grpc", "xhttp":
@@ -590,6 +805,9 @@ func main() {
 	packetMode := flag.String("packet-mode", "", "standard, packetaddr, or xudp")
 	flow := flag.String("flow", "", "optional VLESS flow, e.g. xtls-rprx-vision")
 	innerTLSPort := flag.Uint("inner-tls-port", 0, "destination port that terminates nested TLS")
+	streamBarrier := flag.Int64("stream-barrier", 0, "concurrent VLESS streams required before echo")
+	observeH2Ping := flag.Bool("observe-h2-ping", false, "report client HTTP/2 PING frames")
+	closeH2AfterStream := flag.Bool("close-h2-after-stream", false, "close xHTTP H2 after one stream")
 	flag.Parse()
 	if *uuidText == "" {
 		fmt.Fprintln(os.Stderr, "missing -uuid")
@@ -623,6 +841,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -inner-tls-port")
 		os.Exit(2)
 	}
+	if *streamBarrier < 0 || (*transport != "grpc" && *streamBarrier != 0) {
+		fmt.Fprintln(os.Stderr, "invalid -stream-barrier")
+		os.Exit(2)
+	}
+	if *observeH2Ping && *transport != "grpc" {
+		fmt.Fprintln(os.Stderr, "-observe-h2-ping requires grpc transport")
+		os.Exit(2)
+	}
+	if *closeH2AfterStream && *transport != "xhttp" && *transport != "grpc" {
+		fmt.Fprintln(os.Stderr, "-close-h2-after-stream requires xhttp or grpc transport")
+		os.Exit(2)
+	}
 	if _, err := uuid.FromString(*uuidText); err != nil {
 		_ = uuid.NewV5(uuid.Nil, *uuidText)
 	}
@@ -638,6 +868,10 @@ func main() {
 		expectedGrpcUserAgent: *expectedGrpcUserAgent,
 		packetMode:            *packetMode,
 		flow:                  *flow,
+		streamBarrier:         *streamBarrier,
+		barrierReady:          make(chan struct{}),
+		observeH2Ping:         *observeH2Ping,
+		closeH2AfterStream:    *closeH2AfterStream,
 	}
 	if *flow != "" {
 		var innerTLS *tls.Config
@@ -657,12 +891,12 @@ func main() {
 				MaxVersion:   tls.VersionTLS13,
 			}
 		}
-		handler := &packetEchoHandler{innerTLS: innerTLS, innerPort: uint16(*innerTLSPort)}
+		handler := &packetEchoHandler{innerTLS: innerTLS, innerPort: uint16(*innerTLSPort), streamBarrier: *streamBarrier, barrierReady: make(chan struct{})}
 		service := sing_vless.NewService[string](handler)
 		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
 		auth.singVlessService = service
 	} else if *packetMode != "" {
-		handler := &packetEchoHandler{packetMode: *packetMode}
+		handler := &packetEchoHandler{packetMode: *packetMode, streamBarrier: *streamBarrier, barrierReady: make(chan struct{})}
 		service := vless.NewService[string](nil, handler)
 		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{""})
 		auth.vlessService = service

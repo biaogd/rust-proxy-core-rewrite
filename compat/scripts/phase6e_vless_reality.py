@@ -57,6 +57,9 @@ def start_authority(
     port: int,
     *,
     log_name: str,
+    transport: str = "tcp",
+    expected_http_host: str = "",
+    expected_http_path: str = "/",
 ) -> tuple[Any, Any, Any, pathlib.Path]:
     stdout_path = scratch / f"{log_name}-stdout.log"
     stdout = stdout_path.open("wb")
@@ -67,6 +70,12 @@ def start_authority(
         f"127.0.0.1:{port}",
         "-uuid",
         STANDARD_UUID,
+        "-transport",
+        transport,
+        "-expected-http-host",
+        expected_http_host,
+        "-expected-http-path",
+        expected_http_path,
     ]
     process = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
     output = scratch / f"{log_name}-output.log"

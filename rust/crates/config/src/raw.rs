@@ -314,6 +314,17 @@ pub(crate) struct RawXHttpOptions {
     pub(crate) headers: Option<BTreeMap<String, String>>,
     pub(crate) no_grpc_header: Option<bool>,
     pub(crate) x_padding_bytes: Option<String>,
+    pub(crate) sc_max_each_post_bytes: Option<String>,
+    pub(crate) reuse_settings: Option<RawXHttpReuseSettings>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawXHttpReuseSettings {
+    pub(crate) max_concurrency: Option<String>,
+    pub(crate) max_connections: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

@@ -616,6 +616,7 @@ pub(super) async fn measure_http_delay(
                         rewrite_config::VlessTransport::Grpc {
                             service_name,
                             user_agent,
+                            ..
                         } => {
                             let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
                             rewrite_outbound::connect_vmess_grpc(
@@ -628,25 +629,45 @@ pub(super) async fn measure_http_delay(
                             .map_err(|_| ())?
                         }
                         rewrite_config::VlessTransport::XHttp {
+                            mode,
                             host,
                             path,
                             headers,
                             no_grpc_header,
                             padding_min,
                             padding_max,
-                        } => rewrite_outbound::connect_xhttp_stream_one(
-                            outer,
-                            &rewrite_outbound::XHttpStreamOneOptions {
-                                host: host.clone(),
-                                path: path.clone(),
-                                headers: headers.clone(),
-                                no_grpc_header: *no_grpc_header,
-                                padding_min: *padding_min,
-                                padding_max: *padding_max,
-                            },
-                        )
-                        .await
-                        .map_err(|_| ())?,
+                            max_each_post_min,
+                            max_each_post_max,
+                            reuse: _,
+                        } => {
+                            let mode = match mode {
+                                rewrite_config::VlessXHttpMode::StreamOne => {
+                                    rewrite_outbound::XHttpMode::StreamOne
+                                }
+                                rewrite_config::VlessXHttpMode::StreamUp => {
+                                    rewrite_outbound::XHttpMode::StreamUp
+                                }
+                                rewrite_config::VlessXHttpMode::PacketUp => {
+                                    rewrite_outbound::XHttpMode::PacketUp
+                                }
+                            };
+                            rewrite_outbound::connect_xhttp(
+                                outer,
+                                &rewrite_outbound::XHttpOptions {
+                                    mode,
+                                    host: host.clone(),
+                                    path: path.clone(),
+                                    headers: headers.clone(),
+                                    no_grpc_header: *no_grpc_header,
+                                    padding_min: *padding_min,
+                                    padding_max: *padding_max,
+                                    max_each_post_min: *max_each_post_min,
+                                    max_each_post_max: *max_each_post_max,
+                                },
+                            )
+                            .await
+                            .map_err(|_| ())?
+                        }
                         rewrite_config::VlessTransport::Tcp => outer,
                     };
                     rewrite_outbound::connect_vless_on_stream_with_vision_control(
