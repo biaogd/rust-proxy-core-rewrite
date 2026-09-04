@@ -49,8 +49,13 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
         ["h2", "http/1.1"]
     );
 
+    let udp_source = format!(
+        "{MINIMAL}\nproxies:\n  - name: trojan-udp\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    udp: true\n"
+    );
+    let udp = Config::from_yaml(&udp_source).expect("Phase 6F-B Trojan UDP config");
+    assert!(udp.proxies[0].udp);
+
     for unsupported in [
-        "udp: true",
         "network: ws",
         "grpc-opts: {grpc-service-name: trojan}",
         "reality-opts: {public-key: invalid}",

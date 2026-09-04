@@ -143,6 +143,7 @@ pub(crate) fn parse_proxies(
 
 fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let network = proxy.network.as_deref().unwrap_or("tcp");
+    let udp = proxy.udp.unwrap_or(false);
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -154,7 +155,6 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || network != "tcp"
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
-        || proxy.udp.unwrap_or(false)
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
@@ -215,7 +215,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         private_key: None,
         client_fingerprint: None,
         reality: None,
-        udp: false,
+        udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,

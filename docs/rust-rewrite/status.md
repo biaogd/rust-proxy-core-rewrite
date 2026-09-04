@@ -6051,3 +6051,17 @@ and SOCKS address framing.
 for TLS SNI/ALPN, on-wire command/destination, small and 128-KiB payloads,
 half-close and process survival. The dedicated `trojan` CI shard runs this gate
 on Linux, Windows and macOS. No later 6F capability is claimed by this slice.
+
+## 2026-09-04 Phase 6F-B Trojan UDP over native TLS
+
+Trojan `udp: true` now uses command-3 framing in the shared protocol crate and
+the existing bounded mixed/SOCKS5 UDP session lifecycle. Per-packet
+domain/IPv4/IPv6 destinations, the 8192-byte oracle split boundary, response
+validation and same-association destination changes are explicit. Controller
+views report the Go-compatible `udp: true`, `uot: true`, `xudp: false` tuple.
+
+`compat/scripts/phase6f_trojan_udp.py` passes locally against the pinned Go
+oracle for TLS UDP association setup, two destinations on one client session,
+payload relay, wire observations and controller capabilities. The Trojan CI
+shard runs both 6F-A and 6F-B on Linux, Windows and macOS. Non-native carriers,
+REALITY, fallback and server direction remain unclaimed.

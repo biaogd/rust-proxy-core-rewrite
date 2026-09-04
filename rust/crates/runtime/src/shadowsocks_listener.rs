@@ -542,6 +542,10 @@ async fn run_shadowsocks_inbound_udp_session(
             "error",
             format!("VLESS UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"),
         ),
+        UdpSessionMode::Trojan(proxy) => state.log(
+            "error",
+            format!("Trojan UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"),
+        ),
     }
 }
 
@@ -722,6 +726,10 @@ async fn serve_shadowsocks_inbound_uot<S>(
         UdpSessionMode::Vless(proxy) => state.log(
             "error",
             format!("VLESS UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"),
+        ),
+        UdpSessionMode::Trojan(proxy) => state.log(
+            "error",
+            format!("Trojan UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"),
         ),
     }
 }

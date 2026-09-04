@@ -539,6 +539,29 @@ async fn connect_trojan_proxy(
         .trojan
         .as_ref()
         .ok_or_else(|| "Trojan proxy configuration is missing".to_owned())?;
+    let outer = connect_trojan_outer(
+        proxy,
+        server,
+        trojan,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    rewrite_outbound::connect_trojan_on_stream(outer, destination, &trojan.password)
+        .map_err(|error| format!("Trojan proxy connection failed: {error}"))
+}
+
+pub(super) async fn connect_trojan_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    trojan: &rewrite_config::TrojanProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("Trojan outer TCP connection failed: {error}"))?;
@@ -561,8 +584,7 @@ async fn connect_trojan_proxy(
         rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
             .await
             .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))?;
-    rewrite_outbound::connect_trojan_on_stream(outer, destination, &trojan.password)
-        .map_err(|error| format!("Trojan proxy connection failed: {error}"))
+    Ok(outer)
 }
 
 fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {

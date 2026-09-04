@@ -2874,6 +2874,20 @@ or unimplemented until their own 6F subphase. Acceptance requires protocol and
 configuration unit tests plus `compat/scripts/phase6f_trojan_tcp.py` against
 the pinned Go oracle on the native CI matrix.
 
+### Phase 6F-B — Trojan UDP over native TLS
+
+This slice continues `CFG-03`, `OUT-09` and `OUT-23`. It enables `udp: true`
+for native Trojan and reuses the mixed SOCKS5 UDP session lifecycle. The shared
+protocol crate owns command `3`, per-packet SOCKS addresses, big-endian length,
+CRLF framing, the oracle's 8192-byte maximum frame/splitting rule and bounded
+malformed-response handling.
+
+Acceptance requires same-association destination changes, payload round trips,
+TLS framing observations and exact controller `udp: true`, `uot: true`,
+`xudp: false` evidence in `compat/scripts/phase6f_trojan_udp.py`. UDP from the
+separate Shadowsocks inbound remains explicitly unsupported. WS/gRPC carriers,
+REALITY, fallback and Trojan server direction remain later slices.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

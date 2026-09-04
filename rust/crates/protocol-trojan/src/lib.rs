@@ -9,12 +9,21 @@ use sha2::{Digest as _, Sha224};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+mod packet;
+
+pub use packet::{TrojanUdpAssociation, associate_trojan_udp_on_stream};
+
 const COMMAND_TCP: u8 = 1;
+const COMMAND_UDP: u8 = 3;
 
 #[derive(Debug, Error)]
 pub enum TrojanProtocolError {
     #[error("Trojan destination domain exceeds 255 bytes")]
     DomainTooLong,
+    #[error("Trojan I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Trojan protocol failed: {0}")]
+    Protocol(String),
 }
 
 /// Wraps an established carrier with a lazy Trojan TCP request.
@@ -39,10 +48,27 @@ fn request_header(
     destination: &Destination,
     password: &str,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
+    request_header_with_command(destination, password, COMMAND_TCP)
+}
+
+fn request_header_with_command(
+    destination: &Destination,
+    password: &str,
+    command: u8,
+) -> Result<Vec<u8>, TrojanProtocolError> {
     let mut request = Vec::with_capacity(80);
     request.extend_from_slice(hex::encode(Sha224::digest(password.as_bytes())).as_bytes());
     request.extend_from_slice(b"\r\n");
-    request.push(COMMAND_TCP);
+    request.push(command);
+    append_socks_address(&mut request, destination)?;
+    request.extend_from_slice(b"\r\n");
+    Ok(request)
+}
+
+fn append_socks_address(
+    request: &mut Vec<u8>,
+    destination: &Destination,
+) -> Result<(), TrojanProtocolError> {
     match &destination.host {
         Host::Ip(std::net::IpAddr::V4(address)) => {
             request.push(1);
@@ -60,8 +86,7 @@ fn request_header(
         }
     }
     request.extend_from_slice(&destination.port.to_be_bytes());
-    request.extend_from_slice(b"\r\n");
-    Ok(request)
+    Ok(())
 }
 
 struct TrojanStream {

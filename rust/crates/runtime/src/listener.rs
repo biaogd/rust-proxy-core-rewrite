@@ -144,6 +144,7 @@ pub(super) enum UdpSessionMode {
     ShadowsocksUot(String),
     Vmess(String),
     Vless(String),
+    Trojan(String),
 }
 
 #[derive(Default)]
@@ -259,6 +260,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Shadowsocks if proxy.udp => Some(UdpSessionMode::Shadowsocks(target.to_owned())),
         ProxyKind::Vmess if proxy.udp => Some(UdpSessionMode::Vmess(target.to_owned())),
         ProxyKind::Vless if proxy.udp => Some(UdpSessionMode::Vless(target.to_owned())),
+        ProxyKind::Trojan if proxy.udp => Some(UdpSessionMode::Trojan(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -373,7 +375,120 @@ pub(super) async fn run_udp_session(
             )
             .await;
         }
+        UdpSessionMode::Trojan(proxy) => {
+            run_trojan_udp_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_trojan_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let Some(trojan) = proxy.trojan.as_ref() else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let Ok(initial_address) =
+        resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
+    else {
+        return;
+    };
+    let initial_destination = Destination {
+        host: Host::Ip(initial_address.ip()),
+        port: initial_address.port(),
+    };
+    let outer = match super::tcp::connect_trojan_outer(
+        proxy,
+        &server,
+        trojan,
+        config.ipv6,
+        &state,
+        &config.trust_certificates,
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(outer) => outer,
+        Err(error) => {
+            state.log("error", format!("Trojan UDP carrier failed: {error}"));
+            return;
+        }
+    };
+    let mut association = rewrite_outbound::associate_trojan_udp_on_stream(
+        outer,
+        &initial_destination,
+        &trojan.password,
+    );
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
 }
 
 #[allow(clippy::too_many_arguments)]
