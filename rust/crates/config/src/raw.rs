@@ -217,6 +217,7 @@ pub(crate) struct RawProxy {
     pub(crate) global_padding: Option<bool>,
     pub(crate) authenticated_length: Option<bool>,
     pub(crate) tls: Option<bool>,
+    pub(crate) alpn: Option<Vec<String>>,
     pub(crate) udp: Option<bool>,
     pub(crate) packet_addr: Option<bool>,
     pub(crate) xudp: Option<bool>,

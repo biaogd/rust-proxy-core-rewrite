@@ -34,6 +34,38 @@ fn overlays_oracle_defaults() {
 }
 
 #[test]
+fn trojan_native_tls_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: trojan-native\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    servername: trojan.example\n    alpn: [h2, http/1.1]\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6F-A Trojan config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Trojan);
+    assert!(proxy.tls);
+    assert!(!proxy.udp);
+    assert_eq!(proxy.sni.as_deref(), Some("trojan.example"));
+    assert_eq!(
+        proxy.trojan.as_ref().expect("Trojan options").alpn,
+        ["h2", "http/1.1"]
+    );
+
+    for unsupported in [
+        "udp: true",
+        "network: ws",
+        "grpc-opts: {grpc-service-name: trojan}",
+        "reality-opts: {public-key: invalid}",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn parses_minimal_runtime_config() {
     let config = Config::from_yaml(MINIMAL).expect("minimal config must parse");
     assert_eq!(config.mixed_port, 7890);
@@ -1260,6 +1292,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 shadowsocks_plugin: None,
                 vmess: None,
                 vless: None,
+                trojan: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1340,6 +1373,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             shadowsocks_plugin: None,
             vmess: None,
             vless: None,
+            trojan: None,
             headers: BTreeMap::new(),
         }],
     };

@@ -6037,3 +6037,17 @@ unclaimed until the updated GitHub Actions run completes.
 Workspace fmt, all-target/all-feature clippy and tests pass locally on Darwin
 arm64. Native Windows parity remains revalidation-pending until the updated
 GitHub Actions run completes.
+
+## 2026-09-04 Phase 6F-A Trojan native TLS client
+
+The first Trojan slice now owns the standard native TCP client path in a
+dedicated `rewrite-protocol-trojan` crate. Configuration accepts password,
+server/SNI, trust/name/skip policy and ALPN, while unsupported UDP, WS, gRPC,
+REALITY and inbound/server surfaces fail closed. Runtime routing and controller
+health dials compose the shared TLS client with Trojan SHA-224 authentication
+and SOCKS address framing.
+
+`compat/scripts/phase6f_trojan_tcp.py` compares the pinned Go oracle and Rust
+for TLS SNI/ALPN, on-wire command/destination, small and 128-KiB payloads,
+half-close and process survival. The dedicated `trojan` CI shard runs this gate
+on Linux, Windows and macOS. No later 6F capability is claimed by this slice.

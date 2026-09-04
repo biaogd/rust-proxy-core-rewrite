@@ -2938,6 +2938,7 @@ dependencies = [
  "rewrite-model",
  "rewrite-platform",
  "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-trojan",
  "rewrite-protocol-vless",
  "rewrite-protocol-vmess",
  "rewrite-services",
@@ -2967,6 +2968,18 @@ dependencies = [
  "rewrite-io",
  "rewrite-model",
  "shadowsocks",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-trojan"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rewrite-io",
+ "rewrite-model",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
 ]

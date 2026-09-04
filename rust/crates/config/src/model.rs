@@ -161,6 +161,7 @@ pub enum ProxyKind {
     Shadowsocks,
     Vmess,
     Vless,
+    Trojan,
     Direct,
     Reject,
     Dns,
@@ -216,7 +217,14 @@ pub struct ProxyConfig {
     pub shadowsocks_plugin: Option<ShadowsocksPluginConfig>,
     pub vmess: Option<VmessProxyConfig>,
     pub vless: Option<VlessProxyConfig>,
+    pub trojan: Option<TrojanProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrojanProxyConfig {
+    pub password: String,
+    pub alpn: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

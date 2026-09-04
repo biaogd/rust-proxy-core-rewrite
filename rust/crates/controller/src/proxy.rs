@@ -685,6 +685,40 @@ pub(super) async fn measure_http_delay(
                     )
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Trojan => {
+                    let trojan = proxy.trojan.as_ref().ok_or(())?;
+                    let outer = rewrite_outbound::connect_with_options(
+                        &server,
+                        config.ipv6,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    let alpn: Vec<&[u8]> = trojan.alpn.iter().map(String::as_bytes).collect();
+                    let tls = rewrite_outbound::HttpProxyTls {
+                        server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                        verification_name: proxy.name_cert_verify.as_deref(),
+                        skip_certificate_verification: proxy.skip_cert_verify,
+                        fingerprint: None,
+                        certificate: None,
+                        private_key: None,
+                        custom_roots: &config.trust_certificates,
+                        ech_config: None,
+                        alpn_protocols: &alpn,
+                        tls12_only: false,
+                        tls13_only: false,
+                    };
+                    let outer =
+                        rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, None)
+                            .await
+                            .map_err(|_| ())?;
+                    rewrite_outbound::connect_trojan_on_stream(
+                        outer,
+                        &destination,
+                        &trojan.password,
+                    )
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -918,6 +952,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Shadowsocks => "Shadowsocks",
         rewrite_config::ProxyKind::Vmess => "Vmess",
         rewrite_config::ProxyKind::Vless => "Vless",
+        rewrite_config::ProxyKind::Trojan => "Trojan",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -932,7 +967,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Trojan => false,
     };
     json!({
         "alive": health.alive,
@@ -1086,7 +1121,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Trojan => false,
         };
     }
     let Some(group) = config

@@ -508,10 +508,61 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::Trojan => {
+            connect_trojan_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                state,
+                custom_roots,
+                socket_options,
+            )
+            .await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+async fn connect_trojan_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let trojan = proxy
+        .trojan
+        .as_ref()
+        .ok_or_else(|| "Trojan proxy configuration is missing".to_owned())?;
+    let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
+        .await
+        .map_err(|error| format!("Trojan outer TCP connection failed: {error}"))?;
+    let alpn: Vec<&[u8]> = trojan.alpn.iter().map(String::as_bytes).collect();
+    let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+    let tls = rewrite_outbound::HttpProxyTls {
+        server_name,
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        custom_roots,
+        ech_config: None,
+        alpn_protocols: &alpn,
+        tls12_only: false,
+        tls13_only: false,
+    };
+    let outer =
+        rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
+            .await
+            .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))?;
+    rewrite_outbound::connect_trojan_on_stream(outer, destination, &trojan.password)
+        .map_err(|error| format!("Trojan proxy connection failed: {error}"))
 }
 
 fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {

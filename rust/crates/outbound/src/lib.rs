@@ -3,6 +3,7 @@ mod http;
 mod reality;
 mod shadowsocks;
 mod socks5;
+mod trojan;
 mod vless;
 mod vmess;
 
@@ -47,6 +48,7 @@ pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,
     connect_socks5_with_options,
 };
+pub use trojan::{TrojanProxyError, connect_trojan_on_stream};
 pub use vless::{
     VlessFlow, VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
     associate_vless_udp_on_stream, associate_vless_udp_with_options, connect_vless_on_stream,

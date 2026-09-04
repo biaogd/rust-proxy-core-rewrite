@@ -2856,6 +2856,24 @@ this development workflow.
 This slice does not start VMess server framing, non-native-carrier UDP, mKCP,
 Mekya, advanced TLS/camouflage or general mux work.
 
+### Phase 6F-A — Trojan native TCP over standard TLS
+
+This slice changes inventory rows `CFG-03`, `OUT-09` and `OUT-23`. It adds a
+transport-independent `rewrite-protocol-trojan` crate and the first complete
+client path: YAML proxy record → mixed HTTP/SOCKS TCP inbound → rule selection
+→ verified TLS carrier → Trojan SHA-224 authentication/address request → TCP
+relay. Domain, IPv4 and IPv6 framing, the Go-default `h2,http/1.1` ALPN list,
+custom roots, SNI/ALPN, password rejection, large payloads and half-close are
+acceptance targets. Name override and skip verification remain accepted
+configuration backed by the shared TLS transport, but are not claimed as
+Trojan-specific differential evidence in this slice.
+
+The phase is deliberately TCP-only. `udp: true`, WebSocket, gRPC, REALITY,
+fallback/server behavior and all Trojan inbound configuration remain rejected
+or unimplemented until their own 6F subphase. Acceptance requires protocol and
+configuration unit tests plus `compat/scripts/phase6f_trojan_tcp.py` against
+the pinned Go oracle on the native CI matrix.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

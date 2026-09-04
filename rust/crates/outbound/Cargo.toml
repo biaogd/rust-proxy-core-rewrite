@@ -17,6 +17,7 @@ rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }
 rewrite-services = { path = "../services" }
