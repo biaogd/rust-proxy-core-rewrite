@@ -562,6 +562,78 @@ pub(super) async fn connect_trojan_outer(
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    if let rewrite_config::TrojanTransport::Grpc {
+        service_name,
+        user_agent,
+        ping_interval,
+        max_connections,
+        min_streams,
+        max_streams,
+    } = &trojan.transport
+    {
+        let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+        let options = rewrite_outbound::GrpcClientOptions {
+            host,
+            service_name: service_name.clone(),
+            user_agent: user_agent.clone(),
+            ping_interval: *ping_interval,
+            max_connections: *max_connections,
+            min_streams: *min_streams,
+            max_streams: *max_streams,
+        };
+        let identity =
+            format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+        let client = state.grpc_client(&proxy.name, identity, options).await;
+        return client
+            .connect(|| async {
+                connect_trojan_physical_outer(
+                    proxy,
+                    server,
+                    trojan,
+                    allow_ipv6,
+                    state,
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+                .map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| format!("Trojan gRPC transport failed: {error}"));
+    }
+    let mut outer = connect_trojan_physical_outer(
+        proxy,
+        server,
+        trojan,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    if let rewrite_config::TrojanTransport::WebSocket { path, headers } = &trojan.transport {
+        outer = rewrite_outbound::connect_websocket_with_headers(
+            outer,
+            &proxy.server,
+            proxy.port,
+            path,
+            headers,
+        )
+        .await
+        .map_err(|error| format!("Trojan WebSocket transport failed: {error}"))?;
+    }
+    Ok(outer)
+}
+
+async fn connect_trojan_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    trojan: &rewrite_config::TrojanProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("Trojan outer TCP connection failed: {error}"))?;
@@ -580,21 +652,10 @@ pub(super) async fn connect_trojan_outer(
         tls12_only: false,
         tls13_only: false,
     };
-    let mut outer =
+    let outer =
         rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
             .await
             .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))?;
-    if let rewrite_config::TrojanTransport::WebSocket { path, headers } = &trojan.transport {
-        outer = rewrite_outbound::connect_websocket_with_headers(
-            outer,
-            &proxy.server,
-            proxy.port,
-            path,
-            headers,
-        )
-        .await
-        .map_err(|error| format!("Trojan WebSocket transport failed: {error}"))?;
-    }
     Ok(outer)
 }
 

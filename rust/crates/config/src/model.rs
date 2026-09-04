@@ -235,6 +235,14 @@ pub enum TrojanTransport {
         path: String,
         headers: BTreeMap<String, String>,
     },
+    Grpc {
+        service_name: String,
+        user_agent: String,
+        ping_interval: i64,
+        max_connections: i64,
+        min_streams: i64,
+        max_streams: i64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -73,9 +73,29 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
             if path == "/trojan" && headers.get("Host").is_some_and(|value| value == "front.example")
     ));
 
+    let grpc_source = format!(
+        "{MINIMAL}\nproxies:\n  - name: trojan-grpc\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    network: grpc\n    grpc-opts:\n      grpc-service-name: trojan\n      grpc-user-agent: phase6f-d/1.0\n      ping-interval: 15\n      max-connections: 2\n      min-streams: 3\n      max-streams: 4\n"
+    );
+    let grpc = Config::from_yaml(&grpc_source).expect("Phase 6F-D Trojan gRPC config");
+    assert!(matches!(
+        grpc.proxies[0]
+            .trojan
+            .as_ref()
+            .expect("options")
+            .transport,
+        TrojanTransport::Grpc {
+            ref service_name,
+            ref user_agent,
+            ping_interval: 15,
+            max_connections: 2,
+            min_streams: 3,
+            max_streams: 4,
+        } if service_name == "trojan" && user_agent == "phase6f-d/1.0"
+    ));
+
     for unsupported in [
-        "network: grpc",
         "grpc-opts: {grpc-service-name: trojan}",
+        "network: grpc\n    grpc-opts: {grpc-service-name: 'bad path'}",
         "reality-opts: {public-key: invalid}",
     ] {
         let source = format!(

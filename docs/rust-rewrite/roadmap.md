@@ -2901,6 +2901,19 @@ and UDP over WSS, large TCP payloads, reused UDP destinations, WebSocket request
 path/headers and command framing. gRPC, REALITY, fallback and Trojan inbound
 remain separate slices.
 
+### Phase 6F-D — Trojan TCP and UDP over gRPC/Gun
+
+This slice continues `CFG-03`, `OUT-09` and `OUT-23`. `network: grpc`
+composes verified TLS and negotiated HTTP/2 with the shared library-backed Gun
+stream and connection pool. The configuration boundary supports service name,
+User-Agent, ping interval, connection count and stream thresholds while
+rejecting unknown gRPC options.
+
+`compat/scripts/phase6f_trojan_grpc.py` is the acceptance gate for TCP and UDP
+over gRPC, large TCP payloads, reused UDP destinations, ALPN/service/User-Agent
+observations and Trojan command framing. REALITY, fallback and Trojan inbound
+remain separate slices.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

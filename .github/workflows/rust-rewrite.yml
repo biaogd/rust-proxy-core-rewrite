@@ -315,6 +315,7 @@ jobs:
       PHASE6FTROJAN_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6FTROJANUDP_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6FTROJANWS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6FTROJANGRPC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -428,6 +429,7 @@ jobs:
             compat/scripts/phase6f_trojan_tcp.py \
             compat/scripts/phase6f_trojan_udp.py \
             compat/scripts/phase6f_trojan_websocket.py \
+            compat/scripts/phase6f_trojan_grpc.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

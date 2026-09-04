@@ -13,11 +13,100 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 
 	"github.com/gobwas/ws/wsutil"
+	http "github.com/metacubex/http"
+	"github.com/metacubex/http/http2"
 )
+
+type h2StreamConn struct {
+	net.Conn
+	reader io.Reader
+	writer http.ResponseWriter
+}
+
+func (conn *h2StreamConn) Read(payload []byte) (int, error) { return conn.reader.Read(payload) }
+
+func (conn *h2StreamConn) Write(payload []byte) (int, error) {
+	written, err := conn.writer.Write(payload)
+	if flusher, ok := conn.writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return written, err
+}
+
+func (conn *h2StreamConn) Close() error { return nil }
+
+type gunConn struct {
+	net.Conn
+	remaining int
+}
+
+func readUvarint(reader io.Reader) (uint64, int, error) {
+	var value uint64
+	for index := 0; index < 10; index++ {
+		var one [1]byte
+		if _, err := io.ReadFull(reader, one[:]); err != nil {
+			return 0, 0, err
+		}
+		if index == 9 && one[0] > 1 {
+			return 0, 0, fmt.Errorf("invalid Gun payload length")
+		}
+		value |= uint64(one[0]&0x7f) << (index * 7)
+		if one[0] < 0x80 {
+			return value, index + 1, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("invalid Gun payload length")
+}
+
+func (conn *gunConn) Read(payload []byte) (int, error) {
+	if conn.remaining != 0 {
+		length := len(payload)
+		if length > conn.remaining {
+			length = conn.remaining
+		}
+		read, err := conn.Conn.Read(payload[:length])
+		conn.remaining -= read
+		return read, err
+	}
+	var header [6]byte
+	if _, err := io.ReadFull(conn.Conn, header[:]); err != nil {
+		return 0, err
+	}
+	if header[0] != 0 || header[5] != 0x0a {
+		return 0, fmt.Errorf("invalid Gun envelope")
+	}
+	payloadLength, varintLength, err := readUvarint(conn.Conn)
+	if err != nil {
+		return 0, err
+	}
+	grpcLength := binary.BigEndian.Uint32(header[1:5])
+	if payloadLength > uint64(^uint(0)>>1) || uint64(grpcLength) != 1+uint64(varintLength)+payloadLength {
+		return 0, fmt.Errorf("invalid Gun envelope length")
+	}
+	conn.remaining = int(payloadLength)
+	return conn.Read(payload)
+}
+
+func (conn *gunConn) Write(payload []byte) (int, error) {
+	var encodedLength [10]byte
+	varintLength := binary.PutUvarint(encodedLength[:], uint64(len(payload)))
+	grpcLength := 1 + varintLength + len(payload)
+	if uint64(grpcLength) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("Gun frame is too large")
+	}
+	frame := make([]byte, 5+grpcLength)
+	binary.BigEndian.PutUint32(frame[1:5], uint32(grpcLength))
+	frame[5] = 0x0a
+	copy(frame[6:], encodedLength[:varintLength])
+	copy(frame[6+varintLength:], payload)
+	if _, err := conn.Conn.Write(frame); err != nil {
+		return 0, err
+	}
+	return len(payload), nil
+}
 
 type websocketConn struct {
 	net.Conn
@@ -181,6 +270,23 @@ func handle(connection net.Conn, password string) {
 	}
 }
 
+func serveGRPC(connection net.Conn, password, expectedHost, expectedPath, expectedUserAgent string) {
+	server := &http2.Server{}
+	server.ServeConn(connection, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.Host != expectedHost || request.URL.RequestURI() != expectedPath || request.Header.Get("Content-Type") != "application/grpc" || request.Header.Get("User-Agent") != expectedUserAgent {
+			http.Error(writer, "invalid gRPC Trojan request", http.StatusBadRequest)
+			return
+		}
+		fmt.Printf("GRPC POST %s %s application/grpc %s\n", request.Host, request.URL.RequestURI(), request.Header.Get("User-Agent"))
+		writer.Header().Set("Content-Type", "application/grpc")
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		handle(&gunConn{Conn: &h2StreamConn{Conn: connection, reader: request.Body, writer: writer}}, password)
+	})})
+}
+
 func main() {
 	listen := flag.String("listen", "127.0.0.1:0", "listen address")
 	certificate := flag.String("tls-cert", "", "TLS certificate")
@@ -189,12 +295,18 @@ func main() {
 	host := flag.String("host", "", "expected WS host")
 	path := flag.String("path", "/", "expected WS path")
 	header := flag.String("header", "", "expected X-Trojan-Phase")
+	transport := flag.String("transport", "ws", "ws or grpc")
+	userAgent := flag.String("user-agent", "grpc-go/1.36.0", "expected gRPC User-Agent")
 	flag.Parse()
 	pair, err := tls.LoadX509KeyPair(*certificate, *privateKey)
 	if err != nil {
 		panic(err)
 	}
-	listener, err := tls.Listen("tcp", *listen, &tls.Config{Certificates: []tls.Certificate{pair}, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12})
+	nextProtocol := "http/1.1"
+	if *transport == "grpc" {
+		nextProtocol = "h2"
+	}
+	listener, err := tls.Listen("tcp", *listen, &tls.Config{Certificates: []tls.Certificate{pair}, NextProtos: []string{nextProtocol}, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		panic(err)
 	}
@@ -206,6 +318,10 @@ func main() {
 			return
 		}
 		go func() {
+			if *transport == "grpc" {
+				serveGRPC(connection, *password, *host, *path, *userAgent)
+				return
+			}
 			wrapped, err := upgrade(connection, *host, *path, *header)
 			if err != nil {
 				connection.Close()

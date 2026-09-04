@@ -153,7 +153,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || proxy.flow.is_some()
         || proxy.encryption.is_some()
         || proxy.alter_id.is_some()
-        || !matches!(network, "tcp" | "ws")
+        || !matches!(network, "tcp" | "ws" | "grpc")
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
         || proxy.packet_addr.is_some()
@@ -162,7 +162,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || (network != "ws" && proxy.ws_opts.is_some())
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
-        || proxy.grpc_opts.is_some()
+        || (network != "grpc" && proxy.grpc_opts.is_some())
         || proxy.xhttp_opts.is_some()
         || proxy.mkcp_opts.is_some()
         || proxy.mekya_opts.is_some()
@@ -223,6 +223,37 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         TrojanTransport::WebSocket {
             path,
             headers: options.headers.unwrap_or_default(),
+        }
+    } else if network == "grpc" {
+        let options = proxy.grpc_opts.unwrap_or_default();
+        if !options.extra.is_empty() {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        let service_name = options
+            .grpc_service_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "GunService".to_owned());
+        let user_agent = options
+            .grpc_user_agent
+            .filter(|agent| !agent.is_empty())
+            .unwrap_or_else(|| "grpc-go/1.36.0".to_owned());
+        let service_path = if service_name.starts_with('/') {
+            service_name.clone()
+        } else {
+            format!("/{service_name}/Tun")
+        };
+        if service_path.parse::<http::uri::PathAndQuery>().is_err()
+            || http::header::HeaderValue::from_str(&user_agent).is_err()
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        TrojanTransport::Grpc {
+            service_name,
+            user_agent,
+            ping_interval: options.ping_interval.unwrap_or_default(),
+            max_connections: options.max_connections.unwrap_or_default(),
+            min_streams: options.min_streams.unwrap_or_default(),
+            max_streams: options.max_streams.unwrap_or_default(),
         }
     } else {
         TrojanTransport::Tcp

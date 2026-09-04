@@ -724,6 +724,21 @@ pub(super) async fn measure_http_delay(
                         )
                         .await
                         .map_err(|_| ())?;
+                    } else if let rewrite_config::TrojanTransport::Grpc {
+                        service_name,
+                        user_agent,
+                        ..
+                    } = &trojan.transport
+                    {
+                        let host = proxy.sni.clone().unwrap_or_else(|| server.authority());
+                        outer = rewrite_outbound::connect_vmess_grpc(
+                            outer,
+                            &host,
+                            service_name,
+                            user_agent,
+                        )
+                        .await
+                        .map_err(|_| ())?;
                     }
                     rewrite_outbound::connect_trojan_on_stream(
                         outer,

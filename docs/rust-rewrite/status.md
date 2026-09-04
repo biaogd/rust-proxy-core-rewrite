@@ -6079,3 +6079,16 @@ exercise Go and Rust through WSS for TCP relay, large payloads, UDP association
 reuse, Host/path/custom-header observations and protocol commands. The native
 Trojan CI shard runs this gate on Linux, Windows and macOS. gRPC, REALITY,
 fallback and inbound/server direction remain unclaimed.
+
+## 2026-09-04 Phase 6F-D Trojan gRPC/Gun
+
+Trojan TCP and UDP can now use the shared library-backed HTTP/2 Gun carrier and
+state-managed gRPC connection pool. Configuration maps service name,
+User-Agent, ping interval, connection limit and stream thresholds, and runtime
+and controller health dials use the same carrier semantics.
+
+The independent Go authority and `compat/scripts/phase6f_trojan_grpc.py`
+exercise Go and Rust through TLS-negotiated `h2` for TCP relay, large payloads,
+UDP association reuse, service path/User-Agent observations and Trojan wire
+commands. The Trojan CI shard runs this gate on Linux, Windows and macOS.
+REALITY, fallback and inbound/server direction remain unclaimed.
