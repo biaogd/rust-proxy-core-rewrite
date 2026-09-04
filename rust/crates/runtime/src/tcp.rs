@@ -637,6 +637,12 @@ async fn connect_trojan_physical_outer(
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("Trojan outer TCP connection failed: {error}"))?;
+    if let Some(reality) = proxy.reality.as_ref() {
+        let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+        return rewrite_outbound::wrap_client_reality(Box::new(outer), server_name, reality, false)
+            .await
+            .map_err(|error| format!("Trojan REALITY connection failed: {error}"));
+    }
     let alpn: Vec<&[u8]> = trojan.alpn.iter().map(String::as_bytes).collect();
     let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
     let tls = rewrite_outbound::HttpProxyTls {

@@ -6092,3 +6092,16 @@ exercise Go and Rust through TLS-negotiated `h2` for TCP relay, large payloads,
 UDP association reuse, service path/User-Agent observations and Trojan wire
 commands. The Trojan CI shard runs this gate on Linux, Windows and macOS.
 REALITY, fallback and inbound/server direction remain unclaimed.
+
+## 2026-09-04 Phase 6F-E Trojan REALITY
+
+Native Trojan TCP and UDP now compose with the shared REALITY client. The
+configuration boundary validates Chrome fingerprint, X25519 public key and
+short id and rejects WebSocket/gRPC REALITY combinations and unsupported
+fingerprints instead of silently degrading.
+
+The extended independent Go REALITY authority and
+`compat/scripts/phase6f_trojan_reality.py` exercise Go and Rust for authenticated
+REALITY handshakes, TCP relay, large payloads, UDP association reuse and Trojan
+wire commands. The Trojan CI shard runs this gate on Linux, Windows and macOS.
+Fallback and inbound/server direction remain unclaimed.

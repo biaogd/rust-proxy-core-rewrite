@@ -695,8 +695,9 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?;
                     let alpn: Vec<&[u8]> = trojan.alpn.iter().map(String::as_bytes).collect();
+                    let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
                     let tls = rewrite_outbound::HttpProxyTls {
-                        server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                        server_name,
                         verification_name: proxy.name_cert_verify.as_deref(),
                         skip_certificate_verification: proxy.skip_cert_verify,
                         fingerprint: None,
@@ -708,10 +709,20 @@ pub(super) async fn measure_http_delay(
                         tls12_only: false,
                         tls13_only: false,
                     };
-                    let mut outer =
+                    let mut outer = if let Some(reality) = proxy.reality.as_ref() {
+                        rewrite_outbound::wrap_client_reality(
+                            Box::new(outer),
+                            server_name,
+                            reality,
+                            false,
+                        )
+                        .await
+                        .map_err(|_| ())?
+                    } else {
                         rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, None)
                             .await
-                            .map_err(|_| ())?;
+                            .map_err(|_| ())?
+                    };
                     if let rewrite_config::TrojanTransport::WebSocket { path, headers } =
                         &trojan.transport
                     {

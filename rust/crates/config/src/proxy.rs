@@ -145,6 +145,7 @@ pub(crate) fn parse_proxies(
 fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let udp = proxy.udp.unwrap_or(false);
+    let reality = parse_vless_reality_options(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -173,12 +174,17 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
-        || proxy.client_fingerprint.is_some()
-        || proxy.reality_opts.is_some()
+        || (reality.is_none() && proxy.client_fingerprint.is_some())
         || proxy.headers.is_some()
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if reality.is_some() {
+        if network != "tcp" {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        validate_vless_reality_client_fingerprint(&name, proxy.client_fingerprint.as_deref())?;
     }
     let server = proxy
         .server
@@ -273,8 +279,8 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: None,
-        reality: None,
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        reality,
         udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,

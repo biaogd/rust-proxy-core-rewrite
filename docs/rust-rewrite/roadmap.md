@@ -2914,6 +2914,19 @@ over gRPC, large TCP payloads, reused UDP destinations, ALPN/service/User-Agent
 observations and Trojan command framing. REALITY, fallback and Trojan inbound
 remain separate slices.
 
+### Phase 6F-E — Trojan TCP and UDP over REALITY
+
+This slice continues `CFG-03`, `OUT-09` and `OUT-23`. Native Trojan streams can
+use the shared REALITY client with an explicitly supported Chrome fingerprint,
+validated X25519 public key and short id. Both TCP command 1 and UDP command 3
+run over the authenticated REALITY stream. Non-native REALITY carriers and
+unsupported fingerprints are rejected during configuration loading.
+
+`compat/scripts/phase6f_trojan_reality.py` is the acceptance gate for REALITY
+authentication, TCP relay and large payloads, reused UDP destinations and exact
+Trojan command framing against the Go oracle. Fallback and Trojan inbound remain
+separate slices.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

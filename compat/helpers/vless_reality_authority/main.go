@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -73,6 +77,113 @@ func (handler *echoHandler) NewError(_ context.Context, err error) {
 
 type destTunnel struct{}
 
+func readTrojanAddress(reader io.Reader) (string, []byte, error) {
+	var atyp [1]byte
+	if _, err := io.ReadFull(reader, atyp[:]); err != nil {
+		return "", nil, err
+	}
+	encoded := []byte{atyp[0]}
+	var host string
+	switch atyp[0] {
+	case 1:
+		raw := make([]byte, 4)
+		if _, err := io.ReadFull(reader, raw); err != nil {
+			return "", nil, err
+		}
+		encoded = append(encoded, raw...)
+		host = net.IP(raw).String()
+	case 4:
+		raw := make([]byte, 16)
+		if _, err := io.ReadFull(reader, raw); err != nil {
+			return "", nil, err
+		}
+		encoded = append(encoded, raw...)
+		host = net.IP(raw).String()
+	case 3:
+		var length [1]byte
+		if _, err := io.ReadFull(reader, length[:]); err != nil {
+			return "", nil, err
+		}
+		raw := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(reader, raw); err != nil {
+			return "", nil, err
+		}
+		encoded = append(encoded, length[0])
+		encoded = append(encoded, raw...)
+		host = string(raw)
+	default:
+		return "", nil, fmt.Errorf("invalid address type")
+	}
+	var port [2]byte
+	if _, err := io.ReadFull(reader, port[:]); err != nil {
+		return "", nil, err
+	}
+	encoded = append(encoded, port[:]...)
+	return fmt.Sprintf("%s:%d", host, binary.BigEndian.Uint16(port[:])), encoded, nil
+}
+
+func handleTrojan(connection net.Conn, password string) {
+	defer connection.Close()
+	key := make([]byte, 56)
+	if _, err := io.ReadFull(connection, key); err != nil {
+		return
+	}
+	digest := sha256.Sum224([]byte(password))
+	expected := make([]byte, 56)
+	hex.Encode(expected, digest[:])
+	var crlf [2]byte
+	if _, err := io.ReadFull(connection, crlf[:]); err != nil || !bytes.Equal(key, expected) {
+		return
+	}
+	var command [1]byte
+	if _, err := io.ReadFull(connection, command[:]); err != nil {
+		return
+	}
+	destination, _, err := readTrojanAddress(connection)
+	if err != nil {
+		return
+	}
+	if _, err = io.ReadFull(connection, crlf[:]); err != nil {
+		return
+	}
+	fmt.Printf("TROJAN COMMAND %d %s\n", command[0], destination)
+	if command[0] == 1 {
+		_, _ = io.Copy(connection, connection)
+		return
+	}
+	if command[0] != 3 {
+		return
+	}
+	for {
+		destination, encoded, err := readTrojanAddress(connection)
+		if err != nil {
+			return
+		}
+		var length [2]byte
+		if _, err = io.ReadFull(connection, length[:]); err != nil {
+			return
+		}
+		size := int(binary.BigEndian.Uint16(length[:]))
+		if size > 8192 {
+			return
+		}
+		if _, err = io.ReadFull(connection, crlf[:]); err != nil {
+			return
+		}
+		payload := make([]byte, size)
+		if _, err = io.ReadFull(connection, payload); err != nil {
+			return
+		}
+		fmt.Printf("TROJAN PACKET %s %d\n", destination, size)
+		frame := append(encoded, length[:]...)
+		frame = append(frame, '\r', '\n')
+		frame = append(frame, payload...)
+		if _, err = connection.Write(frame); err != nil {
+			return
+		}
+	}
+}
+
 type h2StreamConn struct {
 	net.Conn
 	reader io.Reader
@@ -139,6 +250,7 @@ func (destTunnel) NatTable() C.NatTable { return nil }
 func main() {
 	listen := flag.String("listen", "127.0.0.1:0", "TCP listen address")
 	uuidText := flag.String("uuid", "", "accepted VLESS UUID")
+	trojanPassword := flag.String("trojan-password", "", "accepted Trojan password")
 	privateKey := flag.String("reality-private-key", defaultPrivateKey, "REALITY private key (raw URL-safe base64)")
 	shortID := flag.String("reality-short-id", defaultShortID, "REALITY short id (hex)")
 	serverName := flag.String("reality-server-name", defaultServerName, "REALITY server name")
@@ -151,12 +263,14 @@ func main() {
 	expectedHTTPHost := flag.String("expected-http-host", "", "expected xHTTP authority")
 	expectedHTTPPath := flag.String("expected-http-path", "/", "expected xHTTP path")
 	flag.Parse()
-	if *uuidText == "" {
-		fmt.Fprintln(os.Stderr, "missing -uuid")
+	if (*uuidText == "") == (*trojanPassword == "") {
+		fmt.Fprintln(os.Stderr, "exactly one of -uuid or -trojan-password is required")
 		os.Exit(2)
 	}
-	if _, err := uuid.FromString(*uuidText); err != nil {
-		_ = uuid.NewV5(uuid.Nil, *uuidText)
+	if *uuidText != "" {
+		if _, err := uuid.FromString(*uuidText); err != nil {
+			_ = uuid.NewV5(uuid.Nil, *uuidText)
+		}
 	}
 	if *flow != "" && *flow != "xtls-rprx-vision" {
 		fmt.Fprintln(os.Stderr, "invalid -flow")
@@ -205,9 +319,12 @@ func main() {
 			MaxVersion:   tls.VersionTLS13,
 		}
 	}
-	handler := &echoHandler{innerTLS: innerTLS, innerTLSPort: uint16(*innerTLSPort)}
-	service := sing_vless.NewService[string](handler)
-	service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
+	var service *sing_vless.Service[string]
+	if *uuidText != "" {
+		handler := &echoHandler{innerTLS: innerTLS, innerTLSPort: uint16(*innerTLSPort)}
+		service = sing_vless.NewService[string](handler)
+		service.UpdateUsers([]string{"phase6e"}, []string{*uuidText}, []string{*flow})
+	}
 
 	fmt.Printf("READY %s\n", listener.Addr().String())
 	for {
@@ -221,6 +338,10 @@ func main() {
 		}
 		go func(connection net.Conn) {
 			defer connection.Close()
+			if *trojanPassword != "" {
+				handleTrojan(connection, *trojanPassword)
+				return
+			}
 			if *transport == "xhttp" {
 				serveXHTTP(connection, service, *expectedHTTPHost, *expectedHTTPPath)
 				return

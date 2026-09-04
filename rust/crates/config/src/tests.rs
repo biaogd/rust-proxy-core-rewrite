@@ -93,9 +93,29 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
         } if service_name == "trojan" && user_agent == "phase6f-d/1.0"
     ));
 
+    let reality_source = format!(
+        "{MINIMAL}\nproxies:\n  - name: trojan-reality\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    udp: true\n    servername: itunes.apple.com\n    client-fingerprint: chrome\n    reality-opts:\n      public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc\n      short-id: 10f897e26c4b9478\n"
+    );
+    let reality = Config::from_yaml(&reality_source).expect("Phase 6F-E Trojan REALITY config");
+    assert!(reality.proxies[0].udp);
+    assert_eq!(
+        reality.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
+    assert_eq!(
+        reality.proxies[0]
+            .reality
+            .as_ref()
+            .expect("REALITY options")
+            .short_id,
+        hex::decode("10f897e26c4b9478").expect("short id")
+    );
+
     for unsupported in [
         "grpc-opts: {grpc-service-name: trojan}",
         "network: grpc\n    grpc-opts: {grpc-service-name: 'bad path'}",
+        "network: ws\n    client-fingerprint: chrome\n    reality-opts: {public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc}",
+        "client-fingerprint: safari\n    reality-opts: {public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc}",
         "reality-opts: {public-key: invalid}",
     ] {
         let source = format!(
