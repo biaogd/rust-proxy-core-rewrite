@@ -225,6 +225,16 @@ pub struct ProxyConfig {
 pub struct TrojanProxyConfig {
     pub password: String,
     pub alpn: Vec<String>,
+    pub transport: TrojanTransport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrojanTransport {
+    Tcp,
+    WebSocket {
+        path: String,
+        headers: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

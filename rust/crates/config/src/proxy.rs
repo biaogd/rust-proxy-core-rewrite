@@ -13,9 +13,9 @@ use crate::load::resolve_controller_pem;
 use crate::model::{
     GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
     ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    RealityProxyConfig, TrojanProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig,
-    VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions,
-    VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
+    RealityProxyConfig, TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode,
+    VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions,
+    VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -141,6 +141,7 @@ pub(crate) fn parse_proxies(
     Ok((rematches, outbounds))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let udp = proxy.udp.unwrap_or(false);
@@ -152,13 +153,13 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || proxy.flow.is_some()
         || proxy.encryption.is_some()
         || proxy.alter_id.is_some()
-        || network != "tcp"
+        || !matches!(network, "tcp" | "ws")
         || proxy.global_padding.is_some()
         || proxy.authenticated_length.is_some()
         || proxy.packet_addr.is_some()
         || proxy.xudp.is_some()
         || proxy.packet_encoding.is_some()
-        || proxy.ws_opts.is_some()
+        || (network != "ws" && proxy.ws_opts.is_some())
         || proxy.http_opts.is_some()
         || proxy.h2_opts.is_some()
         || proxy.grpc_opts.is_some()
@@ -192,12 +193,40 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         .password
         .filter(|password| !password.is_empty())
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-    let alpn = proxy
-        .alpn
-        .unwrap_or_else(|| vec!["h2".to_owned(), "http/1.1".to_owned()]);
+    let alpn = proxy.alpn.unwrap_or_else(|| {
+        if network == "ws" {
+            vec!["http/1.1".to_owned()]
+        } else {
+            vec!["h2".to_owned(), "http/1.1".to_owned()]
+        }
+    });
     if alpn.iter().any(String::is_empty) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
+    let transport = if network == "ws" {
+        let options = proxy.ws_opts.unwrap_or_default();
+        if options.max_early_data.is_some()
+            || options.early_data_header_name.is_some()
+            || options.v2ray_http_upgrade.is_some()
+            || options.v2ray_http_upgrade_fast_open.is_some()
+            || !options.extra.is_empty()
+        {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        let path = options
+            .path
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_owned());
+        if !path.starts_with('/') || path.contains('#') {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        TrojanTransport::WebSocket {
+            path,
+            headers: options.headers.unwrap_or_default(),
+        }
+    } else {
+        TrojanTransport::Tcp
+    };
     Ok(ProxyConfig {
         name,
         kind: ProxyKind::Trojan,
@@ -221,7 +250,11 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         shadowsocks_plugin: None,
         vmess: None,
         vless: None,
-        trojan: Some(TrojanProxyConfig { password, alpn }),
+        trojan: Some(TrojanProxyConfig {
+            password,
+            alpn,
+            transport,
+        }),
         headers: BTreeMap::new(),
     })
 }

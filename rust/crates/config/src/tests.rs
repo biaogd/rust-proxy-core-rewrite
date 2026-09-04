@@ -48,6 +48,10 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
         proxy.trojan.as_ref().expect("Trojan options").alpn,
         ["h2", "http/1.1"]
     );
+    assert_eq!(
+        proxy.trojan.as_ref().expect("Trojan options").transport,
+        TrojanTransport::Tcp
+    );
 
     let udp_source = format!(
         "{MINIMAL}\nproxies:\n  - name: trojan-udp\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    udp: true\n"
@@ -55,8 +59,22 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
     let udp = Config::from_yaml(&udp_source).expect("Phase 6F-B Trojan UDP config");
     assert!(udp.proxies[0].udp);
 
+    let ws_source = format!(
+        "{MINIMAL}\nproxies:\n  - name: trojan-ws\n    type: trojan\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    network: ws\n    ws-opts:\n      path: /trojan\n      headers:\n        Host: front.example\n"
+    );
+    let ws = Config::from_yaml(&ws_source).expect("Phase 6F-C Trojan WS config");
+    assert_eq!(
+        ws.proxies[0].trojan.as_ref().expect("options").alpn,
+        ["http/1.1"]
+    );
+    assert!(matches!(
+        ws.proxies[0].trojan.as_ref().expect("options").transport,
+        TrojanTransport::WebSocket { ref path, ref headers }
+            if path == "/trojan" && headers.get("Host").is_some_and(|value| value == "front.example")
+    ));
+
     for unsupported in [
-        "network: ws",
+        "network: grpc",
         "grpc-opts: {grpc-service-name: trojan}",
         "reality-opts: {public-key: invalid}",
     ] {

@@ -580,10 +580,21 @@ pub(super) async fn connect_trojan_outer(
         tls12_only: false,
         tls13_only: false,
     };
-    let outer =
+    let mut outer =
         rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
             .await
             .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))?;
+    if let rewrite_config::TrojanTransport::WebSocket { path, headers } = &trojan.transport {
+        outer = rewrite_outbound::connect_websocket_with_headers(
+            outer,
+            &proxy.server,
+            proxy.port,
+            path,
+            headers,
+        )
+        .await
+        .map_err(|error| format!("Trojan WebSocket transport failed: {error}"))?;
+    }
     Ok(outer)
 }
 

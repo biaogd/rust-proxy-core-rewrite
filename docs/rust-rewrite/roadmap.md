@@ -2888,6 +2888,19 @@ TLS framing observations and exact controller `udp: true`, `uot: true`,
 separate Shadowsocks inbound remains explicitly unsupported. WS/gRPC carriers,
 REALITY, fallback and Trojan server direction remain later slices.
 
+### Phase 6F-C — Trojan TCP and UDP over WebSocket/WSS
+
+This slice continues `CFG-03`, `OUT-09` and `OUT-23`. `network: ws` composes
+the shared verified TLS client and library-backed WebSocket carrier before the
+shared Trojan protocol framing. The configuration boundary owns path, Host and
+custom headers and rejects early-data/raw-upgrade options outside this slice;
+the default WebSocket ALPN is `http/1.1` like the Go oracle.
+
+`compat/scripts/phase6f_trojan_websocket.py` is the acceptance gate for TCP
+and UDP over WSS, large TCP payloads, reused UDP destinations, WebSocket request
+path/headers and command framing. gRPC, REALITY, fallback and Trojan inbound
+remain separate slices.
+
 ## Phase 7 — advanced and project-specific protocols
 
 Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,

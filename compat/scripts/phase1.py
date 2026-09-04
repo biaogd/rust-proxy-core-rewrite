@@ -108,17 +108,25 @@ def terminate_process(
     """
     requested = process.poll() is None
     if requested:
-        if os.name == "nt":
-            process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            if os.name == "nt":
+                process.terminate()
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # The child may exit between poll() and signalling.  Treat that as
+            # an already-completed shutdown instead of masking the test result.
+            requested = False
     try:
         exit_code = process.wait(timeout=IO_DEADLINE)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         return process.wait(timeout=IO_DEADLINE)
     if normalize_requested and requested:
         if os.name == "nt" or exit_code == -signal.SIGTERM:

@@ -6065,3 +6065,17 @@ oracle for TLS UDP association setup, two destinations on one client session,
 payload relay, wire observations and controller capabilities. The Trojan CI
 shard runs both 6F-A and 6F-B on Linux, Windows and macOS. Non-native carriers,
 REALITY, fallback and server direction remain unclaimed.
+
+## 2026-09-04 Phase 6F-C Trojan WebSocket/WSS
+
+Trojan TCP and UDP can now use the shared library-backed WebSocket carrier over
+verified TLS. Configuration supports `network: ws`, path and headers, selects
+the Go-compatible `http/1.1` default ALPN and rejects undeclared early-data or
+raw-upgrade variants. Runtime and controller health dials share the same carrier
+composition.
+
+The independent Go helper and `compat/scripts/phase6f_trojan_websocket.py`
+exercise Go and Rust through WSS for TCP relay, large payloads, UDP association
+reuse, Host/path/custom-header observations and protocol commands. The native
+Trojan CI shard runs this gate on Linux, Windows and macOS. gRPC, REALITY,
+fallback and inbound/server direction remain unclaimed.

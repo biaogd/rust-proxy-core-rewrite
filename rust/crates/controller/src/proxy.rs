@@ -708,10 +708,23 @@ pub(super) async fn measure_http_delay(
                         tls12_only: false,
                         tls13_only: false,
                     };
-                    let outer =
+                    let mut outer =
                         rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, None)
                             .await
                             .map_err(|_| ())?;
+                    if let rewrite_config::TrojanTransport::WebSocket { path, headers } =
+                        &trojan.transport
+                    {
+                        outer = rewrite_outbound::connect_websocket_with_headers(
+                            outer,
+                            &proxy.server,
+                            proxy.port,
+                            path,
+                            headers,
+                        )
+                        .await
+                        .map_err(|_| ())?;
+                    }
                     rewrite_outbound::connect_trojan_on_stream(
                         outer,
                         &destination,
