@@ -178,7 +178,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-K/M VLESS xHTTP | Complete in declared common HTTP/2 client scope | `stream-one`, `stream-up`, `packet-up` and Go-compatible `auto` selection pass; authenticated REALITY composition and basic XMUX `max-concurrency`/`max-connections` reuse/reconnection also pass. HTTP/1.1/H3, download settings, alternate metadata/data placement, advanced reuse/padding controls, UDP and server direction remain open |
 | Phase 6E-N VLESS bounded production gate | Complete locally; three-platform CI pending | Real `sing-vless` authorities pass 32 concurrent pooled Gun streams, 16 concurrent xHTTP/XMUX streams, 16 HTTP-status failures followed by recovery, and process survival. A deterministic malformed-response corpus is bounded and panic-free. Multi-hour soak, public-server interop and resource ceilings remain release work |
 | Phase 6G-A AnyTLS native TLS TCP | Complete in declared client scope | Clash `type: anytls` config parse, password auth, shared TLS fields, default padding and Go/Rust TCP differential (`disable-reuse`) |
-| Phase 6G-B AnyTLS session mux/reuse | Complete in declared client scope | Idle session pool matching Go CreateStream reuse, concurrent dials, FIN/session-alive half-close oracle (`phase6g_anytls_mux.py`); UDP/UoT, Restls/ShadowTLS/JLS remain open |
+| Phase 6G-B AnyTLS session mux/reuse | Complete in declared client scope | Idle session pool matching Go CreateStream reuse, concurrent dials, FIN/session-alive half-close oracle (`phase6g_anytls_mux.py`) |
+| Phase 6G-C AnyTLS UDP via UoT v2 | Complete in declared client scope | Go `CreateProxy(uot.RequestDestination(2))` + LazyConn UoT v2, multi-destination association reuse, TLS session reuse across UDP associates (`phase6g_anytls_udp.py`); idle/heartbeat polish and Restls/ShadowTLS/JLS remain open |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6126,8 +6127,8 @@ rejection and auth/settings wire observations (with `disable-reuse: true` so
 stream IDs stay comparable before multiplexing lands). Half-close is deferred
 to Phase 6G-B because Go's AnyTLS stream has no `CloseWrite` and races under
 `Relay`. The dedicated AnyTLS CI shard runs this gate. Multiplexing/reuse,
-UDP/UoT, idle/heartbeat recovery and optional alternate TLS carriers remain
-open as Phases 6G-C–E after 6G-B landed.
+Idle/heartbeat recovery and optional alternate TLS carriers remain open as
+Phases 6G-D–E after 6G-C landed.
 
 ## 2026-09-06 Phase 6G-B AnyTLS session multiplexing and reuse
 
@@ -6136,5 +6137,16 @@ are returned on stream close and reused for sequential dials (one AUTH, SYN 1
 then SYN 2). Concurrent SOCKS dials succeed (typically multiple sessions when
 no idle entry exists). Half-close is covered by a Go-observable FIN + session-
 alive oracle rather than SOCKS `SHUT_WR` (Go Stream has no `CloseWrite`).
-`compat/scripts/phase6g_anytls_mux.py` keeps Go/Rust aligned. UDP/UoT (6G-C),
+`compat/scripts/phase6g_anytls_mux.py` keeps Go/Rust aligned. UDP/UoT landed in 6G-C;
 idle/heartbeat recovery polish (6G-D), and Restls/ShadowTLS/JLS (6G-E) remain open.
+
+## 2026-09-06 Phase 6G-C AnyTLS UDP via UoT v2
+
+AnyTLS UDP now follows Go `ListenPacketContext`: the shared pooled client opens
+one stream to `uot.RequestDestination(2)` (`sp.v2.udp-over-tcp.arpa`) and wraps
+it with sing-compatible UoT v2 (`IsConnect == false`). One SOCKS UDP association
+can therefore carry packets to multiple destinations, and a later association
+reuses the idle AnyTLS TLS session. `compat/scripts/phase6g_anytls_udp.py`
+compares Go and Rust against an independent AnyTLS+UoT authority. Idle-session
+janitor polish (6G-D) and Restls/ShadowTLS/JLS carriers (6G-E) remain open.
+

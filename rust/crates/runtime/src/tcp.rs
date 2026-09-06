@@ -548,6 +548,30 @@ async fn connect_anytls_proxy(
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let client = anytls_client_for_proxy(
+        proxy,
+        server,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    client
+        .create_proxy(destination)
+        .await
+        .map_err(|error| format!("AnyTLS proxy connection failed: {error}"))
+}
+
+/// Long-lived pooled `AnyTLS` client shared by TCP dials and UDP `UoT` associations.
+pub(super) async fn anytls_client_for_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<std::sync::Arc<rewrite_outbound::AnyTlsClient>, String> {
     let anytls = proxy
         .anytls
         .as_ref()
@@ -601,13 +625,9 @@ async fn connect_anytls_proxy(
             .map_err(rewrite_outbound::AnyTlsProxyError::Dial)
         })
     });
-    let client = state
+    Ok(state
         .anytls_client(&proxy.name, identity, dial_out, options)
-        .await;
-    client
-        .create_proxy(destination)
-        .await
-        .map_err(|error| format!("AnyTLS proxy connection failed: {error}"))
+        .await)
 }
 
 async fn dial_anytls_tls_carrier(

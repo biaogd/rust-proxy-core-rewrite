@@ -9,7 +9,8 @@ mod vless;
 mod vmess;
 
 pub use anytls::{
-    AnyTlsClient, AnyTlsClientOptions, AnyTlsDialOut, AnyTlsProxyError, connect_anytls_on_stream,
+    AnyTlsClient, AnyTlsClientOptions, AnyTlsDialOut, AnyTlsProxyError, associate_anytls_udp,
+    connect_anytls_on_stream,
 };
 pub use direct::{
     DirectError, DirectTcpOptions, connect, connect_udp_with_options, connect_with_options,

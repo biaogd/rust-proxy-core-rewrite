@@ -93,6 +93,32 @@ impl AnyTlsClient {
     }
 }
 
+/// Opens Go-compatible UDP-over-TCP (`UoT`) v2 over a pooled `AnyTLS` stream.
+///
+/// Matches `CreateProxy(uot.RequestDestination(2))` plus
+/// `uot.NewLazyConn(..., Request{Destination})` with `IsConnect == false`, so
+/// one association can carry packets to multiple destinations.
+///
+/// # Errors
+///
+/// Returns dial or protocol errors from the underlying client, or a framing
+/// error when `UoT` v2 cannot be constructed.
+pub async fn associate_anytls_udp(
+    client: &AnyTlsClient,
+) -> Result<crate::ShadowsocksUotAssociation, AnyTlsProxyError> {
+    let destination = rewrite_protocol_shadowsocks::uot_destination(2).map_err(|error| {
+        AnyTlsProxyError::Protocol(rewrite_protocol_anytls::AnyTlsProtocolError::Protocol(
+            error.to_string(),
+        ))
+    })?;
+    let stream = client.create_proxy(&destination).await?;
+    rewrite_protocol_shadowsocks::ShadowsocksUotAssociation::new(stream, 2).map_err(|error| {
+        AnyTlsProxyError::Protocol(rewrite_protocol_anytls::AnyTlsProtocolError::Protocol(
+            error.to_string(),
+        ))
+    })
+}
+
 /// Starts an `AnyTLS` TCP request over an established TLS carrier (one-shot).
 ///
 /// # Errors
