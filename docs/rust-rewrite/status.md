@@ -177,7 +177,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-H/J VLESS REALITY and Vision composition | **Complete in declared Chrome 133 native-TCP client scope** | `reality-opts` uses patched `shadow-rustls`, accepts Go-compatible short IDs, rejects unsupported fingerprint names, supports optional X25519+ML-KEM-768, and passes authenticated relay/half-close plus complete normalized ClientHello semantics. Phase 6E-J reuses the bounded TLS-record boundary and proves REALITY+Vision DIRECT with nested TLS. Legacy-only TLS 1.2 cipher selection, other fingerprints, non-TCP carriers and server mode remain open |
 | Phase 6E-K/M VLESS xHTTP | Complete in declared common HTTP/2 client scope | `stream-one`, `stream-up`, `packet-up` and Go-compatible `auto` selection pass; authenticated REALITY composition and basic XMUX `max-concurrency`/`max-connections` reuse/reconnection also pass. HTTP/1.1/H3, download settings, alternate metadata/data placement, advanced reuse/padding controls, UDP and server direction remain open |
 | Phase 6E-N VLESS bounded production gate | Complete locally; three-platform CI pending | Real `sing-vless` authorities pass 32 concurrent pooled Gun streams, 16 concurrent xHTTP/XMUX streams, 16 HTTP-status failures followed by recovery, and process survival. A deterministic malformed-response corpus is bounded and panic-free. Multi-hour soak, public-server interop and resource ceilings remain release work |
-| Phase 6G-A AnyTLS native TLS TCP | Complete in declared client scope | Clash `type: anytls` config parse, password auth, shared TLS fields (SNI/ALPN/skip/name-verify/fingerprint/client cert), default padding and a Go/Rust mixed-TCP differential against an independent AnyTLS authority; multiplexing, UDP, idle/heartbeat and Restls/ShadowTLS/JLS carriers remain open |
+| Phase 6G-A AnyTLS native TLS TCP | Complete in declared client scope | Clash `type: anytls` config parse, password auth, shared TLS fields (SNI/ALPN/skip/name-verify/fingerprint/client cert), default padding and a Go/Rust mixed-TCP differential against an independent AnyTLS authority (`disable-reuse` for comparable stream IDs); multiplexing/half-close, UDP, idle/heartbeat and Restls/ShadowTLS/JLS carriers remain open |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6120,8 +6120,11 @@ ECH/REALITY carriers remain rejected at load time for this slice.
 scheme and a single-stream session over an established TLS carrier. Runtime and
 controller health dials compose the shared rustls client with that protocol
 crate. `compat/scripts/phase6g_anytls_tcp.py` compares Go and Rust against an
-independent AnyTLS authority for small/large TCP relay, half-close, wrong-
-password rejection and auth/settings wire observations. The dedicated AnyTLS CI
-shard runs this gate. Multiplexing/reuse, UDP/UoT, idle/heartbeat recovery and
-optional alternate TLS carriers remain open as Phases 6G-B–E.
+independent AnyTLS authority for small/large TCP relay, wrong-password
+rejection and auth/settings wire observations (with `disable-reuse: true` so
+stream IDs stay comparable before multiplexing lands). Half-close is deferred
+to Phase 6G-B because Go's AnyTLS stream has no `CloseWrite` and races under
+`Relay`. The dedicated AnyTLS CI shard runs this gate. Multiplexing/reuse,
+UDP/UoT, idle/heartbeat recovery and optional alternate TLS carriers remain
+open as Phases 6G-B–E.
 
