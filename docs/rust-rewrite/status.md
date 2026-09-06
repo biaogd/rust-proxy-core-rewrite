@@ -6161,8 +6161,9 @@ probe; padding/`cmdWaste` remains write-time only). Opening on a dead idle
 session falls through to a fresh dial so recovery matches Go after the failed
 attempt is retried. `compat/scripts/phase6g_anytls_idle.py` compares Go/Rust on
 idle-evict, min-idle-keep, disconnect recovery, heartbeat response reuse, and
-8-way stress, and is wired into the anytls CI shard. Optional Restls/ShadowTLS/JLS
-carriers land in Phase 6G-E.
+8-way stress (`ok`/`ok_count` only — concurrent AUTH reuse is timing-dependent),
+and is wired into the anytls CI shard. Optional Restls/ShadowTLS/JLS carriers
+land in Phase 6G-E.
 
 ## 2026-09-06 Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers
 

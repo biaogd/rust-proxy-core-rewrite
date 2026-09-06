@@ -448,18 +448,34 @@ def case_stress(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     )
     process, mixed_port, authority = next(gen)
     try:
+        def stress_one(index: int) -> bool:
+            try:
+                return exchange(
+                    mixed_port,
+                    f"s{index}.phase6g",
+                    28200 + index,
+                    f"stress-{index}".encode(),
+                )
+            except Exception:
+                return False
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [
-                pool.submit(exchange, mixed_port, f"s{i}.phase6g", 28200 + i, f"stress-{i}".encode())
-                for i in range(8)
-            ]
+            futures = [pool.submit(stress_one, i) for i in range(8)]
             results = [future.result(timeout=IO_DEADLINE) for future in futures]
         wire = authority.snapshot()
-        ok = all(results) and process.poll() is None
+        ok_count = sum(1 for item in results if item)
+        auth_accept = wire.get("AUTH accept", 0)
+        # Concurrent dials race session reuse: Go/Rust may land between 1..8 AUTH
+        # accepts for the same 8 successful exchanges. Compare outcome counts only.
+        ok = (
+            ok_count == 8
+            and process.poll() is None
+            and 1 <= auth_accept <= 8
+        )
         return {
             "ok": ok,
-            "ok_count": sum(1 for item in results if item),
-            "auth_accept": wire.get("AUTH accept", 0),
+            "ok_count": ok_count,
+            "auth_accept": auth_accept,
             "wire": wire,
         }
     finally:
@@ -480,12 +496,21 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 
 
 def public_view(entry: dict[str, Any]) -> dict[str, Any]:
+    # stress-8 auth_accept is timing-dependent under parallel dials; keep it in
+    # raw observations for debug but out of the Go/Rust equality surface.
+    comparable_keys = {
+        "idle-evict": ("auth_accept",),
+        "min-idle-keep": ("auth_accept",),
+        "disconnect-recovery": ("auth_accept", "dropped"),
+        "heartbeat-response": ("auth_accept", "heart_request", "heart_response"),
+        "stress-8": ("ok_count",),
+    }
     return {
         name: {
             "ok": case["ok"],
             **{
                 key: case[key]
-                for key in ("auth_accept", "heart_request", "heart_response", "ok_count", "dropped")
+                for key in comparable_keys.get(name, ())
                 if key in case
             },
         }
