@@ -164,16 +164,13 @@ impl AsyncWrite for AnyTlsStream {
         if self.pending_shutdown.is_none() {
             let session = Arc::clone(&self.session);
             let sid = self.sid;
+            // Send FIN but keep the stream mapped so late peer PSH/FIN can still
+            // be delivered — required for write-side half-close then read.
             self.pending_shutdown = Some(Box::pin(async move {
                 session
                     .write_control_frame(Frame::new(CMD_FIN, sid))
                     .await
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
-                session
-                    .streams
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&sid);
                 Ok(0)
             }));
         }

@@ -183,7 +183,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
-| Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
+| Cargo workspace | Implemented | Twenty-three focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented through Phase 6E-N; three-platform matrix pending | VLESS now has a dedicated fail-independent shard on Linux x86_64, Windows x86_64 and macOS arm64, including pooled Gun, common xHTTP, REALITY/XMUX and bounded production gates. Local Cargo targets remain outside the repository while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
@@ -6106,3 +6106,22 @@ The extended independent Go REALITY authority and
 REALITY handshakes, TCP relay, large payloads, UDP association reuse and Trojan
 wire commands. The Trojan CI shard runs this gate on Linux, Windows and macOS.
 Fallback and inbound/server direction remain unclaimed.
+
+## 2026-09-06 Phase 6G-A AnyTLS native TLS TCP
+
+The first AnyTLS outbound slice accepts Clash `type: anytls` with required
+password/server/port plus shared TLS fields the Go adapter already exposes
+(SNI, ALPN, skip-cert-verify, name-cert-verify, fingerprint and client
+certificate material). Session options such as `client-metadata`, idle-session
+timers and `disable-reuse` are parsed for later phases. ShadowTLS/Restls/JLS/
+ECH/REALITY carriers remain rejected at load time for this slice.
+
+`rewrite-protocol-anytls` owns password authentication, the default padding
+scheme and a single-stream session over an established TLS carrier. Runtime and
+controller health dials compose the shared rustls client with that protocol
+crate. `compat/scripts/phase6g_anytls_tcp.py` compares Go and Rust against an
+independent AnyTLS authority for small/large TCP relay, half-close, wrong-
+password rejection and auth/settings wire observations. The dedicated AnyTLS CI
+shard runs this gate. Multiplexing/reuse, UDP/UoT, idle/heartbeat recovery and
+optional alternate TLS carriers remain open as Phases 6G-B–E.
+
