@@ -439,6 +439,7 @@ jobs:
             compat/scripts/phase6g_anytls_mux.py \
             compat/scripts/phase6g_anytls_udp.py \
             compat/scripts/phase6g_anytls_idle.py \
+            compat/scripts/phase6g_anytls_carriers.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

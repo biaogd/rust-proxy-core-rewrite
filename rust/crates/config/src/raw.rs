@@ -254,7 +254,43 @@ pub(crate) struct RawProxy {
     pub(crate) min_idle_session: Option<i64>,
     #[serde(rename = "disable-reuse")]
     pub(crate) disable_reuse: Option<bool>,
+    #[serde(rename = "shadow-tls-opts")]
+    pub(crate) shadow_tls_opts: Option<RawAnyTlsShadowTlsOptions>,
+    #[serde(rename = "restls-opts")]
+    pub(crate) restls_opts: Option<RawAnyTlsRestlsOptions>,
+    #[serde(rename = "jls-opts")]
+    pub(crate) jls_opts: Option<RawAnyTlsJlsOptions>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawAnyTlsShadowTlsOptions {
+    pub(crate) password: Option<String>,
+    pub(crate) version: Option<i64>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawAnyTlsRestlsOptions {
+    pub(crate) password: Option<String>,
+    #[serde(rename = "version-hint")]
+    pub(crate) version_hint: Option<String>,
+    #[serde(rename = "restls-script")]
+    pub(crate) restls_script: Option<String>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawAnyTlsJlsOptions {
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

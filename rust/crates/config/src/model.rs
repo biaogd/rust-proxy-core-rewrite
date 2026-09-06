@@ -232,6 +232,27 @@ pub struct AnyTlsProxyConfig {
     pub idle_session_timeout: u64,
     pub min_idle_session: usize,
     pub disable_reuse: bool,
+    /// Outer security carrier replacing native TLS when set (Go-compatible).
+    pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` (mutually exclusive).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnyTlsCarrier {
+    NativeTls,
+    ShadowTls {
+        password: String,
+        version: u8,
+    },
+    Restls {
+        password: String,
+        version_hint: String,
+        restls_script: String,
+    },
+    Jls {
+        username: String,
+        password: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

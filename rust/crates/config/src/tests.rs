@@ -149,6 +149,7 @@ fn anytls_native_tls_configuration_is_supported_and_scoped() {
     assert_eq!(options.idle_session_timeout, 60);
     assert_eq!(options.min_idle_session, 2);
     assert!(options.disable_reuse);
+    assert_eq!(options.carrier, AnyTlsCarrier::NativeTls);
 
     let udp_source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-udp\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    udp: true\n"
@@ -156,10 +157,49 @@ fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let udp = Config::from_yaml(&udp_source).expect("AnyTLS udp flag");
     assert!(udp.proxies[0].udp);
 
+    let shadow = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: anytls-stls\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: shadow.example\n    skip-cert-verify: true\n    client-fingerprint: chrome\n    shadow-tls-opts:\n      password: stls-secret\n      version: 3\n"
+    ))
+    .expect("AnyTLS shadow-tls carrier");
+    assert_eq!(
+        shadow.proxies[0].anytls.as_ref().unwrap().carrier,
+        AnyTlsCarrier::ShadowTls {
+            password: "stls-secret".to_owned(),
+            version: 3,
+        }
+    );
+    assert_eq!(
+        shadow.proxies[0].client_fingerprint.as_deref(),
+        Some("chrome")
+    );
+
+    let restls = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: anytls-restls\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    restls-opts:\n      password: restls-secret\n      version-hint: tls13\n"
+    ))
+    .expect("AnyTLS restls carrier config");
+    assert!(matches!(
+        restls.proxies[0].anytls.as_ref().unwrap().carrier,
+        AnyTlsCarrier::Restls { .. }
+    ));
+
+    let jls = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: anytls-jls\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    jls-opts:\n      username: jls-user\n      password: jls-secret\n"
+    ))
+    .expect("AnyTLS jls carrier config");
+    assert!(matches!(
+        jls.proxies[0].anytls.as_ref().unwrap().carrier,
+        AnyTlsCarrier::Jls { .. }
+    ));
+
+    assert!(
+        Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    shadow-tls-opts: {{password: a, version: 3}}\n    restls-opts: {{password: b}}\n"
+        ))
+        .is_err(),
+        "security carriers must be mutually exclusive"
+    );
+
     for unsupported in [
-        "shadow-tls-opts: {version: 3, password: x}",
-        "restls-opts: {password: x}",
-        "jls-opts: {username: u, password: p}",
         "ech-opts: {enable: true}",
         "client-fingerprint: chrome",
         "reality-opts: {public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc}",

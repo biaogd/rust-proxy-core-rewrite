@@ -645,24 +645,57 @@ async fn dial_anytls_tls_carrier(
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("AnyTLS outer TCP connection failed: {error}"))?;
-    let alpn: Vec<&[u8]> = anytls.alpn.iter().map(String::as_bytes).collect();
-    let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
-    let tls = rewrite_outbound::HttpProxyTls {
-        server_name,
-        verification_name: proxy.name_cert_verify.as_deref(),
-        skip_certificate_verification: proxy.skip_cert_verify,
-        fingerprint: proxy.fingerprint.as_deref(),
-        certificate: proxy.certificate.as_deref(),
-        private_key: proxy.private_key.as_deref(),
-        custom_roots,
-        ech_config: None,
-        alpn_protocols: &alpn,
-        tls12_only: false,
-        tls13_only: false,
-    };
-    rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(clock))
-        .await
-        .map_err(|error| format!("AnyTLS outer TLS connection failed: {error}"))
+    match &anytls.carrier {
+        rewrite_config::AnyTlsCarrier::NativeTls => {
+            let alpn: Vec<&[u8]> = anytls.alpn.iter().map(String::as_bytes).collect();
+            let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
+            let tls = rewrite_outbound::HttpProxyTls {
+                server_name,
+                verification_name: proxy.name_cert_verify.as_deref(),
+                skip_certificate_verification: proxy.skip_cert_verify,
+                fingerprint: proxy.fingerprint.as_deref(),
+                certificate: proxy.certificate.as_deref(),
+                private_key: proxy.private_key.as_deref(),
+                custom_roots,
+                ech_config: None,
+                alpn_protocols: &alpn,
+                tls12_only: false,
+                tls13_only: false,
+            };
+            rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(clock))
+                .await
+                .map_err(|error| format!("AnyTLS outer TLS connection failed: {error}"))
+        }
+        rewrite_config::AnyTlsCarrier::ShadowTls { password, version } => {
+            // Go StreamTLSConn(ShadowTLS) replaces native TLS; AnyTLS AUTH rides the
+            // post-handshake ShadowTLS stream directly.
+            rewrite_outbound::connect_shadow_tls(
+                Box::new(outer),
+                rewrite_outbound::ShadowTlsConnectOptions {
+                    host: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                    password,
+                    version: *version,
+                    skip_certificate_verification: proxy.skip_cert_verify,
+                    verification_name: proxy.name_cert_verify.as_deref(),
+                    certificate_fingerprint: proxy.fingerprint.as_deref(),
+                    certificate: proxy.certificate.as_deref(),
+                    private_key: proxy.private_key.as_deref(),
+                    custom_roots,
+                    alpn: &anytls.alpn,
+                    client_fingerprint: proxy.client_fingerprint.as_deref(),
+                },
+                Some(clock),
+            )
+            .await
+            .map_err(|error| format!("AnyTLS ShadowTLS carrier failed: {error}"))
+        }
+        rewrite_config::AnyTlsCarrier::Restls { .. } => {
+            Err("AnyTLS Restls carrier is not implemented yet (Phase 6G-E leftover)".to_owned())
+        }
+        rewrite_config::AnyTlsCarrier::Jls { .. } => {
+            Err("AnyTLS JLS carrier is not implemented yet (Phase 6G-E leftover)".to_owned())
+        }
+    }
 }
 
 async fn connect_trojan_proxy(
