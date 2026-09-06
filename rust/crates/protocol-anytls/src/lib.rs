@@ -1,5 +1,6 @@
 //! Transport-independent `AnyTLS` client framing shared by outbound adapters.
 
+mod client;
 mod frame;
 mod padding;
 mod session;
@@ -11,8 +12,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
+pub use client::{Client, ClientOptions, DialOut};
 pub use padding::{DEFAULT_PADDING_SCHEME, PaddingFactory};
-pub use session::AnyTlsStream;
+pub use session::{AnyTlsStream, Session, SessionCloseHook, StreamCloseHook};
 
 #[derive(Debug, Error)]
 pub enum AnyTlsProtocolError {

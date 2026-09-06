@@ -436,6 +436,7 @@ jobs:
             compat/scripts/phase6f_trojan_grpc.py \
             compat/scripts/phase6f_trojan_reality.py \
             compat/scripts/phase6g_anytls_tcp.py \
+            compat/scripts/phase6g_anytls_mux.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

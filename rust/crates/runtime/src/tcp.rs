@@ -552,6 +552,76 @@ async fn connect_anytls_proxy(
         .anytls
         .as_ref()
         .ok_or_else(|| "AnyTLS proxy configuration is missing".to_owned())?;
+    let identity =
+        format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
+    let options = rewrite_outbound::AnyTlsClientOptions {
+        password: anytls.password.clone(),
+        client_metadata: anytls.client_metadata.clone(),
+        idle_session_check_interval: std::time::Duration::from_secs(
+            anytls.idle_session_check_interval,
+        ),
+        idle_session_timeout: std::time::Duration::from_secs(anytls.idle_session_timeout),
+        min_idle_session: anytls.min_idle_session,
+        disable_reuse: anytls.disable_reuse,
+    };
+    let proxy_owned = proxy.clone();
+    let server_owned = server.clone();
+    let custom_roots_owned = custom_roots.to_vec();
+    let clock = state.clock();
+    let interface = socket_options.interface.to_owned();
+    let routing_mark = socket_options.routing_mark;
+    let keep_alive_idle = socket_options.keep_alive_idle;
+    let keep_alive_interval = socket_options.keep_alive_interval;
+    let disable_keep_alive = socket_options.disable_keep_alive;
+    let tcp_concurrent = socket_options.tcp_concurrent;
+    let dial_out: rewrite_outbound::AnyTlsDialOut = std::sync::Arc::new(move || {
+        let proxy = proxy_owned.clone();
+        let server = server_owned.clone();
+        let custom_roots = custom_roots_owned.clone();
+        let clock = std::sync::Arc::clone(&clock);
+        let interface = interface.clone();
+        Box::pin(async move {
+            let socket_options = rewrite_outbound::DirectTcpOptions {
+                interface: interface.as_str(),
+                routing_mark,
+                keep_alive_idle,
+                keep_alive_interval,
+                disable_keep_alive,
+                tcp_concurrent,
+            };
+            dial_anytls_tls_carrier(
+                &proxy,
+                &server,
+                allow_ipv6,
+                &custom_roots,
+                socket_options,
+                clock,
+            )
+            .await
+            .map_err(rewrite_outbound::AnyTlsProxyError::Dial)
+        })
+    });
+    let client = state
+        .anytls_client(&proxy.name, identity, dial_out, options)
+        .await;
+    client
+        .create_proxy(destination)
+        .await
+        .map_err(|error| format!("AnyTLS proxy connection failed: {error}"))
+}
+
+async fn dial_anytls_tls_carrier(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    allow_ipv6: bool,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    clock: std::sync::Arc<rewrite_services::AdjustedClock>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let anytls = proxy
+        .anytls
+        .as_ref()
+        .ok_or_else(|| "AnyTLS proxy configuration is missing".to_owned())?;
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("AnyTLS outer TCP connection failed: {error}"))?;
@@ -570,18 +640,9 @@ async fn connect_anytls_proxy(
         tls12_only: false,
         tls13_only: false,
     };
-    let outer =
-        rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
-            .await
-            .map_err(|error| format!("AnyTLS outer TLS connection failed: {error}"))?;
-    rewrite_outbound::connect_anytls_on_stream(
-        outer,
-        destination,
-        &anytls.password,
-        &anytls.client_metadata,
-    )
-    .await
-    .map_err(|error| format!("AnyTLS proxy connection failed: {error}"))
+    rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(clock))
+        .await
+        .map_err(|error| format!("AnyTLS outer TLS connection failed: {error}"))
 }
 
 async fn connect_trojan_proxy(

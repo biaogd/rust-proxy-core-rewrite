@@ -150,6 +150,7 @@ pub(super) async fn apply_generation(
     sync_selector_state(state, &next);
     state.clear_grpc_clients().await;
     state.clear_xhttp_clients().await;
+    state.clear_anytls_clients().await;
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;

@@ -1,4 +1,4 @@
-//! Client session and stream for `AnyTLS` over an established TLS carrier.
+//! Client session and multiplexed streams for `AnyTLS`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -34,6 +34,8 @@ struct SessionInner {
     stream_id: AtomicU32,
     pkt_counter: AtomicU32,
     send_padding: AtomicBool,
+    seq: u64,
+    close_hook: StdMutex<Option<SessionCloseHook>>,
 }
 
 struct WriteState {
@@ -43,6 +45,18 @@ struct WriteState {
 }
 
 type WriteFuture = Pin<Box<dyn Future<Output = Result<usize, std::io::Error>> + Send>>;
+
+/// Callback invoked once when a stream fully closes (FIN sent / dropped).
+pub type StreamCloseHook = Box<dyn FnOnce() + Send + Sync>;
+
+/// Callback invoked once when the session closes.
+pub type SessionCloseHook = Box<dyn FnOnce() + Send + Sync>;
+
+/// Handle to a live `AnyTLS` session over one TLS carrier.
+#[derive(Clone)]
+pub struct Session {
+    inner: Arc<SessionInner>,
+}
 
 /// Logical `AnyTLS` stream over a multiplexed session.
 pub struct AnyTlsStream {
@@ -54,25 +68,192 @@ pub struct AnyTlsStream {
     read_closed: bool,
     pending_write: Option<WriteFuture>,
     pending_shutdown: Option<WriteFuture>,
-    _reader_done: oneshot::Receiver<()>,
+    close_hook: Option<StreamCloseHook>,
+    reader_done: Option<oneshot::Receiver<()>>,
+}
+
+impl Session {
+    /// Starts a client session on an authenticated TLS carrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns I/O errors when the initial settings frame cannot be written.
+    pub async fn start(
+        remote: BoxedStream,
+        client_metadata: &str,
+        padding: Arc<PaddingFactory>,
+        seq: u64,
+    ) -> Result<Self, AnyTlsProtocolError> {
+        let (read_half, write_half) = split_stream(remote);
+        let inner = Arc::new(SessionInner {
+            write: Mutex::new(WriteState {
+                remote: write_half,
+                buffering: true,
+                buffer: Vec::new(),
+            }),
+            streams: StdMutex::new(HashMap::new()),
+            padding: StdMutex::new(Arc::clone(&padding)),
+            closed: AtomicBool::new(false),
+            peer_version: AtomicU32::new(0),
+            stream_id: AtomicU32::new(0),
+            pkt_counter: AtomicU32::new(0),
+            send_padding: AtomicBool::new(true),
+            seq,
+            close_hook: StdMutex::new(None),
+        });
+
+        let (done_tx, _done_rx) = oneshot::channel();
+        let reader_session = Arc::clone(&inner);
+        tokio::spawn(async move {
+            recv_loop(reader_session, read_half).await;
+            let _ = done_tx.send(());
+        });
+
+        let mut settings = Frame::new(CMD_SETTINGS, 0);
+        settings.data = encode_settings(client_metadata, padding.md5());
+        inner.write_control_frame(settings).await?;
+
+        Ok(Self { inner })
+    }
+
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.inner.seq
+    }
+
+    pub fn set_close_hook(&self, hook: SessionCloseHook) {
+        *self
+            .inner
+            .close_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Opens a new multiplexed stream and writes the proxy destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol or I/O errors when the stream cannot be opened.
+    pub async fn open_proxy(
+        &self,
+        destination: &Destination,
+        close_hook: Option<StreamCloseHook>,
+    ) -> Result<AnyTlsStream, AnyTlsProtocolError> {
+        let mut stream = self.open_stream(close_hook).await?;
+        let address = encode_socks_address(destination)?;
+        // First proxy write flushes the session buffer (settings+SYN).
+        {
+            let mut guard = self.inner.write.lock().await;
+            guard.buffering = false;
+        }
+        self.inner.write_data_frame(stream.sid, &address).await?;
+        // Keep ownership of reader_done only on the first stream of a session when
+        // created via open_proxy_stream; pooled sessions already have a reader.
+        stream.reader_done = None;
+        Ok(stream)
+    }
+
+    /// Opens a multiplexed stream without writing a destination yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol or I/O errors when SYN cannot be sent.
+    pub async fn open_stream(
+        &self,
+        close_hook: Option<StreamCloseHook>,
+    ) -> Result<AnyTlsStream, AnyTlsProtocolError> {
+        if self.is_closed() {
+            return Err(AnyTlsProtocolError::Protocol(
+                "AnyTLS session is closed".to_owned(),
+            ));
+        }
+        let sid = self.inner.stream_id.fetch_add(1, Ordering::AcqRel) + 1;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.inner
+            .streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(sid, StreamInbox { sender });
+        self.inner
+            .write_control_frame(Frame::new(CMD_SYN, sid))
+            .await?;
+        Ok(AnyTlsStream {
+            session: Arc::clone(&self.inner),
+            sid,
+            receiver,
+            pending: BytesMut::new(),
+            write_closed: false,
+            read_closed: false,
+            pending_write: None,
+            pending_shutdown: None,
+            close_hook,
+            reader_done: None,
+        })
+    }
+
+    /// Closes the underlying TLS session.
+    pub async fn close(&self) {
+        mark_session_closed(&self.inner).await;
+    }
+}
+
+async fn mark_session_closed(inner: &Arc<SessionInner>) {
+    if inner
+        .closed
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let hook = inner
+        .close_hook
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    {
+        let mut guard = inner.write.lock().await;
+        let _ = guard.remote.shutdown().await;
+    }
+    let inboxes: Vec<_> = inner
+        .streams
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain()
+        .map(|(_, inbox)| inbox)
+        .collect();
+    for inbox in inboxes {
+        let _ = inbox.sender.send(Bytes::new());
+    }
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 
 impl Drop for AnyTlsStream {
     fn drop(&mut self) {
-        if self.write_closed {
-            return;
-        }
-        self.write_closed = true;
+        let hook = self.close_hook.take();
         let session = Arc::clone(&self.session);
         let sid = self.sid;
+        let need_fin = !self.write_closed;
+        self.write_closed = true;
         tokio::spawn(async move {
-            let _ = session.write_control_frame(Frame::new(CMD_FIN, sid)).await;
+            if need_fin {
+                let _ = session.write_control_frame(Frame::new(CMD_FIN, sid)).await;
+            }
             session
                 .streams
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&sid);
         });
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 
@@ -164,8 +345,7 @@ impl AsyncWrite for AnyTlsStream {
         if self.pending_shutdown.is_none() {
             let session = Arc::clone(&self.session);
             let sid = self.sid;
-            // Send FIN but keep the stream mapped so late peer PSH/FIN can still
-            // be delivered — required for write-side half-close then read.
+            // CloseWrite semantics: send FIN, keep reading until peer FIN/EOF.
             self.pending_shutdown = Some(Box::pin(async move {
                 session
                     .write_control_frame(Frame::new(CMD_FIN, sid))
@@ -184,6 +364,9 @@ impl AsyncWrite for AnyTlsStream {
             Poll::Ready(Ok(_)) => {
                 self.pending_shutdown = None;
                 self.write_closed = true;
+                // Half-close only: keep the stream mapped and do not run the
+                // pool dieHook until the stream is fully dropped (Go has no
+                // CloseWrite; pool return is on full Close).
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {
@@ -370,17 +553,7 @@ async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
             _ => {}
         }
     }
-    session.closed.store(true, Ordering::Release);
-    let inboxes: Vec<_> = session
-        .streams
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain()
-        .map(|(_, inbox)| inbox)
-        .collect();
-    for inbox in inboxes {
-        let _ = inbox.sender.send(Bytes::new());
-    }
+    mark_session_closed(&session).await;
 }
 
 fn parse_settings_version(data: &[u8]) -> Option<u32> {
@@ -396,11 +569,6 @@ fn parse_settings_version(data: &[u8]) -> Option<u32> {
 }
 
 fn split_stream(remote: BoxedStream) -> (BoxedStream, BoxedStream) {
-    // `tokio::io::split` returns ReadHalf/WriteHalf that are not BoxedStream-compatible
-    // without a wrapper. Use a channel-backed proxy pair instead via duplex is wrong.
-    // We keep ownership in WriteState and clone via Arc mutex by using a custom split:
-    // put the whole stream behind Arc<Mutex> for both ends is too coarse for reads.
-    // Instead, use tokio::io::split and box each half with adapter structs.
     let (read, write) = tokio::io::split(remote);
     (
         Box::new(ReadHalfStream(read)),
@@ -482,7 +650,7 @@ impl AsyncWrite for WriteHalfStream {
     }
 }
 
-/// Opens an `AnyTLS` proxy stream on an established TLS carrier.
+/// Opens a one-shot `AnyTLS` proxy stream on an established TLS carrier.
 pub async fn open_proxy_stream(
     remote: BoxedStream,
     destination: &Destination,
@@ -492,61 +660,13 @@ pub async fn open_proxy_stream(
         .padding
         .clone()
         .unwrap_or_else(PaddingFactory::default_factory);
-    let (read_half, write_half) = split_stream(remote);
-    let session = Arc::new(SessionInner {
-        write: Mutex::new(WriteState {
-            remote: write_half,
-            buffering: true,
-            buffer: Vec::new(),
-        }),
-        streams: StdMutex::new(HashMap::new()),
-        padding: StdMutex::new(Arc::clone(&padding)),
-        closed: AtomicBool::new(false),
-        peer_version: AtomicU32::new(0),
-        stream_id: AtomicU32::new(0),
-        pkt_counter: AtomicU32::new(0),
-        send_padding: AtomicBool::new(true),
+    let session = Session::start(remote, options.client_metadata, padding, 1).await?;
+    let session_for_hook = session.clone();
+    let close_hook: StreamCloseHook = Box::new(move || {
+        tokio::spawn(async move {
+            session_for_hook.close().await;
+        });
     });
-
-    let (done_tx, done_rx) = oneshot::channel();
-    let reader_session = Arc::clone(&session);
-    tokio::spawn(async move {
-        recv_loop(reader_session, read_half).await;
-        let _ = done_tx.send(());
-    });
-
-    let mut settings = Frame::new(CMD_SETTINGS, 0);
-    settings.data = encode_settings(options.client_metadata, padding.md5());
-    session.write_control_frame(settings).await?;
-
-    let sid = session.stream_id.fetch_add(1, Ordering::AcqRel) + 1;
-    let (sender, receiver) = mpsc::unbounded_channel();
-    session
-        .streams
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(sid, StreamInbox { sender });
-    session
-        .write_control_frame(Frame::new(CMD_SYN, sid))
-        .await?;
-
-    {
-        let mut guard = session.write.lock().await;
-        guard.buffering = false;
-    }
-
-    let address = encode_socks_address(destination)?;
-    session.write_data_frame(sid, &address).await?;
-
-    Ok(Box::new(AnyTlsStream {
-        session,
-        sid,
-        receiver,
-        pending: BytesMut::new(),
-        write_closed: false,
-        read_closed: false,
-        pending_write: None,
-        pending_shutdown: None,
-        _reader_done: done_rx,
-    }))
+    let stream = session.open_proxy(destination, Some(close_hook)).await?;
+    Ok(Box::new(stream))
 }

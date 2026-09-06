@@ -53,6 +53,7 @@ pub struct RuntimeState {
     fake_ips: Mutex<FakeIpRegistry>,
     grpc_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::GrpcClient>)>>,
     xhttp_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::XHttpClient>)>>,
+    anytls_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::AnyTlsClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
 }
 
@@ -85,6 +86,7 @@ impl Default for RuntimeState {
             fake_ips: Mutex::new(FakeIpRegistry::default()),
             grpc_clients: AsyncMutex::new(BTreeMap::new()),
             xhttp_clients: AsyncMutex::new(BTreeMap::new()),
+            anytls_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
         }
     }
@@ -153,6 +155,41 @@ impl RuntimeState {
     pub async fn clear_xhttp_clients(&self) {
         let clients = {
             let mut clients = self.xhttp_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
+        }
+    }
+
+    pub async fn anytls_client(
+        &self,
+        name: &str,
+        identity: String,
+        dial_out: rewrite_outbound::AnyTlsDialOut,
+        options: rewrite_outbound::AnyTlsClientOptions,
+    ) -> Arc<rewrite_outbound::AnyTlsClient> {
+        let previous = {
+            let mut clients = self.anytls_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(rewrite_outbound::AnyTlsClient::new(dial_out, options));
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_anytls_clients(&self) {
+        let clients = {
+            let mut clients = self.anytls_clients.lock().await;
             std::mem::take(&mut *clients)
         };
         for (_, client) in clients.into_values() {

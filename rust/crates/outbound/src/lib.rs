@@ -8,7 +8,9 @@ mod trojan;
 mod vless;
 mod vmess;
 
-pub use anytls::{AnyTlsProxyError, connect_anytls_on_stream};
+pub use anytls::{
+    AnyTlsClient, AnyTlsClientOptions, AnyTlsDialOut, AnyTlsProxyError, connect_anytls_on_stream,
+};
 pub use direct::{
     DirectError, DirectTcpOptions, connect, connect_udp_with_options, connect_with_options,
 };
