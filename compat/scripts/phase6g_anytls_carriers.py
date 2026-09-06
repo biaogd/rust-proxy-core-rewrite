@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Go/Rust differential for Phase 6G-E AnyTLS ShadowTLS carrier (+ config edges)."""
+"""Go/Rust differential for Phase 6G-E AnyTLS ShadowTLS + JLS carriers."""
 
 from __future__ import annotations
 
@@ -22,21 +22,16 @@ from phase5b1a import build_binaries, connect_domain, debug_files
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6g-anytls-carriers-diff.json"
 ANYTLS_PASSWORD = "phase6g-carrier-anytls"
 SHADOWTLS_PASSWORD = "phase6g-carrier-shadowtls"
-SNI = "phase6g-shadowtls.example"
+JLS_USERNAME = "phase6g-jls-user"
+JLS_PASSWORD = "phase6g-jls-pass"
+SHADOW_SNI = "phase6g-shadowtls.example"
+JLS_SNI = "phase6g-jls.example"
 
 
-def authority_binary(scratch: pathlib.Path) -> pathlib.Path:
-    output = scratch / (
-        "anytls-shadowtls-authority.exe" if os.name == "nt" else "anytls-shadowtls-authority"
-    )
+def build_authority(scratch: pathlib.Path, package: str, name: str) -> pathlib.Path:
+    output = scratch / (f"{name}.exe" if os.name == "nt" else name)
     subprocess.run(
-        [
-            "go",
-            "build",
-            "-o",
-            str(output),
-            "./compat/helpers/anytls_shadowtls_authority",
-        ],
+        ["go", "build", "-o", str(output), f"./compat/helpers/{package}"],
         cwd=ROOT,
         check=True,
         timeout=180,
@@ -44,9 +39,9 @@ def authority_binary(scratch: pathlib.Path) -> pathlib.Path:
     return output
 
 
-def start_authority(binary: pathlib.Path, listen: str) -> subprocess.Popen[bytes]:
+def start_process(args: list[str]) -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
-        [str(binary), listen, ANYTLS_PASSWORD, SHADOWTLS_PASSWORD],
+        args,
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -124,6 +119,7 @@ def write_client_config(
     *,
     mixed_port: int,
     server_port: int,
+    sni: str,
     carrier_block: str,
 ) -> None:
     path.write_text(
@@ -137,7 +133,7 @@ proxies:
     server: 127.0.0.1
     port: {server_port}
     password: {ANYTLS_PASSWORD}
-    sni: {SNI}
+    sni: {sni}
     alpn: [h2, http/1.1]
     skip-cert-verify: true
     disable-reuse: true
@@ -148,6 +144,14 @@ rules:
     )
 
 
+def stop_authority(auth: subprocess.Popen[bytes]) -> None:
+    auth.terminate()
+    try:
+        auth.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        auth.kill()
+
+
 def exercise_shadow_tls(
     binary: pathlib.Path, scratch: pathlib.Path, authority: pathlib.Path
 ) -> dict[str, Any]:
@@ -155,13 +159,16 @@ def exercise_shadow_tls(
     echo_port = reserve_port()
     echo_server = start_echo(echo_port)
     server_port = reserve_port()
-    auth = start_authority(authority, f"127.0.0.1:{server_port}")
+    auth = start_process(
+        [str(authority), f"127.0.0.1:{server_port}", ANYTLS_PASSWORD, SHADOWTLS_PASSWORD]
+    )
     mixed_port = reserve_port()
     config = scratch / "shadow-tls.yaml"
     write_client_config(
         config,
         mixed_port=mixed_port,
         server_port=server_port,
+        sni=SHADOW_SNI,
         carrier_block=f"""shadow-tls-opts:
   password: {SHADOWTLS_PASSWORD}
   version: 3
@@ -173,19 +180,55 @@ def exercise_shadow_tls(
         ok = wait_exchange(
             process, mixed_port, "echo.phase6g", echo_port, b"shadow-tls-carrier"
         )
-        return {
-            "ok": ok,
-            "process-alive": process.poll() is None,
-        }
+        return {"ok": ok, "process-alive": process.poll() is None}
     finally:
         stop(process)
         stdout.close()
         stderr.close()
-        auth.terminate()
-        try:
-            auth.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            auth.kill()
+        stop_authority(auth)
+        echo_server.close()
+
+
+def exercise_jls(
+    binary: pathlib.Path, scratch: pathlib.Path, authority: pathlib.Path
+) -> dict[str, Any]:
+    scratch.mkdir(parents=True, exist_ok=True)
+    echo_port = reserve_port()
+    echo_server = start_echo(echo_port)
+    server_port = reserve_port()
+    auth = start_process(
+        [
+            str(authority),
+            f"127.0.0.1:{server_port}",
+            ANYTLS_PASSWORD,
+            JLS_USERNAME,
+            JLS_PASSWORD,
+        ]
+    )
+    mixed_port = reserve_port()
+    config = scratch / "jls.yaml"
+    write_client_config(
+        config,
+        mixed_port=mixed_port,
+        server_port=server_port,
+        sni=JLS_SNI,
+        carrier_block=f"""jls-opts:
+  username: {JLS_USERNAME}
+  password: {JLS_PASSWORD}
+""",
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        ok = wait_exchange(
+            process, mixed_port, "echo.phase6g", echo_port, b"jls-carrier"
+        )
+        return {"ok": ok, "process-alive": process.poll() is None}
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        stop_authority(auth)
         echo_server.close()
 
 
@@ -215,8 +258,7 @@ rules:
     process, stdout, stderr = launch(binary, config, scratch)
     try:
         time.sleep(0.5)
-        dead = process.poll() is not None
-        return {"rejected": dead}
+        return {"rejected": process.poll() is not None}
     finally:
         stop(process)
         stdout.close()
@@ -224,10 +266,14 @@ rules:
 
 
 def exercise(
-    binary: pathlib.Path, scratch: pathlib.Path, authority: pathlib.Path
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    shadow_authority: pathlib.Path,
+    jls_authority: pathlib.Path,
 ) -> dict[str, Any]:
     return {
-        "shadow-tls-v3": exercise_shadow_tls(binary, scratch / "stls", authority),
+        "shadow-tls-v3": exercise_shadow_tls(binary, scratch / "stls", shadow_authority),
+        "jls": exercise_jls(binary, scratch / "jls", jls_authority),
         "mutual-exclusion": exercise_mutual_exclusion(binary, scratch / "mutex"),
     }
 
@@ -238,6 +284,10 @@ def public_view(entry: dict[str, Any]) -> dict[str, Any]:
             "ok": entry["shadow-tls-v3"]["ok"],
             "process-alive": entry["shadow-tls-v3"]["process-alive"],
         },
+        "jls": {
+            "ok": entry["jls"]["ok"],
+            "process-alive": entry["jls"]["process-alive"],
+        },
         "mutual-exclusion": entry["mutual-exclusion"],
     }
 
@@ -246,7 +296,10 @@ def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase6g-anytls-carriers-") as temporary:
         root = pathlib.Path(temporary)
-        authority = authority_binary(root)
+        shadow_authority = build_authority(
+            root, "anytls_shadowtls_authority", "anytls-shadowtls-authority"
+        )
+        jls_authority = build_authority(root, "anytls_jls_authority", "anytls-jls-authority")
         binaries = build_binaries(
             root, "PHASE6GANYTLSCARRIERS_CARGO_TARGET", "phase6g-anytls-carriers"
         )
@@ -254,7 +307,9 @@ def main() -> int:
             for name in ["rust", "go"]:
                 scratch = root / name
                 scratch.mkdir()
-                observations[name] = exercise(binaries[name], scratch, authority)
+                observations[name] = exercise(
+                    binaries[name], scratch, shadow_authority, jls_authority
+                )
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
@@ -276,6 +331,8 @@ def main() -> int:
         go_view == rust_view
         and go_view["shadow-tls-v3"]["ok"]
         and go_view["shadow-tls-v3"]["process-alive"]
+        and go_view["jls"]["ok"]
+        and go_view["jls"]["process-alive"]
         and go_view["mutual-exclusion"]["rejected"]
     )
     if not matched:
@@ -283,11 +340,11 @@ def main() -> int:
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
         return 1
     FAILURE_ARTIFACT.unlink(missing_ok=True)
-    print("Phase 6G-E AnyTLS ShadowTLS carrier differential passed")
+    print("Phase 6G-E AnyTLS ShadowTLS+JLS carrier differential passed")
     print(json.dumps({"go": go_view, "rust": rust_view}, indent=2, sort_keys=True))
     print(
-        "Leftover: Restls/JLS dial carriers accept Clash config + mutual exclusion, "
-        "but end-to-end dial awaits dedicated TLS transports."
+        "Leftover: Restls dial is blocked on a shared Restls TLS client transport "
+        "(Go restls-client-go / utls fork; no Rust Restls client in-tree)."
     )
     return 0
 

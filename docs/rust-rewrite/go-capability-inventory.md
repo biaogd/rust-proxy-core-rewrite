@@ -146,7 +146,7 @@ The product parser enumerates outbound types in
 | OUT-13 | ShadowQUIC | Not started | 7C |
 | OUT-14 | WireGuard and AmneziaWG: userspace stacks, peers, routes and DNS | Not started | 6I |
 | OUT-15 | SSH: authentication, host-key policy, keepalive and multiplexing | Not started | 6J |
-| OUT-16 | Mieru, AnyTLS and Sudoku | Partial: Phase 6G-A/B/C/D/E implements Clash `type: anytls` config parse, password auth, native TLS + ShadowTLS carriers, default padding, session reuse/mux, UDP via UoT v2, idle janitor/heartbeat/recovery and Go/Rust TCP/mux/UDP/idle/carrier differentials; Restls/JLS dial leftover | Restls/JLS end-to-end dial, plus Mieru/Sudoku remain open |
+| OUT-16 | Mieru, AnyTLS and Sudoku | Partial: Phase 6G-A/B/C/D/E implements Clash `type: anytls` config parse, password auth, native TLS + ShadowTLS + JLS carriers, default padding, session reuse/mux, UDP via UoT v2, idle janitor/heartbeat/recovery and Go/Rust TCP/mux/UDP/idle/carrier differentials; Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) | Restls end-to-end dial (shared transport gate), plus Mieru/Sudoku remain open |
 | OUT-17 | MASQUE/CONNECT-IP and TrustTunnel | Not started | 7G–7H |
 | OUT-18 | OpenVPN and Gost relay | Not started | 7I–7J |
 | OUT-19 | Tailscale/tsnet and Tailscale DNS | Not started | 7K plus `with_gvisor` |

@@ -117,7 +117,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
 | TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
 | ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
-| AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A/B/C/D/E outbound native TLS TCP auth/padding/relay + session reuse/mux + UDP/UoT v2 + idle/heartbeat/recovery + ShadowTLS carrier (Restls/JLS dial leftover); inbound remains open |
+| AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A/B/C/D/E outbound native TLS TCP auth/padding/relay + session reuse/mux + UDP/UoT v2 + idle/heartbeat/recovery + ShadowTLS/JLS carriers (Restls dial blocked on shared Restls client transport); inbound remains open |
 | Mieru | Yes | Yes | Oracle | Not started | TCP/UDP/mux interop |
 | Sudoku | Yes | Yes | Oracle | Not started | Handshake/obfs/mux/replay interop |
 | TrustTunnel | Yes | Yes/ICMP | Oracle | Not started | HTTP/2/TCP/packet/ICMP interop |
@@ -170,7 +170,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
 | SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
 | Mieru | Oracle | Not started | Client/mux interop |
-| AnyTLS | Oracle | Partial — Phase 6G-A/B/C/D/E native TLS TCP + session reuse + UDP/UoT + idle/heartbeat/recovery + ShadowTLS carrier | Config parse, password auth, padding, TCP/mux/UDP/idle/carrier differentials; Restls/JLS dial leftover |
+| AnyTLS | Oracle | Partial — Phase 6G-A/B/C/D/E native TLS TCP + session reuse + UDP/UoT + idle/heartbeat/recovery + ShadowTLS/JLS carriers | Config parse, password auth, padding, TCP/mux/UDP/idle/carrier differentials; Restls dial blocked on shared Restls TLS client transport |
 | Sudoku | Oracle | Not started | Handshake/obfs/mux interop |
 | MASQUE | Oracle | Not started | CONNECT-IP/QUIC interop |
 | TrustTunnel | Oracle | Not started | HTTP/2/packet/ICMP interop |

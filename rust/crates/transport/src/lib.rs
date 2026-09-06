@@ -4,6 +4,7 @@
 //! Concrete carriers are added here as they are detached from adapter policy.
 
 mod http_upgrade;
+mod jls;
 mod mekya;
 mod mkcp;
 mod reality;
@@ -21,6 +22,7 @@ mod websocket;
 mod xhttp;
 
 pub use http_upgrade::{connect_http_upgrade_with_early_data, connect_v2ray_http_upgrade};
+pub use jls::{JlsConnectOptions, JlsError, connect_jls};
 pub use mekya::{MekyaConnection, MekyaConnector, MekyaOptions, connect_mekya};
 pub use mkcp::{MkcpConfig, connect_mkcp};
 pub use reality::{RealityConnectOptions, connect_reality, connect_reality_vision};

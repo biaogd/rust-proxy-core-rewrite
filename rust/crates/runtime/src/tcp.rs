@@ -689,11 +689,26 @@ async fn dial_anytls_tls_carrier(
             .await
             .map_err(|error| format!("AnyTLS ShadowTLS carrier failed: {error}"))
         }
-        rewrite_config::AnyTlsCarrier::Restls { .. } => {
-            Err("AnyTLS Restls carrier is not implemented yet (Phase 6G-E leftover)".to_owned())
-        }
-        rewrite_config::AnyTlsCarrier::Jls { .. } => {
-            Err("AnyTLS JLS carrier is not implemented yet (Phase 6G-E leftover)".to_owned())
+        rewrite_config::AnyTlsCarrier::Restls { .. } => Err(
+            "AnyTLS Restls carrier dial is blocked on a shared Restls TLS client transport \
+             (Go uses metacubex/restls-client-go, a utls fork; no Rust Restls client exists in-tree \
+             or on crates.io — only the 3andne/restls server binary). Phase 6G-E leftover."
+                .to_owned(),
+        ),
+        rewrite_config::AnyTlsCarrier::Jls { username, password } => {
+            // Go StreamTLSConn(JLS) replaces native TLS; AnyTLS AUTH rides the
+            // post-handshake JLS stream directly (no second TLS).
+            rewrite_outbound::connect_jls(
+                Box::new(outer),
+                rewrite_outbound::JlsConnectOptions {
+                    host: proxy.sni.as_deref().unwrap_or(&proxy.server),
+                    username,
+                    password,
+                    alpn: &anytls.alpn,
+                },
+            )
+            .await
+            .map_err(|error| format!("AnyTLS JLS carrier failed: {error}"))
         }
     }
 }

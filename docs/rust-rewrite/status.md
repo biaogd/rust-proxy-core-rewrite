@@ -181,7 +181,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6G-B AnyTLS session mux/reuse | Complete in declared client scope | Idle session pool matching Go CreateStream reuse, concurrent dials, FIN/session-alive half-close oracle (`phase6g_anytls_mux.py`) |
 | Phase 6G-C AnyTLS UDP via UoT v2 | Complete in declared client scope | Go `CreateProxy(uot.RequestDestination(2))` + LazyConn UoT v2, multi-destination association reuse on one UoT stream, follow-up associate parity (`phase6g_anytls_udp.py`) |
 | Phase 6G-D AnyTLS idle/heartbeat/recovery | Complete in declared client scope | Idle-session check/timeout floors and janitor matching Go, min-idle keep, HeartRequest→HeartResponse, dead-idle redial recovery, stress (`phase6g_anytls_idle.py`) |
-| Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS dial replacing native TLS (`phase6g_anytls_carriers.py`); Restls/JLS end-to-end dial awaits dedicated TLS transports |
+| Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS + JLS dial replacing native TLS (`phase6g_anytls_carriers.py`); Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6168,11 +6168,20 @@ carriers land in Phase 6G-E.
 
 Outbound AnyTLS now accepts Clash `shadow-tls-opts`, `restls-opts`, and
 `jls-opts` as mutually exclusive security carriers (matching Go
-`adapter/outbound/anytls.go`). ShadowTLS replaces native TLS via the existing
-`connect_shadow_tls` transport; AnyTLS AUTH/session rides the post-handshake
-ShadowTLS stream. `compat/scripts/phase6g_anytls_carriers.py` compares Go/Rust
-ShadowTLS v3 relay success and mutual-exclusion rejection against an independent
-ShadowTLS+AnyTLS authority helper, and is wired into the anytls CI shard.
-Restls/JLS config parse + exclusion are in scope; end-to-end dial remains a
-leftover until dedicated Restls/JLS TLS transports exist.
+`adapter/outbound/anytls.go`). ShadowTLS and JLS replace native TLS before
+AnyTLS AUTH (Go `vmess.StreamTLSConn` contract): ShadowTLS via the existing
+`connect_shadow_tls` transport, JLS via a new `connect_jls` path on
+`rustls-jls` (username→IV / password→key, matching `jls-tls`).
+`compat/scripts/phase6g_anytls_carriers.py` compares Go/Rust ShadowTLS v3 and
+JLS relay success plus mutual-exclusion rejection against independent
+authority helpers, and is wired into the anytls CI shard.
+
+**Restls leftover / shared transport gate:** Go dials Restls through
+`metacubex/restls-client-go` (a full utls/crypto/tls fork with Restls-Script
+record shaping). There is no Rust Restls *client* library in-tree or on
+crates.io (upstream `3andne/restls` is a server binary only). Landing Restls
+dial requires a shared Restls TLS client transport used by AnyTLS, Trojan,
+VLESS, VMess, and Shadowsocks — not an AnyTLS-only stub. Config parse +
+mutual exclusion already land; dial stays an explicit error pointing at that
+gate.
 

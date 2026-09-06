@@ -23,12 +23,12 @@ pub use reality::{wrap_client_reality, wrap_client_reality_with_vision};
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};
 pub use rewrite_transport::{
-    HttpObfsClient, HttpObfsServer, ShadowTlsAcceptResult, ShadowTlsConnectOptions, ShadowTlsError,
-    ShadowTlsHandshakeDial, ShadowTlsServerConfig, TlsObfsClient, TlsObfsServer, V2rayMux,
-    V2rayMuxNetwork, V2rayMuxOptions, WebSocketIo, accept_shadow_tls_v3,
-    connect_http_upgrade_with_early_data, connect_shadow_tls, connect_v2ray_http_upgrade,
-    connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
-    connect_websocket_with_headers,
+    HttpObfsClient, HttpObfsServer, JlsConnectOptions, JlsError, ShadowTlsAcceptResult,
+    ShadowTlsConnectOptions, ShadowTlsError, ShadowTlsHandshakeDial, ShadowTlsServerConfig,
+    TlsObfsClient, TlsObfsServer, V2rayMux, V2rayMuxNetwork, V2rayMuxOptions, WebSocketIo,
+    accept_shadow_tls_v3, connect_http_upgrade_with_early_data, connect_jls, connect_shadow_tls,
+    connect_v2ray_http_upgrade, connect_v2ray_websocket, connect_websocket,
+    connect_websocket_with_early_data, connect_websocket_with_headers,
 };
 pub use rewrite_transport::{
     MekyaConnection, MekyaConnector, MekyaOptions, MkcpConfig, connect_mekya, connect_mkcp,
