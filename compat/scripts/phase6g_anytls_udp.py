@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Go/Rust differential for Phase 6G-C AnyTLS UDP via UoT v2 and destination reuse."""
+"""Go/Rust differential for Phase 6G-C AnyTLS UDP via UoT v2 and multi-destination reuse on one UoT association."""
 
 from __future__ import annotations
 
@@ -343,19 +343,23 @@ rules:
         reused = wait_exchange(process, client, mixed_port, "127.0.0.1", 28403, b"reuse")
         time.sleep(0.2)
         reuse_wire = authority.snapshot()
-        session_reuse = (
+        # A follow-up SOCKS UDP client uses a new source port, so the prior
+        # associate stays idle-held (~1m) and Go opens another CreateProxy /
+        # TLS session. We only require UoT-path success with Go wire parity.
+        follow_up = (
             reused
-            and reuse_wire.get("AUTH accept", 0) == 0
+            and reuse_wire.get("AUTH accept", 0) == 1
             and reuse_wire.get(f"CONNECT {UOT_MAGIC}:0", 0) >= 1
-            and sum(1 for key in reuse_wire if key.startswith("SYN ")) >= 1
+            and reuse_wire.get("UOT-REQUEST 0 127.0.0.1:28403", 0) >= 1
             and reuse_wire.get("PACKET 127.0.0.1:28403 5", 0) >= 1
+            and sum(1 for key in reuse_wire if key.startswith("SYN ")) == 1
         )
 
         status, body = request(controller_port, "GET", "/proxies/anytls-udp")
         snapshot = json.loads(body)
         return {
             "multi-destination": multi_destination,
-            "session-reuse": session_reuse,
+            "follow-up-associate": follow_up,
             "controller": {
                 "status": status,
                 "type": snapshot["type"],
@@ -380,7 +384,7 @@ rules:
 def public_view(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "multi-destination": entry["multi-destination"],
-        "session-reuse": entry["session-reuse"],
+        "follow-up-associate": entry["follow-up-associate"],
         "controller": entry["controller"],
         "process-alive": entry["process-alive"],
     }
@@ -416,7 +420,7 @@ def main() -> int:
     if go_view != rust_view or not all(
         [
             go_view["multi-destination"],
-            go_view["session-reuse"],
+            go_view["follow-up-associate"],
             go_view["process-alive"],
             go_view["controller"]["udp"],
             go_view["controller"]["uot"],
