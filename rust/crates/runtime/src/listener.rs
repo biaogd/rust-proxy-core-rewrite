@@ -267,6 +267,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::Vmess
         | ProxyKind::Vless
         | ProxyKind::Trojan
+        | ProxyKind::AnyTls
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }

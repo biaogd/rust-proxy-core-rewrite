@@ -158,6 +158,7 @@ jobs:
           - controller-services-outbound
           - vless
           - trojan
+          - anytls
           - local-runtime
           - builtins
     defaults:
@@ -317,6 +318,7 @@ jobs:
       PHASE6FTROJANWS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6FTROJANGRPC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6FTROJANREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6GANYTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -365,6 +367,7 @@ jobs:
             controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
+            anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
@@ -432,6 +435,7 @@ jobs:
             compat/scripts/phase6f_trojan_websocket.py \
             compat/scripts/phase6f_trojan_grpc.py \
             compat/scripts/phase6f_trojan_reality.py \
+            compat/scripts/phase6g_anytls_tcp.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

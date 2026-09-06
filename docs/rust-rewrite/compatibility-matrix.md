@@ -117,7 +117,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
 | TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
 | ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
-| AnyTLS | Yes | Protocol-dependent | Oracle | Not started | Padding/session/auth interop |
+| AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A outbound native TLS TCP auth/padding/relay; inbound remains open |
 | Mieru | Yes | Yes | Oracle | Not started | TCP/UDP/mux interop |
 | Sudoku | Yes | Yes | Oracle | Not started | Handshake/obfs/mux/replay interop |
 | TrustTunnel | Yes | Yes/ICMP | Oracle | Not started | HTTP/2/TCP/packet/ICMP interop |
@@ -170,7 +170,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
 | SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
 | Mieru | Oracle | Not started | Client/mux interop |
-| AnyTLS | Oracle | Not started | Session/padding/TLS interop |
+| AnyTLS | Oracle | Partial — Phase 6G-A native TLS TCP | Config parse, password auth, default padding and TCP round-trip differential; mux/UDP/idle/Restls carriers remain open |
 | Sudoku | Oracle | Not started | Handshake/obfs/mux interop |
 | MASQUE | Oracle | Not started | CONNECT-IP/QUIC interop |
 | TrustTunnel | Oracle | Not started | HTTP/2/packet/ICMP interop |

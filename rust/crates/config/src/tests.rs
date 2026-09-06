@@ -129,6 +129,54 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn anytls_native_tls_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("Phase 6G-A AnyTLS config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::AnyTls);
+    assert!(proxy.tls);
+    assert!(!proxy.udp);
+    assert_eq!(proxy.sni.as_deref(), Some("anytls.example"));
+    assert!(proxy.skip_cert_verify);
+    assert_eq!(proxy.name_cert_verify.as_deref(), Some("verify.example"));
+    let options = proxy.anytls.as_ref().expect("AnyTLS options");
+    assert_eq!(options.password, "secret");
+    assert_eq!(options.alpn, ["h2", "http/1.1"]);
+    assert_eq!(options.client_metadata, "phase6g-a");
+    assert_eq!(options.idle_session_check_interval, 45);
+    assert_eq!(options.idle_session_timeout, 60);
+    assert_eq!(options.min_idle_session, 2);
+    assert!(options.disable_reuse);
+
+    let udp_source = format!(
+        "{MINIMAL}\nproxies:\n  - name: anytls-udp\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    udp: true\n"
+    );
+    let udp = Config::from_yaml(&udp_source).expect("AnyTLS udp flag");
+    assert!(udp.proxies[0].udp);
+
+    for unsupported in [
+        "shadow-tls-opts: {version: 3, password: x}",
+        "restls-opts: {password: x}",
+        "jls-opts: {username: u, password: p}",
+        "ech-opts: {enable: true}",
+        "client-fingerprint: chrome",
+        "reality-opts: {public-key: Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc}",
+        "network: ws",
+        "fingerprint: not-a-fingerprint",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn parses_minimal_runtime_config() {
     let config = Config::from_yaml(MINIMAL).expect("minimal config must parse");
     assert_eq!(config.mixed_port, 7890);
@@ -1356,6 +1404,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 vmess: None,
                 vless: None,
                 trojan: None,
+                anytls: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1437,6 +1486,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             vmess: None,
             vless: None,
             trojan: None,
+            anytls: None,
             headers: BTreeMap::new(),
         }],
     };

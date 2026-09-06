@@ -244,6 +244,16 @@ pub(crate) struct RawProxy {
     pub(crate) client_fingerprint: Option<String>,
     #[serde(rename = "reality-opts")]
     pub(crate) reality_opts: Option<RawRealityOptions>,
+    #[serde(rename = "client-metadata")]
+    pub(crate) client_metadata: Option<String>,
+    #[serde(rename = "idle-session-check-interval")]
+    pub(crate) idle_session_check_interval: Option<i64>,
+    #[serde(rename = "idle-session-timeout")]
+    pub(crate) idle_session_timeout: Option<i64>,
+    #[serde(rename = "min-idle-session")]
+    pub(crate) min_idle_session: Option<i64>,
+    #[serde(rename = "disable-reuse")]
+    pub(crate) disable_reuse: Option<bool>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,

@@ -146,7 +146,7 @@ The product parser enumerates outbound types in
 | OUT-13 | ShadowQUIC | Not started | 7C |
 | OUT-14 | WireGuard and AmneziaWG: userspace stacks, peers, routes and DNS | Not started | 6I |
 | OUT-15 | SSH: authentication, host-key policy, keepalive and multiplexing | Not started | 6J |
-| OUT-16 | Mieru, AnyTLS and Sudoku | Not started | 7D–7F |
+| OUT-16 | Mieru, AnyTLS and Sudoku | Partial: Phase 6G-A implements Clash `type: anytls` config parse, password auth, native TLS TCP carrier, default padding and a Go/Rust TCP differential | Session multiplexing/reuse (6G-B), UDP/UoT (6G-C), idle/heartbeat recovery (6G-D), optional Restls/ShadowTLS/JLS carriers (6G-E), plus Mieru/Sudoku remain open |
 | OUT-17 | MASQUE/CONNECT-IP and TrustTunnel | Not started | 7G–7H |
 | OUT-18 | OpenVPN and Gost relay | Not started | 7I–7J |
 | OUT-19 | Tailscale/tsnet and Tailscale DNS | Not started | 7K plus `with_gvisor` |

@@ -11,11 +11,12 @@ use url::Url;
 use crate::error::ConfigError;
 use crate::load::resolve_controller_pem;
 use crate::model::{
-    GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig, ProxyGroupConfig,
-    ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle,
-    RealityProxyConfig, TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode,
-    VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions,
-    VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
+    AnyTlsProxyConfig, GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig, ProxyConfig,
+    ProxyGroupConfig, ProxyGroupKind, ProxyKind, ProxyProviderConfig, ProxyProviderTransform,
+    ProxyProviderVehicle, RealityProxyConfig, TrojanProxyConfig, TrojanTransport, VlessFlow,
+    VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions,
+    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
+    VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawProviderHealthCheck, RawProxy, RawProxyGroup, RawProxyProvider,
@@ -135,10 +136,138 @@ pub(crate) fn parse_proxies(
             Some("vmess") => outbounds.push(parse_vmess_proxy(name, proxy)?),
             Some("vless") => outbounds.push(parse_vless_proxy(name, proxy)?),
             Some("trojan") => outbounds.push(parse_trojan_proxy(name, proxy)?),
+            Some("anytls") => outbounds.push(parse_anytls_proxy(name, proxy, home_directory)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
     Ok((rematches, outbounds))
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_anytls_proxy(
+    name: String,
+    proxy: RawProxy,
+    home_directory: Option<&Path>,
+) -> Result<ProxyConfig, ConfigError> {
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
+        || proxy.mkcp_opts.is_some()
+        || proxy.mekya_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.reality_opts.is_some()
+        || proxy.headers.is_some()
+        || proxy.extra.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "shadow-tls-opts" | "restls-opts" | "jls-opts" | "ech-opts"
+            )
+        })
+        || !proxy.extra.is_empty()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let password = proxy
+        .password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    if proxy.fingerprint.as_deref().is_some_and(|fingerprint| {
+        let normalized = fingerprint.trim().replace(':', "");
+        normalized.len() != 64 || !normalized.chars().all(|ch| ch.is_ascii_hexdigit())
+    }) || (proxy.certificate.is_some() != proxy.private_key.is_some())
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let alpn = proxy
+        .alpn
+        .unwrap_or_else(|| vec!["h2".to_owned(), "http/1.1".to_owned()]);
+    if alpn.iter().any(String::is_empty) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let idle_session_check_interval = proxy
+        .idle_session_check_interval
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(30);
+    let idle_session_timeout = proxy
+        .idle_session_timeout
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(30);
+    let min_idle_session = proxy
+        .min_idle_session
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::AnyTls,
+        server,
+        port,
+        username: None,
+        password: Some(password.clone()),
+        cipher: None,
+        tls: true,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: proxy.name_cert_verify.filter(|value| !value.is_empty()),
+        fingerprint: proxy.fingerprint.filter(|value| !value.is_empty()),
+        certificate: proxy
+            .certificate
+            .filter(|value| !value.is_empty())
+            .map(|value| resolve_controller_pem(value, home_directory))
+            .transpose()?,
+        private_key: proxy
+            .private_key
+            .filter(|value| !value.is_empty())
+            .map(|value| resolve_controller_pem(value, home_directory))
+            .transpose()?,
+        client_fingerprint: None,
+        reality: None,
+        udp: proxy.udp.unwrap_or(false),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: Some(AnyTlsProxyConfig {
+            password,
+            alpn,
+            client_metadata: proxy.client_metadata.unwrap_or_default(),
+            idle_session_check_interval,
+            idle_session_timeout,
+            min_idle_session,
+            disable_reuse: proxy.disable_reuse.unwrap_or(false),
+        }),
+        headers: BTreeMap::new(),
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -176,6 +305,11 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         || proxy.private_key.is_some()
         || (reality.is_none() && proxy.client_fingerprint.is_some())
         || proxy.headers.is_some()
+        || proxy.client_metadata.is_some()
+        || proxy.idle_session_check_interval.is_some()
+        || proxy.idle_session_timeout.is_some()
+        || proxy.min_idle_session.is_some()
+        || proxy.disable_reuse.is_some()
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
@@ -292,6 +426,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
             alpn,
             transport,
         }),
+        anytls: None,
         headers: BTreeMap::new(),
     })
 }
@@ -393,6 +528,7 @@ fn parse_remote_proxy(
         vmess: None,
         vless: None,
         trojan: None,
+        anytls: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -484,6 +620,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         vmess: None,
         vless: None,
         trojan: None,
+        anytls: None,
         headers: BTreeMap::new(),
     })
 }
@@ -581,6 +718,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         }),
         vless: None,
         trojan: None,
+        anytls: None,
         headers: BTreeMap::new(),
     })
 }
@@ -690,6 +828,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
             transport,
         }),
         trojan: None,
+        anytls: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1725,6 +1864,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         vmess: None,
         vless: None,
         trojan: None,
+        anytls: None,
         headers: BTreeMap::new(),
     }
 }
@@ -2086,6 +2226,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Vmess => "Vmess",
             ProxyKind::Vless => "Vless",
             ProxyKind::Trojan => "Trojan",
+            ProxyKind::AnyTls => "AnyTLS",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",

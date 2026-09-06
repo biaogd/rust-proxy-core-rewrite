@@ -12,6 +12,7 @@ members = [
   "crates/net",
   "crates/outbound",
   "crates/platform",
+  "crates/protocol-anytls",
   "crates/protocol-shadowsocks",
   "crates/protocol-trojan",
   "crates/protocol-vless",
