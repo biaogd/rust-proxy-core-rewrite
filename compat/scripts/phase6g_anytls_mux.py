@@ -94,6 +94,9 @@ class AnyTlsHandler(socketserver.BaseRequestHandler):
                     continue
                 if cmd == CMD_PSH:
                     if sid not in streams:
+                        # Stream already FINed / unknown — late writes must not be silent.
+                        authority.observe("PSH-AFTER-FIN")
+                        authority.observe(f"PSH-AFTER-FIN {sid}")
                         continue
                     buf = streams[sid]
                     if not buf and data:
@@ -194,25 +197,30 @@ def exchange(port: int, host: str, target_port: int, payload: bytes) -> bool:
         return recv_exact(stream, len(payload)) == payload
 
 
-def write_after_peer_fin(mixed_port: int) -> bool:
-    """Echo once, peer FINs, then the same SOCKS stream must not echo again."""
+def late_write_was_echoed(mixed_port: int) -> bool:
+    """Return True only when the peer incorrectly echoed a post-FIN late write.
+
+    A SOCKS read timeout is inconclusive and must not count as proof of a correct
+    close — the wire check for PSH-AFTER-FIN is authoritative.
+    """
     with connect_domain(mixed_port, "finwrite.phase6g", 28041) as stream:
         stream.settimeout(IO_DEADLINE)
         stream.sendall(b"fin-one")
         if recv_exact(stream, 7) != b"fin-one":
-            return False
+            return True
         time.sleep(0.2)
         try:
             stream.sendall(b"late-write")
         except OSError:
-            return True
+            return False
         stream.settimeout(0.5)
         try:
             data = stream.recv(16)
-        except (OSError, TimeoutError):
-            return True
-        # Must not receive an echoed late-write after peer FIN.
-        return data != b"late-write"
+        except TimeoutError:
+            return False
+        except OSError:
+            return False
+        return data == b"late-write"
 
 
 def wait_exchange(
@@ -302,22 +310,27 @@ rules:
         )
 
         authority.reset()
-        write_after_fin = write_after_peer_fin(mixed_port)
+        late_echoed = late_write_was_echoed(mixed_port)
         time.sleep(0.1)
         write_after_fin_wire = authority.snapshot()
+        write_after_fin = (
+            not late_echoed
+            and any(key.startswith("PEER-FIN ") for key in write_after_fin_wire)
+            and write_after_fin_wire.get("PSH-AFTER-FIN", 0) == 0
+        )
 
         return {
             "sequential-reuse": sequential_reuse,
             "concurrent-success": concurrent_success,
             "session-alive-after-fin": session_alive_after_fin,
-            "write-after-peer-fin": write_after_fin
-            and any(key.startswith("PEER-FIN ") for key in write_after_fin_wire),
+            "write-after-peer-fin": write_after_fin,
             "process-alive": process.poll() is None,
             "debug": {
                 "sequential-wire": sequential_wire,
                 "concurrent-ok": concurrent_ok,
                 "half-close-wire": half_close_wire,
                 "write-after-fin-wire": write_after_fin_wire,
+                "late-write-echoed": late_echoed,
             },
         }
     finally:

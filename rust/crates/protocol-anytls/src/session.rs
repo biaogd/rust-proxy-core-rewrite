@@ -426,6 +426,11 @@ fn schedule_close_from_inner(inner: &SessionInner) {
 
 impl Drop for AnyTlsStream {
     fn drop(&mut self) {
+        // Cancelling an in-flight write can leave a partial frame on the wire.
+        // Ban the session so the stream close_hook cannot return it to the pool.
+        if self.pending_write.take().is_some() {
+            schedule_close_from_inner(&self.session);
+        }
         let hook = self.close_hook.take();
         let session = Arc::clone(&self.session);
         let sid = self.sid;
@@ -515,11 +520,14 @@ impl AsyncWrite for AnyTlsStream {
         if self.write_closed {
             return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
-        if let Some(error) = self.terminus.error() {
-            self.write_closed = true;
-            return Poll::Ready(Err(error));
-        }
+        // Finish an in-flight write before surfacing remote terminus. Returning
+        // early would drop `pending_write` without polling it, cancelling a
+        // possible half-frame write while still allowing idle-pool reuse.
         if self.pending_write.is_none() {
+            if let Some(error) = self.terminus.error() {
+                self.write_closed = true;
+                return Poll::Ready(Err(error));
+            }
             let session = Arc::clone(&self.session);
             let sid = self.sid;
             let payload = buffer.to_vec();
@@ -531,6 +539,12 @@ impl AsyncWrite for AnyTlsStream {
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 Ok(accepted)
             }));
+        } else if self.terminus.error().is_some() {
+            // Remote FIN/reject raced an in-progress write: the frame may already
+            // be partially on the wire. Ban the session at the same bar as other
+            // partial-write failures (timeout/I/O error), then keep polling so the
+            // write future can finish or hit the write deadline.
+            schedule_close_from_inner(&self.session);
         }
         match self
             .pending_write
@@ -1305,22 +1319,120 @@ mod tests {
         // Hold the write lock so finalize_session_close must wait — previously
         // aborting the reader task cancelled that wait mid-cleanup.
         let session_lock = session.clone();
+        let lock_held = Arc::new(Notify::new());
+        let lock_held_signal = Arc::clone(&lock_held);
+        let release_lock = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::clone(&release_lock);
         let holder = tokio::spawn(async move {
             let _guard = session_lock.inner.write.lock().await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            lock_held_signal.notify_one();
+            while !release_flag.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         });
+        lock_held.notified().await;
 
         // Peer EOF ends recv_loop → request_session_close (must not abort itself).
+        // Do not call session.close() here — that would exercise the external path.
         drop(server);
-        tokio::time::timeout(Duration::from_secs(2), session.close())
-            .await
-            .expect("close must finish");
-        assert!(session.is_closed());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.is_closed() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("reader EOF must mark session closed while write lock is held");
         assert!(
-            hook_fired.load(Ordering::SeqCst),
-            "close_hook must run even when write lock was held during reader EOF"
+            !hook_fired.load(Ordering::SeqCst),
+            "finalize must still be blocked on the write lock"
         );
+        release_lock.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !hook_fired.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("close_hook must run after lock release without external close()");
         let _ = holder.await;
+    }
+
+    #[tokio::test]
+    async fn terminus_during_pending_write_bans_session() {
+        // Small carrier buffer so a PSH body stalls after the peer reads only the header.
+        let (client, mut server) = duplex(256);
+        let padding = Arc::new(StdMutex::new(Arc::new(
+            PaddingFactory::new(b"stop=1\n0=16-16").expect("scheme"),
+        )));
+        let blocked = Arc::new(Notify::new());
+        let blocked_signal = Arc::clone(&blocked);
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let mut header = [0_u8; HEADER_OVERHEAD];
+            let _ = server.read_exact(&mut header).await; // SYN
+            let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+            if length > 0 {
+                let mut body = vec![0_u8; length];
+                let _ = server.read_exact(&mut body).await;
+            }
+            // Read only the PSH header so the payload write stalls mid-frame.
+            let mut psh_header = [0_u8; HEADER_OVERHEAD];
+            let _ = server.read_exact(&mut psh_header).await;
+            blocked_signal.notify_one();
+            let _ = server.write_all(&frame(CMD_FIN, 1, &[])).await;
+            // Never consume the PSH body — client remains mid-write / times out.
+            std::future::pending::<()>().await;
+        });
+        let session = Session::start_with_write_deadline(
+            Box::new(client),
+            "mid-fin",
+            Arc::clone(&padding),
+            1,
+            Duration::from_millis(250),
+        )
+        .await
+        .expect("session");
+        flush_buffered(&session).await;
+        let pooled = Arc::new(AtomicBool::new(false));
+        let pooled_flag = Arc::clone(&pooled);
+        let session_for_hook = session.clone();
+        let stream_hook: StreamCloseHook = Box::new(move || {
+            // Mirrors Client idle return: only pool when session is still healthy.
+            if !session_for_hook.is_closed() {
+                pooled_flag.store(true, Ordering::SeqCst);
+            }
+        });
+        let stream = session
+            .open_stream(Some(stream_hook))
+            .await
+            .expect("stream");
+        let write_task = tokio::spawn(async move {
+            let mut stream = stream;
+            let payload = vec![b'x'; 4 * 1024];
+            let result = stream.write_all(&payload).await;
+            drop(stream);
+            result
+        });
+        // Wait until the peer has observed the PSH header (write in flight).
+        tokio::time::timeout(Duration::from_secs(2), blocked.notified())
+            .await
+            .expect("peer must see in-flight PSH");
+        // Remote FIN while the write future still holds the carrier: must ban the
+        // session (via terminus+pending schedule_close, write timeout, or Drop).
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("remote FIN during an in-flight write must ban the session");
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_task).await;
+        assert!(
+            !pooled.load(Ordering::SeqCst),
+            "half-frame session must not return to the idle pool"
+        );
+        session.close().await;
+        peer.abort();
     }
 
     #[tokio::test]
