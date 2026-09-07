@@ -1,11 +1,15 @@
-//! Hysteria2 client protocol (HY2-A): HTTP/3 auth + custom QUIC TCP streams.
+//! Hysteria2 client protocol: HTTP/3 auth + custom QUIC TCP streams (HY2-A),
+//! plus UDP datagrams, Salamander/port-hop, and Brutal congestion (HY2-B).
 //!
 //! Congestion: stock Quinn `BbrConfig` is used when `up`/`down` are unset (Go
-//! default). Brutal / bandwidth options are deferred to HY2-B.
+//! default). Brutal is available when upload bandwidth is configured.
 
 mod auth;
+mod bps;
 mod client;
 mod congestion;
+mod salamander;
+mod socket;
 mod tcp;
 mod udp;
 mod varint;
