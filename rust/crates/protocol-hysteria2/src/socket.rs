@@ -31,7 +31,7 @@ use std::{
 
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::salamander::Salamander;
 
