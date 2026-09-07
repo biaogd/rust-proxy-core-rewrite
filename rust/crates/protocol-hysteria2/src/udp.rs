@@ -542,4 +542,53 @@ mod tests {
         }
         assert_eq!(out.unwrap().data, p2);
     }
+
+    #[test]
+    fn malformed_udp_corpus_is_bounded_and_never_panics() {
+        let mut corpus: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0; 4],
+            vec![0; 7],
+            vec![0xff; 8],
+            // addr_len = 0 after header
+            {
+                let mut buf = vec![0u8; 9];
+                buf[8] = 0;
+                buf
+            },
+            // absurd addr_len varint
+            {
+                let mut buf = vec![0u8; 16];
+                buf[8] = 0xff;
+                buf[9] = 0xff;
+                buf[10] = 0xff;
+                buf[11] = 0xff;
+                buf
+            },
+        ];
+        for length in 0..=96_usize {
+            corpus.push(
+                (0..length)
+                    .map(|index| u8::try_from((index * 41 + length * 7) & 0xff).unwrap())
+                    .collect(),
+            );
+        }
+        let mut defrag = Defragger::default();
+        for bytes in corpus {
+            let _ = UdpMessage::parse(&bytes);
+            // Feed any parseable message; oversized / bad frag ids must not grow forever.
+            if let Some(parsed) = UdpMessage::parse(&bytes) {
+                let _ = defrag.feed(parsed);
+            }
+            assert!(
+                defrag.size <= MAX_DEFRAG_BYTES,
+                "defrag size exceeded bound: {}",
+                defrag.size
+            );
+        }
+        // Explicit oversize first fragment is rejected and clears state.
+        let huge = msg(&vec![0u8; MAX_DEFRAG_BYTES + 1], 0, 2, 99);
+        assert!(defrag.feed(huge).is_none());
+        assert_eq!(defrag.size, 0);
+    }
 }

@@ -237,6 +237,20 @@ impl Client {
         &self,
         destination: &Destination,
     ) -> Result<BoxedStream, Hysteria2ProtocolError> {
+        match self.open_tcp_once(destination).await {
+            Ok(stream) => Ok(stream),
+            Err(first) => {
+                // Dead or raced session after peer loss — drop and redial once.
+                self.invalidate().await;
+                self.open_tcp_once(destination).await.map_err(|_| first)
+            }
+        }
+    }
+
+    async fn open_tcp_once(
+        &self,
+        destination: &Destination,
+    ) -> Result<BoxedStream, Hysteria2ProtocolError> {
         let session = self.offer_session().await?;
         let stream = session.open_tcp(destination).await?;
         Ok(Box::new(stream))

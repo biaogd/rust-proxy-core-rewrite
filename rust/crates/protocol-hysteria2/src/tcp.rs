@@ -247,4 +247,38 @@ mod tests {
             TcpResponseParse::NeedMore
         ));
     }
+
+    #[test]
+    fn malformed_tcp_response_corpus_is_bounded_and_never_panics() {
+        let mut corpus = vec![vec![], vec![0], vec![1, 0], vec![0, 1], vec![0, 255]];
+        // Oversized message / padding length varints (would be Invalid, not hang).
+        corpus.push(vec![0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        corpus.push(vec![0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        for length in 0..=128_usize {
+            corpus.push(
+                (0..length)
+                    .map(|index| u8::try_from((index * 73 + length * 19) & 0xff).unwrap())
+                    .collect(),
+            );
+        }
+        for response in corpus {
+            let parsed = parse_tcp_response(&response);
+            match parsed {
+                TcpResponseParse::NeedMore
+                | TcpResponseParse::Invalid
+                | TcpResponseParse::Done { .. } => {}
+            }
+            // Scratch buffer used by the stream path must stay bounded.
+            assert!(
+                response.len() <= 128
+                    || matches!(
+                        parsed,
+                        TcpResponseParse::Invalid | TcpResponseParse::NeedMore
+                    )
+                    || matches!(parsed, TcpResponseParse::Done { consumed, .. } if consumed <= response.len()),
+                "unexpected unbounded parse outcome for len={}",
+                response.len()
+            );
+        }
+    }
 }

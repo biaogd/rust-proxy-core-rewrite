@@ -448,7 +448,8 @@ def main() -> int:
                 observations[name] = exercise(
                     binaries[name], binaries["go"], scratch
                 )
-            observations["rust-deferred-up-rejected"] = not config_validation(
+            # HY2-B accepts up/down; keep a hard-reject assertion for deferred knobs.
+            observations["rust-deferred-gecko-rejected"] = not config_validation(
                 binaries["rust"],
                 root / "rust-validate",
                 "proxies:\n"
@@ -457,7 +458,8 @@ def main() -> int:
                 "    server: 127.0.0.1\n"
                 "    port: 443\n"
                 "    password: x\n"
-                "    up: 30 Mbps\n",
+                "    obfs: gecko\n"
+                "    obfs-password: abcd\n",
             )
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
@@ -476,15 +478,15 @@ def main() -> int:
 
     go = normalize(observations["go"])
     rust = normalize(observations["rust"])
-    if go != rust or not observations.get("rust-deferred-up-rejected", False):
+    if go != rust or not observations.get("rust-deferred-gecko-rejected", False):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(
             json.dumps(
                 {
                     "go": go,
                     "rust": rust,
-                    "rust-deferred-up-rejected": observations.get(
-                        "rust-deferred-up-rejected"
+                    "rust-deferred-gecko-rejected": observations.get(
+                        "rust-deferred-gecko-rejected"
                     ),
                 },
                 indent=2,
