@@ -426,15 +426,20 @@ fn schedule_close_from_inner(inner: &SessionInner) {
 
 impl Drop for AnyTlsStream {
     fn drop(&mut self) {
-        // Cancelling an in-flight write can leave a partial frame on the wire.
-        // Ban the session so the stream close_hook cannot return it to the pool.
-        if self.pending_write.take().is_some() {
+        // Cancelling an in-flight PSH or FIN write can leave a partial frame on
+        // the wire. Ban the session so the stream close_hook cannot return it
+        // to the idle pool.
+        let abandoned_write = self.pending_write.take().is_some();
+        let abandoned_shutdown = self.pending_shutdown.take().is_some();
+        if abandoned_write || abandoned_shutdown {
             schedule_close_from_inner(&self.session);
         }
         let hook = self.close_hook.take();
         let session = Arc::clone(&self.session);
         let sid = self.sid;
-        let need_fin = !self.write_closed;
+        // If a FIN write was already in flight (and abandoned), do not start
+        // another one on a possibly half-written frame.
+        let need_fin = !self.write_closed && !abandoned_shutdown;
         self.write_closed = true;
         tokio::spawn(async move {
             if need_fin {
@@ -1503,6 +1508,106 @@ mod tests {
         assert!(
             dials.load(Ordering::SeqCst) >= 2,
             "next request must dial a new carrier, not reuse the partial-write session"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_fin_shutdown_blocks_pool_reuse() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_ref = Arc::clone(&dials);
+        let enter_partial = Arc::new(Notify::new());
+        let enter_partial_peer = Arc::clone(&enter_partial);
+        let dial_out: crate::DialOut = Arc::new(move || {
+            let dials_ref = Arc::clone(&dials_ref);
+            let enter_partial_peer = Arc::clone(&enter_partial_peer);
+            Box::pin(async move {
+                let n = dials_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                // Tiny buffer so a FIN header cannot complete without peer reads.
+                let (client, mut server) = duplex(4);
+                tokio::spawn(async move {
+                    let mut auth = [0_u8; 64];
+                    let mut filled = 0;
+                    while filled < auth.len() {
+                        match server.read(&mut auth[filled..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(got) => filled += got,
+                        }
+                    }
+                    if n == 1 {
+                        let mut byte = [0_u8; 1];
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = enter_partial_peer.notified() => {
+                                    // Consume one byte of the FIN frame, then stall.
+                                    let _ = server.read(&mut byte).await;
+                                    std::future::pending::<()>().await;
+                                }
+                                result = server.read(&mut byte) => {
+                                    match result {
+                                        Ok(0) | Err(_) => return,
+                                        Ok(_) => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut buffer = vec![0_u8; 4096];
+                    loop {
+                        match server.read(&mut buffer).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+                Ok(Box::new(client) as BoxedStream)
+            })
+        });
+        let client = crate::Client::new(
+            dial_out,
+            crate::ClientOptions {
+                client_metadata: "partial-fin".to_owned(),
+                idle_session_check_interval: Duration::from_secs(30),
+                idle_session_timeout: Duration::from_secs(30),
+                min_idle_session: 0,
+                disable_reuse: false,
+                password: "pw".to_owned(),
+            },
+        );
+        // Long deadline so we cancel via timeout/Drop, not write_all timeout.
+        client.test_set_write_deadline(Duration::from_secs(5));
+        let destination = Destination {
+            host: Host::Domain("example.com".to_owned()),
+            port: 443,
+        };
+        let mut stream = client
+            .create_proxy(&destination)
+            .await
+            .expect("first proxy");
+        enter_partial.notify_waiters();
+        // Start FIN shutdown; peer holds after one byte so the write stays in flight.
+        let shutdown = stream.shutdown();
+        tokio::pin!(shutdown);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown must still be blocked on partial FIN write"
+        );
+        // Drop cancels pending_shutdown mid-frame — must ban the session.
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            client.test_idle_len(),
+            0,
+            "partial-FIN session must not enter idle pool"
+        );
+        let second = client.create_proxy(&destination).await.expect("fresh dial");
+        drop(second);
+        assert!(
+            dials.load(Ordering::SeqCst) >= 2,
+            "next request must dial a new carrier, not reuse the partial-FIN session"
         );
         client.close().await;
     }
