@@ -16,7 +16,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc;
 
 use crate::varint::read_from;

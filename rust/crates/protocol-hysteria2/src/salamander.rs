@@ -6,7 +6,7 @@
 
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
-use rand::RngCore;
+use rand::RngExt;
 
 /// BLAKE2b digest with a 32-byte (256-bit) output, matching Go's `blake2b.Size256`.
 type Blake2b256 = Blake2b<U32>;
@@ -47,7 +47,7 @@ impl Salamander {
         if out.len() < out_len {
             return 0;
         }
-        rand::rng().fill_bytes(&mut out[..SALT_LEN]);
+        rand::rng().fill(&mut out[..SALT_LEN]);
         let key = self.key(&out[..SALT_LEN]);
         for (i, &c) in input.iter().enumerate() {
             out[i + SALT_LEN] = c ^ key[i % KEY_LEN];
