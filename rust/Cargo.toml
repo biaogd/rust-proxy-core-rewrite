@@ -13,6 +13,7 @@ members = [
   "crates/outbound",
   "crates/platform",
   "crates/protocol-anytls",
+  "crates/protocol-hysteria2",
   "crates/protocol-shadowsocks",
   "crates/protocol-trojan",
   "crates/protocol-vless",

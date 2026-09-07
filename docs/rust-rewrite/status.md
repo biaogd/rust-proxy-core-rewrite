@@ -182,6 +182,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6G-C AnyTLS UDP via UoT v2 | Complete in declared client scope | Go `CreateProxy(uot.RequestDestination(2))` + LazyConn UoT v2, multi-destination association reuse on one UoT stream, follow-up associate parity (`phase6g_anytls_udp.py`) |
 | Phase 6G-D AnyTLS idle/heartbeat/recovery | Complete in declared client scope | Idle-session check/timeout floors and janitor matching Go, min-idle keep, HeartRequest→HeartResponse, dead-idle redial recovery, stress (`phase6g_anytls_idle.py`) |
 | Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS + JLS dial replacing native TLS; url-test/healthcheck shares carrier dial (`phase6g_anytls_carriers.py`); Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) |
+| HY2-A Hysteria2 outbound TCP | Complete in declared client scope | Clash `type: hysteria2` parse (BBR when up/down unset via stock Quinn `BbrConfig`); HTTP/3 auth + custom QUIC TCP streams; TLS verify/skip; session reuse; groups/providers/health/reload; deferred knobs rejected; Go/Rust differential vs Go HY2 inbound (`phase_hy2a_hysteria2_tcp.py`). UDP/Salamander/Brutal/hop → HY2-B |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6193,3 +6194,32 @@ VLESS, VMess, and Shadowsocks — not an AnyTLS-only stub. Config parse +
 mutual exclusion already land; dial stays an explicit error pointing at that
 gate.
 
+
+## 2026-09-07 HY2-A Hysteria2 outbound TCP
+
+The first Hysteria2 outbound slice (`rewrite-protocol-hysteria2`) accepts Clash
+`type: hysteria2` with password/server/port, SNI, ALPN (default `h3`),
+skip-cert-verify, `disable-reuse`, and optional `udp` (advertised false until
+HY2-B). Bandwidth (`up`/`down`), Brutal, Salamander/Gecko, port hopping, Realm,
+ECH, fingerprint/mTLS/name-cert-verify, and QUIC window overrides are rejected
+at parse time (no silent downgrade).
+
+**Congestion gate:** stock Quinn `BbrConfig` is installed when up/down are unset,
+matching Go/sing-quic default BBR. No Quinn fork or shadow-rustls change was
+required. Brutal/bandwidth remain HY2-B; HY2-A claims TCP interop with that BBR
+choice, not Brutal/default bandwidth parity.
+
+Auth uses HTTP/3 `POST https://hysteria/auth` (status 233) via `h3`/`h3-quinn`
+on a cloned Quinn connection while custom bidi streams carry TCP framing
+(`0x401`). Runtime pools sessions with redial after dead connections; controller
+health/url-test and groups/providers/reload are wired. Datagram UDP is deferred.
+
+`compat/scripts/phase_hy2a_hysteria2_tcp.py` compares Go and Rust mixed clients
+against a Go Hysteria2 inbound authority for domain/IPv4/IPv6 relay, large
+payload, half-close, concurrent streams, cancel isolation, wrong-password and
+bad-cert rejection, target refused recovery, provider select, health delay, and
+reload. Happy-path proxies use `skip-cert-verify: true` because Go's HY2/QUIC
+stack does not apply global `custom-certifactes` the same way TCP outbounds do;
+a dedicated process without skip still proves bad-cert rejection. TCP open uses
+fast-open (write `TCPRequest`, parse `TCPResponse` on first read) matching Go
+and rsteria2 — eager response await deadlocks against the Go authority.

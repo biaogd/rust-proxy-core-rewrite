@@ -129,6 +129,49 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn hysteria2_hy2a_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: hy2.example\n    alpn: [h3]\n    skip-cert-verify: true\n    disable-reuse: true\n    udp: true\n"
+    );
+    let config = Config::from_yaml(&source).expect("HY2-A Hysteria2 config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Hysteria2);
+    assert!(proxy.tls);
+    assert!(proxy.udp);
+    assert_eq!(proxy.sni.as_deref(), Some("hy2.example"));
+    assert!(proxy.skip_cert_verify);
+    let options = proxy.hysteria2.as_ref().expect("Hysteria2 options");
+    assert_eq!(options.password, "secret");
+    assert_eq!(options.alpn, ["h3"]);
+    assert!(options.disable_reuse);
+
+    for unsupported in [
+        "up: 30 Mbps",
+        "down: 200 Mbps",
+        "obfs: salamander",
+        "obfs-password: x",
+        "ports: 443,8443",
+        "hop-interval: 15",
+        "cwnd: 10",
+        "bbr-profile: aggressive",
+        "udp-mtu: 1200",
+        "handshake-timeout: 30",
+        "fingerprint: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "name-cert-verify: other.example",
+        "certificate: ./client.crt",
+        "private-key: ./client.key",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
@@ -1445,6 +1488,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 vless: None,
                 trojan: None,
                 anytls: None,
+                hysteria2: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1527,6 +1571,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             vless: None,
             trojan: None,
             anytls: None,
+            hysteria2: None,
             headers: BTreeMap::new(),
         }],
     };

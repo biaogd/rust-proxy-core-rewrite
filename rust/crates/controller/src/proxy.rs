@@ -779,6 +779,14 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Hysteria2 => {
+                    let client = rewrite_outbound::Hysteria2Client::from_proxy(
+                        proxy,
+                        &config.trust_certificates,
+                    )
+                    .map_err(|_| ())?;
+                    client.create_proxy(&destination).await.map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -1014,6 +1022,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Vless => "Vless",
         rewrite_config::ProxyKind::Trojan => "Trojan",
         rewrite_config::ProxyKind::AnyTls => "AnyTLS",
+        rewrite_config::ProxyKind::Hysteria2 => "Hysteria2",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1030,7 +1039,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        rewrite_config::ProxyKind::Http => false,
+        // HY2-A: datagram UDP deferred to HY2-B (do not advertise).
+        rewrite_config::ProxyKind::Hysteria2 | rewrite_config::ProxyKind::Http => false,
     };
     json!({
         "alive": health.alive,
@@ -1189,7 +1199,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Hysteria2 | rewrite_config::ProxyKind::Http => false,
         };
     }
     let Some(group) = config

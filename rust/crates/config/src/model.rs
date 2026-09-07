@@ -163,6 +163,7 @@ pub enum ProxyKind {
     Vless,
     Trojan,
     AnyTls,
+    Hysteria2,
     Direct,
     Reject,
     Dns,
@@ -220,6 +221,7 @@ pub struct ProxyConfig {
     pub vless: Option<VlessProxyConfig>,
     pub trojan: Option<TrojanProxyConfig>,
     pub anytls: Option<AnyTlsProxyConfig>,
+    pub hysteria2: Option<Hysteria2ProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -234,6 +236,17 @@ pub struct AnyTlsProxyConfig {
     pub disable_reuse: bool,
     /// Outer security carrier replacing native TLS when set (Go-compatible).
     pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `type: hysteria2` options accepted in HY2-A (TCP outbound).
+///
+/// Bandwidth (`up`/`down`), Brutal, Salamander/Gecko, port hopping, Realm, ECH,
+/// and QUIC window overrides are rejected at parse time until HY2-B/C.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hysteria2ProxyConfig {
+    pub password: String,
+    pub alpn: Vec<String>,
+    pub disable_reuse: bool,
 }
 
 /// Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` (mutually exclusive).

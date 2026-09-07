@@ -141,7 +141,7 @@ The product parser enumerates outbound types in
 | OUT-08 | VLESS: encryption, Vision/Reality, TCP/UDP and packet modes | Partial: Phase 6E-A implements version-zero native TCP with canonical/Go-mapped UUIDs, all destination address types, lazy first-write framing, response addons, providers/groups, controller views and half-close; Phase 6E-B adds native TCP over verified/skip rustls with SNI, independent verification name, custom roots and controller health | UDP/packet data paths, encryption extensions, non-native outer transports, advanced TLS, Vision/Reality, mux and server direction remain later 6E gates |
 | OUT-09 | Trojan: TLS/security extensions, fallback and UDP | Not started | 6F |
 | OUT-10 | Snell versions, obfs/security extensions, UDP and pool | Not started | 7B |
-| OUT-11 | Hysteria v1/v2: QUIC/fake TCP, obfs, congestion, UDP and PMTUD | Not started | 6G |
+| OUT-11 | Hysteria v1/v2: QUIC/fake TCP, obfs, congestion, UDP and PMTUD | Partial: HY2-A implements Clash `type: hysteria2` outbound TCP with HTTP/3 auth, TLS verify/skip, stock Quinn BBR (up/down unset), session reuse, groups/providers/health/reload and Go/Rust differential vs Go HY2 inbound; deferred knobs rejected at parse | HY2-B datagram UDP, Salamander/Gecko, Brutal/up/down, port hop, udp-mtu/handshake timeout; HY2-C stress/netem/soak; Hysteria v1 and inbound remain open |
 | OUT-12 | TUIC v4/v5: QUIC, 0-RTT, congestion and UDP relay | Not started | 6H |
 | OUT-13 | ShadowQUIC | Not started | 7C |
 | OUT-14 | WireGuard and AmneziaWG: userspace stacks, peers, routes and DNS | Not started | 6I |
