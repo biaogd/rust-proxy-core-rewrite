@@ -177,12 +177,17 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6E-H/J VLESS REALITY and Vision composition | **Complete in declared Chrome 133 native-TCP client scope** | `reality-opts` uses patched `shadow-rustls`, accepts Go-compatible short IDs, rejects unsupported fingerprint names, supports optional X25519+ML-KEM-768, and passes authenticated relay/half-close plus complete normalized ClientHello semantics. Phase 6E-J reuses the bounded TLS-record boundary and proves REALITY+Vision DIRECT with nested TLS. Legacy-only TLS 1.2 cipher selection, other fingerprints, non-TCP carriers and server mode remain open |
 | Phase 6E-K/M VLESS xHTTP | Complete in declared common HTTP/2 client scope | `stream-one`, `stream-up`, `packet-up` and Go-compatible `auto` selection pass; authenticated REALITY composition and basic XMUX `max-concurrency`/`max-connections` reuse/reconnection also pass. HTTP/1.1/H3, download settings, alternate metadata/data placement, advanced reuse/padding controls, UDP and server direction remain open |
 | Phase 6E-N VLESS bounded production gate | Complete locally; three-platform CI pending | Real `sing-vless` authorities pass 32 concurrent pooled Gun streams, 16 concurrent xHTTP/XMUX streams, 16 HTTP-status failures followed by recovery, and process survival. A deterministic malformed-response corpus is bounded and panic-free. Multi-hour soak, public-server interop and resource ceilings remain release work |
+| Phase 6G-A AnyTLS native TLS TCP | Complete in declared client scope | Clash `type: anytls` config parse, password auth, shared TLS fields, default padding and Go/Rust TCP differential (`disable-reuse`) |
+| Phase 6G-B AnyTLS session mux/reuse | Complete in declared client scope | Idle session pool matching Go CreateStream reuse, concurrent dials, FIN/session-alive half-close oracle (`phase6g_anytls_mux.py`) |
+| Phase 6G-C AnyTLS UDP via UoT v2 | Complete in declared client scope | Go `CreateProxy(uot.RequestDestination(2))` + LazyConn UoT v2, multi-destination association reuse on one UoT stream, follow-up associate parity (`phase6g_anytls_udp.py`) |
+| Phase 6G-D AnyTLS idle/heartbeat/recovery | Complete in declared client scope | Idle-session check/timeout floors and janitor matching Go, min-idle keep, HeartRequest→HeartResponse, dead-idle redial recovery, stress (`phase6g_anytls_idle.py`) |
+| Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS + JLS dial replacing native TLS; url-test/healthcheck shares carrier dial (`phase6g_anytls_carriers.py`); Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
-| Cargo workspace | Implemented | Twenty-two focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
+| Cargo workspace | Implemented | Twenty-three focused crates under `rust/crates/`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented through Phase 6E-N; three-platform matrix pending | VLESS now has a dedicated fail-independent shard on Linux x86_64, Windows x86_64 and macOS arm64, including pooled Gun, common xHTTP, REALITY/XMUX and bounded production gates. Local Cargo targets remain outside the repository while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |
@@ -6105,3 +6110,86 @@ The extended independent Go REALITY authority and
 REALITY handshakes, TCP relay, large payloads, UDP association reuse and Trojan
 wire commands. The Trojan CI shard runs this gate on Linux, Windows and macOS.
 Fallback and inbound/server direction remain unclaimed.
+
+## 2026-09-06 Phase 6G-A AnyTLS native TLS TCP
+
+The first AnyTLS outbound slice accepts Clash `type: anytls` with required
+password/server/port plus shared TLS fields the Go adapter already exposes
+(SNI, ALPN, skip-cert-verify, name-cert-verify, fingerprint and client
+certificate material). Session options such as `client-metadata`, idle-session
+timers and `disable-reuse` are parsed for later phases. ShadowTLS/Restls/JLS/
+ECH/REALITY carriers remain rejected at load time for this slice.
+
+`rewrite-protocol-anytls` owns password authentication, the default padding
+scheme and a single-stream session over an established TLS carrier. Runtime and
+controller health dials compose the shared rustls client with that protocol
+crate. `compat/scripts/phase6g_anytls_tcp.py` compares Go and Rust against an
+independent AnyTLS authority for small/large TCP relay, wrong-password
+rejection and auth/settings wire observations (with `disable-reuse: true` so
+stream IDs stay comparable before multiplexing lands). Half-close is deferred
+to Phase 6G-B because Go's AnyTLS stream has no `CloseWrite` and races under
+`Relay`. The dedicated AnyTLS CI shard runs this gate. Multiplexing/reuse,
+Idle/heartbeat recovery and optional alternate TLS carriers remain open as
+Phases 6G-D–E after 6G-C landed.
+
+## 2026-09-06 Phase 6G-B AnyTLS session multiplexing and reuse
+
+Session pooling now matches Go `transport/anytls/session.Client`: idle sessions
+are returned on stream close and reused for sequential dials (one AUTH, SYN 1
+then SYN 2). Concurrent SOCKS dials succeed (typically multiple sessions when
+no idle entry exists). Half-close is covered by a Go-observable FIN + session-
+alive oracle rather than SOCKS `SHUT_WR` (Go Stream has no `CloseWrite`).
+`compat/scripts/phase6g_anytls_mux.py` keeps Go/Rust aligned. UDP/UoT landed in 6G-C;
+idle/heartbeat recovery polish landed in 6G-D. Restls/ShadowTLS/JLS landed in 6G-E.
+
+## 2026-09-06 Phase 6G-C AnyTLS UDP via UoT v2
+
+AnyTLS UDP now follows Go `ListenPacketContext`: the shared pooled client opens
+one stream to `uot.RequestDestination(2)` (`sp.v2.udp-over-tcp.arpa`) and wraps
+it with sing-compatible UoT v2 (`IsConnect == false`). One SOCKS UDP association
+can therefore carry packets to multiple destinations (Go LazyConn / IsConnect=false). `compat/scripts/phase6g_anytls_udp.py`
+compares Go and Rust against an independent AnyTLS+UoT authority. Idle-session
+janitor polish landed in 6G-D; Restls/ShadowTLS/JLS carriers landed in 6G-E.
+
+## 2026-09-06 Phase 6G-D AnyTLS idle cleanup, heartbeat, disconnect recovery
+
+Idle-session pool behavior now matches Go `transport/anytls/session.Client`
+janitor contracts: check/timeout floors of `<=5s → 30s`, expire-and-close when
+`min-idle-session` is exhausted, and refresh `idleSince` to retain the minimum.
+Clients answer `cmdHeartRequest` with `cmdHeartResponse` (Go does not actively
+probe; padding/`cmdWaste` remains write-time only). Opening on a dead idle
+session falls through to a fresh dial so recovery matches Go after the failed
+attempt is retried. `compat/scripts/phase6g_anytls_idle.py` compares Go/Rust on
+idle-evict, min-idle-keep, disconnect recovery, heartbeat response reuse, and
+8-way stress (`ok`/`ok_count` only — concurrent AUTH reuse is timing-dependent),
+and is wired into the anytls CI shard. Optional Restls/ShadowTLS/JLS carriers
+land in Phase 6G-E.
+
+## 2026-09-06 Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers
+
+Outbound AnyTLS now accepts Clash `shadow-tls-opts`, `restls-opts`, and
+`jls-opts` as mutually exclusive security carriers (matching Go
+`adapter/outbound/anytls.go`). ShadowTLS and JLS replace native TLS before
+AnyTLS AUTH (Go `vmess.StreamTLSConn` contract): ShadowTLS via the existing
+`connect_shadow_tls` transport, JLS via a new `connect_jls` path on
+`rustls-jls` (username→IV / password→key, matching `jls-tls`).
+`compat/scripts/phase6g_anytls_carriers.py` compares Go/Rust ShadowTLS v3 and
+JLS relay success, url-test/healthcheck delay over those carriers, plus
+mutual-exclusion rejection against independent authority helpers, and is wired
+into the anytls CI shard.
+
+Session-layer review fixes (Go oracle alignment): bounded stream recv queues
+(capacity 1, awaitable PSH send for backpressure), cancellable session close
+(`close_notify` + write deadline + reader abort), shared padding pointer across
+Client/sessions for `cmdUpdatePaddingScheme`, and v2 SYNACK 3s watchdog with
+remote reject reason on stream read.
+
+**Restls leftover / shared transport gate:** Go dials Restls through
+`metacubex/restls-client-go` (a full utls/crypto/tls fork with Restls-Script
+record shaping). There is no Rust Restls *client* library in-tree or on
+crates.io (upstream `3andne/restls` is a server binary only). Landing Restls
+dial requires a shared Restls TLS client transport used by AnyTLS, Trojan,
+VLESS, VMess, and Shadowsocks — not an AnyTLS-only stub. Config parse +
+mutual exclusion already land; dial stays an explicit error pointing at that
+gate.
+

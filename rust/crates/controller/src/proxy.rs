@@ -758,6 +758,27 @@ pub(super) async fn measure_http_delay(
                     )
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::AnyTls => {
+                    let anytls = proxy.anytls.as_ref().ok_or(())?;
+                    let outer = rewrite_outbound::connect_anytls_carrier(
+                        proxy,
+                        &server,
+                        config.ipv6,
+                        &config.trust_certificates,
+                        controller_socket_options(config),
+                        None,
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    rewrite_outbound::connect_anytls_on_stream(
+                        outer,
+                        &destination,
+                        &anytls.password,
+                        &anytls.client_metadata,
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -992,6 +1013,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Vmess => "Vmess",
         rewrite_config::ProxyKind::Vless => "Vless",
         rewrite_config::ProxyKind::Trojan => "Trojan",
+        rewrite_config::ProxyKind::AnyTls => "AnyTLS",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1002,7 +1024,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Shadowsocks
         | rewrite_config::ProxyKind::Vmess
         | rewrite_config::ProxyKind::Vless
-        | rewrite_config::ProxyKind::Trojan => proxy.udp,
+        | rewrite_config::ProxyKind::Trojan
+        | rewrite_config::ProxyKind::AnyTls => proxy.udp,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
@@ -1026,8 +1049,10 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         "udp": udp,
         "uot": matches!(
             proxy.kind,
-            rewrite_config::ProxyKind::Vmess | rewrite_config::ProxyKind::Vless
+            rewrite_config::ProxyKind::Vmess
+                | rewrite_config::ProxyKind::Vless
                 | rewrite_config::ProxyKind::Trojan
+                | rewrite_config::ProxyKind::AnyTls
         )
             || (proxy.kind == rewrite_config::ProxyKind::Shadowsocks && proxy.udp_over_tcp),
         "xudp": proxy.vmess.as_ref().is_some_and(|vmess| {
@@ -1158,7 +1183,8 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Shadowsocks
             | rewrite_config::ProxyKind::Vmess
             | rewrite_config::ProxyKind::Vless
-            | rewrite_config::ProxyKind::Trojan => proxy.udp,
+            | rewrite_config::ProxyKind::Trojan
+            | rewrite_config::ProxyKind::AnyTls => proxy.udp,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns

@@ -162,6 +162,7 @@ pub enum ProxyKind {
     Vmess,
     Vless,
     Trojan,
+    AnyTls,
     Direct,
     Reject,
     Dns,
@@ -218,7 +219,40 @@ pub struct ProxyConfig {
     pub vmess: Option<VmessProxyConfig>,
     pub vless: Option<VlessProxyConfig>,
     pub trojan: Option<TrojanProxyConfig>,
+    pub anytls: Option<AnyTlsProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnyTlsProxyConfig {
+    pub password: String,
+    pub alpn: Vec<String>,
+    pub client_metadata: String,
+    pub idle_session_check_interval: u64,
+    pub idle_session_timeout: u64,
+    pub min_idle_session: usize,
+    pub disable_reuse: bool,
+    /// Outer security carrier replacing native TLS when set (Go-compatible).
+    pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` (mutually exclusive).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnyTlsCarrier {
+    NativeTls,
+    ShadowTls {
+        password: String,
+        version: u8,
+    },
+    Restls {
+        password: String,
+        version_hint: String,
+        restls_script: String,
+    },
+    Jls {
+        username: String,
+        password: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
