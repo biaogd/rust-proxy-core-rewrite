@@ -320,7 +320,17 @@ rules:
         wait_controller(process, controller_port)
 
         first = wait_exchange(process, client, mixed_port, "127.0.0.1", 28401, b"ready")
-        second = exchange(client, mixed_port, "192.0.2.91", 28402, bytes(range(256)) * 12)
+        # Same retry helper as the first packet: a one-shot exchange can miss the
+        # SOCKS response under CI load even when the UoT PACKET already landed
+        # (macOS anytls shard flake on 3804003f).
+        second = wait_exchange(
+            process,
+            client,
+            mixed_port,
+            "192.0.2.91",
+            28402,
+            bytes(range(256)) * 12,
+        )
         multi_wire = authority.snapshot()
         multi_destination = (
             first
