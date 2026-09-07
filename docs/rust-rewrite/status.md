@@ -184,7 +184,7 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS + JLS dial replacing native TLS; url-test/healthcheck shares carrier dial (`phase6g_anytls_carriers.py`); Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) |
 | HY2-A Hysteria2 outbound TCP | Complete in declared client scope | Clash `type: hysteria2` parse (BBR when up/down unset via stock Quinn `BbrConfig`); HTTP/3 auth + custom QUIC TCP streams; TLS verify/skip; session reuse; groups/providers/health/reload; deferred knobs rejected; Go/Rust differential vs Go HY2 inbound (`phase_hy2a_hysteria2_tcp.py`) |
 | HY2-B Hysteria2 UDP/obfs/Brutal/hop | Complete in declared client scope | QUIC datagram UDP (frag/reassembly bounds), Salamander, up/down Brutal + CC-RX reconcile, stock BBR when unset, ports/hop-interval, udp-mtu/handshake-timeout/receive windows; `cwnd`/`bbr-profile`/Gecko/Realm/ECH rejected; Go/Rust differential (`phase_hy2b_hysteria2.py`) |
-| HY2-C Hysteria2 stress/netem/soak | Complete in declared client scope (short soak in CI) | Concurrent TCP/UDP, cancel churn, authority restart + interrupt recovery, reload proxy-removal (404 + route + RSS/FD bounds), bounded TCP/UDP malformed corpora, fixed-param netem relay (kernel `tc` when available). Diff: `phase_hy2c_hysteria2.py`. Soak harness `phase_hy2c_hysteria2_soak.py` (CI default 45s; full ≥2h via `HY2C_SOAK_SECONDS=7200`). CI shard `hysteria2` runs A/B/C. Realm/Gecko/ECH/0-RTT/v1/inbound still deferred |
+| HY2-C Hysteria2 stress/netem/soak | Complete in declared client scope | Concurrent TCP/UDP, cancel churn, authority restart + interrupt recovery, reload proxy-removal (404 + route + RSS/FD bounds), bounded TCP/UDP malformed corpora, fixed-param netem relay (kernel `tc` when available). Diff: `phase_hy2c_hysteria2.py`. Soak harness `phase_hy2c_hysteria2_soak.py` (CI default 45s). **Full ≥2h soak passed** on `8a9b0761` at 2026-09-07T15:29:07Z (`HY2C_SOAK_SECONDS=7200`, rust then go; wall ~4.0h; RSS/FD bounded, failure-rate ok). CI shard `hysteria2` runs A/B/C. Realm/Gecko/ECH/0-RTT/v1/inbound still deferred |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6266,7 +6266,14 @@ Same draft PR #12. Bounded production gate and CI matrix closeout for outbound H
   relay-only. Go/Rust compare throughput class + recovery, not per-packet timing.
 - Soak harness: `compat/scripts/phase_hy2c_hysteria2_soak.py`. CI uses
   `HY2C_SOAK_SECONDS=45`. Full ≥2 hour resource-growth soak:
-  `HY2C_SOAK_SECONDS=7200` (overnight/release; not required for every PR push).
+  `HY2C_SOAK_SECONDS=7200` (runs rust then go for that duration each).
+- **Full soak evidence (2026-09-07):** SHA `8a9b0761`, started
+  `2026-09-07T11:29:01Z`, finished `2026-09-07T15:29:07Z` (wall ~4.002h),
+  exit 0. Outcome: `full-soak=true`, `failure-rate-class=ok`,
+  `rss-bounded=true`, `fd-bounded=true`, `process-alive=true`. Mid-run
+  samples: rust client ~51 MiB RSS / 15 FDs at ~68 min; go client ~52 MiB
+  RSS / 10 FDs early in its 2h window. No failure artifact; stderr only
+  showed the Cargo finish line.
 - CI: new `hysteria2` differential shard runs `phase_hy2a_*`, `phase_hy2b_*`,
   `phase_hy2c_*` on Linux x86_64, Windows x86_64, macOS arm64.
 
