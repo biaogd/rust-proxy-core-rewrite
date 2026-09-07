@@ -197,12 +197,28 @@ pub async fn connect_anytls_carrier(
                 AnyTlsProxyError::Dial(format!("AnyTLS ShadowTLS carrier failed: {error}"))
             })
         }
-        AnyTlsCarrier::Restls { .. } => Err(AnyTlsProxyError::Dial(
-            "AnyTLS Restls carrier dial is blocked on a shared Restls TLS client transport \
-             (Go uses metacubex/restls-client-go, a utls fork; no Rust Restls client exists in-tree \
-             or on crates.io — only the 3andne/restls server binary). Phase 6G-E leftover."
-                .to_owned(),
-        )),
+        AnyTlsCarrier::Restls {
+            password,
+            version_hint,
+            restls_script,
+        } => {
+            let alpn: Vec<&[u8]> = anytls.alpn.iter().map(String::as_bytes).collect();
+            rewrite_transport::connect_restls(
+                Box::new(outer),
+                rewrite_transport::RestlsConnectOptions {
+                    tls: restls_tls_options(proxy, custom_roots, &alpn),
+                    password,
+                    version_hint,
+                    script: restls_script,
+                    client_fingerprint: proxy.client_fingerprint.as_deref(),
+                },
+                clock,
+            )
+            .await
+            .map_err(|error| {
+                AnyTlsProxyError::Dial(format!("AnyTLS Restls carrier failed: {error}"))
+            })
+        }
         AnyTlsCarrier::Jls { username, password } => {
             // Go StreamTLSConn(JLS) replaces native TLS; AnyTLS AUTH rides the
             // post-handshake JLS stream directly (no second TLS).
@@ -218,6 +234,26 @@ pub async fn connect_anytls_carrier(
             .await
             .map_err(|error| AnyTlsProxyError::Dial(format!("AnyTLS JLS carrier failed: {error}")))
         }
+    }
+}
+
+fn restls_tls_options<'a>(
+    proxy: &'a ProxyConfig,
+    custom_roots: &'a [String],
+    alpn: &'a [&'a [u8]],
+) -> rewrite_transport::ClientTlsOptions<'a> {
+    rewrite_transport::ClientTlsOptions {
+        server_name: proxy.sni.as_deref().unwrap_or(&proxy.server),
+        verification_name: proxy.name_cert_verify.as_deref(),
+        skip_certificate_verification: proxy.skip_cert_verify,
+        fingerprint: proxy.fingerprint.as_deref(),
+        certificate: proxy.certificate.as_deref(),
+        private_key: proxy.private_key.as_deref(),
+        custom_roots,
+        ech_config: None,
+        alpn_protocols: alpn,
+        tls12_only: false,
+        tls13_only: true,
     }
 }
 

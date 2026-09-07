@@ -8,6 +8,7 @@ mod jls;
 mod mekya;
 mod mkcp;
 mod reality;
+mod restls;
 mod shadow_tls;
 mod shadow_tls_config;
 mod shadow_tls_server;
@@ -26,6 +27,7 @@ pub use jls::{JlsConnectOptions, JlsError, connect_jls};
 pub use mekya::{MekyaConnection, MekyaConnector, MekyaOptions, connect_mekya};
 pub use mkcp::{MkcpConfig, connect_mkcp};
 pub use reality::{RealityConnectOptions, connect_reality, connect_reality_vision};
+pub use restls::{RestlsConnectOptions, connect_restls};
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadow_tls_server::{
     ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,

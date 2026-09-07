@@ -1,5 +1,13 @@
 # Rust rewrite roadmap and differential test plan
 
+## Phase 6G-F — Restls TLS 1.3 client
+
+One vertical slice: YAML AnyTLS `restls-opts` → shared Restls TLS 1.3 carrier →
+AnyTLS session → TCP echo through a Go authority. Add TLS hooks to shadow-rustls,
+publish a tested immutable tag, pin it in Cargo, then run Go contracts and Go/Rust
+product differentials on Linux/Windows/macOS. TLS 1.2, resumption, exact browser
+fingerprints, other consumers and inbound stay out of scope. See [restls.md](restls.md).
+
 ## Delivery rule
 
 The rewrite proceeds as a sequence of independently runnable vertical slices.

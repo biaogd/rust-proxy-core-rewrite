@@ -1,10 +1,21 @@
 # Rust rewrite status
 
-Last updated: 2026-09-03
+Last updated: 2026-09-07
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ## Overall status
+
+Phase 6G-F adds Restls TLS 1.3 and AnyTLS carrier integration. Local Go-server
+contract passes (default/custom scripts, 200 KiB transfer, wrong password and
+ordinary TLS rejection). Product differential and native CI validation remain
+pending; do not infer production/full compatibility. See [Restls scope](restls.md).
+Local `cargo fmt --all --check` and Clippy for config/transport/outbound with
+all targets/features pass. Full workspace Clippy/test, Go baseline and product
+differentials are CI gates, not claimed locally passed. TLS hook tag:
+`rustls-0.23.43-shadow.3` (`f10697d571764a016ec57b19d53692785fe2b121`).
+Earlier 6G-E Restls-blocked statements describe that historical phase, superseded
+only for this TLS 1.3 slice. TLS 1.2 and remaining release gates stay open.
 
 | Workstream | State | Evidence / next gate |
 | --- | --- | --- |
@@ -6192,4 +6203,3 @@ dial requires a shared Restls TLS client transport used by AnyTLS, Trojan,
 VLESS, VMess, and Shadowsocks — not an AnyTLS-only stub. Config parse +
 mutual exclusion already land; dial stays an explicit error pointing at that
 gate.
-

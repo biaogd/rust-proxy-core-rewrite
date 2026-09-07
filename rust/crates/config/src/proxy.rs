@@ -191,8 +191,8 @@ fn parse_anytls_proxy(
     let carrier = parse_anytls_carrier(&name, shadow_tls_opts, restls_opts, jls_opts)?;
     if client_fingerprint.is_some() && !matches!(carrier, AnyTlsCarrier::ShadowTls { .. }) {
         // Go feeds client-fingerprint into ShadowTLS/Restls/JLS uTLS paths. Native
-        // TLS AnyTLS ignores it today; reject until Restls/JLS dial exists so we
-        // do not silently drop an observed Go knobs for those carriers.
+        // Native TLS AnyTLS ignores it today. Carrier-specific validation below
+        // rejects fingerprints that their TLS implementations cannot provide.
         if !matches!(
             carrier,
             AnyTlsCarrier::Restls { .. } | AnyTlsCarrier::Jls { .. }
@@ -210,6 +210,12 @@ fn parse_anytls_proxy(
                 3
             }
         })?;
+    }
+    if let AnyTlsCarrier::Restls { version_hint, .. } = &carrier {
+        if !version_hint.eq_ignore_ascii_case("tls13") {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        validate_shadow_tls_client_fingerprint(&name, client_fingerprint.as_deref(), 3)?;
     }
     let server = proxy
         .server

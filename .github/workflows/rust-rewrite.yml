@@ -93,6 +93,18 @@ jobs:
       - name: Run Rust tests
         run: cargo test --manifest-path rust/Cargo.toml --workspace --all-features --locked
 
+      - name: Set up Go for Restls contract
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Restls TLS 1.3 Go contract
+        run: |
+          oracle="$RUNNER_TEMP/restls-authority"
+          if [ "$RUNNER_OS" = "Windows" ]; then oracle="${oracle}.exe"; fi
+          go build -o "$oracle" ./compat/helpers/restls_authority
+          RESTLS_AUTHORITY="$oracle" cargo test --manifest-path rust/Cargo.toml -p rewrite-transport restls_go_oracle --locked -- --ignored --nocapture
+
       - name: Build release binary
         run: cargo build --manifest-path rust/Cargo.toml --package rewrite-cli --all-features --release --locked
 
@@ -440,6 +452,7 @@ jobs:
             compat/scripts/phase6g_anytls_udp.py \
             compat/scripts/phase6g_anytls_idle.py \
             compat/scripts/phase6g_anytls_carriers.py \
+            compat/scripts/phase6g_anytls_restls.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

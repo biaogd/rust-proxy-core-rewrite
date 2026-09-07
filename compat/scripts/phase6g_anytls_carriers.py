@@ -489,8 +489,8 @@ def main() -> int:
     print("Phase 6G-E AnyTLS ShadowTLS+JLS carrier (+health) differential passed")
     print(json.dumps({"go": go_view, "rust": rust_view}, indent=2, sort_keys=True))
     print(
-        "Leftover: Restls dial is blocked on a shared Restls TLS client transport "
-        "(Go restls-client-go / utls fork; no Rust Restls client in-tree)."
+        "Restls TLS 1.3 has a separate Phase 6G-F differential; "
+        "TLS 1.2/resumption and remaining Restls release gates stay open."
     )
     return 0
 

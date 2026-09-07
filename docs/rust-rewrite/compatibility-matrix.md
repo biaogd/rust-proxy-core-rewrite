@@ -25,7 +25,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 
 | Capability | Go | Rust | Required parity evidence |
 | --- | --- | --- | --- |
-| Phase 5A1 default config/home resolution | Oracle | **Parity** | Existing legacy home, absolute/relative `-d` and `CLASH_HOME_DIR`, conditional absolute/relative XDG fallback, default/explicit initial-file creation and missing-parent behavior in `compat/scripts/phase5a1.py`; the fixture isolates both POSIX `HOME` and Windows `USERPROFILE`, with native Windows revalidation pending |
+| Phase 5A1 default config/home resolution | Oracle | **Parity** | Existing legacy home, absolute/relative `-d` and `CLASH_HOME_DIR`, conditional absolute/relative XDG fallback, default/explicit initial-file creation and missing-parent behavior in `compat/scripts/phase5a1.py`; the fixture isolates both POSIX `HOME` and Windows `USERPROFILE`, with native Windows relocal Go contract passed; native/product CI pending |
 | Phase 1 explicit `-f` configuration file | Oracle | **Parity** | `compat/scripts/phase1.py` on Darwin arm64 and Linux amd64 |
 | Phase 5A1 `-d`, `-config`, stdin config and input precedence | Oracle | **Parity** | CLI-over-environment and base64 > stdin > explicit/env file > default selection, normalized success paths, exit and error classes in `compat/scripts/phase5a1.py` |
 | Phase 1 `-t` configuration corpus | Oracle | **Parity** | Valid minimal, malformed YAML, invalid mode/rule/port-type and out-of-range integer |
@@ -57,7 +57,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 5A6g `generate sudoku-keypair` | Oracle | **Parity** | Two canonical Edwards25519 split scalars, compressed public point, independent scalar-sum/basepoint recovery, exact lowercase hex labels, trailing argument and startup short-circuit in `compat/scripts/phase5a6g.py` |
 | Full age identities and encrypted config | Oracle | Partial | Multiple identities and hybrid/PQ, SSH, encrypted-identity and plugin forms remain unclaimed |
 | Phase 1 SIGTERM cleanup | Oracle | **Parity** | Exit 0, listener/idle stream closure and bounded task drain |
-| Phase 5A7b local-resource shutdown | Oracle | **Parity on Unix; Windows revalidation pending** | Unix SIGINT/SIGTERM and Windows `CTRL_BREAK_EVENT` drive zero exit, bounded idle-stream closure and immediate mixed/controller/DNS TCP plus DNS UDP port release in `compat/scripts/phase5a7b.py`; the new native Windows path is not claimed before CI completes |
+| Phase 5A7b local-resource shutdown | Oracle | **Parity on Unix; Windows relocal Go contract passed; native/product CI pending** | Unix SIGINT/SIGTERM and Windows `CTRL_BREAK_EVENT` drive zero exit, bounded idle-stream closure and immediate mixed/controller/DNS TCP plus DNS UDP port release in `compat/scripts/phase5a7b.py`; the new native Windows path is not claimed before CI completes |
 | Full shutdown/profile semantics | Oracle | Partial | Local resources and Phase 4F14 fake-IP persistence have evidence; future providers, TUN and remote adapters require their own shutdown gates |
 | Phase 3 local rule/listener reload | Oracle | **Parity** | Same-port rule switch, invalid-config rollback and port migration through one non-duplicated portable `/configs` transaction in `compat/scripts/phase3.py`; Unix SIGHUP source semantics remain covered separately and the hardened native Windows transaction is pending CI revalidation |
 | Phase 5A7a invalid reload recovery | Oracle | **Parity** | Malformed-YAML rollback, continued old-generation TCP routing and a following valid `/configs` generation in `compat/scripts/phase5a7a.py` |
@@ -117,7 +117,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
 | TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
 | ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
-| AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A/B/C/D/E outbound native TLS TCP auth/padding/relay + session reuse/mux + UDP/UoT v2 + idle/heartbeat/recovery + ShadowTLS/JLS carriers (Restls dial blocked on shared Restls client transport); inbound remains open |
+| AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A/B/C/D/E outbound native TLS TCP auth/padding/relay + session reuse/mux + UDP/UoT v2 + idle/heartbeat/recovery + ShadowTLS/JLS carriers (Phase 6G-F Restls TLS 1.3 implemented; local Go contract passed; native/product CI pending); inbound remains open |
 | Mieru | Yes | Yes | Oracle | Not started | TCP/UDP/mux interop |
 | Sudoku | Yes | Yes | Oracle | Not started | Handshake/obfs/mux/replay interop |
 | TrustTunnel | Yes | Yes/ICMP | Oracle | Not started | HTTP/2/TCP/packet/ICMP interop |
@@ -170,7 +170,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
 | SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
 | Mieru | Oracle | Not started | Client/mux interop |
-| AnyTLS | Oracle | Partial — Phase 6G-A/B/C/D/E native TLS TCP + session reuse + UDP/UoT + idle/heartbeat/recovery + ShadowTLS/JLS carriers | Config parse, password auth, padding, TCP/mux/UDP/idle/carrier differentials; Restls dial blocked on shared Restls TLS client transport |
+| AnyTLS | Oracle | Partial — Phase 6G-A/B/C/D/E native TLS TCP + session reuse + UDP/UoT + idle/heartbeat/recovery + ShadowTLS/JLS carriers | Config parse, password auth, padding, TCP/mux/UDP/idle/carrier differentials; Phase 6G-F Restls TLS 1.3 implemented; local Go contract passed; native/product CI pending |
 | Sudoku | Oracle | Not started | Handshake/obfs/mux interop |
 | MASQUE | Oracle | Not started | CONNECT-IP/QUIC interop |
 | TrustTunnel | Oracle | Not started | HTTP/2/packet/ICMP interop |
@@ -179,7 +179,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Tailscale | Oracle (`with_gvisor`) | Not started | tsnet/DNS/tailnet integration |
 | ZeroTier | Oracle (unless disabled) | Not started | Network lifecycle/integration |
 | Dialer-proxy chains and sing-mux | Oracle | Not started | Nested dial path, TCP/UDP, statistics, cycle/error and close behavior |
-| Shared outbound transport/security variants | Oracle | Partial | Phase 6D-F–L covers TLS/WS/Upgrade/HTTP/H2, pooled Gun, mKCP and Mekya for VMess. Phase 6E-I–M adds VLESS UDP carrier composition, REALITY+Vision, pooled Gun and common HTTP/2 xHTTP/basic XMUX. H3 and advanced xHTTP controls, randomized long-duration mKCP impairment, other consumers, ECH, JLS, ReSTLS and TLSMirror remain separate gates |
+| Shared outbound transport/security variants | Oracle | Partial | Phase 6D-F–L covers TLS/WS/Upgrade/HTTP/H2, pooled Gun, mKCP and Mekya for VMess. Phase 6E-I–M adds VLESS UDP carrier composition, REALITY+Vision, pooled Gun and common HTTP/2 xHTTP/basic XMUX. H3 and advanced xHTTP controls, randomized long-duration mKCP impairment, other consumers, Phase 6G-F adds Restls TLS 1.3 for AnyTLS (local Go contract passed; native/product CI pending); ECH, remaining ReSTLS profiles and TLSMirror stay separate gates |
 
 ## DNS
 
@@ -478,14 +478,14 @@ separate build and runtime claim.
 | Linux amd64 — Phase 5F1 LAN/socket policy | Oracle | Pending | Dedicated local-runtime shard includes fixed-listener LAN/TFO/MPTCP/keepalive/config and current dial-policy differential; nonzero routing mark remains a separate privileged claim |
 | Linux amd64 — Phase 5F2 UDP NAT | Oracle | Pending | Dedicated local-runtime shard enables deterministic NAT/fan-out/backpressure plus the real 60-second idle-expiry differential; no result is claimed before completion |
 | Linux amd64 — Phase 5F3 release build | Oracle | Pending | Default quality job builds `rewrite-cli --all-features --release` after fmt, clippy and tests; no result is claimed before completion |
-| macOS arm64 — full native CI | Oracle | Build passed; full revalidation pending | Actions run `33158824630` proved the native locked all-target build. The default workflow now additionally runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all ten differential shards; no stronger result is claimed before completion |
+| macOS arm64 — full native CI | Oracle | Build passed; full relocal Go contract passed; native/product CI pending | Actions run `33158824630` proved the native locked all-target build. The default workflow now additionally runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all ten differential shards; no stronger result is claimed before completion |
 | Linux amd64 — Phase 5F3 routing mark | Oracle | Pending | Separate root-only job calls the production mark helper with global-unicast metadata and requires exact nonzero `SO_MARK` read-back; no result is claimed before completion |
 | Linux amd64 beyond declared Phase 5 slices | Oracle | Not started | Later namespace/TUN and capability-specific evidence |
 | Linux arm64 — Phase 4F14 bbolt interchange | Oracle | **Partial** | Native Docker execution on 2026-08-26 proved Go→Rust→Go v4/v6 mapping interchange and zero exits after an observable reload/signal-readiness barrier; the rest of Phase 4F14 is unclaimed |
 | Linux arm64 beyond the Phase 4F14 interchange gate | Oracle | Not started | Cross-build then capability-specific native integration |
 | Windows amd64 — Phase 4F3 system resolver | Oracle | Cross-build passed; native pending | Rust 1.95 GNU target check passed; native safe `ipconfig` discovery/adapter contract job is configured, while Go/Rust wire parity remains pending |
 | Windows amd64 — Phase 4F4 DHCP resolver | Oracle | Cross-build passed; native pending | Interface enumeration, packet and socket code compile for Rust 1.95 GNU; privileged native client/server parity remains pending |
-| Windows amd64 — full native CI | Oracle | Revalidation pending | The default workflow runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all eleven applicable differential shards on `windows-latest`; configuration/override cases still run while only their Unix SIGHUP subcases are omitted, lifecycle hooks and resource shutdown use a real `CTRL_BREAK_EVENT`, and the SIGHUP-only dynamic-CORS case reports explicit non-applicability. The follow-up runtime keeps REST/provider updates live after the Windows signal task closes its unused reload source; fixtures isolate `USERPROFILE`, resolve Cargo `.exe` helpers, model spawn-and-exit restart, preserve the pinned Winsock dial-error behavior, and cross cold data-plane readiness boundaries before comparison. No result is claimed before completion |
+| Windows amd64 — full native CI | Oracle | Relocal Go contract passed; native/product CI pending | The default workflow runs fmt, all-target/all-feature clippy, workspace tests, release build, Go/with-gVisor and all eleven applicable differential shards on `windows-latest`; configuration/override cases still run while only their Unix SIGHUP subcases are omitted, lifecycle hooks and resource shutdown use a real `CTRL_BREAK_EVENT`, and the SIGHUP-only dynamic-CORS case reports explicit non-applicability. The follow-up runtime keeps REST/provider updates live after the Windows signal task closes its unused reload source; fixtures isolate `USERPROFILE`, resolve Cargo `.exe` helpers, model spawn-and-exit restart, preserve the pinned Winsock dial-error behavior, and cross cold data-plane readiness boundaries before comparison. No result is claimed before completion |
 | Windows amd64 — Phase 5D named pipe | Oracle | **Parity in named-pipe scope; current rerun pending** | The native named-pipe Go/Rust differential passed in Actions run `33159534696`. The client now frames one persistent-pipe response by `Content-Length` rather than EOF; that updated gate awaits a native rerun. Cross-platform bbolt product code is present, while native Windows profile restart and Go/Rust cache interchange require separate evidence |
 | Windows arm64/386 and other behavior | Oracle | Not started | Named-pipe/process/socket behavior outside amd64 |
 | FreeBSD 386/amd64/arm64 | Oracle | Not started | Redir/TUN/socket behavior |
