@@ -1,11 +1,13 @@
-//! Session client with QUIC connection reuse.
+//! Session client with QUIC connection reuse (HY2-A/B).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use quinn::congestion::BbrConfig;
 use quinn::crypto::rustls::QuicClientConfig;
+use quinn::{AsyncUdpSocket, EndpointConfig, Runtime, TokioRuntime};
 use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use tokio::sync::Mutex;
@@ -21,11 +23,22 @@ use tokio_rustls::rustls::{
 };
 
 use crate::auth;
+use crate::congestion::{BrutalControl, SwitchableFactory};
+use crate::salamander::{Salamander, MIN_PSK_LEN};
+use crate::socket::{HopConfig, ObfsHopSocket};
 use crate::tcp::Hysteria2Stream;
+use crate::udp::{UdpSession, UdpSessionManager, MAX_DATAGRAM_FRAME_SIZE};
 use crate::{
     DEFAULT_CONN_RECEIVE_WINDOW, DEFAULT_KEEP_ALIVE_PERIOD, DEFAULT_MAX_IDLE_TIMEOUT,
     DEFAULT_STREAM_RECEIVE_WINDOW, Hysteria2ProtocolError,
 };
+
+/// Default hop interval when unset (Go: 30s).
+const DEFAULT_HOP_INTERVAL_SECS: u64 = 30;
+/// Minimum hop interval (Go floor: 5s).
+const MIN_HOP_INTERVAL_SECS: u64 = 5;
+/// Default UDP MTU when unset (quic-go MaxDatagramSize − 3).
+const DEFAULT_UDP_MTU: u16 = 1197;
 
 /// TLS options for the Hysteria2 QUIC dial.
 #[derive(Clone, Debug)]
@@ -36,7 +49,7 @@ pub struct TlsOptions {
     pub custom_roots: Vec<String>,
 }
 
-/// Client construction options.
+/// Client construction options (HY2-A + HY2-B).
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub server: String,
@@ -45,12 +58,61 @@ pub struct ClientOptions {
     pub tls: TlsOptions,
     /// When true, never reuse a QUIC session after the first stream batch.
     pub disable_reuse: bool,
+    /// Upload bandwidth (bytes/sec). `0` → stock BBR.
+    pub up_bps: u64,
+    /// Download bandwidth reported as `Hysteria-CC-RX` (bytes/sec). `0` → auto.
+    pub down_bps: u64,
+    /// Salamander PSK; empty disables.
+    pub obfs_password: String,
+    /// Extra hop ports (same host). Empty → single `port`.
+    pub hop_ports: Vec<u16>,
+    /// Hop interval range in seconds (`0` → default 30s).
+    pub hop_interval_min_secs: u64,
+    pub hop_interval_max_secs: u64,
+    /// QUIC datagram payload budget (fragmentation threshold).
+    pub udp_mtu: u16,
+    /// QUIC handshake / connect timeout.
+    pub handshake_timeout: Duration,
+    /// Optional stream receive window override.
+    pub stream_receive_window: Option<u64>,
+    /// Optional connection receive window override.
+    pub connection_receive_window: Option<u64>,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            port: 443,
+            password: String::new(),
+            tls: TlsOptions {
+                server_name: String::new(),
+                skip_certificate_verification: false,
+                alpn: vec!["h3".to_owned()],
+                custom_roots: Vec::new(),
+            },
+            disable_reuse: false,
+            up_bps: 0,
+            down_bps: 0,
+            obfs_password: String::new(),
+            hop_ports: Vec::new(),
+            hop_interval_min_secs: 0,
+            hop_interval_max_secs: 0,
+            udp_mtu: DEFAULT_UDP_MTU,
+            handshake_timeout: Duration::from_secs(10),
+            stream_receive_window: None,
+            connection_receive_window: None,
+        }
+    }
 }
 
 struct SessionInner {
     connection: quinn::Connection,
     closed: AtomicBool,
     udp_enabled: bool,
+    udp: Option<Arc<UdpSessionManager>>,
+    udp_mtu: usize,
+    brutal: Option<BrutalControl>,
 }
 
 /// Authenticated Hysteria2 QUIC session.
@@ -102,6 +164,25 @@ impl Session {
         }
     }
 
+    /// Opens a UDP relay session on this QUIC connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns when UDP was not advertised or the session budget is exhausted.
+    pub fn open_udp(&self) -> Result<UdpSession, Hysteria2ProtocolError> {
+        if self.is_closed() {
+            return Err(Hysteria2ProtocolError::Protocol(
+                "Hysteria2 session is closed".to_owned(),
+            ));
+        }
+        let Some(manager) = self.inner.udp.as_ref() else {
+            return Err(Hysteria2ProtocolError::Protocol(
+                "UDP relay not enabled by server".to_owned(),
+            ));
+        };
+        manager.new_session(self.inner.udp_mtu)
+    }
+
     /// Closes the underlying QUIC connection.
     pub fn close(&self) {
         self.mark_closed();
@@ -116,16 +197,34 @@ pub struct Client {
     options: ClientOptions,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Option<quinn::Endpoint>>,
+    /// Shared across endpoint rebuilds when Brutal is active.
+    brutal: Option<BrutalControl>,
 }
 
 impl Client {
-    #[must_use]
-    pub fn new(options: ClientOptions) -> Self {
-        Self {
+    /// # Errors
+    ///
+    /// Returns when Salamander PSK is too short.
+    pub fn new(options: ClientOptions) -> Result<Self, Hysteria2ProtocolError> {
+        if !options.obfs_password.is_empty() && options.obfs_password.len() < MIN_PSK_LEN {
+            return Err(Hysteria2ProtocolError::Protocol(format!(
+                "salamander password must be at least {MIN_PSK_LEN} bytes"
+            )));
+        }
+        let brutal = if options.up_bps > 0 {
+            Some((
+                Arc::new(AtomicU64::new(options.up_bps)),
+                Arc::new(AtomicBool::new(false)),
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
             options,
             session: Mutex::new(None),
             endpoint: Mutex::new(None),
-        }
+            brutal,
+        })
     }
 
     /// Opens a TCP stream, reusing a live session when allowed.
@@ -140,6 +239,16 @@ impl Client {
         let session = self.offer_session().await?;
         let stream = session.open_tcp(destination).await?;
         Ok(Box::new(stream))
+    }
+
+    /// Opens a UDP association, reusing a live session when allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns dial/auth failures or when the server disabled UDP.
+    pub async fn open_udp(&self) -> Result<UdpSession, Hysteria2ProtocolError> {
+        let session = self.offer_session().await?;
+        session.open_udp()
     }
 
     /// Forces the next dial to open a fresh QUIC session.
@@ -174,7 +283,6 @@ impl Client {
             && !existing.is_closed()
             && !self.options.disable_reuse
         {
-            // Another task won the dial race; reuse theirs and drop ours.
             session.close();
             return Ok(existing.clone());
         }
@@ -185,51 +293,89 @@ impl Client {
     }
 
     async fn dial_session(&self) -> Result<Session, Hysteria2ProtocolError> {
-        let address = resolve_server(&self.options.server, self.options.port).await?;
-        let endpoint = self.endpoint().await?;
-        let connecting = endpoint.connect(address, &self.options.tls.server_name)?;
-        let connection = connecting
+        let (canonical, hop) = resolve_endpoint(&self.options).await?;
+        let endpoint = self.endpoint(canonical, hop).await?;
+        let connecting = endpoint.connect(canonical, &self.options.tls.server_name)?;
+        let connection = tokio::time::timeout(self.options.handshake_timeout, connecting)
             .await
+            .map_err(|_| Hysteria2ProtocolError::Quinn("handshake timed out".to_owned()))?
             .map_err(|error| Hysteria2ProtocolError::Quinn(format!("handshake failed: {error}")))?;
-        // HY2-A: full handshake only (0-RTT deferred).
-        let auth = auth::authenticate(connection.clone(), &self.options.password, 0)
-            .await
-            .map_err(|error| Hysteria2ProtocolError::Protocol(format!("auth failed: {error}")))?;
-        let _ = auth.rx_auto; // Brutal selection is HY2-B; BBR already installed at dial.
+
+        let auth = auth::authenticate(
+            connection.clone(),
+            &self.options.password,
+            self.options.down_bps,
+        )
+        .await
+        .map_err(|error| Hysteria2ProtocolError::Protocol(format!("auth failed: {error}")))?;
+
+        if let Some((rate, use_bbr)) = &self.brutal {
+            if auth.rx_auto {
+                use_bbr.store(true, Ordering::Relaxed);
+            } else if auth.rx > 0 {
+                let clamped = self.options.up_bps.min(auth.rx);
+                rate.store(clamped, Ordering::Relaxed);
+            }
+        }
+
+        let udp = if auth.udp_enabled {
+            Some(UdpSessionManager::new(connection.clone()))
+        } else {
+            None
+        };
+        let udp_mtu = usize::from(self.options.udp_mtu.max(64));
+
         Ok(Session {
             inner: Arc::new(SessionInner {
                 connection,
                 closed: AtomicBool::new(false),
                 udp_enabled: auth.udp_enabled,
+                udp,
+                udp_mtu,
+                brutal: self.brutal.clone(),
             }),
         })
     }
 
-    async fn endpoint(&self) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
+    async fn endpoint(
+        &self,
+        canonical: SocketAddr,
+        hop: Option<HopConfig>,
+    ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
         let mut guard = self.endpoint.lock().await;
         if let Some(endpoint) = guard.as_ref() {
             return Ok(endpoint.clone());
         }
-        let endpoint = build_endpoint(&self.options.tls)?;
+        let endpoint = build_endpoint(
+            &self.options,
+            canonical,
+            hop,
+            self.brutal.clone(),
+        )?;
         *guard = Some(endpoint.clone());
         Ok(endpoint)
     }
 }
 
-fn build_endpoint(tls: &TlsOptions) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
+fn build_endpoint(
+    options: &ClientOptions,
+    canonical: SocketAddr,
+    hop: Option<HopConfig>,
+    brutal: Option<BrutalControl>,
+) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let mut roots = RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(cert);
     }
-    for pem in &tls.custom_roots {
+    for pem in &options.tls.custom_roots {
         let mut cursor = std::io::Cursor::new(pem.as_bytes());
         for cert in rustls_pemfile::certs(&mut cursor).flatten() {
             let _ = roots.add(cert);
         }
     }
     let builder = ClientConfig::builder();
-    let mut crypto = if tls.skip_certificate_verification {
+    let mut crypto = if options.tls.skip_certificate_verification {
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification::new()))
@@ -237,7 +383,8 @@ fn build_endpoint(tls: &TlsOptions) -> Result<quinn::Endpoint, Hysteria2Protocol
     } else {
         builder.with_root_certificates(roots).with_no_client_auth()
     };
-    crypto.alpn_protocols = tls
+    crypto.alpn_protocols = options
+        .tls
         .alpn
         .iter()
         .map(|value| value.as_bytes().to_vec())
@@ -245,7 +392,6 @@ fn build_endpoint(tls: &TlsOptions) -> Result<quinn::Endpoint, Hysteria2Protocol
     if crypto.alpn_protocols.is_empty() {
         crypto.alpn_protocols = vec![b"h3".to_vec()];
     }
-    // HY2-A: no 0-RTT.
     crypto.enable_early_data = false;
     crypto.resumption = tokio_rustls::rustls::client::Resumption::disabled();
 
@@ -253,28 +399,113 @@ fn build_endpoint(tls: &TlsOptions) -> Result<quinn::Endpoint, Hysteria2Protocol
         .map_err(|error| Hysteria2ProtocolError::Quinn(error.to_string()))?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
     let mut transport = quinn::TransportConfig::default();
+    let idle = options
+        .handshake_timeout
+        .max(DEFAULT_MAX_IDLE_TIMEOUT);
     transport.max_idle_timeout(Some(
-        DEFAULT_MAX_IDLE_TIMEOUT
-            .try_into()
+        idle.try_into()
             .map_err(|error| Hysteria2ProtocolError::Quinn(format!("{error}")))?,
     ));
     transport.keep_alive_interval(Some(DEFAULT_KEEP_ALIVE_PERIOD));
+    let stream_window = options
+        .stream_receive_window
+        .unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW);
+    let conn_window = options
+        .connection_receive_window
+        .unwrap_or(DEFAULT_CONN_RECEIVE_WINDOW);
     transport.stream_receive_window(
-        quinn::VarInt::from_u64(DEFAULT_STREAM_RECEIVE_WINDOW)
+        quinn::VarInt::from_u64(stream_window)
             .map_err(|error| Hysteria2ProtocolError::Quinn(error.to_string()))?,
     );
     transport.receive_window(
-        quinn::VarInt::from_u64(DEFAULT_CONN_RECEIVE_WINDOW)
+        quinn::VarInt::from_u64(conn_window)
             .map_err(|error| Hysteria2ProtocolError::Quinn(error.to_string()))?,
     );
-    // Congestion gate: stock Quinn BBR (Go default when up/down unset).
-    transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    // Enable QUIC datagrams for UDP relay.
+    transport.datagram_receive_buffer_size(Some(MAX_DATAGRAM_FRAME_SIZE * 1024));
+    transport.datagram_send_buffer_size(MAX_DATAGRAM_FRAME_SIZE * 1024);
+
+    match brutal {
+        Some((rate, use_bbr)) => {
+            transport.congestion_controller_factory(Arc::new(SwitchableFactory { rate, use_bbr }));
+        }
+        None => {
+            transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
+        }
+    }
     client_config.transport_config(Arc::new(transport));
 
-    let mut endpoint = quinn::Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+    let obfs = if options.obfs_password.is_empty() {
+        None
+    } else {
+        Some(
+            Salamander::new(options.obfs_password.as_bytes()).ok_or_else(|| {
+                Hysteria2ProtocolError::Protocol("invalid salamander password".to_owned())
+            })?,
+        )
+    };
+
+    let bind_addr = if canonical.is_ipv6() {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    };
+    let std_sock = std::net::UdpSocket::bind(bind_addr).map_err(Hysteria2ProtocolError::Io)?;
+    let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+    let inner = runtime
+        .wrap_udp_socket(std_sock)
         .map_err(Hysteria2ProtocolError::Io)?;
+    let socket: Arc<dyn AsyncUdpSocket> =
+        match ObfsHopSocket::new(inner.clone(), canonical, obfs, hop) {
+            Some(wrapped) => wrapped,
+            None => inner,
+        };
+
+    let mut endpoint =
+        quinn::Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
+            .map_err(Hysteria2ProtocolError::Io)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
+}
+
+async fn resolve_endpoint(
+    options: &ClientOptions,
+) -> Result<(SocketAddr, Option<HopConfig>), Hysteria2ProtocolError> {
+    let mut ports = options.hop_ports.clone();
+    if ports.is_empty() {
+        ports.push(options.port);
+    } else if !ports.contains(&options.port) {
+        ports.insert(0, options.port);
+        ports.sort_unstable();
+        ports.dedup();
+    }
+    let first = ports[0];
+    let address = resolve_server(&options.server, first).await?;
+    let addrs: Vec<SocketAddr> = ports
+        .iter()
+        .map(|port| SocketAddr::new(address.ip(), *port))
+        .collect();
+    if addrs.len() <= 1 {
+        return Ok((address, None));
+    }
+    let min = if options.hop_interval_min_secs == 0 {
+        DEFAULT_HOP_INTERVAL_SECS
+    } else {
+        options.hop_interval_min_secs.max(MIN_HOP_INTERVAL_SECS)
+    };
+    let max = if options.hop_interval_max_secs == 0 {
+        min
+    } else {
+        options.hop_interval_max_secs.max(min)
+    };
+    Ok((
+        address,
+        Some(HopConfig {
+            addrs,
+            interval_min: Duration::from_secs(min),
+            interval_max: Duration::from_secs(max),
+        }),
+    ))
 }
 
 async fn resolve_server(host: &str, port: u16) -> Result<SocketAddr, Hysteria2ProtocolError> {
@@ -336,10 +567,4 @@ impl ServerCertVerifier for SkipServerVerification {
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
     }
-}
-
-// Silence unused dual-stack helper until HY2-B binds both families explicitly.
-#[allow(dead_code)]
-fn unbound_v6() -> SocketAddr {
-    SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
 }

@@ -24,7 +24,9 @@ async fn probe_against_env_authority() {
             custom_roots: vec![],
         },
         disable_reuse: true,
-    });
+        ..ClientOptions::default()
+    })
+    .expect("client options");
     let dest = Destination {
         host: Host::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
         port: echo,

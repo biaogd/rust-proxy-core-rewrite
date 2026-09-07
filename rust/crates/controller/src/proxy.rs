@@ -1034,13 +1034,13 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Vmess
         | rewrite_config::ProxyKind::Vless
         | rewrite_config::ProxyKind::Trojan
-        | rewrite_config::ProxyKind::AnyTls => proxy.udp,
+        | rewrite_config::ProxyKind::AnyTls
+        | rewrite_config::ProxyKind::Hysteria2 => proxy.udp,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
         | rewrite_config::ProxyKind::Rematch => true,
-        // HY2-A: datagram UDP deferred to HY2-B (do not advertise).
-        rewrite_config::ProxyKind::Hysteria2 | rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http => false,
     };
     json!({
         "alive": health.alive,
@@ -1194,12 +1194,13 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Vmess
             | rewrite_config::ProxyKind::Vless
             | rewrite_config::ProxyKind::Trojan
-            | rewrite_config::ProxyKind::AnyTls => proxy.udp,
+            | rewrite_config::ProxyKind::AnyTls
+            | rewrite_config::ProxyKind::Hysteria2 => proxy.udp,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
             | rewrite_config::ProxyKind::Rematch => true,
-            rewrite_config::ProxyKind::Hysteria2 | rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http => false,
         };
     }
     let Some(group) = config

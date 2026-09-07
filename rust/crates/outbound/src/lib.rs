@@ -20,7 +20,9 @@ pub use http::{
     HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
     wrap_client_tls_with_alpn, wrap_client_tls_with_options, wrap_client_vision_tls_with_options,
 };
-pub use hysteria2::{Hysteria2Client, Hysteria2ProxyError};
+pub use hysteria2::{
+    Hysteria2Client, Hysteria2ProxyError, Hysteria2UdpAssociation, associate_hysteria2_udp,
+};
 pub use reality::{wrap_client_reality, wrap_client_reality_with_vision};
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};

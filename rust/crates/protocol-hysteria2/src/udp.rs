@@ -304,7 +304,10 @@ impl UdpSessionManager {
     /// # Errors
     ///
     /// Returns when the concurrent session count would exceed [`MAX_SESSIONS`].
-    pub fn new_session(self: &Arc<Self>) -> Result<UdpSession, Hysteria2ProtocolError> {
+    pub fn new_session(
+        self: &Arc<Self>,
+        udp_mtu: usize,
+    ) -> Result<UdpSession, Hysteria2ProtocolError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(SESSION_CHAN_SIZE);
         {
@@ -322,6 +325,7 @@ impl UdpSessionManager {
             rx,
             defrag: Defragger::default(),
             mgr: Arc::downgrade(self),
+            udp_mtu: udp_mtu.max(64).min(MAX_UDP_SIZE),
         })
     }
 
@@ -365,6 +369,7 @@ pub struct UdpSession {
     rx: mpsc::Receiver<UdpMessage>,
     defrag: Defragger,
     mgr: Weak<UdpSessionManager>,
+    udp_mtu: usize,
 }
 
 impl UdpSession {
@@ -405,11 +410,13 @@ impl UdpSession {
             }
         }
 
-        // Fragment to the current datagram limit and send each piece.
+        // Fragment to the configured/current datagram limit and send each piece.
         let max = self
             .conn
             .max_datagram_size()
-            .unwrap_or(MAX_DATAGRAM_FRAME_SIZE);
+            .unwrap_or(MAX_DATAGRAM_FRAME_SIZE)
+            .min(self.udp_mtu)
+            .max(64);
         let mut frag = msg;
         frag.packet_id = rand::rng().random_range(1..=u16::MAX);
         for f in frag_udp_message(&frag, max) {

@@ -129,11 +129,11 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
 }
 
 #[test]
-fn hysteria2_hy2a_configuration_is_supported_and_scoped() {
+fn hysteria2_hy2b_configuration_is_supported_and_scoped() {
     let source = format!(
-        "{MINIMAL}\nproxies:\n  - name: hy2\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: hy2.example\n    alpn: [h3]\n    skip-cert-verify: true\n    disable-reuse: true\n    udp: true\n"
+        "{MINIMAL}\nproxies:\n  - name: hy2\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: hy2.example\n    alpn: [h3]\n    skip-cert-verify: true\n    disable-reuse: true\n    up: 30 Mbps\n    down: 200\n    obfs: salamander\n    obfs-password: salamander-secret\n    ports: 443,8443,9000-9002\n    hop-interval: 10-30\n    udp-mtu: 1200\n    handshake-timeout: 15\n    initial-stream-receive-window: 8388608\n    max-stream-receive-window: 8388608\n    recv-window-conn: 20971520\n"
     );
-    let config = Config::from_yaml(&source).expect("HY2-A Hysteria2 config");
+    let config = Config::from_yaml(&source).expect("HY2-B Hysteria2 config");
     let proxy = &config.proxies[0];
     assert_eq!(proxy.kind, ProxyKind::Hysteria2);
     assert!(proxy.tls);
@@ -144,22 +144,45 @@ fn hysteria2_hy2a_configuration_is_supported_and_scoped() {
     assert_eq!(options.password, "secret");
     assert_eq!(options.alpn, ["h3"]);
     assert!(options.disable_reuse);
+    assert_eq!(options.up_bps, 30_000_000 / 8);
+    assert_eq!(options.down_bps, 200_000_000 / 8);
+    assert_eq!(options.obfs.as_deref(), Some("salamander"));
+    assert_eq!(options.obfs_password, "salamander-secret");
+    assert_eq!(options.hop_ports, [443, 8443, 9000, 9001, 9002]);
+    assert_eq!(options.hop_interval_min_secs, 10);
+    assert_eq!(options.hop_interval_max_secs, 30);
+    assert_eq!(options.udp_mtu, 1200);
+    assert_eq!(options.handshake_timeout_ms, 15_000);
+    assert_eq!(options.stream_receive_window, Some(8_388_608));
+    assert_eq!(options.connection_receive_window, Some(20_971_520));
+
+    let defaults = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2-defaults\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n"
+    ))
+    .expect("HY2-B defaults");
+    assert!(defaults.proxies[0].udp);
+    let default_opts = defaults.proxies[0]
+        .hysteria2
+        .as_ref()
+        .expect("Hysteria2 defaults");
+    assert_eq!(default_opts.udp_mtu, 1197);
+    assert_eq!(default_opts.handshake_timeout_ms, 0);
+    assert!(default_opts.obfs.is_none());
+    assert!(default_opts.hop_ports.is_empty());
 
     for unsupported in [
-        "up: 30 Mbps",
-        "down: 200 Mbps",
+        "obfs: gecko\n    obfs-password: x",
         "obfs: salamander",
-        "obfs-password: x",
-        "ports: 443,8443",
-        "hop-interval: 15",
         "cwnd: 10",
         "bbr-profile: aggressive",
-        "udp-mtu: 1200",
-        "handshake-timeout: 30",
+        "realm-opts:\n      enable: true",
+        "ports: '*'",
+        "up: nope",
         "fingerprint: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         "name-cert-verify: other.example",
         "certificate: ./client.crt",
         "private-key: ./client.key",
+        "initial-stream-receive-window: 100\n    max-stream-receive-window: 200",
     ] {
         let source = format!(
             "{MINIMAL}\nproxies:\n  - name: bad\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    {unsupported}\n"

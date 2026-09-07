@@ -16,6 +16,7 @@ mod varint;
 
 pub use client::{Client, ClientOptions, Session, TlsOptions};
 pub use tcp::Hysteria2Stream;
+pub use udp::UdpSession;
 
 use thiserror::Error;
 

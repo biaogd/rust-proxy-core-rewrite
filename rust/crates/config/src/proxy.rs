@@ -298,32 +298,35 @@ fn parse_anytls_proxy(
 }
 
 #[allow(clippy::too_many_lines)]
-fn parse_hysteria2_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
-    // HY2-A: reject deferred / unimplemented Clash knobs explicitly.
-    const DEFERRED_EXTRA: &[&str] = &[
-        "ports",
-        "hop-interval",
-        "up",
-        "down",
-        "obfs",
-        "obfs-password",
+fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    // HY2-B: accept bandwidth / hop / salamander / window knobs; still reject
+    // Gecko, Realm, ECH, cwnd/BBR profile, dialer-proxy, and cert overrides.
+    const REJECTED_EXTRA: &[&str] = &[
         "obfs-min-packet-size",
         "obfs-max-packet-size",
         "cwnd",
         "bbr-profile",
-        "udp-mtu",
-        "handshake-timeout",
         "realm-opts",
         "ech-opts",
+        "disable-mtu-discovery",
+        "fast-open",
+        "dialer-proxy",
+    ];
+    const ACCEPTED_EXTRA: &[&str] = &[
+        "up",
+        "down",
+        "ports",
+        "hop-interval",
+        "obfs",
+        "obfs-password",
+        "udp-mtu",
+        "handshake-timeout",
         "initial-stream-receive-window",
         "max-stream-receive-window",
         "initial-connection-receive-window",
         "max-connection-receive-window",
         "recv-window-conn",
         "recv-window",
-        "disable-mtu-discovery",
-        "fast-open",
-        "dialer-proxy",
     ];
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
@@ -367,8 +370,11 @@ fn parse_hysteria2_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, C
         || proxy
             .extra
             .keys()
-            .any(|key| DEFERRED_EXTRA.contains(&key.as_str()))
-        || !proxy.extra.is_empty()
+            .any(|key| REJECTED_EXTRA.contains(&key.as_str()))
+        || proxy
+            .extra
+            .keys()
+            .any(|key| !ACCEPTED_EXTRA.contains(&key.as_str()))
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -389,6 +395,84 @@ fn parse_hysteria2_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, C
     if alpn.is_empty() || alpn.iter().any(String::is_empty) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
+
+    let up_raw = hysteria2_extra_string(&mut proxy.extra, "up")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let down_raw = hysteria2_extra_string(&mut proxy.extra, "down")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let up_bps = parse_hysteria2_bps(up_raw.as_deref().unwrap_or(""))
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let down_bps = parse_hysteria2_bps(down_raw.as_deref().unwrap_or(""))
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+
+    let ports_raw = hysteria2_extra_string(&mut proxy.extra, "ports")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let hop_ports = match ports_raw.as_deref().unwrap_or("") {
+        "" => Vec::new(),
+        raw => parse_hysteria2_ports(raw)
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?,
+    };
+    let hop_raw = hysteria2_extra_string(&mut proxy.extra, "hop-interval")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let (hop_interval_min_secs, hop_interval_max_secs) =
+        parse_hysteria2_hop_interval(hop_raw.as_deref().unwrap_or(""))
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+
+    let obfs_raw = hysteria2_extra_string(&mut proxy.extra, "obfs")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let obfs_password = hysteria2_extra_string(&mut proxy.extra, "obfs-password")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let obfs_password = obfs_password.unwrap_or_default();
+    let obfs = match obfs_raw.as_deref().unwrap_or("") {
+        "" => None,
+        "salamander" => {
+            if obfs_password.is_empty() {
+                return Err(ConfigError::UnsupportedProxy(name));
+            }
+            Some("salamander".to_owned())
+        }
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+
+    let udp_mtu = match hysteria2_extra_u64(&mut proxy.extra, "udp-mtu")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+    {
+        None | Some(0) => 1197,
+        Some(value) => u16::try_from(value)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?
+            .max(1),
+    };
+    // Clash YAML is seconds (Go); store milliseconds for the outbound client.
+    let handshake_timeout_ms = match hysteria2_extra_u64(&mut proxy.extra, "handshake-timeout")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+    {
+        None | Some(0) => 0,
+        Some(secs) => secs.saturating_mul(1000),
+    };
+
+    let stream_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+    let connection_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
     Ok(ProxyConfig {
         name,
         kind: ProxyKind::Hysteria2,
@@ -406,7 +490,8 @@ fn parse_hysteria2_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, C
         private_key: None,
         client_fingerprint: None,
         reality: None,
-        udp: proxy.udp.unwrap_or(false),
+        // Go `NewHysteria2` always sets Base.UDP = true; default-on when unset.
+        udp: proxy.udp.unwrap_or(true),
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
@@ -418,9 +503,195 @@ fn parse_hysteria2_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, C
             password,
             alpn,
             disable_reuse: proxy.disable_reuse.unwrap_or(false),
+            up_bps,
+            down_bps,
+            obfs,
+            obfs_password,
+            hop_ports,
+            hop_interval_min_secs,
+            hop_interval_max_secs,
+            udp_mtu,
+            handshake_timeout_ms,
+            stream_receive_window,
+            connection_receive_window,
         }),
         headers: BTreeMap::new(),
     })
+}
+
+fn hysteria2_extra_string(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Result<Option<String>, ()> {
+    let Some(value) = extra.remove(key) else {
+        return Ok(None);
+    };
+    match value {
+        serde_yaml_ng::Value::Null => Ok(Some(String::new())),
+        serde_yaml_ng::Value::String(text) => Ok(Some(text)),
+        serde_yaml_ng::Value::Number(number) => Ok(Some(number.to_string())),
+        serde_yaml_ng::Value::Bool(flag) => Ok(Some(flag.to_string())),
+        _ => Err(()),
+    }
+}
+
+fn hysteria2_extra_u64(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Result<Option<u64>, ()> {
+    let Some(value) = extra.remove(key) else {
+        return Ok(None);
+    };
+    match value {
+        serde_yaml_ng::Value::Null => Ok(Some(0)),
+        serde_yaml_ng::Value::Number(number) => number.as_u64().map(Some).ok_or(()),
+        serde_yaml_ng::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Ok(Some(0))
+            } else {
+                trimmed.parse().map(Some).map_err(|_| ())
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn resolve_hysteria2_window(
+    name: &str,
+    initial: Option<u64>,
+    max: Option<u64>,
+    legacy: Option<u64>,
+) -> Result<Option<u64>, ConfigError> {
+    // If both initial-* and max-* are set to different non-zero values, reject.
+    if let (Some(initial), Some(max)) = (initial, max)
+        && initial != 0
+        && max != 0
+        && initial != max
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    // Otherwise take the single non-zero value (legacy aliases included).
+    let mut chosen = None;
+    for candidate in [initial, max, legacy].into_iter().flatten() {
+        if candidate == 0 {
+            continue;
+        }
+        match chosen {
+            None => chosen = Some(candidate),
+            Some(existing) if existing == candidate => {}
+            Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+        }
+    }
+    Ok(chosen)
+}
+
+/// Clash/Go `utils.StringToBps`: bare int → Mbps; empty → `0`; invalid → `None`.
+fn parse_hysteria2_bps(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    if let Ok(value) = trimmed.parse::<u64>() {
+        return Some(value.saturating_mul(1_000_000 / 8));
+    }
+    let bytes = trimmed.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == 0 {
+        return None;
+    }
+    let number: u64 = trimmed[..index].parse().ok()?;
+    let mut rest = trimmed[index..].trim_start();
+    let mut scale: u64 = 1;
+    if let Some(prefix) = rest.chars().next() {
+        match prefix {
+            'K' => {
+                scale = 1_000;
+                rest = rest[1..].trim_start();
+            }
+            'M' => {
+                scale = 1_000_000;
+                rest = rest[1..].trim_start();
+            }
+            'G' => {
+                scale = 1_000_000_000;
+                rest = rest[1..].trim_start();
+            }
+            'T' => {
+                scale = 1_000_000_000_000;
+                rest = rest[1..].trim_start();
+            }
+            _ => {}
+        }
+    }
+    let is_bits = match rest {
+        "bps" => true,
+        "Bps" => false,
+        _ => return None,
+    };
+    let mut n = number.saturating_mul(scale);
+    if is_bits {
+        n /= 8;
+    }
+    Some(n)
+}
+
+/// Parse `"443,8443,9000-9002"`. Rejects `*` / `all` / ranges larger than 4096 ports.
+fn parse_hysteria2_ports(spec: &str) -> Option<Vec<u16>> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() || trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+        return None;
+    }
+    let mut ports = Vec::new();
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        if let Some((start, end)) = part.split_once('-') {
+            let mut lo: u16 = start.trim().parse().ok()?;
+            let mut hi: u16 = end.trim().parse().ok()?;
+            if lo > hi {
+                std::mem::swap(&mut lo, &mut hi);
+            }
+            if u32::from(hi) - u32::from(lo) > 4096 {
+                return None;
+            }
+            ports.extend(lo..=hi);
+        } else {
+            ports.push(part.parse().ok()?);
+        }
+    }
+    if ports.is_empty() {
+        return None;
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
+}
+
+/// Parse hop-interval as seconds (`15` or `10-30`). Empty → `(0, 0)`.
+fn parse_hysteria2_hop_interval(spec: &str) -> Option<(u64, u64)> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Some((0, 0));
+    }
+    if let Some((lo, hi)) = trimmed.split_once('-') {
+        let min: u64 = lo.trim().parse().ok()?;
+        let max: u64 = hi.trim().parse().ok()?;
+        if min == 0 || max == 0 {
+            return None;
+        }
+        return Some((min.min(max), min.max(max)));
+    }
+    let value: u64 = trimmed.parse().ok()?;
+    if value == 0 {
+        return None;
+    }
+    Some((value, value))
 }
 
 fn parse_anytls_carrier(
