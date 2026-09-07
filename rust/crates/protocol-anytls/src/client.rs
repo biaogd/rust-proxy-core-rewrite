@@ -49,6 +49,8 @@ struct ClientInner {
     idle: Mutex<VecDeque<IdleEntry>>,
     sessions: Mutex<BTreeMap<u64, Session>>,
     wake: Notify,
+    #[cfg(test)]
+    write_deadline_override: Mutex<Option<Duration>>,
 }
 
 /// Long-lived `AnyTLS` client with optional idle session reuse.
@@ -76,6 +78,8 @@ impl Client {
             idle: Mutex::new(VecDeque::new()),
             sessions: Mutex::new(BTreeMap::new()),
             wake: Notify::new(),
+            #[cfg(test)]
+            write_deadline_override: Mutex::new(None),
         });
         if !inner.options.disable_reuse {
             let janitor = Arc::clone(&inner);
@@ -154,7 +158,16 @@ impl Client {
     }
 
     #[cfg(test)]
-    fn test_idle_len(&self) -> usize {
+    pub(crate) fn test_set_write_deadline(&self, deadline: Duration) {
+        *self
+            .inner
+            .write_deadline_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(deadline);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_idle_len(&self) -> usize {
         self.inner
             .idle
             .lock()
@@ -244,11 +257,21 @@ impl Client {
         remote.flush().await?;
 
         let seq = self.inner.session_counter.fetch_add(1, Ordering::AcqRel) + 1;
-        let session = Session::start(
+        #[cfg(test)]
+        let write_deadline = self
+            .inner
+            .write_deadline_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or(Duration::from_secs(5));
+        #[cfg(not(test))]
+        let write_deadline = Duration::from_secs(5);
+        let session = Session::start_with_write_deadline(
             remote,
             &self.inner.options.client_metadata,
             Arc::clone(&self.inner.padding),
             seq,
+            write_deadline,
         )
         .await?;
 

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -40,15 +40,50 @@ enum StreamEvent {
     Error(String),
 }
 
+/// Shared remote-termination state for a stream (Go `Stream.dieErr`).
+struct StreamTerminus {
+    die_err: StdMutex<Option<(std::io::ErrorKind, String)>>,
+}
+
+impl StreamTerminus {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            die_err: StdMutex::new(None),
+        })
+    }
+
+    fn fail(&self, kind: std::io::ErrorKind, message: impl Into<String>) {
+        let mut guard = self
+            .die_err
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_none() {
+            *guard = Some((kind, message.into()));
+        }
+    }
+
+    fn error(&self) -> Option<std::io::Error> {
+        self.die_err
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(kind, message)| std::io::Error::new(*kind, message.clone()))
+    }
+}
+
 struct StreamInbox {
     sender: mpsc::Sender<StreamEvent>,
+    terminus: Arc<StreamTerminus>,
 }
 
 struct SessionInner {
+    /// Weak self so write-error paths can schedule close without an `Arc` receiver.
+    weak_self: StdMutex<Weak<SessionInner>>,
     write: Mutex<WriteState>,
     streams: StdMutex<HashMap<u32, StreamInbox>>,
     padding: SharedPadding,
     closed: AtomicBool,
+    close_complete: AtomicBool,
     peer_version: AtomicU32,
     stream_id: AtomicU32,
     pkt_counter: AtomicU32,
@@ -56,8 +91,10 @@ struct SessionInner {
     seq: u64,
     close_hook: StdMutex<Option<SessionCloseHook>>,
     close_notify: Notify,
+    close_wait: Notify,
     reader_abort: StdMutex<Option<AbortHandle>>,
     syn_done: StdMutex<Option<AbortHandle>>,
+    write_deadline: Duration,
 }
 
 struct WriteState {
@@ -85,6 +122,7 @@ pub struct AnyTlsStream {
     session: Arc<SessionInner>,
     sid: u32,
     receiver: mpsc::Receiver<StreamEvent>,
+    terminus: Arc<StreamTerminus>,
     pending: BytesMut,
     write_closed: bool,
     read_closed: bool,
@@ -106,6 +144,16 @@ impl Session {
         padding: SharedPadding,
         seq: u64,
     ) -> Result<Self, AnyTlsProtocolError> {
+        Self::start_with_write_deadline(remote, client_metadata, padding, seq, WRITE_DEADLINE).await
+    }
+
+    pub(crate) async fn start_with_write_deadline(
+        remote: BoxedStream,
+        client_metadata: &str,
+        padding: SharedPadding,
+        seq: u64,
+        write_deadline: Duration,
+    ) -> Result<Self, AnyTlsProtocolError> {
         let padding_md5 = padding
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -113,6 +161,7 @@ impl Session {
             .to_owned();
         let (read_half, write_half) = split_stream(remote);
         let inner = Arc::new(SessionInner {
+            weak_self: StdMutex::new(Weak::new()),
             write: Mutex::new(WriteState {
                 remote: write_half,
                 buffering: true,
@@ -121,6 +170,7 @@ impl Session {
             streams: StdMutex::new(HashMap::new()),
             padding,
             closed: AtomicBool::new(false),
+            close_complete: AtomicBool::new(false),
             peer_version: AtomicU32::new(0),
             stream_id: AtomicU32::new(0),
             pkt_counter: AtomicU32::new(0),
@@ -128,9 +178,15 @@ impl Session {
             seq,
             close_hook: StdMutex::new(None),
             close_notify: Notify::new(),
+            close_wait: Notify::new(),
             reader_abort: StdMutex::new(None),
             syn_done: StdMutex::new(None),
+            write_deadline,
         });
+        *inner
+            .weak_self
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&inner);
 
         let (done_tx, _done_rx) = oneshot::channel();
         let reader_session = Arc::clone(&inner);
@@ -208,11 +264,18 @@ impl Session {
         }
         let sid = self.inner.stream_id.fetch_add(1, Ordering::AcqRel) + 1;
         let (sender, receiver) = mpsc::channel(STREAM_RECV_CAPACITY);
+        let terminus = StreamTerminus::new();
         self.inner
             .streams
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(sid, StreamInbox { sender });
+            .insert(
+                sid,
+                StreamInbox {
+                    sender,
+                    terminus: Arc::clone(&terminus),
+                },
+            );
 
         let peer_version = self.inner.peer_version.load(Ordering::Acquire);
         if sid >= 2 && peer_version >= 2 {
@@ -226,6 +289,7 @@ impl Session {
             session: Arc::clone(&self.inner),
             sid,
             receiver,
+            terminus,
             pending: BytesMut::new(),
             write_closed: false,
             read_closed: false,
@@ -238,7 +302,8 @@ impl Session {
 
     /// Closes the underlying TLS session.
     pub async fn close(&self) {
-        mark_session_closed(&self.inner).await;
+        request_session_close(Arc::clone(&self.inner));
+        wait_for_close_complete(&self.inner).await;
     }
 }
 
@@ -253,7 +318,7 @@ fn arm_synack_watchdog(inner: &Arc<SessionInner>) {
     let session = Arc::clone(inner);
     let join = tokio::spawn(async move {
         tokio::time::sleep(SYNACK_WATCHDOG).await;
-        mark_session_closed(&session).await;
+        request_session_close(session);
     });
     *guard = Some(join.abort_handle());
 }
@@ -269,7 +334,12 @@ fn cancel_synack_watchdog(inner: &SessionInner) {
     }
 }
 
-async fn mark_session_closed(inner: &Arc<SessionInner>) {
+/// Schedules session teardown on an independent task.
+///
+/// Callers that may themselves be aborted (reader EOF, SYNACK watchdog) must not
+/// run cleanup inline — aborting the current task would cancel write-lock wait /
+/// `close_hook`.
+fn request_session_close(inner: Arc<SessionInner>) {
     if inner
         .closed
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -279,7 +349,14 @@ async fn mark_session_closed(inner: &Arc<SessionInner>) {
     }
     // Wake any write stalled on a non-reading peer (Go `SetDeadline(now)`).
     inner.close_notify.notify_waiters();
-    cancel_synack_watchdog(inner);
+    tokio::spawn(async move {
+        finalize_session_close(inner).await;
+    });
+}
+
+async fn finalize_session_close(inner: Arc<SessionInner>) {
+    // Running on a detached task: aborting reader/watchdog cannot cancel us.
+    cancel_synack_watchdog(&inner);
     if let Some(handle) = inner
         .reader_abort
         .lock()
@@ -296,26 +373,55 @@ async fn mark_session_closed(inner: &Arc<SessionInner>) {
     // Drop stream senders so readers observe EOF/error without waiting on a
     // blocked write half.
     {
-        let _inboxes: Vec<_> = inner
+        let inboxes: Vec<_> = inner
             .streams
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain()
             .map(|(_, inbox)| inbox)
             .collect();
+        for inbox in inboxes {
+            inbox
+                .terminus
+                .fail(std::io::ErrorKind::ConnectionReset, "AnyTLS session closed");
+        }
     }
     if let Ok(mut guard) = tokio::time::timeout(CLOSE_DEADLINE, inner.write.lock()).await {
         // Prefer dropping the write half over awaiting shutdown forever.
         guard.remote = Box::new(ClosedStream);
         guard.buffer.clear();
         guard.buffering = false;
-    } else {
-        // Write lock stuck past deadline; close_notify should have woken the
-        // writer. Remaining cleanup is best-effort via closed flag.
     }
     if let Some(hook) = hook {
         hook();
     }
+    inner.close_complete.store(true, Ordering::Release);
+    inner.close_wait.notify_waiters();
+}
+
+async fn wait_for_close_complete(inner: &SessionInner) {
+    if inner.close_complete.load(Ordering::Acquire) {
+        return;
+    }
+    let notified = inner.close_wait.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if inner.close_complete.load(Ordering::Acquire) {
+        return;
+    }
+    let _ = tokio::time::timeout(CLOSE_DEADLINE + Duration::from_secs(1), notified).await;
+}
+
+fn schedule_close_from_inner(inner: &SessionInner) {
+    let Some(arc) = inner
+        .weak_self
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade()
+    else {
+        return;
+    };
+    request_session_close(arc);
 }
 
 impl Drop for AnyTlsStream {
@@ -350,6 +456,8 @@ impl AsyncRead for AnyTlsStream {
         if self.read_closed {
             return Poll::Ready(Ok(()));
         }
+        // Deliver already-queued payload before surfacing remote termination
+        // (Go `pipeR.Read` then `dieErr` when n == 0).
         if !self.pending.is_empty() {
             let amount = buffer.remaining().min(self.pending.len());
             buffer.put_slice(&self.pending[..amount]);
@@ -360,6 +468,9 @@ impl AsyncRead for AnyTlsStream {
             Poll::Ready(Some(StreamEvent::Data(chunk))) => {
                 if chunk.is_empty() {
                     self.read_closed = true;
+                    if let Some(error) = self.terminus.error() {
+                        return Poll::Ready(Err(error));
+                    }
                     return Poll::Ready(Ok(()));
                 }
                 let amount = buffer.remaining().min(chunk.len());
@@ -371,13 +482,26 @@ impl AsyncRead for AnyTlsStream {
             }
             Poll::Ready(Some(StreamEvent::Error(message))) => {
                 self.read_closed = true;
+                self.terminus
+                    .fail(std::io::ErrorKind::Other, message.clone());
                 Poll::Ready(Err(std::io::Error::other(message)))
             }
             Poll::Ready(None) => {
                 self.read_closed = true;
-                Poll::Ready(Ok(()))
+                if let Some(error) = self.terminus.error() {
+                    Poll::Ready(Err(error))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if let Some(error) = self.terminus.error() {
+                    self.read_closed = true;
+                    Poll::Ready(Err(error))
+                } else {
+                    Poll::Pending
+                }
+            }
         }
     }
 }
@@ -390,6 +514,10 @@ impl AsyncWrite for AnyTlsStream {
     ) -> Poll<std::io::Result<usize>> {
         if self.write_closed {
             return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+        }
+        if let Some(error) = self.terminus.error() {
+            self.write_closed = true;
+            return Poll::Ready(Err(error));
         }
         if self.pending_write.is_none() {
             let session = Arc::clone(&self.session);
@@ -499,17 +627,29 @@ impl SessionInner {
                 "AnyTLS session is closed".to_owned(),
             ));
         }
-        let mut guard = self.write.lock().await;
-        if guard.buffering {
-            guard.buffer.extend_from_slice(payload);
-            return Ok(());
+        let result = {
+            let mut guard = self.write.lock().await;
+            if self.closed.load(Ordering::Acquire) {
+                Err(AnyTlsProtocolError::Protocol(
+                    "AnyTLS session is closed".to_owned(),
+                ))
+            } else if guard.buffering {
+                guard.buffer.extend_from_slice(payload);
+                Ok(())
+            } else if !guard.buffer.is_empty() {
+                let mut combined = std::mem::take(&mut guard.buffer);
+                combined.extend_from_slice(payload);
+                write_conn_locked(self, &mut guard, &combined).await
+            } else {
+                write_conn_locked(self, &mut guard, payload).await
+            }
+        };
+        // Any wire write failure may leave a partial frame; close so the session
+        // cannot return to the idle pool (Go writeControlFrame → Close on error).
+        if result.is_err() {
+            schedule_close_from_inner(self);
         }
-        if !guard.buffer.is_empty() {
-            let mut combined = std::mem::take(&mut guard.buffer);
-            combined.extend_from_slice(payload);
-            return write_conn_locked(self, &mut guard, &combined).await;
-        }
-        write_conn_locked(self, &mut guard, payload).await
+        result
     }
 }
 
@@ -585,7 +725,7 @@ async fn write_all_cancellable(
     tokio::pin!(notified);
     notified.as_mut().enable();
     tokio::select! {
-        result = tokio::time::timeout(WRITE_DEADLINE, remote.write_all(payload)) => {
+        result = tokio::time::timeout(session.write_deadline, remote.write_all(payload)) => {
             match result {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => Err(AnyTlsProtocolError::Io(error)),
@@ -640,11 +780,18 @@ async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
                 }
             }
             CMD_FIN => {
-                let _ = session
+                if let Some(inbox) = session
                     .streams
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&sid);
+                    .remove(&sid)
+                {
+                    // Go closeLocally: subsequent Writes fail with dieErr.
+                    inbox.terminus.fail(
+                        std::io::ErrorKind::ConnectionReset,
+                        "AnyTLS stream closed by peer",
+                    );
+                }
             }
             CMD_SYNACK => {
                 cancel_synack_watchdog(&session);
@@ -656,6 +803,9 @@ async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&sid)
                     {
+                        inbox
+                            .terminus
+                            .fail(std::io::ErrorKind::Other, reason.clone());
                         let _ = inbox.sender.try_send(StreamEvent::Error(reason));
                     }
                 }
@@ -682,7 +832,7 @@ async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
             _ => {}
         }
     }
-    mark_session_closed(&session).await;
+    request_session_close(session);
 }
 
 fn parse_settings_version(data: &[u8]) -> Option<u32> {
@@ -836,9 +986,12 @@ pub async fn open_proxy_stream(
 mod tests {
     use super::*;
     use crate::frame::{
-        CMD_PSH, CMD_SERVER_SETTINGS, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, HEADER_OVERHEAD,
+        CMD_FIN, CMD_PSH, CMD_SERVER_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME,
+        HEADER_OVERHEAD,
     };
+    use rewrite_io::BoxedStream;
     use rewrite_model::Host;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     fn frame(cmd: u8, sid: u32, data: &[u8]) -> Vec<u8> {
@@ -874,7 +1027,11 @@ mod tests {
     #[tokio::test]
     async fn slow_consumer_applies_recv_backpressure() {
         let (client, mut server) = duplex(64 * 1024);
-        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        // stop=1 so the SETTINGS flush is not split into WASTE frames that confuse
+        // the test peer's frame reader.
+        let padding = Arc::new(StdMutex::new(Arc::new(
+            PaddingFactory::new(b"stop=1\n0=16-16").expect("scheme"),
+        )));
         let session = Session::start(Box::new(client), "test", Arc::clone(&padding), 1)
             .await
             .expect("session");
@@ -887,24 +1044,28 @@ mod tests {
             // Wait for SYN (stream 1).
             let mut header = [0_u8; HEADER_OVERHEAD];
             let _ = server.read_exact(&mut header).await;
+            assert_eq!(header[0], CMD_SYN, "expected SYN, got cmd {}", header[0]);
             let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
             if length > 0 {
                 let mut body = vec![0_u8; length];
                 let _ = server.read_exact(&mut body).await;
             }
-            // Flood two PSH payloads; capacity is 1 so the second send awaits.
+            // Flood PSH payloads; capacity is 1 so later sends await the consumer.
             for payload in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
-                let _ = server.write_all(&frame(CMD_PSH, 1, payload)).await;
+                server
+                    .write_all(&frame(CMD_PSH, 1, payload))
+                    .await
+                    .expect("psh write");
             }
             // Keep the carrier open until the test finishes.
-            let mut sink = vec![0_u8; 64];
-            let _ = server.read(&mut sink).await;
+            std::future::pending::<()>().await;
         });
 
         let mut stream = session.open_stream(None).await.expect("stream");
         flush_buffered(&session).await;
         // Give recv_loop time to enqueue the first PSH and block on the second.
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!session.is_closed(), "session closed before reads");
         let mut first = [0_u8; 8];
         let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut first))
             .await
@@ -923,7 +1084,7 @@ mod tests {
         assert_eq!(&first[..n], b"three");
         drop(stream);
         session.close().await;
-        let _ = peer.await;
+        peer.abort();
     }
 
     #[tokio::test]
@@ -1001,6 +1162,17 @@ mod tests {
         assert!(
             error.to_string().contains("remote: destination refused"),
             "unexpected error: {error}"
+        );
+        let write_err =
+            tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"should-fail"))
+                .await
+                .expect("write timeout")
+                .expect_err("writes after reject SYNACK must fail");
+        assert!(
+            write_err
+                .to_string()
+                .contains("remote: destination refused"),
+            "unexpected write error: {write_err}"
         );
         drop(stream);
         session.close().await;
@@ -1112,6 +1284,149 @@ mod tests {
         })
         .await
         .expect("padding update must land on shared factory");
+        session.close().await;
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn close_from_reader_eof_completes_while_write_lock_held() {
+        let (client, server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "cleanup", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let hook_flag = Arc::clone(&hook_fired);
+        session.set_close_hook(Box::new(move || {
+            hook_flag.store(true, Ordering::SeqCst);
+        }));
+
+        // Hold the write lock so finalize_session_close must wait — previously
+        // aborting the reader task cancelled that wait mid-cleanup.
+        let session_lock = session.clone();
+        let holder = tokio::spawn(async move {
+            let _guard = session_lock.inner.write.lock().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        // Peer EOF ends recv_loop → request_session_close (must not abort itself).
+        drop(server);
+        tokio::time::timeout(Duration::from_secs(2), session.close())
+            .await
+            .expect("close must finish");
+        assert!(session.is_closed());
+        assert!(
+            hook_fired.load(Ordering::SeqCst),
+            "close_hook must run even when write lock was held during reader EOF"
+        );
+        let _ = holder.await;
+    }
+
+    #[tokio::test]
+    async fn write_timeout_closes_session_and_blocks_pool_reuse() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dials_ref = Arc::clone(&dials);
+        let dial_out: crate::DialOut = Arc::new(move || {
+            let dials_ref = Arc::clone(&dials_ref);
+            Box::pin(async move {
+                let n = dials_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                let (client, mut server) = duplex(32);
+                tokio::spawn(async move {
+                    // Consume auth so Session::start can proceed.
+                    let mut auth = [0_u8; 64];
+                    let mut filled = 0;
+                    while filled < auth.len() {
+                        match server.read(&mut auth[filled..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(got) => filled += got,
+                        }
+                    }
+                    if n == 1 {
+                        // Read a few SETTINGS bytes then stop reading so the
+                        // client write path hits WRITE_DEADLINE mid-frame.
+                        let mut bit = [0_u8; 4];
+                        let _ = server.read(&mut bit).await;
+                        std::future::pending::<()>().await;
+                    } else {
+                        let mut buffer = vec![0_u8; 4096];
+                        loop {
+                            match server.read(&mut buffer).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    }
+                });
+                Ok(Box::new(client) as BoxedStream)
+            })
+        });
+        let client = crate::Client::new(
+            dial_out,
+            crate::ClientOptions {
+                client_metadata: "partial".to_owned(),
+                idle_session_check_interval: Duration::from_secs(30),
+                idle_session_timeout: Duration::from_secs(30),
+                min_idle_session: 0,
+                disable_reuse: false,
+                password: "pw".to_owned(),
+            },
+        );
+        client.test_set_write_deadline(Duration::from_millis(150));
+        let destination = Destination {
+            host: Host::Domain("example.com".to_owned()),
+            port: 443,
+        };
+        let first = client.create_proxy(&destination).await;
+        assert!(first.is_err(), "partial-write timeout must fail the dial");
+        // Allow close finalizer to run before the next dial.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            client.test_idle_len(),
+            0,
+            "failed session must not enter idle pool"
+        );
+        let second = client.create_proxy(&destination).await.expect("fresh dial");
+        drop(second);
+        assert!(
+            dials.load(Ordering::SeqCst) >= 2,
+            "next request must dial a new carrier, not reuse the partial-write session"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn remote_fin_fails_subsequent_writes() {
+        let (client, mut server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "fin-write", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let mut header = [0_u8; HEADER_OVERHEAD];
+            let _ = server.read_exact(&mut header).await; // SYN
+            let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+            if length > 0 {
+                let mut body = vec![0_u8; length];
+                let _ = server.read_exact(&mut body).await;
+            }
+            let _ = server.write_all(&frame(CMD_FIN, 1, &[])).await;
+            let mut sink = vec![0_u8; 64];
+            let _ = server.read(&mut sink).await;
+        });
+        let mut stream = session.open_stream(None).await.expect("stream");
+        flush_buffered(&session).await;
+        // Observe peer FIN via read EOF/error.
+        let mut buf = [0_u8; 4];
+        let _ = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+        let err = tokio::time::timeout(Duration::from_secs(1), stream.write_all(b"late"))
+            .await
+            .expect("timeout")
+            .expect_err("write after remote FIN must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        drop(stream);
         session.close().await;
         let _ = peer.await;
     }

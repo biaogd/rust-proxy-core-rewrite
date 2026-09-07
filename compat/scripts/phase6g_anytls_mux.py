@@ -79,6 +79,7 @@ class AnyTlsHandler(socketserver.BaseRequestHandler):
                 return
             authority.observe("AUTH accept")
             streams: dict[int, bytearray] = {}
+            stream_hosts: dict[int, str] = {}
             while True:
                 cmd, sid, data = read_frame(stream)
                 if cmd == CMD_WASTE:
@@ -100,6 +101,7 @@ class AnyTlsHandler(socketserver.BaseRequestHandler):
                         authority.observe(f"CONNECT {host}:{port}")
                         write_frame(stream, CMD_SYNACK, sid)
                         streams[sid] = bytearray(b"\x00")
+                        stream_hosts[sid] = host
                         continue
                     if data:
                         stream.sendall(
@@ -108,6 +110,13 @@ class AnyTlsHandler(socketserver.BaseRequestHandler):
                             + len(data).to_bytes(2, "big")
                             + data
                         )
+                        # Peer FIN after first echo — subsequent client writes must fail
+                        # (Go Stream.dieErr / Rust StreamTerminus).
+                        if stream_hosts.get(sid, "").startswith("finwrite."):
+                            write_frame(stream, CMD_FIN, sid)
+                            authority.observe(f"PEER-FIN {sid}")
+                            streams.pop(sid, None)
+                            stream_hosts.pop(sid, None)
                     continue
                 if cmd == CMD_FIN:
                     authority.observe(f"FIN {sid}")
@@ -183,6 +192,27 @@ def exchange(port: int, host: str, target_port: int, payload: bytes) -> bool:
         stream.settimeout(IO_DEADLINE)
         stream.sendall(payload)
         return recv_exact(stream, len(payload)) == payload
+
+
+def write_after_peer_fin(mixed_port: int) -> bool:
+    """Echo once, peer FINs, then the same SOCKS stream must not echo again."""
+    with connect_domain(mixed_port, "finwrite.phase6g", 28041) as stream:
+        stream.settimeout(IO_DEADLINE)
+        stream.sendall(b"fin-one")
+        if recv_exact(stream, 7) != b"fin-one":
+            return False
+        time.sleep(0.2)
+        try:
+            stream.sendall(b"late-write")
+        except OSError:
+            return True
+        stream.settimeout(0.5)
+        try:
+            data = stream.recv(16)
+        except (OSError, TimeoutError):
+            return True
+        # Must not receive an echoed late-write after peer FIN.
+        return data != b"late-write"
 
 
 def wait_exchange(
@@ -271,15 +301,23 @@ rules:
             and sum(1 for key in half_close_wire if key.startswith("SYN ")) >= 1
         )
 
+        authority.reset()
+        write_after_fin = write_after_peer_fin(mixed_port)
+        time.sleep(0.1)
+        write_after_fin_wire = authority.snapshot()
+
         return {
             "sequential-reuse": sequential_reuse,
             "concurrent-success": concurrent_success,
             "session-alive-after-fin": session_alive_after_fin,
+            "write-after-peer-fin": write_after_fin
+            and any(key.startswith("PEER-FIN ") for key in write_after_fin_wire),
             "process-alive": process.poll() is None,
             "debug": {
                 "sequential-wire": sequential_wire,
                 "concurrent-ok": concurrent_ok,
                 "half-close-wire": half_close_wire,
+                "write-after-fin-wire": write_after_fin_wire,
             },
         }
     finally:
@@ -294,6 +332,7 @@ def public_view(entry: dict[str, Any]) -> dict[str, Any]:
         "sequential-reuse": entry["sequential-reuse"],
         "concurrent-success": entry["concurrent-success"],
         "session-alive-after-fin": entry["session-alive-after-fin"],
+        "write-after-peer-fin": entry["write-after-peer-fin"],
         "process-alive": entry["process-alive"],
     }
 
