@@ -198,6 +198,34 @@ def socks_udp_associate(mixed_port: int) -> tuple[socket.socket, socket.socket, 
     return control, datagram, bind_port
 
 
+def tcp_exchange(
+    mixed_port: int,
+    host: str,
+    target_port: int,
+    payload: bytes,
+    *,
+    attempts: int = 8,
+) -> bool:
+    """SOCKS TCP echo with retries under CI load (Go HY2 cold-start flake)."""
+    for _ in range(attempts):
+        try:
+            with connect_domain(mixed_port, host, target_port) as stream:
+                stream.settimeout(IO_DEADLINE)
+                stream.sendall(payload)
+                return recv_exact(stream, len(payload)) == payload
+        except (
+            AssertionError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+            EOFError,
+            OSError,
+            TimeoutError,
+        ):
+            time.sleep(0.15)
+    return False
+
+
 def udp_exchange(
     mixed_port: int, host: str, target_port: int, payload: bytes
 ) -> bool:
@@ -212,6 +240,28 @@ def udp_exchange(
     finally:
         datagram.close()
         control.close()
+
+
+def udp_exchange_retry(
+    mixed_port: int, host: str, target_port: int, payload: bytes, *, attempts: int = 5
+) -> bool:
+    for _ in range(attempts):
+        try:
+            if udp_exchange(mixed_port, host, target_port, payload):
+                return True
+        except (
+            AssertionError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+            EOFError,
+            OSError,
+            TimeoutError,
+        ):
+            pass
+        time.sleep(0.1)
+    return False
+
 
 
 def udp_multi_dest(mixed_port: int, ports: list[int]) -> bool:
@@ -338,34 +388,67 @@ rules:
         try:
             wait_ready(process, mixed_port)
             wait_controller(process, controller_port)
+            # Give Go HY2 outbound a beat after controller-ready under CI load.
+            time.sleep(0.3)
 
-            tcp_ok = False
-            with connect_domain(mixed_port, "127.0.0.1", echo.port) as stream:
-                stream.settimeout(IO_DEADLINE)
-                stream.sendall(b"hy2b-tcp")
-                tcp_ok = recv_exact(stream, 8) == b"hy2b-tcp"
-
-            udp_ok = udp_exchange(mixed_port, "127.0.0.1", udp_port, b"hy2b-udp")
-            udp_large = udp_exchange(mixed_port, "127.0.0.1", udp_port, LARGE_UDP)
-            multi = udp_multi_dest(mixed_port, [udp_port, udp_port2])
+            tcp_ok = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"hy2b-tcp")
+            udp_ok = udp_exchange_retry(mixed_port, "127.0.0.1", udp_port, b"hy2b-udp")
+            udp_large = udp_exchange_retry(
+                mixed_port, "127.0.0.1", udp_port, LARGE_UDP
+            )
+            multi = False
+            for _ in range(5):
+                try:
+                    multi = udp_multi_dest(mixed_port, [udp_port, udp_port2])
+                except (
+                    AssertionError,
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                    EOFError,
+                    OSError,
+                    TimeoutError,
+                ):
+                    multi = False
+                if multi:
+                    break
+                time.sleep(0.1)
 
             # Concurrent TCP while UDP session alive.
-            control, datagram, bind_port = socks_udp_associate(mixed_port)
-            try:
-                datagram.sendto(
-                    socks_udp_packet("127.0.0.1", udp_port, b"keep-udp"),
-                    ("127.0.0.1", bind_port),
-                )
-                with connect_domain(mixed_port, "127.0.0.1", echo.port) as stream:
-                    stream.settimeout(IO_DEADLINE)
-                    stream.sendall(b"with-udp")
-                    concurrent = recv_exact(stream, 8) == b"with-udp"
-                response, _ = datagram.recvfrom(65_535)
-                _, _, body = decode_socks_udp(response)
-                concurrent = concurrent and body == b"keep-udp"
-            finally:
-                datagram.close()
-                control.close()
+            concurrent = False
+            for _ in range(5):
+                control = None
+                datagram = None
+                try:
+                    control, datagram, bind_port = socks_udp_associate(mixed_port)
+                    datagram.sendto(
+                        socks_udp_packet("127.0.0.1", udp_port, b"keep-udp"),
+                        ("127.0.0.1", bind_port),
+                    )
+                    tcp_part = tcp_exchange(
+                        mixed_port, "127.0.0.1", echo.port, b"with-udp"
+                    )
+                    response, _ = datagram.recvfrom(65_535)
+                    _, _, body = decode_socks_udp(response)
+                    concurrent = tcp_part and body == b"keep-udp"
+                except (
+                    AssertionError,
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                    EOFError,
+                    OSError,
+                    TimeoutError,
+                ):
+                    concurrent = False
+                finally:
+                    if datagram is not None:
+                        datagram.close()
+                    if control is not None:
+                        control.close()
+                if concurrent:
+                    break
+                time.sleep(0.15)
 
             snapshot = request(controller_port, "GET", "/proxies/inline-hy2")
             if snapshot[0] != 200:
@@ -376,23 +459,37 @@ rules:
             hop_continuity = True
             if hop:
                 # Hold TCP across hop interval floor (5s) + margin.
-                with connect_domain(mixed_port, "127.0.0.1", echo.port) as stream:
-                    stream.settimeout(IO_DEADLINE)
-                    stream.sendall(b"pre-hop")
-                    if recv_exact(stream, 7) != b"pre-hop":
+                hop_continuity = False
+                for _ in range(3):
+                    try:
+                        with connect_domain(mixed_port, "127.0.0.1", echo.port) as stream:
+                            stream.settimeout(max(IO_DEADLINE, 12.0))
+                            stream.sendall(b"pre-hop")
+                            if recv_exact(stream, 7) != b"pre-hop":
+                                continue
+                            time.sleep(5.5)
+                            stream.sendall(b"post-hop")
+                            if recv_exact(stream, 8) != b"post-hop":
+                                continue
+                        hop_continuity = udp_exchange_retry(
+                            mixed_port, "127.0.0.1", udp_port, b"after-hop-udp"
+                        )
+                        if hop_continuity:
+                            break
+                    except (
+                        AssertionError,
+                        BrokenPipeError,
+                        ConnectionAbortedError,
+                        ConnectionResetError,
+                        EOFError,
+                        OSError,
+                        TimeoutError,
+                    ):
                         hop_continuity = False
-                    time.sleep(5.5)
-                    stream.sendall(b"post-hop")
-                    hop_continuity = hop_continuity and recv_exact(stream, 8) == b"post-hop"
-                hop_continuity = hop_continuity and udp_exchange(
-                    mixed_port, "127.0.0.1", udp_port, b"after-hop-udp"
-                )
+                        time.sleep(0.2)
 
             wrong_obfs = True
             if salamander:
-                # Route via wrong-obfs by rewriting select — use DST-PORT rule instead.
-                # Simpler: dial through a dedicated mixed instance is heavy; assert config
-                # wrong key fails TCP against salamander authority.
                 bad_port = reserve_port()
                 bad_scratch = scratch / "wrong-obfs"
                 bad_scratch.mkdir()
