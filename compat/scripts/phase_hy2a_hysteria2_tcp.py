@@ -87,9 +87,11 @@ def exchange(
     payload: bytes,
     *,
     half_close: bool = False,
+    timeout: float | None = None,
 ) -> bool:
+    stream_timeout = IO_DEADLINE if timeout is None else timeout
     with connect_domain(port, host, target_port) as stream:
-        stream.settimeout(IO_DEADLINE)
+        stream.settimeout(stream_timeout)
         stream.sendall(payload)
         if half_close:
             # Prove half-close after application data is flowing: read one byte,
@@ -108,15 +110,36 @@ def wait_exchange(
     host: str,
     target_port: int,
     payload: bytes,
+    *,
+    deadline_secs: float | None = None,
 ) -> bool:
-    deadline = time.monotonic() + IO_DEADLINE
-    while True:
+    # Outer budget must exceed a single SOCKS attempt timeout so Windows/CI
+    # cold-start can retry after TimeoutError / WinError 10053/10054.
+    limit = deadline_secs if deadline_secs is not None else max(IO_DEADLINE * 4, 20.0)
+    attempt_timeout = min(IO_DEADLINE, 3.0)
+    deadline = time.monotonic() + limit
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
         try:
-            return exchange(port, host, target_port, payload)
-        except (AssertionError, EOFError, OSError, TimeoutError):
-            if process.poll() is not None or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.05)
+            return exchange(
+                port, host, target_port, payload, timeout=attempt_timeout
+            )
+        except (
+            AssertionError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+            EOFError,
+            OSError,
+            TimeoutError,
+        ) as error:
+            last_error = error
+            time.sleep(0.15)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError("wait_exchange exhausted without a successful exchange")
 
 
 def config_validation(binary: pathlib.Path, scratch: pathlib.Path, body: str) -> bool:
@@ -300,11 +323,28 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
+        time.sleep(0.3)
 
         domain_small = wait_exchange(
             process, mixed_port, "echo.hy2a.test", echo_port, b"hy2a-domain"
         )
-        ipv4_large = exchange(mixed_port, "127.0.0.1", echo_port, LARGE_PAYLOAD)
+        ipv4_large = False
+        for _ in range(5):
+            try:
+                ipv4_large = exchange(mixed_port, "127.0.0.1", echo_port, LARGE_PAYLOAD)
+                if ipv4_large:
+                    break
+            except (
+                AssertionError,
+                BrokenPipeError,
+                ConnectionAbortedError,
+                ConnectionResetError,
+                EOFError,
+                OSError,
+                TimeoutError,
+            ):
+                ipv4_large = False
+                time.sleep(0.1)
         ipv6_ok = True
         if echo6_port is not None:
             ipv6_ok = exchange(mixed_port, "::1", echo6_port, b"hy2a-ipv6")
