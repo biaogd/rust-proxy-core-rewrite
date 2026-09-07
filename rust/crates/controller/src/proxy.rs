@@ -760,32 +760,16 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::AnyTls => {
                     let anytls = proxy.anytls.as_ref().ok_or(())?;
-                    let outer = rewrite_outbound::connect_with_options(
+                    let outer = rewrite_outbound::connect_anytls_carrier(
+                        proxy,
                         &server,
                         config.ipv6,
+                        &config.trust_certificates,
                         controller_socket_options(config),
+                        None,
                     )
                     .await
                     .map_err(|_| ())?;
-                    let alpn: Vec<&[u8]> = anytls.alpn.iter().map(String::as_bytes).collect();
-                    let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
-                    let tls = rewrite_outbound::HttpProxyTls {
-                        server_name,
-                        verification_name: proxy.name_cert_verify.as_deref(),
-                        skip_certificate_verification: proxy.skip_cert_verify,
-                        fingerprint: proxy.fingerprint.as_deref(),
-                        certificate: proxy.certificate.as_deref(),
-                        private_key: proxy.private_key.as_deref(),
-                        custom_roots: &config.trust_certificates,
-                        ech_config: None,
-                        alpn_protocols: &alpn,
-                        tls12_only: false,
-                        tls13_only: false,
-                    };
-                    let outer =
-                        rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, None)
-                            .await
-                            .map_err(|_| ())?;
                     rewrite_outbound::connect_anytls_on_stream(
                         outer,
                         &destination,

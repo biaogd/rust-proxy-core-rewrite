@@ -20,6 +20,15 @@ pub const DEFAULT_PADDING_SCHEME: &[u8] = b"stop=8
 6=500-1000
 7=500-1000";
 
+/// Shared padding pointer matching Go `atomic.Pointer[PaddingFactory]` on Client.
+pub type SharedPadding = std::sync::Arc<std::sync::Mutex<std::sync::Arc<PaddingFactory>>>;
+
+/// Builds a shared default padding factory.
+#[must_use]
+pub fn default_shared_padding() -> SharedPadding {
+    std::sync::Arc::new(std::sync::Mutex::new(PaddingFactory::default_factory()))
+}
+
 /// Parsed padding factory matching Go `padding.PaddingFactory`.
 #[derive(Clone, Debug)]
 pub struct PaddingFactory {

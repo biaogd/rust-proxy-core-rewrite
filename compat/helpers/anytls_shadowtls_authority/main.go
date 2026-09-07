@@ -115,10 +115,17 @@ func serve(
 		}
 		// Differentials use synthetic hostnames; echo on the stream like the
 		// Python AnyTLS authorities instead of dialing the requested name.
+		// HTTP GET/HEAD (url-test / healthcheck) gets a 200 response.
 		buf := make([]byte, 4096)
+		first := true
 		for {
 			n, err := stream.Read(buf)
 			if n > 0 {
+				if first && (hasHTTPMethod(buf[:n], "GET") || hasHTTPMethod(buf[:n], "HEAD")) {
+					_, _ = stream.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nprobe"))
+					return
+				}
+				first = false
 				if _, writeErr := stream.Write(buf[:n]); writeErr != nil {
 					return
 				}
@@ -130,6 +137,18 @@ func serve(
 	}, paddingFactory)
 	session.Run()
 	session.Close()
+}
+
+func hasHTTPMethod(buf []byte, method string) bool {
+	if len(buf) < len(method)+1 {
+		return false
+	}
+	for i := 0; i < len(method); i++ {
+		if buf[i] != method[i] {
+			return false
+		}
+	}
+	return buf[len(method)] == ' '
 }
 
 func startCamouflageServer() (string, error) {

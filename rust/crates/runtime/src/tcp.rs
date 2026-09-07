@@ -638,79 +638,16 @@ async fn dial_anytls_tls_carrier(
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
     clock: std::sync::Arc<rewrite_services::AdjustedClock>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let anytls = proxy
-        .anytls
-        .as_ref()
-        .ok_or_else(|| "AnyTLS proxy configuration is missing".to_owned())?;
-    let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
-        .await
-        .map_err(|error| format!("AnyTLS outer TCP connection failed: {error}"))?;
-    match &anytls.carrier {
-        rewrite_config::AnyTlsCarrier::NativeTls => {
-            let alpn: Vec<&[u8]> = anytls.alpn.iter().map(String::as_bytes).collect();
-            let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
-            let tls = rewrite_outbound::HttpProxyTls {
-                server_name,
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: &alpn,
-                tls12_only: false,
-                tls13_only: false,
-            };
-            rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(clock))
-                .await
-                .map_err(|error| format!("AnyTLS outer TLS connection failed: {error}"))
-        }
-        rewrite_config::AnyTlsCarrier::ShadowTls { password, version } => {
-            // Go StreamTLSConn(ShadowTLS) replaces native TLS; AnyTLS AUTH rides the
-            // post-handshake ShadowTLS stream directly.
-            rewrite_outbound::connect_shadow_tls(
-                Box::new(outer),
-                rewrite_outbound::ShadowTlsConnectOptions {
-                    host: proxy.sni.as_deref().unwrap_or(&proxy.server),
-                    password,
-                    version: *version,
-                    skip_certificate_verification: proxy.skip_cert_verify,
-                    verification_name: proxy.name_cert_verify.as_deref(),
-                    certificate_fingerprint: proxy.fingerprint.as_deref(),
-                    certificate: proxy.certificate.as_deref(),
-                    private_key: proxy.private_key.as_deref(),
-                    custom_roots,
-                    alpn: &anytls.alpn,
-                    client_fingerprint: proxy.client_fingerprint.as_deref(),
-                },
-                Some(clock),
-            )
-            .await
-            .map_err(|error| format!("AnyTLS ShadowTLS carrier failed: {error}"))
-        }
-        rewrite_config::AnyTlsCarrier::Restls { .. } => Err(
-            "AnyTLS Restls carrier dial is blocked on a shared Restls TLS client transport \
-             (Go uses metacubex/restls-client-go, a utls fork; no Rust Restls client exists in-tree \
-             or on crates.io — only the 3andne/restls server binary). Phase 6G-E leftover."
-                .to_owned(),
-        ),
-        rewrite_config::AnyTlsCarrier::Jls { username, password } => {
-            // Go StreamTLSConn(JLS) replaces native TLS; AnyTLS AUTH rides the
-            // post-handshake JLS stream directly (no second TLS).
-            rewrite_outbound::connect_jls(
-                Box::new(outer),
-                rewrite_outbound::JlsConnectOptions {
-                    host: proxy.sni.as_deref().unwrap_or(&proxy.server),
-                    username,
-                    password,
-                    alpn: &anytls.alpn,
-                },
-            )
-            .await
-            .map_err(|error| format!("AnyTLS JLS carrier failed: {error}"))
-        }
-    }
+    rewrite_outbound::connect_anytls_carrier(
+        proxy,
+        server,
+        allow_ipv6,
+        custom_roots,
+        socket_options,
+        Some(clock),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 async fn connect_trojan_proxy(

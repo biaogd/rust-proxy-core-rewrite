@@ -6,29 +6,48 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::task::AbortHandle;
 
 use crate::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS,
     CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, CMD_WASTE, Frame,
     HEADER_OVERHEAD, MAX_FRAME_DATA_LEN, encode_settings, encode_socks_address,
 };
-use crate::padding::{CHECK_MARK, PaddingFactory};
+use crate::padding::{CHECK_MARK, PaddingFactory, SharedPadding};
 use crate::{AnyTlsConnectOptions, AnyTlsProtocolError};
 
+/// Cap matching Go's synchronous pipe: one in-flight payload stalls `recvLoop`.
+const STREAM_RECV_CAPACITY: usize = 1;
+
+/// Matches Go `writeControlFrame` write deadline (`time.Second * 5`).
+const WRITE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Bound for acquiring the write lock / dropping the carrier during `Close`.
+const CLOSE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Matches Go `util.NewDeadlineWatcher(time.Second*3, ...)` for SYNACK.
+const SYNACK_WATCHDOG: Duration = Duration::from_secs(3);
+
+enum StreamEvent {
+    Data(Bytes),
+    Error(String),
+}
+
 struct StreamInbox {
-    sender: mpsc::UnboundedSender<Bytes>,
+    sender: mpsc::Sender<StreamEvent>,
 }
 
 struct SessionInner {
     write: Mutex<WriteState>,
     streams: StdMutex<HashMap<u32, StreamInbox>>,
-    padding: StdMutex<Arc<PaddingFactory>>,
+    padding: SharedPadding,
     closed: AtomicBool,
     peer_version: AtomicU32,
     stream_id: AtomicU32,
@@ -36,6 +55,9 @@ struct SessionInner {
     send_padding: AtomicBool,
     seq: u64,
     close_hook: StdMutex<Option<SessionCloseHook>>,
+    close_notify: Notify,
+    reader_abort: StdMutex<Option<AbortHandle>>,
+    syn_done: StdMutex<Option<AbortHandle>>,
 }
 
 struct WriteState {
@@ -62,7 +84,7 @@ pub struct Session {
 pub struct AnyTlsStream {
     session: Arc<SessionInner>,
     sid: u32,
-    receiver: mpsc::UnboundedReceiver<Bytes>,
+    receiver: mpsc::Receiver<StreamEvent>,
     pending: BytesMut,
     write_closed: bool,
     read_closed: bool,
@@ -81,9 +103,14 @@ impl Session {
     pub async fn start(
         remote: BoxedStream,
         client_metadata: &str,
-        padding: Arc<PaddingFactory>,
+        padding: SharedPadding,
         seq: u64,
     ) -> Result<Self, AnyTlsProtocolError> {
+        let padding_md5 = padding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .md5()
+            .to_owned();
         let (read_half, write_half) = split_stream(remote);
         let inner = Arc::new(SessionInner {
             write: Mutex::new(WriteState {
@@ -92,7 +119,7 @@ impl Session {
                 buffer: Vec::new(),
             }),
             streams: StdMutex::new(HashMap::new()),
-            padding: StdMutex::new(Arc::clone(&padding)),
+            padding,
             closed: AtomicBool::new(false),
             peer_version: AtomicU32::new(0),
             stream_id: AtomicU32::new(0),
@@ -100,17 +127,24 @@ impl Session {
             send_padding: AtomicBool::new(true),
             seq,
             close_hook: StdMutex::new(None),
+            close_notify: Notify::new(),
+            reader_abort: StdMutex::new(None),
+            syn_done: StdMutex::new(None),
         });
 
         let (done_tx, _done_rx) = oneshot::channel();
         let reader_session = Arc::clone(&inner);
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             recv_loop(reader_session, read_half).await;
             let _ = done_tx.send(());
         });
+        *inner
+            .reader_abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join.abort_handle());
 
         let mut settings = Frame::new(CMD_SETTINGS, 0);
-        settings.data = encode_settings(client_metadata, padding.md5());
+        settings.data = encode_settings(client_metadata, &padding_md5);
         inner.write_control_frame(settings).await?;
 
         Ok(Self { inner })
@@ -173,12 +207,18 @@ impl Session {
             ));
         }
         let sid = self.inner.stream_id.fetch_add(1, Ordering::AcqRel) + 1;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(STREAM_RECV_CAPACITY);
         self.inner
             .streams
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(sid, StreamInbox { sender });
+
+        let peer_version = self.inner.peer_version.load(Ordering::Acquire);
+        if sid >= 2 && peer_version >= 2 {
+            arm_synack_watchdog(&self.inner);
+        }
+
         self.inner
             .write_control_frame(Frame::new(CMD_SYN, sid))
             .await?;
@@ -202,6 +242,33 @@ impl Session {
     }
 }
 
+fn arm_synack_watchdog(inner: &Arc<SessionInner>) {
+    let mut guard = inner
+        .syn_done
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(previous) = guard.take() {
+        previous.abort();
+    }
+    let session = Arc::clone(inner);
+    let join = tokio::spawn(async move {
+        tokio::time::sleep(SYNACK_WATCHDOG).await;
+        mark_session_closed(&session).await;
+    });
+    *guard = Some(join.abort_handle());
+}
+
+fn cancel_synack_watchdog(inner: &SessionInner) {
+    if let Some(handle) = inner
+        .syn_done
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        handle.abort();
+    }
+}
+
 async fn mark_session_closed(inner: &Arc<SessionInner>) {
     if inner
         .closed
@@ -210,24 +277,41 @@ async fn mark_session_closed(inner: &Arc<SessionInner>) {
     {
         return;
     }
+    // Wake any write stalled on a non-reading peer (Go `SetDeadline(now)`).
+    inner.close_notify.notify_waiters();
+    cancel_synack_watchdog(inner);
+    if let Some(handle) = inner
+        .reader_abort
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        handle.abort();
+    }
     let hook = inner
         .close_hook
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
+    // Drop stream senders so readers observe EOF/error without waiting on a
+    // blocked write half.
     {
-        let mut guard = inner.write.lock().await;
-        let _ = guard.remote.shutdown().await;
+        let _inboxes: Vec<_> = inner
+            .streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, inbox)| inbox)
+            .collect();
     }
-    let inboxes: Vec<_> = inner
-        .streams
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain()
-        .map(|(_, inbox)| inbox)
-        .collect();
-    for inbox in inboxes {
-        let _ = inbox.sender.send(Bytes::new());
+    if let Ok(mut guard) = tokio::time::timeout(CLOSE_DEADLINE, inner.write.lock()).await {
+        // Prefer dropping the write half over awaiting shutdown forever.
+        guard.remote = Box::new(ClosedStream);
+        guard.buffer.clear();
+        guard.buffering = false;
+    } else {
+        // Write lock stuck past deadline; close_notify should have woken the
+        // writer. Remaining cleanup is best-effort via closed flag.
     }
     if let Some(hook) = hook {
         hook();
@@ -273,7 +357,7 @@ impl AsyncRead for AnyTlsStream {
             return Poll::Ready(Ok(()));
         }
         match self.receiver.poll_recv(context) {
-            Poll::Ready(Some(chunk)) => {
+            Poll::Ready(Some(StreamEvent::Data(chunk))) => {
                 if chunk.is_empty() {
                     self.read_closed = true;
                     return Poll::Ready(Ok(()));
@@ -284,6 +368,10 @@ impl AsyncRead for AnyTlsStream {
                     self.pending.extend_from_slice(&chunk[amount..]);
                 }
                 Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Some(StreamEvent::Error(message))) => {
+                self.read_closed = true;
+                Poll::Ready(Err(std::io::Error::other(message)))
             }
             Poll::Ready(None) => {
                 self.read_closed = true;
@@ -406,6 +494,11 @@ impl SessionInner {
     }
 
     async fn write_conn(&self, payload: &[u8]) -> Result<(), AnyTlsProtocolError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AnyTlsProtocolError::Protocol(
+                "AnyTLS session is closed".to_owned(),
+            ));
+        }
         let mut guard = self.write.lock().await;
         if guard.buffering {
             guard.buffer.extend_from_slice(payload);
@@ -443,7 +536,7 @@ async fn write_conn_locked(
                 }
                 let size = usize::try_from(size).unwrap_or(0);
                 if remain > size {
-                    guard.remote.write_all(&payload[..size]).await?;
+                    write_all_cancellable(session, &mut guard.remote, &payload[..size]).await?;
                     payload = &payload[size..];
                 } else if remain > 0 {
                     let padding_len = size.saturating_sub(remain + HEADER_OVERHEAD);
@@ -456,26 +549,55 @@ async fn write_conn_locked(
                         );
                         packet.extend_from_slice(&waste);
                     }
-                    guard.remote.write_all(&packet).await?;
+                    write_all_cancellable(session, &mut guard.remote, &packet).await?;
                     payload = &[];
                 } else {
                     let mut waste = vec![0_u8; HEADER_OVERHEAD + size];
                     waste[0] = CMD_WASTE;
                     waste[5..7]
                         .copy_from_slice(&u16::try_from(size).unwrap_or(u16::MAX).to_be_bytes());
-                    guard.remote.write_all(&waste).await?;
+                    write_all_cancellable(session, &mut guard.remote, &waste).await?;
                 }
             }
             if payload.is_empty() {
                 return Ok(());
             }
-            guard.remote.write_all(payload).await?;
+            write_all_cancellable(session, &mut guard.remote, payload).await?;
             return Ok(());
         }
         session.send_padding.store(false, Ordering::Release);
     }
-    guard.remote.write_all(payload).await?;
-    Ok(())
+    write_all_cancellable(session, &mut guard.remote, payload).await
+}
+
+async fn write_all_cancellable(
+    session: &SessionInner,
+    remote: &mut BoxedStream,
+    payload: &[u8],
+) -> Result<(), AnyTlsProtocolError> {
+    if session.closed.load(Ordering::Acquire) {
+        return Err(AnyTlsProtocolError::Protocol(
+            "AnyTLS session is closed".to_owned(),
+        ));
+    }
+    // Arm notify before racing so a concurrent close cannot be missed.
+    let notified = session.close_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    tokio::select! {
+        result = tokio::time::timeout(WRITE_DEADLINE, remote.write_all(payload)) => {
+            match result {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(AnyTlsProtocolError::Io(error)),
+                Err(_) => Err(AnyTlsProtocolError::Protocol(
+                    "AnyTLS write deadline exceeded".to_owned(),
+                )),
+            }
+        }
+        () = notified => Err(AnyTlsProtocolError::Protocol(
+            "AnyTLS session is closed".to_owned(),
+        )),
+    }
 }
 
 async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
@@ -507,28 +629,35 @@ async fn recv_loop(session: Arc<SessionInner>, mut remote_read: BoxedStream) {
                     .get(&sid)
                     .map(|inbox| inbox.sender.clone());
                 if let Some(sender) = sender {
-                    let _ = sender.send(Bytes::from(data));
+                    // Awaitable send provides Go pipe backpressure.
+                    if sender
+                        .send(StreamEvent::Data(Bytes::from(data)))
+                        .await
+                        .is_err()
+                    {
+                        // Stream gone; drop payload.
+                    }
                 }
             }
             CMD_FIN => {
-                if let Some(inbox) = session
+                let _ = session
                     .streams
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&sid)
-                {
-                    let _ = inbox.sender.send(Bytes::new());
-                }
+                    .remove(&sid);
             }
             CMD_SYNACK => {
-                if !data.is_empty()
-                    && let Some(inbox) = session
+                cancel_synack_watchdog(&session);
+                if !data.is_empty() {
+                    let reason = format!("remote: {}", String::from_utf8_lossy(&data));
+                    if let Some(inbox) = session
                         .streams
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&sid)
-                {
-                    let _ = inbox.sender.send(Bytes::new());
+                    {
+                        let _ = inbox.sender.try_send(StreamEvent::Error(reason));
+                    }
                 }
             }
             CMD_ALERT => break,
@@ -578,6 +707,7 @@ fn split_stream(remote: BoxedStream) -> (BoxedStream, BoxedStream) {
 
 struct ReadHalfStream(tokio::io::ReadHalf<BoxedStream>);
 struct WriteHalfStream(tokio::io::WriteHalf<BoxedStream>);
+struct ClosedStream;
 
 impl AsyncRead for ReadHalfStream {
     fn poll_read(
@@ -621,7 +751,7 @@ impl AsyncRead for WriteHalfStream {
     ) -> Poll<std::io::Result<()>> {
         Poll::Ready(Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "write half does not support read",
+            "write half does not support write",
         )))
     }
 }
@@ -650,6 +780,37 @@ impl AsyncWrite for WriteHalfStream {
     }
 }
 
+impl AsyncRead for ClosedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        _buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for ClosedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        _buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// Opens a one-shot `AnyTLS` proxy stream on an established TLS carrier.
 pub async fn open_proxy_stream(
     remote: BoxedStream,
@@ -659,7 +820,7 @@ pub async fn open_proxy_stream(
     let padding = options
         .padding
         .clone()
-        .unwrap_or_else(PaddingFactory::default_factory);
+        .unwrap_or_else(crate::padding::default_shared_padding);
     let session = Session::start(remote, options.client_metadata, padding, 1).await?;
     let session_for_hook = session.clone();
     let close_hook: StreamCloseHook = Box::new(move || {
@@ -669,4 +830,312 @@ pub async fn open_proxy_stream(
     });
     let stream = session.open_proxy(destination, Some(close_hook)).await?;
     Ok(Box::new(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::{
+        CMD_PSH, CMD_SERVER_SETTINGS, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, HEADER_OVERHEAD,
+    };
+    use rewrite_model::Host;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    fn frame(cmd: u8, sid: u32, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_OVERHEAD + data.len());
+        out.push(cmd);
+        out.extend_from_slice(&sid.to_be_bytes());
+        out.extend_from_slice(&(u16::try_from(data.len()).unwrap()).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    async fn drain_settings(server: &mut tokio::io::DuplexStream) {
+        let mut header = [0_u8; HEADER_OVERHEAD];
+        let _ = server.read_exact(&mut header).await;
+        let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+        if length > 0 {
+            let mut body = vec![0_u8; length];
+            let _ = server.read_exact(&mut body).await;
+        }
+    }
+
+    async fn flush_buffered(session: &Session) {
+        let mut guard = session.inner.write.lock().await;
+        guard.buffering = false;
+        if !guard.buffer.is_empty() {
+            let buffered = std::mem::take(&mut guard.buffer);
+            write_conn_locked(&session.inner, &mut guard, &buffered)
+                .await
+                .expect("flush");
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_consumer_applies_recv_backpressure() {
+        let (client, mut server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "test", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let _ = server
+                .write_all(&frame(CMD_SERVER_SETTINGS, 0, b"v=2"))
+                .await;
+            // Wait for SYN (stream 1).
+            let mut header = [0_u8; HEADER_OVERHEAD];
+            let _ = server.read_exact(&mut header).await;
+            let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+            if length > 0 {
+                let mut body = vec![0_u8; length];
+                let _ = server.read_exact(&mut body).await;
+            }
+            // Flood two PSH payloads; capacity is 1 so the second send awaits.
+            for payload in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+                let _ = server.write_all(&frame(CMD_PSH, 1, payload)).await;
+            }
+            // Keep the carrier open until the test finishes.
+            let mut sink = vec![0_u8; 64];
+            let _ = server.read(&mut sink).await;
+        });
+
+        let mut stream = session.open_stream(None).await.expect("stream");
+        flush_buffered(&session).await;
+        // Give recv_loop time to enqueue the first PSH and block on the second.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut first = [0_u8; 8];
+        let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut first))
+            .await
+            .expect("read1 timeout")
+            .expect("read1");
+        assert_eq!(&first[..n], b"one");
+        let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut first))
+            .await
+            .expect("read2 timeout")
+            .expect("read2");
+        assert_eq!(&first[..n], b"two");
+        let n = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut first))
+            .await
+            .expect("read3 timeout")
+            .expect("read3");
+        assert_eq!(&first[..n], b"three");
+        drop(stream);
+        session.close().await;
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn close_completes_when_peer_neither_reads_nor_closes() {
+        // Tiny duplex buffer so writes block once the peer stops reading.
+        let (client, server) = duplex(8);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "hang", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        // Consume initial buffered SETTINGS from the client write buffer flush
+        // path by opening a stream (disables buffering) then flooding writes.
+        let peer = tokio::spawn(async move {
+            // Never read; never close.
+            std::future::pending::<()>().await;
+            drop(server);
+        });
+
+        {
+            let mut guard = session.inner.write.lock().await;
+            guard.buffering = false;
+        }
+        let session_write = session.clone();
+        let writer = tokio::spawn(async move {
+            // Attempt a large write that will stall on the tiny duplex.
+            let payload = vec![0x61_u8; 64 * 1024];
+            let mut frame = Frame::new(CMD_PSH, 1);
+            frame.data = payload;
+            let _ = session_write.inner.write_control_frame(frame).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::timeout(Duration::from_secs(2), session.close())
+            .await
+            .expect("close must finish while peer is stuck");
+        assert!(session.is_closed());
+        writer.abort();
+        peer.abort();
+    }
+
+    #[tokio::test]
+    async fn synack_reject_surfaces_remote_reason() {
+        let (client, mut server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "reject", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let _ = server
+                .write_all(&frame(CMD_SERVER_SETTINGS, 0, b"v=2"))
+                .await;
+            let mut header = [0_u8; HEADER_OVERHEAD];
+            let _ = server.read_exact(&mut header).await;
+            let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+            if length > 0 {
+                let mut body = vec![0_u8; length];
+                let _ = server.read_exact(&mut body).await;
+            }
+            let _ = server
+                .write_all(&frame(CMD_SYNACK, 1, b"destination refused"))
+                .await;
+            let mut sink = vec![0_u8; 32];
+            let _ = server.read(&mut sink).await;
+        });
+
+        let mut stream = session.open_stream(None).await.expect("stream");
+        flush_buffered(&session).await;
+        let mut buffer = [0_u8; 8];
+        let error = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer))
+            .await
+            .expect("timeout")
+            .expect_err("reject must surface as read error");
+        assert!(
+            error.to_string().contains("remote: destination refused"),
+            "unexpected error: {error}"
+        );
+        drop(stream);
+        session.close().await;
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn missing_synack_closes_session_for_v2_reuse() {
+        let (client, mut server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "watchdog", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let _ = server
+                .write_all(&frame(CMD_SERVER_SETTINGS, 0, b"v=2"))
+                .await;
+            // Consume SYN frames but never send SYNACK.
+            let mut sink = vec![0_u8; 4096];
+            loop {
+                match server.read(&mut sink).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        // Stream 1 has no watchdog; stream 2 arms the 3s timer.
+        let stream1 = session.open_stream(None).await.expect("s1");
+        flush_buffered(&session).await;
+        drop(stream1);
+        tokio::task::yield_now().await;
+        // Ensure peer_version is visible before opening stream 2.
+        for _ in 0..50 {
+            if session.inner.peer_version.load(Ordering::Acquire) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            session.inner.peer_version.load(Ordering::Acquire) >= 2,
+            "peer version must be recorded before stream 2"
+        );
+        let _stream2 = session.open_stream(None).await.expect("s2");
+        flush_buffered(&session).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !session.is_closed() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("missing SYNACK must close session");
+        session.close().await;
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn padding_update_is_shared_with_client_for_new_auth() {
+        let shared = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let before = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .md5()
+            .to_owned();
+        let scheme = b"stop=1\n0=16-16";
+        let updated = PaddingFactory::new(scheme).expect("scheme");
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(updated);
+        let after = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .md5()
+            .to_owned();
+        assert_ne!(before, after);
+        let blob = crate::authentication_blob("pw", &shared.lock().unwrap().clone());
+        // 32 hash + 2 len + 16 padding
+        assert_eq!(blob.len(), 32 + 2 + 16);
+    }
+
+    #[tokio::test]
+    async fn padding_update_frame_mutates_shared_factory() {
+        let (client, mut server) = duplex(64 * 1024);
+        let shared = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let before = shared.lock().unwrap().md5().to_owned();
+        let session = Session::start(Box::new(client), "pad", Arc::clone(&shared), 1)
+            .await
+            .expect("session");
+        flush_buffered(&session).await;
+        let scheme = b"stop=1\n0=16-16";
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let _ = server
+                .write_all(&frame(CMD_UPDATE_PADDING_SCHEME, 0, scheme))
+                .await;
+            let mut sink = vec![0_u8; 32];
+            let _ = server.read(&mut sink).await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = shared.lock().unwrap().md5().to_owned();
+                if current != before {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("padding update must land on shared factory");
+        session.close().await;
+        let _ = peer.await;
+    }
+
+    #[tokio::test]
+    async fn open_proxy_destination_smoke() {
+        let (client, mut server) = duplex(64 * 1024);
+        let padding = Arc::new(StdMutex::new(PaddingFactory::default_factory()));
+        let session = Session::start(Box::new(client), "proxy", Arc::clone(&padding), 1)
+            .await
+            .expect("session");
+        // open_proxy flushes SETTINGS+SYN+addr; peer waits for that traffic.
+        let peer = tokio::spawn(async move {
+            drain_settings(&mut server).await;
+            let mut sink = vec![0_u8; 4096];
+            let _ = server.read(&mut sink).await;
+        });
+        let destination = Destination {
+            host: Host::Domain("example.com".to_owned()),
+            port: 443,
+        };
+        let stream = session.open_proxy(&destination, None).await.expect("proxy");
+        drop(stream);
+        session.close().await;
+        let _ = peer.await;
+    }
 }

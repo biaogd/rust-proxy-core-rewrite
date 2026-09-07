@@ -14,9 +14,13 @@ import threading
 import time
 from typing import Any
 
+import http.client
+import urllib.parse
+
 from phase1 import IO_DEADLINE, ROOT, recv_exact, reserve_port, wait_ready
 from phase3 import launch, stop
 from phase5b1a import build_binaries, connect_domain, debug_files
+from phase5d_streams import SECRET, wait_controller
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6g-anytls-carriers-diff.json"
@@ -121,10 +125,25 @@ def write_client_config(
     server_port: int,
     sni: str,
     carrier_block: str,
+    controller_port: int | None = None,
+    health_url: str | None = None,
 ) -> None:
+    controller = ""
+    groups = ""
+    if controller_port is not None and health_url is not None:
+        controller = f"""external-controller: 127.0.0.1:{controller_port}
+secret: {SECRET}
+"""
+        groups = f"""proxy-groups:
+  - name: anytls-health
+    type: url-test
+    proxies: [anytls-carrier]
+    url: {health_url}
+    interval: 3600
+"""
     path.write_text(
         f"""mixed-port: {mixed_port}
-mode: rule
+{controller}mode: rule
 log-level: info
 ipv6: false
 proxies:
@@ -138,10 +157,23 @@ proxies:
     skip-cert-verify: true
     disable-reuse: true
 {textwrap.indent(carrier_block.rstrip(), "    ")}
-rules:
+{groups}rules:
   - MATCH,anytls-carrier
 """
     )
+
+
+def controller_request(port: int, method: str, path: str) -> tuple[int, bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=IO_DEADLINE)
+    connection.request(
+        method, path, headers={"Authorization": f"Bearer {SECRET}"}
+    )
+    response = connection.getresponse()
+    try:
+        return response.status, response.read()
+    finally:
+        response.close()
+        connection.close()
 
 
 def stop_authority(auth: subprocess.Popen[bytes]) -> None:
@@ -232,6 +264,104 @@ def exercise_jls(
         echo_server.close()
 
 
+def exercise_shadow_tls_health(
+    binary: pathlib.Path, scratch: pathlib.Path, authority: pathlib.Path
+) -> dict[str, Any]:
+    scratch.mkdir(parents=True, exist_ok=True)
+    server_port = reserve_port()
+    auth = start_process(
+        [str(authority), f"127.0.0.1:{server_port}", ANYTLS_PASSWORD, SHADOWTLS_PASSWORD]
+    )
+    mixed_port, controller_port = reserve_port(), reserve_port()
+    health_url = "http://health.phase6g:28190/probe"
+    config = scratch / "shadow-tls-health.yaml"
+    write_client_config(
+        config,
+        mixed_port=mixed_port,
+        server_port=server_port,
+        sni=SHADOW_SNI,
+        carrier_block=f"""shadow-tls-opts:
+  password: {SHADOWTLS_PASSWORD}
+  version: 3
+""",
+        controller_port=controller_port,
+        health_url=health_url,
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        wait_controller(process, controller_port)
+        query = urllib.parse.urlencode(
+            {"url": health_url, "timeout": "5000", "expected": "200-299"}
+        )
+        status, body = controller_request(
+            controller_port, "GET", f"/group/anytls-health/delay?{query}"
+        )
+        return {
+            "ok": status == 200,
+            "status": status,
+            "body": body.decode(errors="replace")[:200],
+            "process-alive": process.poll() is None,
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        stop_authority(auth)
+
+
+def exercise_jls_health(
+    binary: pathlib.Path, scratch: pathlib.Path, authority: pathlib.Path
+) -> dict[str, Any]:
+    scratch.mkdir(parents=True, exist_ok=True)
+    server_port = reserve_port()
+    auth = start_process(
+        [
+            str(authority),
+            f"127.0.0.1:{server_port}",
+            ANYTLS_PASSWORD,
+            JLS_USERNAME,
+            JLS_PASSWORD,
+        ]
+    )
+    mixed_port, controller_port = reserve_port(), reserve_port()
+    health_url = "http://health.phase6g:28191/probe"
+    config = scratch / "jls-health.yaml"
+    write_client_config(
+        config,
+        mixed_port=mixed_port,
+        server_port=server_port,
+        sni=JLS_SNI,
+        carrier_block=f"""jls-opts:
+  username: {JLS_USERNAME}
+  password: {JLS_PASSWORD}
+""",
+        controller_port=controller_port,
+        health_url=health_url,
+    )
+    process, stdout, stderr = launch(binary, config, scratch)
+    try:
+        wait_ready(process, mixed_port)
+        wait_controller(process, controller_port)
+        query = urllib.parse.urlencode(
+            {"url": health_url, "timeout": "5000", "expected": "200-299"}
+        )
+        status, body = controller_request(
+            controller_port, "GET", f"/group/anytls-health/delay?{query}"
+        )
+        return {
+            "ok": status == 200,
+            "status": status,
+            "body": body.decode(errors="replace")[:200],
+            "process-alive": process.poll() is None,
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+        stop_authority(auth)
+
+
 def exercise_mutual_exclusion(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     scratch.mkdir(parents=True, exist_ok=True)
     mixed_port = reserve_port()
@@ -274,6 +404,10 @@ def exercise(
     return {
         "shadow-tls-v3": exercise_shadow_tls(binary, scratch / "stls", shadow_authority),
         "jls": exercise_jls(binary, scratch / "jls", jls_authority),
+        "shadow-tls-health": exercise_shadow_tls_health(
+            binary, scratch / "stls-health", shadow_authority
+        ),
+        "jls-health": exercise_jls_health(binary, scratch / "jls-health", jls_authority),
         "mutual-exclusion": exercise_mutual_exclusion(binary, scratch / "mutex"),
     }
 
@@ -287,6 +421,14 @@ def public_view(entry: dict[str, Any]) -> dict[str, Any]:
         "jls": {
             "ok": entry["jls"]["ok"],
             "process-alive": entry["jls"]["process-alive"],
+        },
+        "shadow-tls-health": {
+            "ok": entry["shadow-tls-health"]["ok"],
+            "process-alive": entry["shadow-tls-health"]["process-alive"],
+        },
+        "jls-health": {
+            "ok": entry["jls-health"]["ok"],
+            "process-alive": entry["jls-health"]["process-alive"],
         },
         "mutual-exclusion": entry["mutual-exclusion"],
     }
@@ -333,6 +475,10 @@ def main() -> int:
         and go_view["shadow-tls-v3"]["process-alive"]
         and go_view["jls"]["ok"]
         and go_view["jls"]["process-alive"]
+        and go_view["shadow-tls-health"]["ok"]
+        and go_view["shadow-tls-health"]["process-alive"]
+        and go_view["jls-health"]["ok"]
+        and go_view["jls-health"]["process-alive"]
         and go_view["mutual-exclusion"]["rejected"]
     )
     if not matched:
@@ -340,7 +486,7 @@ def main() -> int:
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
         return 1
     FAILURE_ARTIFACT.unlink(missing_ok=True)
-    print("Phase 6G-E AnyTLS ShadowTLS+JLS carrier differential passed")
+    print("Phase 6G-E AnyTLS ShadowTLS+JLS carrier (+health) differential passed")
     print(json.dumps({"go": go_view, "rust": rust_view}, indent=2, sort_keys=True))
     print(
         "Leftover: Restls dial is blocked on a shared Restls TLS client transport "

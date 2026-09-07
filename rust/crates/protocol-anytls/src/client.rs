@@ -12,7 +12,7 @@ use rewrite_model::Destination;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 
-use crate::padding::PaddingFactory;
+use crate::padding::{SharedPadding, default_shared_padding};
 use crate::session::{Session, StreamCloseHook};
 use crate::{AnyTlsProtocolError, authentication_blob};
 
@@ -41,7 +41,8 @@ struct IdleEntry {
 
 struct ClientInner {
     dial_out: DialOut,
-    padding: Arc<PaddingFactory>,
+    /// Shared with every session (Go `atomic.Pointer[PaddingFactory]`).
+    padding: SharedPadding,
     options: ClientOptions,
     closed: AtomicBool,
     session_counter: AtomicU64,
@@ -68,7 +69,7 @@ impl Client {
         }
         let inner = Arc::new(ClientInner {
             dial_out,
-            padding: PaddingFactory::default_factory(),
+            padding: default_shared_padding(),
             options,
             closed: AtomicBool::new(false),
             session_counter: AtomicU64::new(0),
@@ -230,7 +231,15 @@ impl Client {
 
     async fn create_session(&self) -> Result<Session, AnyTlsProtocolError> {
         let mut remote = (self.inner.dial_out)().await?;
-        let auth = authentication_blob(&self.inner.options.password, &self.inner.padding);
+        let auth = {
+            let factory = self
+                .inner
+                .padding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            authentication_blob(&self.inner.options.password, &factory)
+        };
         remote.write_all(&auth).await?;
         remote.flush().await?;
 

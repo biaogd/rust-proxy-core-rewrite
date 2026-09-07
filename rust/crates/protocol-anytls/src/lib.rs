@@ -8,12 +8,11 @@ mod session;
 use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
 pub use client::{Client, ClientOptions, DialOut};
-pub use padding::{DEFAULT_PADDING_SCHEME, PaddingFactory};
+pub use padding::{DEFAULT_PADDING_SCHEME, PaddingFactory, SharedPadding, default_shared_padding};
 pub use session::{AnyTlsStream, Session, SessionCloseHook, StreamCloseHook};
 
 #[derive(Debug, Error)]
@@ -30,7 +29,7 @@ pub enum AnyTlsProtocolError {
 #[derive(Clone, Debug, Default)]
 pub struct AnyTlsConnectOptions<'a> {
     pub client_metadata: &'a str,
-    pub padding: Option<Arc<PaddingFactory>>,
+    pub padding: Option<SharedPadding>,
 }
 
 /// Builds the post-handshake authentication blob: `sha256(password) || len || zeros`.
@@ -65,8 +64,14 @@ pub async fn connect_anytls_on_stream(
     let padding = options
         .padding
         .clone()
-        .unwrap_or_else(PaddingFactory::default_factory);
-    let auth = authentication_blob(password, &padding);
+        .unwrap_or_else(padding::default_shared_padding);
+    let auth = {
+        let factory = padding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        authentication_blob(password, &factory)
+    };
     remote.write_all(&auth).await?;
     remote.flush().await?;
     let mut options = options.clone();

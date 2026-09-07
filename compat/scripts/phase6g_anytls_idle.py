@@ -350,9 +350,15 @@ def case_min_idle_keep(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str,
     process, mixed_port, authority = next(gen)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            def keep_one(host: str, port: int, payload: bytes) -> bool:
+                try:
+                    return exchange(mixed_port, host, port, payload)
+                except Exception:
+                    return False
+
             futures = [
-                pool.submit(exchange, mixed_port, "keep1.phase6g", 28111, b"keep-one"),
-                pool.submit(exchange, mixed_port, "keep2.phase6g", 28112, b"keep-two"),
+                pool.submit(keep_one, "keep1.phase6g", 28111, b"keep-one"),
+                pool.submit(keep_one, "keep2.phase6g", 28112, b"keep-two"),
             ]
             concurrent_ok = [future.result(timeout=IO_DEADLINE) for future in futures]
         time.sleep(0.3)
