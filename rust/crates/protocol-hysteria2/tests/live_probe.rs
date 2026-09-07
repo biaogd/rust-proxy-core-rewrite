@@ -28,7 +28,7 @@ async fn probe_against_env_authority() {
     })
     .expect("client options");
     let dest = Destination {
-        host: Host::Ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         port: echo,
     };
     let open = tokio::time::timeout(Duration::from_secs(8), client.open_tcp(&dest)).await;
@@ -38,7 +38,7 @@ async fn probe_against_env_authority() {
             stream
         }
         Ok(Err(error)) => panic!("open_tcp failed: {error:#}"),
-        Err(_) => panic!("open_tcp timed out"),
+        Err(elapsed) => panic!("open_tcp timed out: {elapsed}"),
     };
     stream.write_all(b"ping").await.expect("write");
     let mut buf = [0_u8; 4];

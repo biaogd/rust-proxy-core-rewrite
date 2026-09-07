@@ -6200,20 +6200,19 @@ gate.
 
 The first Hysteria2 outbound slice (`rewrite-protocol-hysteria2`) accepts Clash
 `type: hysteria2` with password/server/port, SNI, ALPN (default `h3`),
-skip-cert-verify, `disable-reuse`, and optional `udp` (advertised false until
-HY2-B). Bandwidth (`up`/`down`), Brutal, Salamander/Gecko, port hopping, Realm,
-ECH, fingerprint/mTLS/name-cert-verify, and QUIC window overrides are rejected
-at parse time (no silent downgrade).
+skip-cert-verify, `disable-reuse`, and optional `udp`. Bandwidth (`up`/`down`),
+Brutal, Salamander/Gecko, port hopping, Realm, ECH, fingerprint/mTLS, and
+QUIC window overrides were deferred to HY2-B or later (hard reject in HY2-A).
 
 **Congestion gate:** stock Quinn `BbrConfig` is installed when up/down are unset,
 matching Go/sing-quic default BBR. No Quinn fork or shadow-rustls change was
-required. Brutal/bandwidth remain HY2-B; HY2-A claims TCP interop with that BBR
-choice, not Brutal/default bandwidth parity.
+required. HY2-A claims TCP interop with that BBR choice, not Brutal/default
+bandwidth parity (those landed in HY2-B).
 
 Auth uses HTTP/3 `POST https://hysteria/auth` (status 233) via `h3`/`h3-quinn`
 on a cloned Quinn connection while custom bidi streams carry TCP framing
 (`0x401`). Runtime pools sessions with redial after dead connections; controller
-health/url-test and groups/providers/reload are wired. Datagram UDP is deferred.
+health/url-test and groups/providers/reload are wired.
 
 `compat/scripts/phase_hy2a_hysteria2_tcp.py` compares Go and Rust mixed clients
 against a Go Hysteria2 inbound authority for domain/IPv4/IPv6 relay, large
@@ -6224,3 +6223,29 @@ stack does not apply global `custom-certifactes` the same way TCP outbounds do;
 a dedicated process without skip still proves bad-cert rejection. TCP open uses
 fast-open (write `TCPRequest`, parse `TCPResponse` on first read) matching Go
 and rsteria2 — eager response await deadlocks against the Go authority.
+
+## 2026-09-07 HY2-B Hysteria2 UDP / Salamander / Brutal / hop
+
+Same draft PR #12 / branch `cursor/hysteria2-hy2a-c9a5`. Extends the outbound
+client without inbound/v1/Realm/Gecko/ECH/0-RTT:
+
+- QUIC datagram UDP: session manager, multi-destination, fragment reassembly
+  with hard bounds (session count, queue depth, reassembly bytes, TTL expiry).
+- Salamander obfuscation (Blake2b-256 XOR + 8-byte salt); wrong key / short
+  packets fail closed.
+- `up`/`down` negotiation: Brutal when `up` is set (rate clamped from
+  AuthResponse / `CC-RX`), stock Quinn BBR when unset; `CC-RX: auto` flips
+  Brutal → BBR. Stream/conn receive windows applied via Quinn transport
+  config. `cwnd` / `bbr-profile` / `gecko` rejected at parse (stock Quinn has
+  no Go cwnd/bbr-profile API — never parse-and-ignore).
+- `ports` + `hop-interval` via `ObfsHopSocket` (canonical inbound rewrite so
+  Quinn keeps the connection across hops).
+- `udp-mtu` (default 1197) and `handshake-timeout`.
+- Runtime SOCKS UDP ASSOCIATE (`UdpSessionMode::Hysteria2`); controller
+  advertises `proxy.udp` when enabled.
+
+Differential: `compat/scripts/phase_hy2b_hysteria2.py` (plain / salamander /
+brutal / hop / salamander+brutal; wrong-key; reject gecko/cwnd/bbr-profile).
+
+Deferred to HY2-C: long soak, netem loss/reorder/duplication stress, matrix
+closeout. Still open later: Realm/Gecko/ECH/0-RTT, Hysteria v1, inbound.
