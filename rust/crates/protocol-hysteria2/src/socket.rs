@@ -1,20 +1,12 @@
 //! A custom [`AsyncUdpSocket`] that layers Salamander obfuscation and/or UDP
 //! port hopping underneath quinn, mirroring the Go `obfs` and `udphop`
 //! `net.PacketConn` wrappers.
-//!
-//! Both features live at the datagram layer:
-//! - **Obfuscation**: outbound packets are XOR-masked + salted; inbound packets
-//!   are unmasked. Disables GSO/GRO so every datagram carries its own salt.
-//! - **Port hopping**: outbound packets are redirected to a rotating *destination*
-//!   port out of a configured range, and the *source* address of inbound packets
-//!   is rewritten back to the canonical server address so quinn never perceives a
-//!   path change (equivalent to Go's `DisablePathManager: true`).
-//!
-//! Note: unlike Go's `udphop`, which also rebinds a fresh *local* socket on each
-//! hop (rotating the client's source port for NAT-rebinding), this keeps one
-//! local socket and only rotates the destination port. That is sufficient
-//! against a standard server listening on a port range; it just doesn't rotate
-//! the source port.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::unchecked_time_subtraction
+)]
 
 use std::{
     fmt,
@@ -22,8 +14,8 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -62,13 +54,13 @@ pub(crate) struct ObfsHopSocket {
     /// Reused receive scratch for the obfuscation path (deobfuscate before
     /// handing plaintext to quinn), avoiding a per-poll allocation.
     recv_scratch: Mutex<(Vec<u8>, Vec<RecvMeta>)>,
-    _hop_task: Option<tokio::task::JoinHandle<()>>,
+    hop_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for ObfsHopSocket {
     fn drop(&mut self) {
         // Dropping a JoinHandle only detaches; abort so the hop loop stops.
-        if let Some(task) = &self._hop_task {
+        if let Some(task) = &self.hop_task {
             task.abort();
         }
     }
@@ -80,7 +72,7 @@ impl fmt::Debug for ObfsHopSocket {
             .field("obfs", &self.obfs.is_some())
             .field("hopping", &self.hop_index.is_some())
             .field("canonical", &self.canonical)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -102,8 +94,12 @@ impl ObfsHopSocket {
                 let index = Arc::new(AtomicUsize::new(
                     rand::rng().random_range(0..cfg.addrs.len()),
                 ));
-                let task =
-                    spawn_hop_task(index.clone(), cfg.addrs.len(), cfg.interval_min, cfg.interval_max);
+                let task = spawn_hop_task(
+                    index.clone(),
+                    cfg.addrs.len(),
+                    cfg.interval_min,
+                    cfg.interval_max,
+                );
                 (Some(index), cfg.addrs, Some(task))
             }
             // A single-port "range" needs no rotation; treat as no hopping.
@@ -118,7 +114,7 @@ impl ObfsHopSocket {
             canonical,
             write_buf: Mutex::new(vec![0u8; SCRATCH_DATAGRAM]),
             recv_scratch: Mutex::new((Vec::new(), Vec::new())),
-            _hop_task: hop_task,
+            hop_task,
         }))
     }
 
@@ -238,7 +234,10 @@ impl AsyncUdpSocket for ObfsHopSocket {
                         .map(IoSliceMut::new)
                         .collect();
 
-                    let n = match self.inner.poll_recv(cx, &mut tmp_bufs, &mut tmp_meta[..count]) {
+                    let n = match self
+                        .inner
+                        .poll_recv(cx, &mut tmp_bufs, &mut tmp_meta[..count])
+                    {
                         Poll::Ready(Ok(0)) => return Poll::Ready(Ok(0)), // avoid busy-spin
                         Poll::Ready(Ok(n)) => n,
                         other => return other,

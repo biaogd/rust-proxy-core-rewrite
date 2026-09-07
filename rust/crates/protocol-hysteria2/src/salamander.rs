@@ -8,7 +8,7 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use rand::RngExt;
 
-/// BLAKE2b digest with a 32-byte (256-bit) output, matching Go's `blake2b.Size256`.
+/// [`Blake2b`] digest with a 32-byte (256-bit) output, matching Go's `blake2b.Size256`.
 type Blake2b256 = Blake2b<U32>;
 
 const SALT_LEN: usize = 8;

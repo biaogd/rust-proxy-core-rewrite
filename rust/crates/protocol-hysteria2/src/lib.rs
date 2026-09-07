@@ -14,6 +14,7 @@ mod tcp;
 mod udp;
 mod varint;
 
+pub use bps::{parse_bps, parse_hop_interval, parse_ports};
 pub use client::{Client, ClientOptions, Session, TlsOptions};
 pub use tcp::Hysteria2Stream;
 pub use udp::UdpSession;

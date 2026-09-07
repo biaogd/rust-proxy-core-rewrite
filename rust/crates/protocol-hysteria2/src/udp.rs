@@ -1,16 +1,17 @@
 //! UDP relay over QUIC unreliable datagrams (Go: core/client/udp.go +
 //! `UDPMessage` / `FragUDPMessage` / `Defragger` in the protocol package).
-//!
-//! A single background task reads datagrams off the QUIC connection, parses
-//! them into [`UdpMessage`]s and dispatches them to the owning session by
-//! Session ID. Each [`UdpSession`] reassembles fragments locally and sends with
-//! automatic fragmentation when a payload exceeds the current datagram limit.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc, Mutex, Weak,
+        atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -19,14 +20,14 @@ use bytes::Bytes;
 use rand::RngExt;
 use tokio::sync::mpsc;
 
-use crate::varint::read_from;
 use crate::Hysteria2ProtocolError;
+use crate::varint::read_from;
 
 /// Largest reassembled UDP payload buffer (Go `MaxUDPSize`).
 pub(crate) const MAX_UDP_SIZE: usize = 4096;
 /// Largest QUIC datagram frame Hysteria2 advertises (Go `MaxDatagramFrameSize`).
 pub(crate) const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
-/// DoS guard on address string length (Go `MaxMessageLength`).
+/// Denial-of-service guard on address string length (Go `MaxMessageLength`).
 pub(crate) const MAX_MESSAGE_LENGTH: u64 = 2048;
 /// Per-session inbound queue depth (Go `udpMessageChanSize`).
 const SESSION_CHAN_SIZE: usize = 1024;
@@ -82,7 +83,7 @@ impl UdpMessage {
         Some(i)
     }
 
-    /// Parse a UDPMessage from a complete datagram (Go `ParseUDPMessage`).
+    /// Parse a `UDPMessage` from a complete datagram (Go `ParseUDPMessage`).
     pub fn parse(msg: &[u8]) -> Option<Self> {
         if msg.len() < 8 {
             return None;
@@ -209,10 +210,10 @@ impl Defragger {
     }
 
     fn drop_if_expired(&mut self, now: Instant) {
-        if let Some(started) = self.started {
-            if now.saturating_duration_since(started) >= DEFRAG_TTL {
-                self.clear();
-            }
+        if let Some(started) = self.started
+            && now.saturating_duration_since(started) >= DEFRAG_TTL
+        {
+            self.clear();
         }
     }
 
@@ -256,7 +257,7 @@ impl Defragger {
                 // All fragments present — assemble in order.
                 let mut data = Vec::with_capacity(self.size);
                 let mut first: Option<UdpMessage> = None;
-                for slot in self.frags.iter_mut() {
+                for slot in &mut self.frags {
                     if let Some(frag) = slot.take() {
                         data.extend_from_slice(&frag.data);
                         if first.is_none() {
@@ -325,7 +326,7 @@ impl UdpSessionManager {
             rx,
             defrag: Defragger::default(),
             mgr: Arc::downgrade(self),
-            udp_mtu: udp_mtu.max(64).min(MAX_UDP_SIZE),
+            udp_mtu: udp_mtu.clamp(64, MAX_UDP_SIZE),
         })
     }
 
@@ -424,9 +425,7 @@ impl UdpSession {
             if let Some(n) = f.serialize(&mut fbuf) {
                 self.conn
                     .send_datagram(Bytes::copy_from_slice(&fbuf[..n]))
-                    .map_err(|e| {
-                        Hysteria2ProtocolError::Protocol(format!("send fragment: {e}"))
-                    })?;
+                    .map_err(|e| Hysteria2ProtocolError::Protocol(format!("send fragment: {e}")))?;
             }
         }
         Ok(())
@@ -439,9 +438,10 @@ impl UdpSession {
     /// Returns once the session or connection is closed.
     pub async fn recv(&mut self) -> Result<(Vec<u8>, String), Hysteria2ProtocolError> {
         loop {
-            let msg = self.rx.recv().await.ok_or_else(|| {
-                Hysteria2ProtocolError::Protocol("udp session closed".to_owned())
-            })?;
+            let msg =
+                self.rx.recv().await.ok_or_else(|| {
+                    Hysteria2ProtocolError::Protocol("udp session closed".to_owned())
+                })?;
             if let Some(full) = self.defrag.feed(msg) {
                 return Ok((full.data, full.addr));
             }

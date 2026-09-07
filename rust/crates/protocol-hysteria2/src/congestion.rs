@@ -17,17 +17,24 @@
 //! ~`bps / ackRate`. `on_congestion_event` deliberately does **not** shrink the
 //! window — that is the whole point of Brutal.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
 use std::{
     any::Any,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use quinn_proto::congestion::{BbrConfig, Controller, ControllerFactory};
 use quinn_proto::RttEstimator;
+use quinn_proto::congestion::{BbrConfig, Controller, ControllerFactory};
 
 const SLOT_COUNT: usize = 5; // seconds of ACK/loss history
 const MIN_SAMPLE_COUNT: u64 = 50;
@@ -159,6 +166,7 @@ impl Controller for Brutal {
 
 /// Factory that builds a fresh [`Brutal`] controller per connection, all
 /// sharing the same live rate handle.
+#[allow(dead_code)] // SwitchableFactory covers the live Brutal path today.
 pub(crate) struct BrutalFactory {
     /// Shared target send rate in bytes/sec.
     pub rate: Arc<AtomicU64>,

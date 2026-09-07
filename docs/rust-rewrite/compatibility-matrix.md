@@ -113,7 +113,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | VMess | Yes | Transport-dependent | Oracle | Not started | v2ray interop and transport matrix |
 | VLESS | Yes | Transport-dependent | Oracle | Partial | Phase 6E-A–N client scopes; inbound/server direction remains open |
 | Trojan | Yes | Yes | Oracle | Not started | TLS/auth/fallback/UDP interop |
-| Hysteria2 | Yes | Yes | Oracle | Partial | HY2-A outbound TCP (auth/TLS/reuse/groups); UDP/obfs/Brutal/hop deferred to HY2-B |
+| Hysteria2 | Yes | Yes | Oracle | Partial | HY2-A/B outbound TCP+UDP (auth/TLS/reuse/Salamander/Brutal/hop/groups); Gecko/Realm/ECH/v1/inbound → later |
 | Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
 | TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
 | ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
@@ -164,7 +164,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | VLESS | Oracle | **Parity in Phase 6E-A–N declared client scopes** | A–K cover native/TLS/WS/HTTP/H2/Gun, common UDP carriers, Vision, REALITY and stream-one xHTTP. L adds Gun pool controls/reconnection. M adds xHTTP `auto`/`stream-up`/`packet-up`, REALITY and basic XMUX. N adds real-sing-vless concurrency, repeated-failure recovery and malformed-response bounds. Encryption extensions, UDP over HTTP/H2/xHTTP, WSS as a separate UDP gate, H3/advanced xHTTP, other fingerprints, general mux and server direction remain open |
 | Snell | Oracle | Not started | Version/UDP/pool interop |
 | Trojan | Oracle | **Partial — Phase 6F-A–E client scope** | A proves native TLS TCP authentication/framing/relay; B proves native TLS UDP framing, splitting and reuse; C proves TCP and UDP over WSS with path, Host/custom headers and WebSocket ALPN; D proves TCP and UDP over HTTP/2 Gun/gRPC, service path, User-Agent and pooled client controls; E proves native TCP and UDP over REALITY with Chrome fingerprint, public-key/short-id authentication and strict unsupported-combination rejection. TLS name override/skip still rely on shared transport evidence; fallback and server direction remain open |
-| Hysteria / Hysteria2 | Oracle | **Partial — HY2-A outbound TCP** | HY2-A proves Clash `type: hysteria2` HTTP/3 auth, TLS verify/skip, stock Quinn BBR (up/down unset), TCP relay/reuse, groups/providers/health/reload and Go/Rust differential vs Go HY2 inbound. Datagram UDP, Salamander/Brutal/hop and Hysteria v1 remain HY2-B/C / deferred |
+| Hysteria / Hysteria2 | Oracle | **Partial — HY2-A/B outbound** | HY2-A/B prove Clash `type: hysteria2` HTTP/3 auth, TLS verify/skip, stock Quinn BBR (up/down unset), Brutal when up set, TCP+UDP relay, Salamander, port hop, udp-mtu/windows, groups/providers/health/reload and Go/Rust differentials vs Go HY2 inbound. Gecko/Realm/ECH, Hysteria v1, inbound and HY2-C stress/netem/soak remain open |
 | TUIC | Oracle | Not started | v4/v5/0-RTT/congestion interop |
 | ShadowQUIC | Oracle | Not started | QUIC stream/datagram interop |
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |

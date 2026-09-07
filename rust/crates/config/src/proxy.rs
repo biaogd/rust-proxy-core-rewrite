@@ -409,8 +409,9 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
     let hop_ports = match ports_raw.as_deref().unwrap_or("") {
         "" => Vec::new(),
-        raw => parse_hysteria2_ports(raw)
-            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?,
+        raw => {
+            parse_hysteria2_ports(raw).ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?
+        }
     };
     let hop_raw = hysteria2_extra_string(&mut proxy.extra, "hop-interval")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;

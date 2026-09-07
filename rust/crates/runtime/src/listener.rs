@@ -631,19 +631,16 @@ pub(super) async fn run_hysteria2_udp_session(
     if proxy.hysteria2.is_none() {
         return;
     }
-    let client = match super::tcp::hysteria2_client_for_proxy(
-        &proxy,
-        &state,
-        &config.trust_certificates,
-    )
-    .await
-    {
-        Ok(client) => client,
-        Err(error) => {
-            state.log("error", format!("Hysteria2 UDP client failed: {error}"));
-            return;
-        }
-    };
+    let client =
+        match super::tcp::hysteria2_client_for_proxy(&proxy, &state, &config.trust_certificates)
+            .await
+        {
+            Ok(client) => client,
+            Err(error) => {
+                state.log("error", format!("Hysteria2 UDP client failed: {error}"));
+                return;
+            }
+        };
     let mut association = match rewrite_outbound::associate_hysteria2_udp(&client).await {
         Ok(association) => association,
         Err(error) => {

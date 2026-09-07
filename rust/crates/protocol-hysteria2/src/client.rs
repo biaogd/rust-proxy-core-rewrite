@@ -24,10 +24,10 @@ use tokio_rustls::rustls::{
 
 use crate::auth;
 use crate::congestion::{BrutalControl, SwitchableFactory};
-use crate::salamander::{Salamander, MIN_PSK_LEN};
+use crate::salamander::{MIN_PSK_LEN, Salamander};
 use crate::socket::{HopConfig, ObfsHopSocket};
 use crate::tcp::Hysteria2Stream;
-use crate::udp::{UdpSession, UdpSessionManager, MAX_DATAGRAM_FRAME_SIZE};
+use crate::udp::{MAX_DATAGRAM_FRAME_SIZE, UdpSession, UdpSessionManager};
 use crate::{
     DEFAULT_CONN_RECEIVE_WINDOW, DEFAULT_KEEP_ALIVE_PERIOD, DEFAULT_MAX_IDLE_TIMEOUT,
     DEFAULT_STREAM_RECEIVE_WINDOW, Hysteria2ProtocolError,
@@ -37,7 +37,7 @@ use crate::{
 const DEFAULT_HOP_INTERVAL_SECS: u64 = 30;
 /// Minimum hop interval (Go floor: 5s).
 const MIN_HOP_INTERVAL_SECS: u64 = 5;
-/// Default UDP MTU when unset (quic-go MaxDatagramSize − 3).
+/// Default UDP MTU when unset (quic-go `MaxDatagramSize` − 3).
 const DEFAULT_UDP_MTU: u16 = 1197;
 
 /// TLS options for the Hysteria2 QUIC dial.
@@ -112,6 +112,7 @@ struct SessionInner {
     udp_enabled: bool,
     udp: Option<Arc<UdpSessionManager>>,
     udp_mtu: usize,
+    #[allow(dead_code)] // retained for future live Brutal rate introspection
     brutal: Option<BrutalControl>,
 }
 
@@ -346,12 +347,7 @@ impl Client {
         if let Some(endpoint) = guard.as_ref() {
             return Ok(endpoint.clone());
         }
-        let endpoint = build_endpoint(
-            &self.options,
-            canonical,
-            hop,
-            self.brutal.clone(),
-        )?;
+        let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal.clone())?;
         *guard = Some(endpoint.clone());
         Ok(endpoint)
     }
@@ -399,9 +395,7 @@ fn build_endpoint(
         .map_err(|error| Hysteria2ProtocolError::Quinn(error.to_string()))?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
     let mut transport = quinn::TransportConfig::default();
-    let idle = options
-        .handshake_timeout
-        .max(DEFAULT_MAX_IDLE_TIMEOUT);
+    let idle = options.handshake_timeout.max(DEFAULT_MAX_IDLE_TIMEOUT);
     transport.max_idle_timeout(Some(
         idle.try_into()
             .map_err(|error| Hysteria2ProtocolError::Quinn(format!("{error}")))?,

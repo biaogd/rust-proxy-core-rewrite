@@ -122,7 +122,7 @@ fn client_options_from_proxy(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| proxy.server.clone());
     let handshake_timeout = if hysteria2.handshake_timeout_ms == 0 {
-        Duration::from_millis(10_000)
+        Duration::from_secs(10)
     } else {
         Duration::from_millis(hysteria2.handshake_timeout_ms)
     };
