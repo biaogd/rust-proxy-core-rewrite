@@ -6,12 +6,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+adler2 = { workspace = true }
 aes.workspace = true
 base64.workspace = true
 bytes.workspace = true
+crc32fast.workspace = true
 hmac.workspace = true
 md-5.workspace = true
 rand.workspace = true
+rc4 = { workspace = true }
 rewrite-io = { path = "../io" }
 rewrite-model = { path = "../model" }
 sha1.workspace = true

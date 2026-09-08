@@ -191,10 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_auth_sha1_v4_loudly() {
+    fn rejects_unimplemented_protocol_loudly() {
         let (_a, b) = duplex(64);
         let mut options = base_options();
-        options.protocol = "auth_sha1_v4".into();
+        options.protocol = "auth_chain_c".into();
         let dest = Destination {
             host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             port: 1,
@@ -207,6 +207,7 @@ mod tests {
         let Err(err) = result else {
             panic!("must reject");
         };
-        assert!(err.to_string().contains("auth_aes128"));
+        assert!(err.to_string().contains("auth_chain_c"));
+        assert!(err.to_string().contains("SSR-C implements"));
     }
 }
