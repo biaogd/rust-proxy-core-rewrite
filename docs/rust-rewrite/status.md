@@ -1,6 +1,8 @@
 # Rust rewrite status
 
-Last updated: 2026-09-03
+Last updated: 2026-09-08
+
+SSR-A (ShadowsocksR outbound origin+plain AES-CFB) landed on `cursor/ssr-a-c9a5`: `protocol-shadowsocksr`, `type: ssr`, pinned shadowsocksrr server `fd723a92`, phase `phase7a_ssr_tcp.py`. Auth protocols/obfs/UDP remain open.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 

@@ -2949,6 +2949,7 @@ dependencies = [
  "rewrite-protocol-anytls",
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-shadowsocksr",
  "rewrite-protocol-trojan",
  "rewrite-protocol-vless",
  "rewrite-protocol-vmess",
@@ -3016,6 +3017,19 @@ dependencies = [
  "rewrite-io",
  "rewrite-model",
  "shadowsocks",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-shadowsocksr"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rand 0.10.2",
+ "rewrite-io",
+ "rewrite-model",
+ "shadowsocks-crypto",
  "thiserror 2.0.20",
  "tokio",
 ]

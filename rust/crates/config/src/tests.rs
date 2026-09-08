@@ -129,6 +129,37 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn ssr_a_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ssr\n    type: ssr\n    server: 127.0.0.1\n    port: 8388\n    password: secret\n    cipher: aes-128-cfb\n    protocol: origin\n    obfs: plain\n"
+    );
+    let config = Config::from_yaml(&source).expect("SSR-A config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::ShadowsocksR);
+    assert_eq!(proxy.cipher.as_deref(), Some("aes-128-cfb"));
+    let ssr = proxy.ssr.as_ref().expect("ssr options");
+    assert_eq!(ssr.protocol, "origin");
+    assert_eq!(ssr.obfs, "plain");
+    assert!(!proxy.udp);
+
+    for unsupported in [
+        "cipher: aes-128-gcm\n    protocol: origin\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: auth_aes128_md5\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: http_simple",
+        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: plain\n    udp: true",
+        "cipher: aes-192-cfb\n    protocol: origin\n    obfs: plain",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: ssr\n    server: 127.0.0.1\n    port: 1\n    password: x\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn hysteria2_hy2b_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: hy2\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: hy2.example\n    alpn: [h3]\n    skip-cert-verify: true\n    disable-reuse: true\n    up: 30 Mbps\n    down: 200\n    obfs: salamander\n    obfs-password: salamander-secret\n    ports: 443,8443,9000-9002\n    hop-interval: 10-30\n    udp-mtu: 1200\n    handshake-timeout: 15\n    initial-stream-receive-window: 8388608\n    max-stream-receive-window: 8388608\n    recv-window-conn: 20971520\n"
@@ -1534,6 +1565,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 trojan: None,
                 anytls: None,
                 hysteria2: None,
+                ssr: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1617,6 +1649,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             trojan: None,
             anytls: None,
             hysteria2: None,
+            ssr: None,
             headers: BTreeMap::new(),
         }],
     };

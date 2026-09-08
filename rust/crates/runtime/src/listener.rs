@@ -273,6 +273,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::Trojan
         | ProxyKind::AnyTls
         | ProxyKind::Hysteria2
+        | ProxyKind::ShadowsocksR
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }
