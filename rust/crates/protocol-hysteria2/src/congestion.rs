@@ -135,13 +135,15 @@ impl Brutal {
 
     /// Window that makes Quinn's 1.25×window/RTT pacer emit ≈ `target_bps`.
     fn window_for_rate(&self, rtt: Duration) -> u64 {
-        // Floor at 1 byte — a multi-KiB / MTU floor (old 10 KiB, or even one
-        // full datagram) makes low bandwidth × low RTT configs send far above
-        // the configured rate under Quinn's window-derived pacer.
-        let floor = 1u64;
+        // Floor at one MTU so QUIC can still emit a packet. Accurate rate
+        // capping therefore requires `bps * RTT / 1.25 >= MTU` (low bandwidth
+        // on sub-millisecond localhost RTT cannot be capped by window alone —
+        // that case is excluded from the Brutal rate differential via injected
+        // delay). The old fixed 10 KiB floor is gone.
+        let floor = self.mtu.max(1);
         let target = self.target_bps();
         if target <= 0.0 {
-            return self.mtu.max(floor);
+            return floor;
         }
         let rtt = if rtt.is_zero() { INITIAL_RTT_HINT } else { rtt };
         let cwnd = target * rtt.as_secs_f64() / QUINN_PACING_GAIN;
@@ -351,12 +353,21 @@ mod tests {
     fn window_tracks_configured_rate_without_10kib_floor() {
         let rate = Arc::new(AtomicU64::new(100_000)); // 100 KB/s
         let mut brutal = Brutal::new(rate, 1200);
-        brutal.srtt = Duration::from_millis(10);
+        brutal.srtt = Duration::from_millis(50);
         brutal.ack_rate = 1.0;
-        // window = 100_000 * 0.01 / 1.25 = 800
-        assert_eq!(brutal.window(), 800);
-        // Old floor of 10_240 would have forced ~1.28 MB/s here.
+        // window = 100_000 * 0.05 / 1.25 = 4_000 (above MTU, below old 10 KiB)
+        assert_eq!(brutal.window(), 4_000);
         assert!(brutal.window() < 10_240);
+    }
+
+    #[test]
+    fn window_floors_to_mtu_when_rate_rtt_product_is_tiny() {
+        let rate = Arc::new(AtomicU64::new(100_000));
+        let mut brutal = Brutal::new(rate, 1200);
+        brutal.srtt = Duration::from_millis(1);
+        brutal.ack_rate = 1.0;
+        // 100_000 * 0.001 / 1.25 = 80 → floored to MTU
+        assert_eq!(brutal.window(), 1200);
     }
 
     #[test]
