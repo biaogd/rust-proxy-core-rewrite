@@ -158,43 +158,53 @@ impl AsyncRead for HttpObfsConn {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if !self.recv_buf.is_empty() {
-            let n = buf.remaining().min(self.recv_buf.len());
-            buf.put_slice(&self.recv_buf[..n]);
-            self.recv_buf.advance(n);
-            return Poll::Ready(Ok(()));
-        }
-        if self.has_recv_header {
-            return Pin::new(&mut self.inner).poll_read(cx, buf);
-        }
-        let mut scratch = [0_u8; 16 * 1024];
-        let mut tmp = ReadBuf::new(&mut scratch);
-        match Pin::new(&mut self.inner).poll_read(cx, &mut tmp) {
-            Poll::Ready(Ok(())) => {
-                let filled = tmp.filled();
-                if filled.is_empty() {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "EOF before HTTP obfs response headers",
-                    )));
+        // Do not map header-only reads to AsyncRead EOF (Ready + 0 filled). Go's
+        // `(0, nil)` after headers is "wait for body"; Tokio treats 0 as EOF.
+        loop {
+            if self.has_recv_header {
+                if !self.recv_buf.is_empty() {
+                    let n = buf.remaining().min(self.recv_buf.len());
+                    buf.put_slice(&self.recv_buf[..n]);
+                    self.recv_buf.advance(n);
+                    return Poll::Ready(Ok(()));
                 }
-                if let Some(pos) = filled.windows(4).position(|w| w == b"\r\n\r\n") {
-                    self.has_recv_header = true;
-                    let payload = &filled[pos + 4..];
-                    let n = buf.remaining().min(payload.len());
-                    buf.put_slice(&payload[..n]);
-                    if payload.len() > n {
-                        self.recv_buf.extend_from_slice(&payload[n..]);
-                    }
-                    Poll::Ready(Ok(()))
-                } else {
-                    Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "HTTP obfs response missing header terminator",
-                    )))
-                }
+                return Pin::new(&mut self.inner).poll_read(cx, buf);
             }
-            other => other,
+
+            if let Some(pos) = self
+                .recv_buf
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            {
+                self.has_recv_header = true;
+                self.recv_buf.advance(pos + 4);
+                // Headers alone: keep reading for encrypted payload instead of
+                // returning Ready(Ok) with an empty ReadBuf.
+                continue;
+            }
+
+            let mut scratch = [0_u8; 16 * 1024];
+            let mut tmp = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut self.inner).poll_read(cx, &mut tmp) {
+                Poll::Ready(Ok(())) => {
+                    let filled = tmp.filled();
+                    if filled.is_empty() {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "EOF before HTTP obfs response headers",
+                        )));
+                    }
+                    if self.recv_buf.len() + filled.len() > 64 * 1024 {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "HTTP obfs response headers exceed 64KiB",
+                        )));
+                    }
+                    self.recv_buf.extend_from_slice(filled);
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }
@@ -246,5 +256,86 @@ impl AsyncWrite for HttpObfsConn {
             Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_shutdown(cx),
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::poll_fn;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
+
+    #[tokio::test]
+    async fn header_only_read_waits_for_payload_not_eof() {
+        let (client, mut server) = duplex(4096);
+        let mut conn = HttpObfsConn::new(
+            Box::new(client),
+            "example.com".into(),
+            443,
+            String::new(),
+            16,
+            false,
+        );
+
+        // Headers arrive first; encrypted payload arrives on a later read.
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+
+        let mut out = [0_u8; 16];
+        let pending = poll_fn(|cx| {
+            let mut buf = ReadBuf::new(&mut out);
+            match Pin::new(&mut conn).poll_read(cx, &mut buf) {
+                Poll::Ready(Ok(())) => {
+                    // Must not report a 0-byte Ready (AsyncRead EOF).
+                    assert!(
+                        !buf.filled().is_empty(),
+                        "header-only read must not return Ready with empty buffer"
+                    );
+                    Poll::Ready(Ok::<usize, ()>(buf.filled().len()))
+                }
+                Poll::Ready(Err(_)) => Poll::Ready(Err(())),
+                Poll::Pending => Poll::Pending,
+            }
+        });
+        // With only headers available, poll_read should Pending (or later yield
+        // payload) — never Ready(Ok) with zero filled bytes.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(50), pending).await;
+        assert!(
+            first.is_err() || matches!(first, Ok(Ok(n)) if n > 0),
+            "unexpected Ready empty success before payload"
+        );
+
+        server.write_all(b"ciphertext-iv-body").await.unwrap();
+        server.flush().await.unwrap();
+        let n = conn.read(&mut out).await.unwrap();
+        assert!(n > 0);
+        assert_eq!(&out[..n], &b"ciphertext-iv-body"[..n]);
+    }
+
+    #[tokio::test]
+    async fn headers_then_payload_in_separate_reads() {
+        let (client, mut server) = duplex(4096);
+        let mut conn = HttpObfsConn::new(
+            Box::new(client),
+            "example.com".into(),
+            80,
+            String::new(),
+            16,
+            true,
+        );
+        server.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+        let read = tokio::spawn(async move {
+            let mut buf = vec![0_u8; 32];
+            let n = conn.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+        tokio::task::yield_now().await;
+        server.write_all(b"payload-bytes").await.unwrap();
+        let got = read.await.unwrap();
+        assert_eq!(got, b"payload-bytes");
     }
 }

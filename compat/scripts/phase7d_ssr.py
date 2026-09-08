@@ -355,7 +355,11 @@ rules:
 
 
 def hang_ssr_listener() -> tuple[socket.socket, int, list[socket.socket]]:
-    """Accept TCP and never speak SSR — client must fail within a bounded timeout."""
+    """Accept TCP, stay mute briefly, then close — no SSR bytes.
+
+    A forever-hold peer would only surface the client's own socket timeout; we
+    close without speaking so the product must fail the handshake with EOF/reset.
+    """
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
@@ -363,16 +367,59 @@ def hang_ssr_listener() -> tuple[socket.socket, int, list[socket.socket]]:
     port = int(listener.getsockname()[1])
     held: list[socket.socket] = []
 
+    def mute_then_close(conn: socket.socket) -> None:
+        held.append(conn)
+        time.sleep(0.4)
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
     def accept_loop() -> None:
         while True:
             try:
                 conn, _ = listener.accept()
             except OSError:
                 return
-            held.append(conn)
+            threading.Thread(target=mute_then_close, args=(conn,), daemon=True).start()
 
     threading.Thread(target=accept_loop, daemon=True).start()
     return listener, port, held
+
+
+def product_closed_exchange(
+    mixed_port: int, host: str, port: int, *, wait: float = 5.0
+) -> tuple[bool, str]:
+    """Return (ok, reason). Client socket wait-timeout is failure, not success."""
+    try:
+        with connect_domain(mixed_port, host, port) as stream:
+            stream.settimeout(wait)
+            try:
+                stream.sendall(b"ssr-d-hang-probe")
+            except (BrokenPipeError, ConnectionResetError):
+                return True, "write-reset"
+            try:
+                data = stream.recv(1)
+            except TimeoutError:
+                return False, "client-wait-timeout"
+            except (BrokenPipeError, ConnectionResetError, EOFError):
+                return True, "recv-reset"
+            if data == b"":
+                return True, "product-eof"
+            return False, f"unexpected-data:{data!r}"
+    except TimeoutError:
+        return False, "dial-or-wait-timeout"
+    except (BrokenPipeError, ConnectionResetError, EOFError):
+        return True, "connect-reset"
+    except OSError as error:
+        # TimeoutError is an OSError subclass — must not count as product close.
+        if isinstance(error, TimeoutError):
+            return False, "os-timeout"
+        return True, f"os-error:{type(error).__name__}"
 
 
 def handshake_timeout_bounded(
@@ -381,7 +428,7 @@ def handshake_timeout_bounded(
     hang_port: int,
     echo_port: int,
 ) -> bool:
-    """Dial SSR against a mute TCP peer; must reject without hanging past deadline."""
+    """Dial SSR against a mute peer; product must close (not client wait-timeout)."""
     hang_scratch = scratch / "hang-timeout"
     hang_scratch.mkdir(exist_ok=True)
     hang_mixed = reserve_port()
@@ -408,11 +455,28 @@ rules:
     process, stdout, stderr = launch(binary, hang_config, hang_scratch)
     try:
         wait_ready(process, hang_mixed)
+        fds_before = process_fd_count(process.pid)
         started = time.monotonic()
-        rejected = rejected_exchange(hang_mixed, "127.0.0.1", echo_port)
+        closed, reason = product_closed_exchange(
+            hang_mixed, "127.0.0.1", echo_port, wait=5.0
+        )
         elapsed = time.monotonic() - started
-        # rejected_exchange uses a 2s socket timeout; allow modest overhead.
-        return rejected and elapsed < max(IO_DEADLINE, 8.0)
+        alive = process.poll() is None
+        fds_after = process_fd_count(process.pid)
+        # Product-driven close should finish well under the client wait; a pass
+        # that only rides the 5s socket timeout is rejected via reason.
+        fd_ok = (
+            fds_before is None
+            or fds_after is None
+            or fds_after <= fds_before + (32 if os.name == "nt" else 16)
+        )
+        return (
+            closed
+            and reason != "client-wait-timeout"
+            and elapsed < 4.5
+            and alive
+            and fd_ok
+        )
     finally:
         stop(process)
         stdout.close()

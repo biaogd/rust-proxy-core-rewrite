@@ -65,13 +65,16 @@ TCP_PROFILES: list[tuple[str, str, str, str, str, str]] = [
     ("aes-128-cfb", "auth_chain_a", "", "http_simple", "", "auth_chain_a+http_simple"),
 ]
 
-# UDP: obfs must be plain (TCP camouflage does not apply).
-UDP_PROFILES: list[tuple[str, str, str, str]] = [
-    ("aes-128-cfb", "origin", "", "origin+aes-128-cfb"),
-    ("aes-128-cfb", "auth_aes128_md5", "", "auth_aes128_md5"),
-    ("aes-128-cfb", "auth_sha1_v4", "", "auth_sha1_v4"),
-    ("aes-128-cfb", "auth_chain_a", "", "auth_chain_a"),
-    ("none", "origin", "", "origin+none"),
+# UDP: camouflage is TCP-only; nodes may still advertise http_*/tls ticket + udp:true
+# (Go skips obfs on the packet path).
+UDP_PROFILES: list[tuple[str, str, str, str, str]] = [
+    ("aes-128-cfb", "origin", "", "plain", "origin+aes-128-cfb"),
+    ("aes-128-cfb", "auth_aes128_md5", "", "plain", "auth_aes128_md5"),
+    ("aes-128-cfb", "auth_sha1_v4", "", "plain", "auth_sha1_v4"),
+    ("aes-128-cfb", "auth_chain_a", "", "plain", "auth_chain_a"),
+    ("none", "origin", "", "plain", "origin+none"),
+    ("aes-128-cfb", "origin", "", "http_simple", "udp+http_simple"),
+    ("aes-128-cfb", "origin", "", "tls1.2_ticket_auth", "udp+tls_ticket"),
 ]
 
 
@@ -130,6 +133,7 @@ def write_udp_config(
     cipher: str,
     protocol: str,
     protocol_param: str,
+    obfs: str = "plain",
 ) -> None:
     lines = [
         f"mixed-port: {mixed_port}",
@@ -147,7 +151,7 @@ def write_udp_config(
         f"    password: {PASSWORD}",
         f"    cipher: {cipher}",
         f"    protocol: {protocol}",
-        "    obfs: plain",
+        f"    obfs: {obfs}",
         "    udp: true",
     ]
     if protocol_param:
@@ -353,6 +357,7 @@ def exercise_udp(
     cipher: str,
     protocol: str,
     protocol_param: str,
+    obfs: str,
     label: str,
 ) -> dict[str, Any]:
     echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
@@ -369,7 +374,7 @@ def exercise_udp(
         ssr_port,
         cipher=cipher,
         protocol=protocol,
-        obfs="plain",
+        obfs=obfs,
         protocol_param=protocol_param,
         obfs_param="",
     )
@@ -383,6 +388,7 @@ def exercise_udp(
         cipher=cipher,
         protocol=protocol,
         protocol_param=protocol_param,
+        obfs=obfs,
     )
     process = stdout = stderr = None
     try:
@@ -427,6 +433,7 @@ def exercise_udp(
             "label": label,
             "cipher": cipher,
             "protocol": protocol,
+            "obfs": obfs,
             "ipv4": ipv4_ok,
             "session-reuse": reuse_ok,
             "controller": snapshot,
@@ -479,6 +486,7 @@ def shared_udp(profile: dict[str, Any]) -> dict[str, Any]:
             "label",
             "cipher",
             "protocol",
+            "obfs",
             "ipv4",
             "session-reuse",
             "controller",
@@ -515,7 +523,7 @@ def main() -> int:
                         label,
                     )
                 udp: dict[str, Any] = {}
-                for cipher, protocol, protocol_param, label in UDP_PROFILES:
+                for cipher, protocol, protocol_param, obfs, label in UDP_PROFILES:
                     scratch = root / engine / "udp" / label.replace("+", "_")
                     scratch.mkdir(parents=True)
                     udp[label] = exercise_udp(
@@ -525,6 +533,7 @@ def main() -> int:
                         cipher,
                         protocol,
                         protocol_param,
+                        obfs,
                         label,
                     )
                 observations[engine] = {"tcp": tcp, "udp": udp}

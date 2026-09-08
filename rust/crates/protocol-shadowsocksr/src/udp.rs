@@ -93,20 +93,12 @@ impl SsrUdpAssociation {
         reject_non_ssr_udp(options)?;
         let cipher = parse_stream_cipher(&options.cipher)?;
         let key = derive_key(&options.password, cipher);
-        // Obfs is TCP-only; refuse non-plain so callers cannot assume UDP camouflage.
-        match options.obfs.as_str() {
-            "plain" => {
-                if !options.obfs_param.is_empty() {
-                    return Err(ShadowsocksRProtocolError::Configuration(
-                        "obfs-param is not accepted for SSR obfs `plain`".into(),
-                    ));
-                }
-            }
-            other => {
-                return Err(ShadowsocksRProtocolError::Configuration(format!(
-                    "SSR UDP does not apply TCP obfs `{other}` (use plain)"
-                )));
-            }
+        // Obfs is TCP-only. Go still dials UDP for nodes with http_*/tls1.2_ticket_*/
+        // random_head — camouflage is skipped on the packet path, not rejected.
+        if options.obfs == "plain" && !options.obfs_param.is_empty() {
+            return Err(ShadowsocksRProtocolError::Configuration(
+                "obfs-param is not accepted for SSR obfs `plain`".into(),
+            ));
         }
         let protocol = ProtocolUdp::new(&options.protocol, &options.protocol_param, &key)?;
         Ok(Self {
@@ -295,5 +287,31 @@ mod tests {
         assert_eq!(encoded.len(), 3 + 4 + 4);
         assert_eq!(&encoded[..3], b"abc");
         assert_eq!(&encoded[3..7], &9_u32.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn udp_association_accepts_tcp_obfs_and_skips_it() {
+        for obfs in [
+            "http_simple",
+            "http_post",
+            "tls1.2_ticket_auth",
+            "tls1.2_ticket_fastauth",
+            "random_head",
+        ] {
+            let options = crate::client::SsrClientOptions {
+                password: "phase7a-ssr-password".into(),
+                cipher: "aes-128-cfb".into(),
+                protocol: "origin".into(),
+                protocol_param: String::new(),
+                obfs: obfs.into(),
+                obfs_param: String::new(),
+                server_host: "127.0.0.1".into(),
+                server_port: 1,
+            };
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            socket.connect("127.0.0.1:9").await.unwrap();
+            SsrUdpAssociation::from_connected_socket(socket, &options)
+                .unwrap_or_else(|error| panic!("{obfs}: {error}"));
+        }
     }
 }

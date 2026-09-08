@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-08
 
-SSR outbound A–D complete on this branch: TCP protocols/obfs/ciphers + UDP (A–C), production hardening (D). Pin: shadowsocksrr `fd723a92` + shims (py3, forbidden-ip empty, half-close, pure-RC4). Phases `phase7a`/`7b`/`7c`/`7d_ssr.py` + `phase7d_ssr_soak.py`. SSR-D gates: wrong-password/cipher/protocol/obfs mismatch, hang-handshake timeout, truncate/cancel, concurrent TCP+UDP, reload-under-load, soft RSS/FD bounds; soak default `SSR_D_SOAK_SECONDS=45` (long opt-in `7200`; `SSR_PRODUCTION_GATE=1` requires release + ≥7200). Fixtures use only `127.0.0.1` (no `/etc/hosts` / `127.0.0.2`); CI shard `controller-services-outbound` runs 7a–7d on Linux/macOS/Windows like peer phases. Remaining gaps: no inbound SSR listener; mudb multi-user `uid:passwd` e2e not claimed (config accepts, pin is single-password); multi-hour soak is opt-in not PR-blocking.
+SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/negatives/soak with review follow-ups (HTTP header-then-payload read, TLS ticket Finished flush under write Pending, UDP skips TCP obfs, hang gate requires product EOF/reset not client wait-timeout). Pin: shadowsocksrr `fd723a92` + shims (py3, forbidden-ip empty, half-close, pure-RC4). Phases `phase7a`/`7b`/`7c`/`7d_ssr.py` + `phase7d_ssr_soak.py`. Soak default `SSR_D_SOAK_SECONDS=45` (long opt-in `7200`). Fixtures use only `127.0.0.1`; CI shard `controller-services-outbound` runs 7a–7d on Linux/macOS/Windows. Remaining gaps: no inbound SSR; mudb multi-user `uid:passwd` e2e unclaimed; multi-hour soak opt-in only.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
