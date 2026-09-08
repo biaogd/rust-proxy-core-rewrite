@@ -30,5 +30,6 @@ test/config/cache*
 # Rust rewrite build and compatibility-test artifacts
 /rust/target/
 /compat/artifacts/
+/compat/.cache/
 /target/compat/
 __pycache__/
