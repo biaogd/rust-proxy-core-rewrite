@@ -148,6 +148,7 @@ pub(crate) struct AuthChainConn {
 }
 
 impl AuthChainConn {
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new(
         inner: BoxedStream,
         kind: AuthChainKind,
@@ -249,12 +250,12 @@ impl AuthChainConn {
         let pos2 = self
             .data_size_list2
             .partition_point(|&item| item < length + self.overhead);
-        let list2_len = self.data_size_list2.len();
-        let final_pos2 = pos2 + (random.next() % list2_len as u64) as usize;
-        if final_pos2 < list2_len {
+        let list2_count = self.data_size_list2.len();
+        let final_pos2 = pos2 + (random.next() % list2_count as u64) as usize;
+        if final_pos2 < list2_count {
             return self.data_size_list2[final_pos2] - length - self.overhead;
         }
-        if final_pos2 < pos2 + list2_len - 1 {
+        if final_pos2 < pos2 + list2_count - 1 {
             return 0;
         }
         if length > 1300 {
@@ -301,7 +302,10 @@ impl AuthChainConn {
         block[12..14].copy_from_slice(&(paddings[0] as u16).to_le_bytes());
         block[14..16].copy_from_slice(&(paddings[1] as u16).to_le_bytes());
 
-        let cipher_key_vec = kdf(&format!("{}{}", b64(&self.user.user_key), self.kind.salt()), 16);
+        let cipher_key_vec = kdf(
+            &format!("{}{}", b64(&self.user.user_key), self.kind.salt()),
+            16,
+        );
         let mut cipher_key = [0_u8; 16];
         cipher_key.copy_from_slice(&cipher_key_vec);
         aes128_cbc_encrypt_block(&cipher_key, &mut block);
@@ -359,11 +363,7 @@ impl AuthChainConn {
 
         // uid ^ hash[8:12]
         let uid = u32::from_le_bytes(self.user.user_id)
-            ^ u32::from_le_bytes(
-                self.last_client_hash[8..12]
-                    .try_into()
-                    .expect("4 bytes"),
-            );
+            ^ u32::from_le_bytes(self.last_client_hash[8..12].try_into().expect("4 bytes"));
         out.extend_from_slice(&uid.to_le_bytes());
 
         // encrypted auth data
@@ -624,7 +624,10 @@ impl AuthChainUdp {
                 "auth_chain udp checksum mismatch".into(),
             ));
         }
-        let md5_data = HashKind::Md5.hmac(&self.stream_key, &packet[packet.len() - 8..packet.len() - 1]);
+        let md5_data = HashKind::Md5.hmac(
+            &self.stream_key,
+            &packet[packet.len() - 8..packet.len() - 1],
+        );
         let rand_data_length = udp_get_rand_length(&md5_data, &mut self.random_server);
         if packet.len() < 8 + rand_data_length {
             return Err(ShadowsocksRProtocolError::Protocol(

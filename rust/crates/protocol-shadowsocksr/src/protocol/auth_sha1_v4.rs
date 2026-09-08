@@ -115,7 +115,7 @@ impl AuthSha1V4Conn {
         }
     }
 
-    fn pack_data(&self, out: &mut Vec<u8>, data: &[u8]) {
+    fn pack_data(out: &mut Vec<u8>, data: &[u8]) {
         let data_length = data.len();
         let rand_data_length = Self::rand_data_length(data_length);
         let mut packed = 2 + 2 + 3 + rand_data_length + data_length + 4;
@@ -178,11 +178,11 @@ impl AuthSha1V4Conn {
             self.has_sent_header = true;
         }
         while rest.len() > MAX_CHUNK {
-            self.pack_data(&mut out, &rest[..MAX_CHUNK]);
+            Self::pack_data(&mut out, &rest[..MAX_CHUNK]);
             rest = &rest[MAX_CHUNK..];
         }
         if !rest.is_empty() {
-            self.pack_data(&mut out, rest);
+            Self::pack_data(&mut out, rest);
         }
         out
     }
@@ -366,8 +366,12 @@ mod tests {
         frame.extend_from_slice(&adler.to_le_bytes());
         assert_eq!(frame.len(), 9);
 
-        let mut conn =
-            AuthSha1V4Conn::new(Box::new(tokio::io::duplex(64).0), vec![0; 16], vec![0; 16], 0);
+        let mut conn = AuthSha1V4Conn::new(
+            Box::new(tokio::io::duplex(64).0),
+            vec![0; 16],
+            vec![0; 16],
+            0,
+        );
         conn.under_decoded.extend_from_slice(&frame);
         conn.decode_available().expect("empty frame");
         assert!(conn.decoded.is_empty());

@@ -331,8 +331,8 @@ proxies:
     server: 127.0.0.1
     port: 1
     password: x
-    cipher: aes-128-cfb
-    protocol: auth_sha1_v4
+    cipher: aes-128-gcm
+    protocol: origin
     obfs: plain
 """,
                 encoding="utf-8",
@@ -343,7 +343,7 @@ proxies:
                 timeout=20,
                 check=False,
             )
-            observations["rust-rejects-auth-sha1-v4"] = proc.returncode != 0
+            observations["rust-rejects-aead"] = proc.returncode != 0
             bad.write_text(
                 """mixed-port: 0
 mode: rule
@@ -354,8 +354,8 @@ proxies:
     port: 1
     password: x
     cipher: aes-128-cfb
-    protocol: origin
-    obfs: random_head
+    protocol: auth_chain_c
+    obfs: plain
 """,
                 encoding="utf-8",
             )
@@ -365,7 +365,7 @@ proxies:
                 timeout=20,
                 check=False,
             )
-            observations["rust-rejects-random-head"] = proc.returncode != 0
+            observations["rust-rejects-auth-chain-c"] = proc.returncode != 0
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
@@ -417,8 +417,8 @@ proxies:
         go_shared != rust_shared
         or not rust_half_ok
         or not rust_tls_ok
-        or not observations.get("rust-rejects-auth-sha1-v4")
-        or not observations.get("rust-rejects-random-head")
+        or not observations.get("rust-rejects-aead")
+        or not observations.get("rust-rejects-auth-chain-c")
     ):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))

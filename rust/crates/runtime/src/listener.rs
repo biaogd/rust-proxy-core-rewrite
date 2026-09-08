@@ -142,6 +142,7 @@ pub(super) enum UdpSessionMode {
     Socks5(String),
     Shadowsocks(String),
     ShadowsocksUot(String),
+    ShadowsocksR(String),
     Vmess(String),
     Vless(String),
     Trojan(String),
@@ -260,6 +261,9 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
             Some(UdpSessionMode::ShadowsocksUot(target.to_owned()))
         }
         ProxyKind::Shadowsocks if proxy.udp => Some(UdpSessionMode::Shadowsocks(target.to_owned())),
+        ProxyKind::ShadowsocksR if proxy.udp => {
+            Some(UdpSessionMode::ShadowsocksR(target.to_owned()))
+        }
         ProxyKind::Vmess if proxy.udp => Some(UdpSessionMode::Vmess(target.to_owned())),
         ProxyKind::Vless if proxy.udp => Some(UdpSessionMode::Vless(target.to_owned())),
         ProxyKind::Trojan if proxy.udp => Some(UdpSessionMode::Trojan(target.to_owned())),
@@ -268,12 +272,12 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
+        | ProxyKind::ShadowsocksR
         | ProxyKind::Vmess
         | ProxyKind::Vless
         | ProxyKind::Trojan
         | ProxyKind::AnyTls
         | ProxyKind::Hysteria2
-        | ProxyKind::ShadowsocksR
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }
@@ -366,6 +370,12 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::ShadowsocksUot(proxy) => {
             run_shadowsocks_uot_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::ShadowsocksR(proxy) => {
+            run_ssr_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
@@ -999,6 +1009,108 @@ pub(super) async fn run_shadowsocks_udp_session(
             state.log(
                 "error",
                 format!("Shadowsocks UDP association failed: {error}"),
+            );
+            return;
+        }
+    };
+
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            if matches!(destination.host, Host::Ip(address) if address.is_ipv6() && !config.ipv6) {
+                break;
+            }
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_ssr_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let Some(ssr) = proxy.ssr.as_ref() else {
+        return;
+    };
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let mut association = match rewrite_outbound::associate_ssr_udp_with_options(
+        &server,
+        config.ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        &ssr.protocol,
+        &ssr.protocol_param,
+        &ssr.obfs,
+        &ssr.obfs_param,
+        direct_tcp_options(&config),
+    )
+    .await
+    {
+        Ok(association) => association,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("ShadowsocksR UDP association failed: {error}"),
             );
             return;
         }

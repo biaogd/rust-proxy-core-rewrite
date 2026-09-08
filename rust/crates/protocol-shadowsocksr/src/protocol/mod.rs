@@ -9,8 +9,7 @@ use rewrite_io::BoxedStream;
 
 use crate::ShadowsocksRProtocolError;
 
-pub(crate) use auth_aes128::{AUTH_AES128_MD5, AUTH_AES128_SHA1, AuthAes128Conn};
-#[allow(unused_imports)] // AuthChainUdp exported for UDP association (SSR later).
+pub(crate) use auth_aes128::{AUTH_AES128_MD5, AUTH_AES128_SHA1, AuthAes128Conn, AuthAes128Udp};
 pub(crate) use auth_chain::{AuthChainConn, AuthChainKind, AuthChainUdp};
 pub(crate) use auth_sha1_v4::AuthSha1V4Conn;
 

@@ -19,7 +19,7 @@ mod protocol;
 mod udp;
 
 pub use client::{SsrClientOptions, connect_tcp_on_stream};
-pub use udp::associate_udp;
+pub use udp::{SsrUdpAssociation, associate_udp};
 
 use thiserror::Error;
 

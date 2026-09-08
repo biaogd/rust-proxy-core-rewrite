@@ -144,11 +144,10 @@ fn ssr_a_configuration_is_supported_and_scoped() {
 
     for unsupported in [
         "cipher: aes-128-gcm\n    protocol: origin\n    obfs: plain",
-        "cipher: aes-128-cfb\n    protocol: auth_sha1_v4\n    obfs: plain",
-        "cipher: aes-128-cfb\n    protocol: auth_chain_a\n    obfs: plain",
-        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: random_head",
-        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: plain\n    udp: true",
-        "cipher: aes-192-cfb\n    protocol: origin\n    obfs: plain",
+        "cipher: chacha20\n    protocol: origin\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: auth_chain_c\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: plain\n    obfs-param: x",
+        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: random_head\n    obfs-param: x",
     ] {
         let source = format!(
             "{MINIMAL}\nproxies:\n  - name: bad\n    type: ssr\n    server: 127.0.0.1\n    port: 1\n    password: x\n    {unsupported}\n"
@@ -157,6 +156,39 @@ fn ssr_a_configuration_is_supported_and_scoped() {
             Config::from_yaml(&source).is_err(),
             "accepted {unsupported}"
         );
+    }
+}
+
+#[test]
+fn ssr_c_configuration_accepts_chain_random_head_ciphers_udp() {
+    use std::fmt::Write as _;
+    for (cipher, protocol, protocol_param, obfs, udp) in [
+        ("aes-192-cfb", "auth_sha1_v4", "", "plain", false),
+        ("aes-128-ctr", "auth_chain_a", "1000:passwd", "plain", true),
+        ("rc4-md5", "auth_chain_b", "", "random_head", false),
+        ("chacha20-ietf", "origin", "", "random_head", true),
+        ("none", "auth_sha1_v4", "", "plain", true),
+        ("dummy", "origin", "", "plain", false),
+    ] {
+        let mut source = format!(
+            "{MINIMAL}\nproxies:\n  - name: ssr\n    type: ssr\n    server: 127.0.0.1\n    port: 8388\n    password: secret\n    cipher: {cipher}\n    protocol: {protocol}\n    obfs: {obfs}\n"
+        );
+        if !protocol_param.is_empty() {
+            let _ = writeln!(source, "    protocol-param: \"{protocol_param}\"");
+        }
+        if udp {
+            source.push_str("    udp: true\n");
+        }
+        let config = Config::from_yaml(&source)
+            .unwrap_or_else(|e| panic!("{cipher}/{protocol}/{obfs}: {e}"));
+        let proxy = &config.proxies[0];
+        assert_eq!(proxy.kind, ProxyKind::ShadowsocksR);
+        assert_eq!(proxy.cipher.as_deref(), Some(cipher));
+        assert_eq!(proxy.udp, udp);
+        let ssr = proxy.ssr.as_ref().expect("ssr");
+        assert_eq!(ssr.protocol, protocol);
+        assert_eq!(ssr.obfs, obfs);
+        assert_eq!(ssr.protocol_param, protocol_param);
     }
 }
 

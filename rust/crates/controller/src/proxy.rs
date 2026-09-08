@@ -1053,8 +1053,9 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Vless
         | rewrite_config::ProxyKind::Trojan
         | rewrite_config::ProxyKind::AnyTls
-        | rewrite_config::ProxyKind::Hysteria2 => proxy.udp,
-        rewrite_config::ProxyKind::ShadowsocksR | rewrite_config::ProxyKind::Http => false,
+        | rewrite_config::ProxyKind::Hysteria2
+        | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+        rewrite_config::ProxyKind::Http => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
@@ -1213,8 +1214,9 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Vless
             | rewrite_config::ProxyKind::Trojan
             | rewrite_config::ProxyKind::AnyTls
-            | rewrite_config::ProxyKind::Hysteria2 => proxy.udp,
-            rewrite_config::ProxyKind::ShadowsocksR | rewrite_config::ProxyKind::Http => false,
+            | rewrite_config::ProxyKind::Hysteria2
+            | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+            rewrite_config::ProxyKind::Http => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns

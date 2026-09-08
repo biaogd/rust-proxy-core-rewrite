@@ -440,6 +440,52 @@ impl AsyncWrite for AuthAes128Conn {
     }
 }
 
+/// UDP `EncodePacket` / `DecodePacket` for `auth_aes128_*` (Go parity).
+pub(crate) struct AuthAes128Udp {
+    kind: AuthAes128Kind,
+    stream_key: Vec<u8>,
+    user: UserData,
+}
+
+impl AuthAes128Udp {
+    pub(crate) fn new(kind: AuthAes128Kind, stream_key: Vec<u8>, protocol_param: &str) -> Self {
+        let user = parse_user(protocol_param, kind, &stream_key);
+        Self {
+            kind,
+            stream_key,
+            user,
+        }
+    }
+
+    pub(crate) fn encode_packet(&self, plaintext: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(plaintext.len() + 8);
+        out.extend_from_slice(plaintext);
+        out.extend_from_slice(&self.user.user_id);
+        let mac = self.kind.hash.hmac(&self.user.user_key, &out);
+        out.extend_from_slice(&mac[..4]);
+        out
+    }
+
+    pub(crate) fn decode_packet(
+        &self,
+        packet: &[u8],
+    ) -> Result<Vec<u8>, ShadowsocksRProtocolError> {
+        if packet.len() < 4 {
+            return Err(ShadowsocksRProtocolError::Protocol(
+                "auth_aes128 udp packet too short".into(),
+            ));
+        }
+        let body = &packet[..packet.len() - 4];
+        let mac = self.kind.hash.hmac(&self.stream_key, body);
+        if mac[..4] != packet[packet.len() - 4..] {
+            return Err(ShadowsocksRProtocolError::Protocol(
+                "auth_aes128 udp checksum mismatch".into(),
+            ));
+        }
+        Ok(body.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

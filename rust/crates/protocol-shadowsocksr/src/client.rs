@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use crate::cipher::{StreamCipherConn, derive_key, parse_stream_cipher};
 use crate::{ShadowsocksRProtocolError, obfs, protocol};
 
-/// Options accepted by the SSR-A/B TCP dial.
+/// Options accepted by the SSR-A/B/C TCP dial.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SsrClientOptions {
     pub password: String,
@@ -40,8 +40,8 @@ pub async fn connect_tcp_on_stream(
     options: &SsrClientOptions,
 ) -> Result<BoxedStream, ShadowsocksRProtocolError> {
     reject_non_ssr_stream(options)?;
-    let kind = parse_stream_cipher(&options.cipher)?;
-    let key = derive_key(&options.password, kind);
+    let cipher = parse_stream_cipher(&options.cipher)?;
+    let key = derive_key(&options.password, cipher);
     let obfs_overhead = obfs::overhead(&options.obfs)?;
     let _ = protocol::overhead(&options.protocol)?;
 
@@ -52,11 +52,11 @@ pub async fn connect_tcp_on_stream(
             host: &options.server_host,
             port: options.server_port,
             stream_key: &key,
-            iv_len: kind.iv_len(),
+            iv_len: cipher.iv_len(),
             obfs_param: &options.obfs_param,
         },
     )?;
-    let mut cipher_conn = StreamCipherConn::new(stream, kind, key.clone())?;
+    let mut cipher_conn = StreamCipherConn::new(stream, cipher, key.clone())?;
     // Generate write IV before protocol wrap (Go ObtainWriteIV).
     let write_iv = cipher_conn.obtain_write_iv().to_vec();
     let stream: BoxedStream = Box::new(cipher_conn);

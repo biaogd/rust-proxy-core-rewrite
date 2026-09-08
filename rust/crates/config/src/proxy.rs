@@ -1150,21 +1150,40 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
     })
 }
 
-const SSR_CIPHERS: [&str; 2] = ["aes-128-cfb", "aes-256-cfb"];
+const SSR_CIPHERS: [&str; 10] = [
+    "none",
+    "dummy",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "rc4-md5",
+    "chacha20-ietf",
+];
 const SSR_ACCEPTED_EXTRA: &[&str] = &["obfs", "obfs-param", "protocol", "protocol-param"];
-const SSR_PROTOCOLS: [&str; 3] = ["origin", "auth_aes128_md5", "auth_aes128_sha1"];
-const SSR_OBFS: [&str; 5] = [
+const SSR_PROTOCOLS: [&str; 6] = [
+    "origin",
+    "auth_aes128_md5",
+    "auth_aes128_sha1",
+    "auth_sha1_v4",
+    "auth_chain_a",
+    "auth_chain_b",
+];
+const SSR_OBFS: [&str; 6] = [
     "plain",
     "http_simple",
     "http_post",
     "tls1.2_ticket_auth",
     "tls1.2_ticket_fastauth",
+    "random_head",
 ];
 
 #[allow(clippy::too_many_lines)]
 fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
-    // SSR-A/B: origin + auth_aes128_* ; plain/http_*/tls1.2_ticket_* ; aes-128/256-cfb.
-    // Auth_sha1_v4, auth_chain_*, random_head, UDP, AEAD remain rejected loudly.
+    // SSR-A/B/C: stream ciphers + none/dummy; protocols through auth_chain_*;
+    // obfs through random_head; UDP outbound allowed. AEAD/SS2022 remain rejected.
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -1197,9 +1216,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
-    if proxy.udp.unwrap_or(false) {
-        return Err(ConfigError::UnsupportedProxy(name));
-    }
+    let udp = proxy.udp.unwrap_or(false);
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -1238,7 +1255,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
     if !SSR_OBFS.contains(&obfs.as_str()) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
-    if obfs == "plain" && !obfs_param.is_empty() {
+    if (obfs == "plain" || obfs == "random_head") && !obfs_param.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     if !proxy.extra.is_empty() {
@@ -1261,7 +1278,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
         private_key: None,
         client_fingerprint: None,
         reality: None,
-        udp: false,
+        udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,

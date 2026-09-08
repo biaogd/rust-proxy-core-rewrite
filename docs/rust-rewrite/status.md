@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-08
 
-SSR-B (same branch/PR as SSR-A) adds outbound `auth_aes128_md5` / `auth_aes128_sha1` and obfs `http_simple` / `http_post` / `tls1.2_ticket_auth` / `tls1.2_ticket_fastauth` (TLS camouflage only, not rustls). SSR-A `origin`+`plain`+aes-128/256-cfb kept. Pin: shadowsocksrr `fd723a92` + existing shims; phases `phase7a_ssr_tcp.py` / `phase7b_ssr_tcp.py`. Loud reject for SSR-C leftovers (`auth_sha1_v4`, `auth_chain_*`, `random_head`, UDP, …).
+SSR-C (same branch/PR as SSR-A/B) adds outbound `auth_sha1_v4` / `auth_chain_a` / `auth_chain_b`, obfs `random_head`, remaining Go stream ciphers + `none`/`dummy`, and SSR UDP (cipher→protocol; TCP obfs only). Groups/providers/health/reload follow existing outbound patterns; controller reports `udp` from config. Pin: shadowsocksrr `fd723a92` + existing shims; phases `phase7a`/`phase7b`/`phase7c_ssr.py`. SSR-D (malformed/stress/soak/three-platform release) deferred. Loud reject for AEAD/SS2022 and unmapped legacy `chacha20`/`xchacha20`.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
