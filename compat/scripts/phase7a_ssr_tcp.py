@@ -40,7 +40,7 @@ PASSWORD = "phase7a-ssr-password"
 SSR_SERVER_REPO = "https://github.com/shadowsocksrr/shadowsocksr.git"
 SSR_SERVER_PIN = "fd723a92c488d202b407323f0512987346944136"
 # Bump when fetch-time shims change so local caches rebuild.
-SSR_SERVER_SHIM = "py3+forbidden-empty+halfclose-v1"
+SSR_SERVER_SHIM = "py3+forbidden-empty+halfclose-v1+pure-rc4-v1"
 CIPHERS = ("aes-128-cfb", "aes-256-cfb")
 
 
@@ -49,6 +49,74 @@ def ssr_cache_dir() -> pathlib.Path:
     if override:
         return pathlib.Path(override)
     return ROOT / "compat" / ".cache" / "shadowsocksr" / SSR_SERVER_PIN
+
+
+def _apply_pure_rc4_shim(openssl_py: pathlib.Path, rc4_md5_py: pathlib.Path) -> None:
+    """Provide stream RC4 without OpenSSL (needed for auth_chain / rc4-md5).
+
+    Modern libcrypto builds often omit RC4; auth_chain framing still requires it.
+    """
+    openssl_text = openssl_py.read_text(encoding="utf-8")
+    if "phase7a_pure_rc4" not in openssl_text:
+        helper = '''
+# phase7a_pure_rc4: fallback when libcrypto disables RC4 (auth_chain / rc4-md5)
+class PureRC4(object):
+    def __init__(self, key):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        key = bytes(key)
+        S = list(range(256))
+        j = 0
+        for i in range(256):
+            j = (j + S[i] + key[i % len(key)]) & 255
+            S[i], S[j] = S[j], S[i]
+        self._S = S
+        self._i = 0
+        self._j = 0
+
+    def update(self, data):
+        if isinstance(data, str):
+            data = data.encode('latin-1')
+        data = bytearray(data)
+        S = self._S
+        i = self._i
+        j = self._j
+        for n in range(len(data)):
+            i = (i + 1) & 255
+            j = (j + S[i]) & 255
+            S[i], S[j] = S[j], S[i]
+            data[n] ^= S[(S[i] + S[j]) & 255]
+        self._i = i
+        self._j = j
+        return bytes(data)
+
+
+def create_pure_rc4(alg, key, iv, op, key_as_bytes=0, d=None, salt=None, i=1, padding=1):
+    return PureRC4(key)
+
+'''
+        # Insert helpers before the ciphers map.
+        anchor = "\nciphers = {\n"
+        if anchor not in openssl_text:
+            raise RuntimeError("unable to locate openssl.ciphers for pure RC4 shim")
+        openssl_text = openssl_text.replace(anchor, helper + anchor, 1)
+        openssl_text = openssl_text.replace(
+            "'rc4': (16, 0, OpenSSLCrypto),",
+            "'rc4': (16, 0, create_pure_rc4),  # phase7a_pure_rc4",
+            1,
+        )
+        openssl_py.write_text(openssl_text, encoding="utf-8")
+
+    rc4_text = rc4_md5_py.read_text(encoding="utf-8")
+    if "phase7a_pure_rc4" not in rc4_text:
+        rc4_text = rc4_text.replace(
+            "return openssl.OpenSSLCrypto(b'rc4', rc4_key, b'', op)",
+            "return openssl.create_pure_rc4(b'rc4', rc4_key, b'', op)  # phase7a_pure_rc4",
+            1,
+        )
+        if "phase7a_pure_rc4" not in rc4_text:
+            raise RuntimeError("unable to patch rc4_md5 create_cipher for pure RC4")
+        rc4_md5_py.write_text(rc4_text, encoding="utf-8")
 
 
 def _apply_half_close_shim(tcprelay: pathlib.Path) -> None:
@@ -182,6 +250,10 @@ def ensure_ssr_server() -> pathlib.Path:
         if patched != text:
             path.write_text(patched, encoding="utf-8")
     _apply_half_close_shim(cache / "shadowsocks" / "tcprelay.py")
+    _apply_pure_rc4_shim(
+        cache / "shadowsocks" / "crypto" / "openssl.py",
+        cache / "shadowsocks" / "crypto" / "rc4_md5.py",
+    )
     marker.write_text(expected, encoding="utf-8")
     return cache / "shadowsocks" / "server.py"
 

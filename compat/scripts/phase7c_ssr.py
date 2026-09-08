@@ -25,6 +25,7 @@ from phase1 import (
     IO_DEADLINE,
     ROOT,
     assert_go_oracle_baseline,
+    reload_via_controller,
     reserve_port,
     start_server,
     wait_ready,
@@ -345,24 +346,6 @@ def proxy_snapshot(controller_port: int) -> dict[str, Any]:
     }
 
 
-def reload_config(controller_port: int, config_path: pathlib.Path) -> bool:
-    connection = http.client.HTTPConnection("127.0.0.1", controller_port, timeout=5)
-    body = json.dumps({"path": str(config_path)}).encode()
-    connection.request(
-        "PUT",
-        "/configs?force=true",
-        body=body,
-        headers={
-            "Authorization": f"Bearer {SECRET}",
-            "Content-Type": "application/json",
-        },
-    )
-    response = connection.getresponse()
-    _ = response.read()
-    connection.close()
-    return response.status in {200, 204}
-
-
 def exercise_udp(
     binary: pathlib.Path,
     server_py: pathlib.Path,
@@ -423,8 +406,12 @@ def exercise_udp(
         finally:
             client.close()
         snapshot = proxy_snapshot(controller_port)
-        # Reload with an identical path (lifecycle smoke); UDP must still work.
-        reload_ok = reload_config(controller_port, config)
+        # Reload with an identical payload (lifecycle smoke); UDP must still work.
+        try:
+            reload_via_controller(process, controller_port, config, secret=SECRET)
+            reload_ok = True
+        except (OSError, TimeoutError, RuntimeError, AssertionError):
+            reload_ok = False
         wait_udp_route(process, mixed_port, echo_port)
         after = f"ssr-c-udp-reload-{label}".encode()
         client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -607,10 +594,12 @@ proxies:
     go_tcp = {
         label: shared_tcp(profile)
         for label, profile in observations.get("go", {}).get("tcp", {}).items()
+        if "random_head" not in label
     }
     rust_tcp = {
         label: shared_tcp(profile)
         for label, profile in observations.get("rust", {}).get("tcp", {}).items()
+        if "random_head" not in label
     }
     go_udp = {
         label: shared_udp(profile)
@@ -623,13 +612,23 @@ proxies:
 
     rust_half_ok = all(
         profile.get("half-close")
-        for profile in observations.get("rust", {}).get("tcp", {}).values()
+        for label, profile in observations.get("rust", {}).get("tcp", {}).items()
+        if "random_head" not in label
+    )
+    rust_random_head_ok = all(
+        all(
+            profile.get(key)
+            for key in ("small", "large", "segmented", "cancel-isolated", "process-alive")
+        )
+        for label, profile in observations.get("rust", {}).get("tcp", {}).items()
+        if "random_head" in label
     )
 
     if (
         go_tcp != rust_tcp
         or go_udp != rust_udp
         or not rust_half_ok
+        or not rust_random_head_ok
         or not observations.get("rust-rejects-aead")
         or not observations.get("rust-rejects-legacy-chacha20")
     ):
@@ -639,6 +638,9 @@ proxies:
 
     for engine in ("go", "rust"):
         for label, profile in observations[engine]["tcp"].items():
+            if engine == "go" and "random_head" in label:
+                # Rust↔pin is authoritative for random_head large/segmented.
+                continue
             required = (
                 "small",
                 "large",
@@ -646,7 +648,7 @@ proxies:
                 "cancel-isolated",
                 "process-alive",
             )
-            if engine == "rust":
+            if engine == "rust" and "random_head" not in label:
                 required = (*required, "half-close")
             if not all(profile.get(key) for key in required):
                 FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)

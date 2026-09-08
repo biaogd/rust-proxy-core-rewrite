@@ -129,7 +129,8 @@ impl AuthSha1V4Conn {
         out.extend_from_slice(&crc.to_le_bytes());
         Self::pack_rand_data(out, rand_data_length);
         out.extend_from_slice(data);
-        let adler = adler32_checksum(&out[start + 4..]);
+        // Go: adler32 over the whole frame so far (length+crc+pad+data), then append.
+        let adler = adler32_checksum(&out[start..]);
         out.extend_from_slice(&adler.to_le_bytes());
         debug_assert_eq!(out.len() - start, packed);
     }
