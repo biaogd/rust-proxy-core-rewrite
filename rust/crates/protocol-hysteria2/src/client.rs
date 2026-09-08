@@ -288,6 +288,9 @@ pub struct Client {
     options: ClientOptions,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Option<CachedEndpoint>>,
+    /// Endpoints retired after a path (DNS/hop) change. Kept alive so
+    /// in-flight independent connections are not torn down by a new dial.
+    retired_endpoints: Mutex<Vec<quinn::Endpoint>>,
     /// When Brutal is enabled, dial installs a fresh control into this slot
     /// before `connect` so each QUIC connection gets independent negotiation.
     brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
@@ -315,6 +318,7 @@ impl Client {
             options,
             session: Mutex::new(None),
             endpoint: Mutex::new(None),
+            retired_endpoints: Mutex::new(Vec::new()),
             brutal_next,
             brutal_dial: Mutex::new(()),
         })
@@ -352,7 +356,7 @@ impl Client {
             }
         };
         if session.is_independent() {
-            // Retain Session for the stream lifetime so QUIC + UDP recv abort
+            // Retain Session for the stream lifetime so QUIC + UDP recv exit
             // when the last business user exits.
             Ok(Box::new(SessionBoundTcp {
                 inner: stream,
@@ -392,6 +396,14 @@ impl Client {
             cached
                 .endpoint
                 .close(0_u32.into(), b"Hysteria2 client closed");
+        }
+        drop(endpoint);
+        let retired = {
+            let mut guard = self.retired_endpoints.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        for endpoint in retired {
+            endpoint.close(0_u32.into(), b"Hysteria2 client closed");
         }
     }
 
@@ -519,25 +531,37 @@ impl Client {
         hop: Option<HopConfig>,
     ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
         let path = EndpointPathKey::new(canonical, hop.as_ref());
-        let mut guard = self.endpoint.lock().await;
-        if let Some(cached) = guard.as_ref()
-            && cached.path == path
-        {
-            return Ok(cached.endpoint.clone());
+        let previous;
+        let endpoint = {
+            let mut guard = self.endpoint.lock().await;
+            if let Some(cached) = guard.as_ref()
+                && cached.path == path
+            {
+                return Ok(cached.endpoint.clone());
+            }
+            previous = guard.take();
+            let endpoint =
+                build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
+            *guard = Some(CachedEndpoint {
+                endpoint: endpoint.clone(),
+                path,
+            });
+            endpoint
+        };
+        if let Some(previous) = previous {
+            // Retire from new dials but keep the endpoint alive so existing
+            // independent connections (disable-reuse) are not interrupted.
+            self.retired_endpoints
+                .lock()
+                .await
+                .push(previous.endpoint);
         }
-        if let Some(previous) = guard.take() {
-            // DNS / hop address change: hop socket still has stale addrs if we
-            // reused the endpoint — rebuild instead.
-            previous
-                .endpoint
-                .close(0_u32.into(), b"Hysteria2 endpoint path changed");
-        }
-        let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
-        *guard = Some(CachedEndpoint {
-            endpoint: endpoint.clone(),
-            path,
-        });
         Ok(endpoint)
+    }
+
+    #[cfg(test)]
+    async fn retired_endpoints_len_for_test(&self) -> usize {
+        self.retired_endpoints.lock().await.len()
     }
 }
 
@@ -712,12 +736,44 @@ async fn resolve_server(host: &str, port: u16) -> Result<SocketAddr, Hysteria2Pr
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
+    // Isolated DNS fixture for differentials/tests: a process-local map file
+    // (no system hosts mutation). Format: `hostname ipv4` per line.
+    if let Some(ip) = resolve_override_ip(host) {
+        return Ok(SocketAddr::new(ip, port));
+    }
     let mut addresses = tokio::net::lookup_host((host, port))
         .await
         .map_err(Hysteria2ProtocolError::Io)?;
     addresses.next().ok_or_else(|| {
         Hysteria2ProtocolError::Protocol(format!("failed to resolve Hysteria2 server {host}"))
     })
+}
+
+/// Env var pointing at a resolve-map file read on each dial (cross-platform).
+const RESOLVE_OVERRIDE_ENV: &str = "REWRITE_HY2_RESOLVE_FILE";
+
+fn resolve_override_ip(host: &str) -> Option<IpAddr> {
+    let path = std::env::var_os(RESOLVE_OVERRIDE_ENV)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    resolve_override_ip_from(&text, host)
+}
+
+fn resolve_override_ip_from(text: &str, host: &str) -> Option<IpAddr> {
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = parts.next()?;
+        let ip = parts.next()?;
+        if name.eq_ignore_ascii_case(host)
+            && let Ok(ip) = ip.parse::<IpAddr>()
+        {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -854,5 +910,22 @@ mod tests {
             .expect("rebuilt endpoint");
         // New path must bind a fresh UDP socket (different local port).
         assert_ne!(ep1.local_addr().ok(), ep2.local_addr().ok());
+        // Old endpoint must remain open (retired, not closed) so in-flight
+        // independent connections keep working.
+        assert_eq!(client.retired_endpoints_len_for_test().await, 1);
+        assert!(
+            ep1.local_addr().is_ok(),
+            "retired endpoint was closed on path change"
+        );
+    }
+
+    #[test]
+    fn resolve_override_file_is_parsed() {
+        let text = "hy2.example.test 127.0.0.2\n# comment\nother 10.0.0.1\n";
+        assert_eq!(
+            resolve_override_ip_from(text, "hy2.example.test"),
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)))
+        );
+        assert_eq!(resolve_override_ip_from(text, "missing.test"), None);
     }
 }

@@ -67,20 +67,29 @@ def build_binaries(output: pathlib.Path) -> dict[str, pathlib.Path]:
     return {"go": go_binary, "rust": rust_binary}
 
 
-def launch(binary: pathlib.Path, config: pathlib.Path, scratch: pathlib.Path) -> tuple[subprocess.Popen[bytes], Any, Any]:
+def launch(
+    binary: pathlib.Path,
+    config: pathlib.Path,
+    scratch: pathlib.Path,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[subprocess.Popen[bytes], Any, Any]:
     stdout = (scratch / "stdout.log").open("wb")
     stderr = (scratch / "stderr.log").open("wb")
     config_home = scratch / ".config"
     profile_home = config_home / "mihomo"
+    env = {
+        **os.environ,
+        "HOME": str(scratch),
+        "XDG_CONFIG_HOME": str(config_home),
+        "CLASH_HOME_DIR": str(profile_home),
+    }
+    if extra_env:
+        env.update(extra_env)
     process = subprocess.Popen(
         [str(binary), "-f", str(config)],
         cwd=scratch,
-        env={
-            **os.environ,
-            "HOME": str(scratch),
-            "XDG_CONFIG_HOME": str(config_home),
-            "CLASH_HOME_DIR": str(profile_home),
-        },
+        env=env,
         stdout=stdout,
         stderr=stderr,
         start_new_session=True,

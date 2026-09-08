@@ -17,6 +17,7 @@ use std::{
 };
 
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use bytes::Bytes;
 use rand::RngExt;
@@ -364,21 +365,23 @@ impl Defragger {
 pub struct UdpSessionManager {
     sessions: Mutex<HashMap<u32, mpsc::Sender<UdpMessage>>>,
     next_id: AtomicU32,
-    /// Explicitly aborted on shutdown/Drop — do not rely on weak upgrades after
-    /// a datagram (TCP-only / idle associations would otherwise leak forever).
+    /// Cooperative shutdown for the datagram receive task (no `abort()`).
+    cancel: CancellationToken,
     recv_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl UdpSessionManager {
     /// Spawn the receive loop and return the manager.
     pub(crate) fn new(conn: quinn::Connection) -> Arc<Self> {
+        let cancel = CancellationToken::new();
         let mgr = Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
+            cancel: cancel.clone(),
             recv_task: Mutex::new(None),
         });
         let weak = Arc::downgrade(&mgr);
-        let handle = tokio::spawn(receive_loop(conn, weak));
+        let handle = tokio::spawn(receive_loop(conn, weak, cancel));
         *mgr.recv_task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
@@ -451,52 +454,60 @@ impl UdpSessionManager {
             .clear();
     }
 
-    /// Abort the datagram receive task and wake association receivers.
+    /// Cancel the datagram receive task and wake association receivers.
     pub(crate) fn shutdown(&self) {
         self.close_all();
-        if let Some(task) = self
+        self.cancel.cancel();
+        // Drop the join handle without abort — the task exits via cancel.
+        let _ = self
             .recv_task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            task.abort();
-        }
+            .take();
     }
 }
 
 impl Drop for UdpSessionManager {
     fn drop(&mut self) {
         self.close_all();
-        if let Some(task) = self
+        self.cancel.cancel();
+        let _ = self
             .recv_task
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            task.abort();
-        }
+            .take();
     }
 }
 
-async fn receive_loop(conn: quinn::Connection, mgr: Weak<UdpSessionManager>) {
+async fn receive_loop(
+    conn: quinn::Connection,
+    mgr: Weak<UdpSessionManager>,
+    cancel: CancellationToken,
+) {
     loop {
-        if let Ok(data) = conn.read_datagram().await {
-            if let Some(msg) = UdpMessage::parse(&data) {
-                match mgr.upgrade() {
-                    Some(m) => m.dispatch(msg),
-                    None => return, // manager dropped
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                if let Some(m) = mgr.upgrade() {
+                    m.close_all();
+                }
+                return;
+            }
+            result = conn.read_datagram() => {
+                if let Ok(data) = result {
+                    if let Some(msg) = UdpMessage::parse(&data) {
+                        match mgr.upgrade() {
+                            Some(m) => m.dispatch(msg),
+                            None => return,
+                        }
+                    }
+                } else {
+                    if let Some(m) = mgr.upgrade() {
+                        m.close_all();
+                    }
+                    return;
                 }
             }
-            // Invalid datagram — skip, like Go.
-        } else {
-            // Connection closed: actively close session channels so
-            // receivers wake (senders do not drop merely because this
-            // task exits — they live in the manager map).
-            if let Some(m) = mgr.upgrade() {
-                m.close_all();
-            }
-            return;
         }
     }
 }
@@ -803,47 +814,48 @@ mod tests {
     }
 
     impl UdpSessionManager {
-        /// Test helper: install a stand-in recv task (no QUIC) to assert abort-on-drop.
-        pub(crate) fn new_with_task_for_test(task: JoinHandle<()>) -> Arc<Self> {
-            Arc::new(Self {
+        /// Test helper: stand-in recv task cancelled cooperatively (no QUIC).
+        pub(crate) fn new_with_cancel_task_for_test() -> (Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
+            let cancel = CancellationToken::new();
+            let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+            let child = cancel.clone();
+            let task = tokio::spawn(async move {
+                let _keep = hold_tx;
+                tokio::select! {
+                    () = child.cancelled() => {}
+                    () = std::future::pending::<()>() => {}
+                }
+            });
+            let mgr = Arc::new(Self {
                 sessions: Mutex::new(HashMap::new()),
                 next_id: AtomicU32::new(1),
+                cancel,
                 recv_task: Mutex::new(Some(task)),
-            })
+            });
+            (mgr, hold_rx)
         }
     }
 
     #[tokio::test]
-    async fn manager_drop_aborts_recv_task_without_datagram_wake() {
+    async fn manager_drop_cancels_recv_task_without_datagram_wake() {
         // Regression: receive_loop used to wait forever for a datagram before
         // noticing the manager was gone — TCP-only / idle UDP leaked tasks.
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let _keep = hold_tx;
-            // Block forever unless aborted (no datagram wake).
-            std::future::pending::<()>().await;
-        });
-        let mgr = UdpSessionManager::new_with_task_for_test(task);
+        let (mgr, hold_rx) = UdpSessionManager::new_with_cancel_task_for_test();
         drop(mgr);
         tokio::time::timeout(Duration::from_secs(2), hold_rx)
             .await
-            .expect("recv task was not aborted on manager drop")
-            .expect_err("aborted task should drop its oneshot sender");
+            .expect("recv task was not cancelled on manager drop")
+            .expect_err("cancelled task should drop its oneshot sender");
     }
 
     #[tokio::test]
-    async fn shutdown_aborts_recv_task_idempotently() {
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let _keep = hold_tx;
-            std::future::pending::<()>().await;
-        });
-        let mgr = UdpSessionManager::new_with_task_for_test(task);
+    async fn shutdown_cancels_recv_task_idempotently() {
+        let (mgr, hold_rx) = UdpSessionManager::new_with_cancel_task_for_test();
         mgr.shutdown();
         mgr.shutdown(); // second call must be a no-op
         tokio::time::timeout(Duration::from_secs(2), hold_rx)
             .await
-            .expect("recv task was not aborted on shutdown")
-            .expect_err("aborted task should drop its oneshot sender");
+            .expect("recv task was not cancelled on shutdown")
+            .expect_err("cancelled task should drop its oneshot sender");
     }
 }

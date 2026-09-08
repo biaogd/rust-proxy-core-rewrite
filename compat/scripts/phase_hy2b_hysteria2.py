@@ -578,41 +578,12 @@ rules:
 
 
 DNS_HOP_HOST = "hy2-dns-hop-c9a5.test"
-DNS_HOP_MARKER = f"# phase-hy2b-dns-hop {DNS_HOP_HOST}"
+RESOLVE_OVERRIDE_ENV = "REWRITE_HY2_RESOLVE_FILE"
 
 
-def _hosts_set(ip: str) -> None:
-    """Point DNS_HOP_HOST at ip via /etc/hosts (requires write access)."""
-    path = pathlib.Path("/etc/hosts")
-    existing = path.read_text(encoding="utf-8").splitlines()
-    kept = [line for line in existing if DNS_HOP_MARKER not in line and DNS_HOP_HOST not in line]
-    kept.append(f"{ip}\t{DNS_HOP_HOST} {DNS_HOP_MARKER}")
-    text = "\n".join(kept) + "\n"
-    try:
-        path.write_text(text, encoding="utf-8")
-    except PermissionError:
-        subprocess.run(
-            ["sudo", "tee", str(path)],
-            input=text.encode(),
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-
-
-def _hosts_clear() -> None:
-    path = pathlib.Path("/etc/hosts")
-    existing = path.read_text(encoding="utf-8").splitlines()
-    kept = [line for line in existing if DNS_HOP_MARKER not in line and DNS_HOP_HOST not in line]
-    text = "\n".join(kept) + "\n"
-    try:
-        path.write_text(text, encoding="utf-8")
-    except PermissionError:
-        subprocess.run(
-            ["sudo", "tee", str(path)],
-            input=text.encode(),
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
+def _write_resolve_map(path: pathlib.Path, ip: str) -> None:
+    """Isolated DNS fixture: hostname → IP map file (no system hosts mutation)."""
+    path.write_text(f"{DNS_HOP_HOST} {ip}\n", encoding="utf-8")
 
 
 def exercise_dns_hop_switch(
@@ -624,12 +595,12 @@ def exercise_dns_hop_switch(
 ) -> dict[str, Any]:
     """After DNS flips the hop server IP, redials must use the new address.
 
-    Regression: cached Quinn endpoint kept ObfsHopSocket hop_addrs/canonical from
-    the first resolve, so post-DNS-change sends still hit the stale IP.
+    Also asserts an in-flight connection on the old path keeps working when a
+    new dial resolves a different IP (endpoint retirement, not close).
 
-    Rust resolves the proxy hostname via the OS (`lookup_host` / `/etc/hosts`) and
-    must rebuild the endpoint on the **same** Client (no reload). Go uses Clash
-    `hosts:` and needs a controller reload to pick up the remapping.
+    Rust: process-local resolve-map file (`REWRITE_HY2_RESOLVE_FILE`), same Client.
+    Go: Clash `hosts:` + controller reload (Clash DNS path).
+    Cross-platform: never mutates system hosts files.
     """
     from phase1 import reload_via_controller
 
@@ -637,13 +608,13 @@ def exercise_dns_hop_switch(
     hop_ports = [reserve_port() for _ in range(3)]
     ports_yaml = ",".join(str(port) for port in hop_ports)
     mixed_port, controller_port = reserve_port(), reserve_port()
+    resolve_map = scratch / "resolve-map.txt"
 
     def bring_up(ip: str, label: str) -> tuple[Any, Any, Any, list[BidirectionalUdpRelay]]:
         auth_port = reserve_port()
         auth_scratch = scratch / f"authority-{label}"
         auth_scratch.mkdir(parents=True, exist_ok=True)
-        # Authority stays on 127.0.0.1; only the hop-facing relays move with DNS
-        # so a stale ObfsHopSocket (still sending to the old IP) cannot succeed.
+        # Authority stays on 127.0.0.1; hop-facing relays bind on the resolved IP.
         authority, a_out, a_err = start_authority(
             authority_binary, auth_scratch, auth_port, listen_host="127.0.0.1"
         )
@@ -689,45 +660,46 @@ rules:
         )
         return config
 
-    authority = a_out = a_err = None
-    relays: list[BidirectionalUdpRelay] = []
+    authority_a = a_out_a = a_err_a = None
+    authority_b = a_out_b = a_err_b = None
+    relays_a: list[BidirectionalUdpRelay] = []
+    relays_b: list[BidirectionalUdpRelay] = []
     process = stdout = stderr = None
     try:
-        _hosts_set("127.0.0.1")
-        resolved = socket.getaddrinfo(DNS_HOP_HOST, hop_ports[0], type=socket.SOCK_DGRAM)
-        if not any(item[4][0] == "127.0.0.1" for item in resolved):
-            raise RuntimeError(f"hosts map failed: {resolved!r}")
-
-        authority, a_out, a_err, relays = bring_up("127.0.0.1", "a")
+        _write_resolve_map(resolve_map, "127.0.0.1")
+        authority_a, a_out_a, a_err_a, relays_a = bring_up("127.0.0.1", "a")
         config = write_config("127.0.0.1")
-        process, stdout, stderr = launch(binary, config, scratch)
+        extra_env = {RESOLVE_OVERRIDE_ENV: str(resolve_map)} if engine == "rust" else None
+        process, stdout, stderr = launch(binary, config, scratch, extra_env=extra_env)
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
         time.sleep(0.3)
-        before = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-before")
 
-        for relay in relays:
-            relay.stop()
-        relays = []
-        stop(authority)
-        a_out.close()
-        a_err.close()
-        authority = a_out = a_err = None
+        # Hold an old-path stream open across the DNS switch.
+        with connect_domain(mixed_port, "127.0.0.1", echo.port) as old_stream:
+            old_stream.settimeout(IO_DEADLINE)
+            old_stream.sendall(b"dns-hold")
+            if recv_exact(old_stream, 8) != b"dns-hold":
+                raise AssertionError("old-path setup echo failed")
+            before = True
 
-        _hosts_set("127.0.0.2")
-        resolved = socket.getaddrinfo(DNS_HOP_HOST, hop_ports[0], type=socket.SOCK_DGRAM)
-        if not any(item[4][0] == "127.0.0.2" for item in resolved):
-            raise RuntimeError(f"hosts remap failed: {resolved!r}")
+            # Bring up new path while old relays stay alive (continuity).
+            _write_resolve_map(resolve_map, "127.0.0.2")
+            authority_b, a_out_b, a_err_b, relays_b = bring_up("127.0.0.2", "b")
+            if engine == "go":
+                config = write_config("127.0.0.2")
+                reload_via_controller(process, controller_port, config, secret=SECRET)
+                time.sleep(0.3)
 
-        authority, a_out, a_err, relays = bring_up("127.0.0.2", "b")
-        if engine == "go":
-            config = write_config("127.0.0.2")
-            reload_via_controller(process, controller_port, config, secret=SECRET)
-            time.sleep(0.3)
-        after = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-after")
+            after = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-after")
+
+            old_stream.sendall(b"still-old")
+            old_alive = recv_exact(old_stream, 9) == b"still-old"
+
         return {
             "before-ok": before,
             "after-ok": after,
+            "old-conn-alive": old_alive,
             "process-alive": process.poll() is None,
         }
     finally:
@@ -737,16 +709,20 @@ rules:
             stdout.close()
         if stderr is not None:
             stderr.close()
-        for relay in relays:
+        for relay in relays_a + relays_b:
             relay.stop()
-        if authority is not None:
-            stop(authority)
-        if a_out is not None:
-            a_out.close()
-        if a_err is not None:
-            a_err.close()
-        _hosts_clear()
+        for authority, a_out, a_err in (
+            (authority_a, a_out_a, a_err_a),
+            (authority_b, a_out_b, a_err_b),
+        ):
+            if authority is not None:
+                stop(authority)
+            if a_out is not None:
+                a_out.close()
+            if a_err is not None:
+                a_err.close()
         echo.close()
+
 
 def main() -> int:
     observations: dict[str, Any] = {}
@@ -795,8 +771,17 @@ def main() -> int:
                     raise AssertionError(
                         f"{engine} dns-hop-switch failed: {dns}"
                     )
-                observations[engine]["dns-hop-switch"] = dns
-
+                # Rust same-Client path must keep the pre-switch connection alive.
+                # Go remaps via Clash hosts reload (new client) — continuity N/A.
+                if engine == "rust" and not dns.get("old-conn-alive"):
+                    raise AssertionError(
+                        f"rust dns-hop old connection interrupted: {dns}"
+                    )
+                observations[engine]["dns-hop-switch"] = {
+                    "before-ok": dns["before-ok"],
+                    "after-ok": dns["after-ok"],
+                    "process-alive": dns["process-alive"],
+                }
             observations["rust-rejects-gecko"] = not config_validation(
                 binaries["rust"],
                 root / "reject-gecko",
