@@ -442,6 +442,9 @@ pub struct Client {
     /// Serializes Brutal slot install + connect so concurrent disable-reuse
     /// dials cannot steal each other's controls.
     brutal_dial: Mutex<()>,
+    /// Test-only turnstile after an atomic acquire (lease already registered).
+    #[cfg(test)]
+    acquire_hook_for_test: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Client {
@@ -466,6 +469,8 @@ impl Client {
             retired_endpoints: RetiredEndpointSet::new(),
             brutal_next,
             brutal_dial: Mutex::new(()),
+            #[cfg(test)]
+            acquire_hook_for_test: Mutex::new(None),
         })
     }
 
@@ -606,9 +611,10 @@ impl Client {
         });
 
         let (canonical, hop) = resolve_endpoint(&self.options).await?;
-        let slot = self.endpoint_slot(canonical, hop).await?;
-        let endpoint = slot.endpoint()?;
-        let lease = slot.retain_session();
+        // Select the cached/built endpoint and register the session lease under
+        // the same cache lock so a concurrent path change cannot retire+close
+        // an endpoint we are about to dial on (live_sessions still 0).
+        let (endpoint, lease) = self.acquire_endpoint(canonical, hop).await?;
         let connecting = endpoint.connect(canonical, &self.options.tls.server_name)?;
         let connection = connecting
             .await
@@ -667,12 +673,62 @@ impl Client {
         })
     }
 
+    /// Returns a live endpoint handle and a session lease.
+    ///
+    /// The cache lookup/build and `live_sessions` increment share one critical
+    /// section on `self.endpoint`. Retirement (which closes when the count is
+    /// zero) can only run after taking that same lock to replace the cache
+    /// entry, so it cannot observe count 0 for an in-flight acquire.
+    async fn acquire_endpoint(
+        &self,
+        canonical: SocketAddr,
+        hop: Option<HopConfig>,
+    ) -> Result<(quinn::Endpoint, EndpointLease), Hysteria2ProtocolError> {
+        // Opportunistic GC of idle retired endpoints from prior path changes.
+        self.retired_endpoints.gc();
+        let path = EndpointPathKey::new(canonical, hop.as_ref());
+        let mut previous: Option<CachedEndpoint> = None;
+        let (endpoint, lease) = {
+            let mut guard = self.endpoint.lock().await;
+            let slot = if let Some(cached) = guard.as_ref()
+                && cached.path == path
+            {
+                Arc::clone(&cached.slot)
+            } else {
+                previous = guard.take();
+                let built =
+                    build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
+                let slot = EndpointSlot::new(built, Arc::clone(&self.retired_endpoints));
+                *guard = Some(CachedEndpoint {
+                    slot: Arc::clone(&slot),
+                    path,
+                });
+                slot
+            };
+            // Lease must be registered before this mutex is released.
+            let lease = slot.retain_session();
+            let endpoint = slot.endpoint()?;
+            (endpoint, lease)
+        };
+        if let Some(previous) = previous {
+            // Retire outside the cache lock (retired set has its own sync).
+            // In-flight acquires that already retained keep live_sessions > 0.
+            previous.slot.mark_retired();
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.acquire_hook_for_test.lock().await.as_ref() {
+            hook();
+        }
+        Ok((endpoint, lease))
+    }
+
+    /// Cache lookup/build without a session lease (idle path changes / tests).
+    #[cfg(test)]
     async fn endpoint_slot(
         &self,
         canonical: SocketAddr,
         hop: Option<HopConfig>,
     ) -> Result<Arc<EndpointSlot>, Hysteria2ProtocolError> {
-        // Opportunistic GC of idle retired endpoints from prior path changes.
         self.retired_endpoints.gc();
         let path = EndpointPathKey::new(canonical, hop.as_ref());
         let previous;
@@ -721,6 +777,39 @@ impl Client {
             .await
             .as_ref()
             .map(|cached| Arc::clone(&cached.slot))
+    }
+
+    /// Test-only: clone the cached slot **without** bumping `live_sessions`.
+    /// Used to recreate the pre-fix select→retain race window.
+    #[cfg(test)]
+    async fn select_cached_slot_without_lease_for_test(&self) -> Option<Arc<EndpointSlot>> {
+        self.endpoint
+            .lock()
+            .await
+            .as_ref()
+            .map(|cached| Arc::clone(&cached.slot))
+    }
+
+    #[cfg(test)]
+    async fn set_acquire_hook_for_test<F>(&self, hook: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        *self.acquire_hook_for_test.lock().await = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    async fn clear_acquire_hook_for_test(&self) {
+        *self.acquire_hook_for_test.lock().await = None;
+    }
+
+    #[cfg(test)]
+    async fn acquire_endpoint_for_test(
+        &self,
+        canonical: SocketAddr,
+        hop: Option<HopConfig>,
+    ) -> Result<(quinn::Endpoint, EndpointLease), Hysteria2ProtocolError> {
+        self.acquire_endpoint(canonical, hop).await
     }
 }
 
@@ -1168,6 +1257,171 @@ mod tests {
                 .expect("endpoint");
             assert_eq!(client.retired_endpoints_len_for_test(), 0);
         }
+    }
+
+    fn test_client() -> Client {
+        Client::new(ClientOptions {
+            server: "127.0.0.1".into(),
+            port: 1,
+            password: "x".into(),
+            tls: TlsOptions {
+                server_name: "test".into(),
+                skip_certificate_verification: true,
+                alpn: vec!["h3".into()],
+                custom_roots: Vec::new(),
+            },
+            hop_ports: vec![13_001, 13_002],
+            hop_interval_min_secs: 5,
+            hop_interval_max_secs: 5,
+            ..ClientOptions::default()
+        })
+        .expect("client")
+    }
+
+    fn hop_path(octet: u8, ports: [u16; 2]) -> (SocketAddr, HopConfig) {
+        let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[0]));
+        let hop = HopConfig {
+            addrs: vec![
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[0])),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[1])),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        (canonical, hop)
+    }
+
+    /// Controllable interleaving of the pre-fix race:
+    /// Dial A selects the cached slot (no lease) → Dial B retires (count 0,
+    /// close) → Dial A retains too late.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racy_select_without_lease_loses_to_concurrent_retirement() {
+        use std::sync::{Arc, Barrier};
+
+        let client = Arc::new(test_client());
+        let (canon_a, hop_a) = hop_path(1, [13_001, 13_002]);
+        let (canon_b, hop_b) = hop_path(2, [13_001, 13_002]);
+        let _ = client
+            .endpoint(canon_a, Some(hop_a))
+            .await
+            .expect("prime path A");
+
+        let selected = Arc::new(Barrier::new(2));
+        let retired = Arc::new(Barrier::new(2));
+
+        let dial_a = {
+            let client = Arc::clone(&client);
+            let selected = Arc::clone(&selected);
+            let retired = Arc::clone(&retired);
+            let handle = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                let slot = handle
+                    .block_on(client.select_cached_slot_without_lease_for_test())
+                    .expect("cached A");
+                // Window: selected, lease not registered, cache lock released.
+                selected.wait();
+                // Dial B retires+closes while we are here.
+                retired.wait();
+                let _lease = slot.retain_session();
+                slot.is_released()
+            })
+        };
+
+        let dial_b = {
+            let client = Arc::clone(&client);
+            let selected = Arc::clone(&selected);
+            let retired = Arc::clone(&retired);
+            tokio::spawn(async move {
+                selected.wait();
+                let _ = client
+                    .endpoint(canon_b, Some(hop_b))
+                    .await
+                    .expect("switch to B");
+                retired.wait();
+            })
+        };
+
+        let closed_after_racy_retain = dial_a.await.expect("dial A join");
+        dial_b.await.expect("dial B join");
+        assert!(
+            closed_after_racy_retain,
+            "split select→retain must lose to retirement (documents the race window)"
+        );
+    }
+
+    /// Same scheduling pressure as the racy test, but Dial A uses atomic
+    /// `acquire_endpoint` (select + lease under one cache lock). Retirement
+    /// cannot close the in-flight endpoint.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn atomic_acquire_survives_concurrent_path_retirement() {
+        use std::sync::{Arc, Barrier};
+
+        let client = Arc::new(test_client());
+        let (canon_a, hop_a) = hop_path(1, [14_001, 14_002]);
+        let (canon_b, hop_b) = hop_path(2, [14_001, 14_002]);
+        let _ = client
+            .endpoint(canon_a, Some(hop_a.clone()))
+            .await
+            .expect("prime path A");
+
+        // After lease is registered (and cache lock released), pause so Dial B
+        // can attempt retirement in the same wall-clock window the old race used.
+        let leased = Arc::new(Barrier::new(2));
+        let retired = Arc::new(Barrier::new(2));
+        {
+            let leased = Arc::clone(&leased);
+            let retired = Arc::clone(&retired);
+            client
+                .set_acquire_hook_for_test(move || {
+                    leased.wait();
+                    retired.wait();
+                })
+                .await;
+        }
+
+        let dial_a = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                let (endpoint, lease) = client
+                    .acquire_endpoint_for_test(canon_a, Some(hop_a))
+                    .await
+                    .expect("atomic acquire");
+                let released = lease.slot.is_released();
+                let addr_ok = endpoint.local_addr().is_ok();
+                (released, addr_ok, lease)
+            })
+        };
+
+        let dial_b = {
+            let client = Arc::clone(&client);
+            let leased = Arc::clone(&leased);
+            let retired = Arc::clone(&retired);
+            tokio::spawn(async move {
+                // Wait until Dial A has registered its lease (post-fix point).
+                leased.wait();
+                let _ = client
+                    .endpoint(canon_b, Some(hop_b))
+                    .await
+                    .expect("switch to B");
+                retired.wait();
+            })
+        };
+
+        let (released, addr_ok, lease) = dial_a.await.expect("dial A join");
+        dial_b.await.expect("dial B join");
+        client.clear_acquire_hook_for_test().await;
+
+        assert!(
+            !released && addr_ok,
+            "atomic acquire must keep the selected endpoint alive across concurrent retirement"
+        );
+        assert_eq!(
+            client.retired_endpoints_len_for_test(),
+            1,
+            "path A stays retired until the in-flight lease drops"
+        );
+        drop(lease);
+        assert_eq!(client.retired_endpoints_len_for_test(), 0);
     }
 
     #[test]
