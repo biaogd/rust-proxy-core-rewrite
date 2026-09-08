@@ -57,9 +57,12 @@ def start_udp_echo() -> tuple[socketserver.ThreadingUDPServer, int]:
 class BidirectionalUdpRelay:
     """Per-client NAT-style UDP relay for hop ports → authority."""
 
-    def __init__(self, listen_port: int, target_port: int) -> None:
+    def __init__(
+        self, listen_port: int, target_port: int, *, listen_host: str = "127.0.0.1"
+    ) -> None:
         self.listen_port = listen_port
         self.target_port = target_port
+        self.listen_host = listen_host
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -73,7 +76,7 @@ class BidirectionalUdpRelay:
     def _run(self) -> None:
         listen = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listen.bind(("127.0.0.1", self.listen_port))
+        listen.bind((self.listen_host, self.listen_port))
         upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         upstream.bind(("127.0.0.1", 0))
         listen.setblocking(False)
@@ -99,6 +102,7 @@ def hy2_record(
     name: str,
     server_port: int,
     *,
+    server: str = "127.0.0.1",
     password: str = PASSWORD,
     skip_verify: bool = True,
     salamander: bool = False,
@@ -113,7 +117,7 @@ def hy2_record(
     lines = [
         f"  - name: {name}",
         "    type: hysteria2",
-        "    server: 127.0.0.1",
+        f"    server: {server}",
         f"    port: {server_port}",
         f"    password: {password}",
         f"    sni: {SNI}",
@@ -144,6 +148,7 @@ def start_authority(
     scratch: pathlib.Path,
     listen_port: int,
     *,
+    listen_host: str = "127.0.0.1",
     salamander: bool = False,
     up: str | None = None,
     down: str | None = None,
@@ -167,7 +172,7 @@ ipv6: true
 listeners:
   - name: hy2-in
     type: hysteria2
-    listen: 127.0.0.1
+    listen: {listen_host}
     port: {listen_port}
     users:
       hy2-user: {PASSWORD}
@@ -503,6 +508,20 @@ rules:
                         hop_continuity = False
                         time.sleep(0.2)
 
+            # disable-reuse leak pressure: many short TCP dials must succeed
+            # (recv-task / connection accumulation would eventually break this).
+            repeated_dials = True
+            if disable_reuse:
+                repeated_dials = all(
+                    tcp_exchange(
+                        mixed_port,
+                        "127.0.0.1",
+                        echo.port,
+                        f"reuse-dial-{index}".encode(),
+                    )
+                    for index in range(12)
+                )
+
             wrong_obfs = True
             if salamander:
                 bad_port = reserve_port()
@@ -536,6 +555,7 @@ rules:
                 "tcp-udp-concurrent": concurrent,
                 "udp-advertised": udp_advertised,
                 "hop-continuity": hop_continuity,
+                "repeated-dials": repeated_dials,
                 "wrong-obfs-rejected": wrong_obfs,
                 "process-alive": process.poll() is None,
             }
@@ -556,6 +576,177 @@ rules:
         udp_echo2.shutdown()
         udp_echo2.server_close()
 
+
+DNS_HOP_HOST = "hy2-dns-hop-c9a5.test"
+DNS_HOP_MARKER = f"# phase-hy2b-dns-hop {DNS_HOP_HOST}"
+
+
+def _hosts_set(ip: str) -> None:
+    """Point DNS_HOP_HOST at ip via /etc/hosts (requires write access)."""
+    path = pathlib.Path("/etc/hosts")
+    existing = path.read_text(encoding="utf-8").splitlines()
+    kept = [line for line in existing if DNS_HOP_MARKER not in line and DNS_HOP_HOST not in line]
+    kept.append(f"{ip}\t{DNS_HOP_HOST} {DNS_HOP_MARKER}")
+    text = "\n".join(kept) + "\n"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except PermissionError:
+        subprocess.run(
+            ["sudo", "tee", str(path)],
+            input=text.encode(),
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+
+def _hosts_clear() -> None:
+    path = pathlib.Path("/etc/hosts")
+    existing = path.read_text(encoding="utf-8").splitlines()
+    kept = [line for line in existing if DNS_HOP_MARKER not in line and DNS_HOP_HOST not in line]
+    text = "\n".join(kept) + "\n"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except PermissionError:
+        subprocess.run(
+            ["sudo", "tee", str(path)],
+            input=text.encode(),
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+
+
+def exercise_dns_hop_switch(
+    binary: pathlib.Path,
+    authority_binary: pathlib.Path,
+    scratch: pathlib.Path,
+    *,
+    engine: str,
+) -> dict[str, Any]:
+    """After DNS flips the hop server IP, redials must use the new address.
+
+    Regression: cached Quinn endpoint kept ObfsHopSocket hop_addrs/canonical from
+    the first resolve, so post-DNS-change sends still hit the stale IP.
+
+    Rust resolves the proxy hostname via the OS (`lookup_host` / `/etc/hosts`) and
+    must rebuild the endpoint on the **same** Client (no reload). Go uses Clash
+    `hosts:` and needs a controller reload to pick up the remapping.
+    """
+    from phase1 import reload_via_controller
+
+    echo = start_server(EchoHandler)
+    hop_ports = [reserve_port() for _ in range(3)]
+    ports_yaml = ",".join(str(port) for port in hop_ports)
+    mixed_port, controller_port = reserve_port(), reserve_port()
+
+    def bring_up(ip: str, label: str) -> tuple[Any, Any, Any, list[BidirectionalUdpRelay]]:
+        auth_port = reserve_port()
+        auth_scratch = scratch / f"authority-{label}"
+        auth_scratch.mkdir(parents=True, exist_ok=True)
+        # Authority stays on 127.0.0.1; only the hop-facing relays move with DNS
+        # so a stale ObfsHopSocket (still sending to the old IP) cannot succeed.
+        authority, a_out, a_err = start_authority(
+            authority_binary, auth_scratch, auth_port, listen_host="127.0.0.1"
+        )
+        time.sleep(0.4)
+        if authority.poll() is not None:
+            raise RuntimeError(f"authority {label} exited early")
+        relays = [
+            BidirectionalUdpRelay(port, auth_port, listen_host=ip) for port in hop_ports
+        ]
+        for relay in relays:
+            relay.start()
+        return authority, a_out, a_err, relays
+
+    def write_config(mapped_ip: str) -> pathlib.Path:
+        config = scratch / "config.yaml"
+        hosts_block = ""
+        if engine == "go":
+            hosts_block = f"hosts:\n  {DNS_HOP_HOST}: {mapped_ip}\n"
+        config.write_text(
+            f"""mixed-port: {mixed_port}
+external-controller: 127.0.0.1:{controller_port}
+secret: {SECRET}
+mode: rule
+log-level: info
+ipv6: true
+{hosts_block}proxies:
+{hy2_record(
+    "hy2",
+    hop_ports[0],
+    server=DNS_HOP_HOST,
+    ports=ports_yaml,
+    hop_interval="5",
+    disable_reuse=True,
+)}
+proxy-groups:
+  - name: hy2-select
+    type: select
+    proxies: [hy2]
+    default-selected: hy2
+rules:
+  - MATCH,hy2-select
+"""
+        )
+        return config
+
+    authority = a_out = a_err = None
+    relays: list[BidirectionalUdpRelay] = []
+    process = stdout = stderr = None
+    try:
+        _hosts_set("127.0.0.1")
+        resolved = socket.getaddrinfo(DNS_HOP_HOST, hop_ports[0], type=socket.SOCK_DGRAM)
+        if not any(item[4][0] == "127.0.0.1" for item in resolved):
+            raise RuntimeError(f"hosts map failed: {resolved!r}")
+
+        authority, a_out, a_err, relays = bring_up("127.0.0.1", "a")
+        config = write_config("127.0.0.1")
+        process, stdout, stderr = launch(binary, config, scratch)
+        wait_ready(process, mixed_port)
+        wait_controller(process, controller_port)
+        time.sleep(0.3)
+        before = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-before")
+
+        for relay in relays:
+            relay.stop()
+        relays = []
+        stop(authority)
+        a_out.close()
+        a_err.close()
+        authority = a_out = a_err = None
+
+        _hosts_set("127.0.0.2")
+        resolved = socket.getaddrinfo(DNS_HOP_HOST, hop_ports[0], type=socket.SOCK_DGRAM)
+        if not any(item[4][0] == "127.0.0.2" for item in resolved):
+            raise RuntimeError(f"hosts remap failed: {resolved!r}")
+
+        authority, a_out, a_err, relays = bring_up("127.0.0.2", "b")
+        if engine == "go":
+            config = write_config("127.0.0.2")
+            reload_via_controller(process, controller_port, config, secret=SECRET)
+            time.sleep(0.3)
+        after = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-after")
+        return {
+            "before-ok": before,
+            "after-ok": after,
+            "process-alive": process.poll() is None,
+        }
+    finally:
+        if process is not None:
+            stop(process)
+        if stdout is not None:
+            stdout.close()
+        if stderr is not None:
+            stderr.close()
+        for relay in relays:
+            relay.stop()
+        if authority is not None:
+            stop(authority)
+        if a_out is not None:
+            a_out.close()
+        if a_err is not None:
+            a_err.close()
+        _hosts_clear()
+        echo.close()
 
 def main() -> int:
     observations: dict[str, Any] = {}
@@ -590,6 +781,21 @@ def main() -> int:
                         binaries[engine], binaries["go"], scratch, **kwargs
                     )
                 observations[engine] = profiles
+
+            for engine in ("rust", "go"):
+                scratch = root / engine / "dns-hop-switch"
+                scratch.mkdir(parents=True)
+                dns = exercise_dns_hop_switch(
+                    binaries[engine],
+                    binaries["go"],
+                    scratch,
+                    engine=engine,
+                )
+                if not (dns.get("before-ok") and dns.get("after-ok")):
+                    raise AssertionError(
+                        f"{engine} dns-hop-switch failed: {dns}"
+                    )
+                observations[engine]["dns-hop-switch"] = dns
 
             observations["rust-rejects-gecko"] = not config_validation(
                 binaries["rust"],

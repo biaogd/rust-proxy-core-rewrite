@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tokio::task::JoinHandle;
+
 use bytes::Bytes;
 use rand::RngExt;
 use tokio::sync::mpsc;
@@ -360,21 +362,26 @@ impl Defragger {
 
 /// Routes inbound UDP datagrams to per-session channels.
 pub struct UdpSessionManager {
-    conn: quinn::Connection,
     sessions: Mutex<HashMap<u32, mpsc::Sender<UdpMessage>>>,
     next_id: AtomicU32,
+    /// Explicitly aborted on shutdown/Drop — do not rely on weak upgrades after
+    /// a datagram (TCP-only / idle associations would otherwise leak forever).
+    recv_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl UdpSessionManager {
     /// Spawn the receive loop and return the manager.
     pub(crate) fn new(conn: quinn::Connection) -> Arc<Self> {
         let mgr = Arc::new(Self {
-            conn: conn.clone(),
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU32::new(1),
+            recv_task: Mutex::new(None),
         });
         let weak = Arc::downgrade(&mgr);
-        tokio::spawn(receive_loop(conn, weak));
+        let handle = tokio::spawn(receive_loop(conn, weak));
+        *mgr.recv_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
         mgr
     }
 
@@ -385,12 +392,16 @@ impl UdpSessionManager {
     /// Returns when the concurrent session count would exceed [`MAX_SESSIONS`].
     pub fn new_session(
         self: &Arc<Self>,
+        conn: &quinn::Connection,
         udp_mtu: usize,
     ) -> Result<UdpSession, Hysteria2ProtocolError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(SESSION_CHAN_SIZE);
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if sessions.len() >= MAX_SESSIONS {
                 return Err(Hysteria2ProtocolError::Protocol(
                     "udp session limit exceeded".to_owned(),
@@ -400,7 +411,7 @@ impl UdpSessionManager {
         }
         Ok(UdpSession {
             id,
-            conn: self.conn.clone(),
+            conn: conn.clone(),
             rx,
             defrag: Defragger::default(),
             // Strong ref: keeps the manager (and its channel senders / receive
@@ -412,7 +423,10 @@ impl UdpSessionManager {
     }
 
     fn dispatch(&self, msg: UdpMessage) {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(tx) = sessions.get(&msg.session_id) {
             // Non-blocking: drop the datagram if the session queue is full or
             // its receiver is gone (Go's `default:` case in udp.go).
@@ -422,13 +436,46 @@ impl UdpSessionManager {
     }
 
     fn remove(&self, id: u32) {
-        self.sessions.lock().unwrap().remove(&id);
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
     }
 
     /// Drop every session sender so blocked `recv` callers wake with EOF
     /// (QUIC closed / receive loop exit).
     fn close_all(&self) {
-        self.sessions.lock().unwrap().clear();
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Abort the datagram receive task and wake association receivers.
+    pub(crate) fn shutdown(&self) {
+        self.close_all();
+        if let Some(task) = self
+            .recv_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for UdpSessionManager {
+    fn drop(&mut self) {
+        self.close_all();
+        if let Some(task) = self
+            .recv_task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
     }
 }
 
@@ -682,8 +729,8 @@ mod tests {
     fn defrag_near_byte_cap_new_packet_returns_without_hanging() {
         // Regression: size under MAX but size+incoming over MAX used to spin
         // forever because eviction only ran when size was already over MAX.
-        let mut d = Defragger::default();
         const PACKETS: usize = 17;
+        let mut d = Defragger::default();
         let chunk = 4_194_000 / PACKETS;
         assert!(chunk * PACKETS <= MAX_DEFRAG_BYTES);
         assert!(chunk * PACKETS + 1000 > MAX_DEFRAG_BYTES);
@@ -753,5 +800,50 @@ mod tests {
         // Explicit oversize first fragment is rejected.
         let huge = msg(&vec![0u8; MAX_DEFRAG_BYTES + 1], 0, 2, 99);
         assert!(defrag.feed(huge).is_none());
+    }
+
+    impl UdpSessionManager {
+        /// Test helper: install a stand-in recv task (no QUIC) to assert abort-on-drop.
+        pub(crate) fn new_with_task_for_test(task: JoinHandle<()>) -> Arc<Self> {
+            Arc::new(Self {
+                sessions: Mutex::new(HashMap::new()),
+                next_id: AtomicU32::new(1),
+                recv_task: Mutex::new(Some(task)),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn manager_drop_aborts_recv_task_without_datagram_wake() {
+        // Regression: receive_loop used to wait forever for a datagram before
+        // noticing the manager was gone — TCP-only / idle UDP leaked tasks.
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _keep = hold_tx;
+            // Block forever unless aborted (no datagram wake).
+            std::future::pending::<()>().await;
+        });
+        let mgr = UdpSessionManager::new_with_task_for_test(task);
+        drop(mgr);
+        tokio::time::timeout(Duration::from_secs(2), hold_rx)
+            .await
+            .expect("recv task was not aborted on manager drop")
+            .expect_err("aborted task should drop its oneshot sender");
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_recv_task_idempotently() {
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _keep = hold_tx;
+            std::future::pending::<()>().await;
+        });
+        let mgr = UdpSessionManager::new_with_task_for_test(task);
+        mgr.shutdown();
+        mgr.shutdown(); // second call must be a no-op
+        tokio::time::timeout(Duration::from_secs(2), hold_rx)
+            .await
+            .expect("recv task was not aborted on shutdown")
+            .expect_err("aborted task should drop its oneshot sender");
     }
 }

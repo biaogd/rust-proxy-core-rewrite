@@ -110,11 +110,29 @@ impl Default for ClientOptions {
 struct SessionInner {
     connection: quinn::Connection,
     closed: AtomicBool,
+    /// `disable-reuse` dials are not stored on [`Client`]; the last Session Arc
+    /// (held by a TCP/UDP business user) must close the QUIC connection.
+    independent: bool,
     udp_enabled: bool,
     udp: Option<Arc<UdpSessionManager>>,
     udp_mtu: usize,
     #[allow(dead_code)] // retained for future live Brutal rate introspection
     brutal: Option<BrutalControl>,
+}
+
+impl Drop for SessionInner {
+    fn drop(&mut self) {
+        // Always abort the UDP recv task — weak-ref checks after datagrams are
+        // not enough (TCP-only / idle associations never wake the loop).
+        if let Some(udp) = self.udp.take() {
+            udp.shutdown();
+        }
+        if self.independent && !self.closed.load(Ordering::Acquire) {
+            self.closed.store(true, Ordering::Release);
+            self.connection
+                .close(0_u32.into(), b"Hysteria2 session closed");
+        }
+    }
 }
 
 /// Authenticated Hysteria2 QUIC session.
@@ -127,6 +145,11 @@ impl Session {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire) || self.inner.connection.close_reason().is_some()
+    }
+
+    #[must_use]
+    pub fn is_independent(&self) -> bool {
+        self.inner.independent
     }
 
     #[must_use]
@@ -182,23 +205,89 @@ impl Session {
                 "UDP relay not enabled by server".to_owned(),
             ));
         };
-        manager.new_session(self.inner.udp_mtu)
+        manager.new_session(&self.inner.connection, self.inner.udp_mtu)
     }
 
-    /// Closes the underlying QUIC connection.
+    /// Closes the underlying QUIC connection and aborts the UDP recv task.
     pub fn close(&self) {
         self.mark_closed();
+        if let Some(udp) = &self.inner.udp {
+            udp.shutdown();
+        }
         self.inner
             .connection
             .close(0_u32.into(), b"Hysteria2 session closed");
     }
 }
 
+/// Keeps an independent [`Session`] alive for the lifetime of a TCP stream so
+/// the last business-user drop closes QUIC (and aborts the UDP recv task).
+struct SessionBoundTcp {
+    inner: Hysteria2Stream,
+    _session: Session,
+}
+
+impl tokio::io::AsyncRead for SessionBoundTcp {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for SessionBoundTcp {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Fingerprint of the path baked into a Quinn endpoint's hop/obfs socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EndpointPathKey {
+    canonical: SocketAddr,
+    hop_addrs: Vec<SocketAddr>,
+}
+
+impl EndpointPathKey {
+    fn new(canonical: SocketAddr, hop: Option<&HopConfig>) -> Self {
+        let hop_addrs = hop.map_or_else(|| vec![canonical], |cfg| cfg.addrs.clone());
+        Self {
+            canonical,
+            hop_addrs,
+        }
+    }
+}
+
+struct CachedEndpoint {
+    endpoint: quinn::Endpoint,
+    path: EndpointPathKey,
+}
+
 /// Long-lived Hysteria2 client with optional session reuse.
 pub struct Client {
     options: ClientOptions,
     session: Mutex<Option<Session>>,
-    endpoint: Mutex<Option<quinn::Endpoint>>,
+    endpoint: Mutex<Option<CachedEndpoint>>,
     /// When Brutal is enabled, dial installs a fresh control into this slot
     /// before `connect` so each QUIC connection gets independent negotiation.
     brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
@@ -255,8 +344,23 @@ impl Client {
         destination: &Destination,
     ) -> Result<BoxedStream, Hysteria2ProtocolError> {
         let session = self.offer_session().await?;
-        let stream = session.open_tcp(destination).await?;
-        Ok(Box::new(stream))
+        let stream = match session.open_tcp(destination).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                // Independent dial with no surviving business user: drop closes.
+                return Err(error);
+            }
+        };
+        if session.is_independent() {
+            // Retain Session for the stream lifetime so QUIC + UDP recv abort
+            // when the last business user exits.
+            Ok(Box::new(SessionBoundTcp {
+                inner: stream,
+                _session: session,
+            }))
+        } else {
+            Ok(Box::new(stream))
+        }
     }
 
     /// Opens a UDP association, reusing a live session when allowed.
@@ -267,7 +371,8 @@ impl Client {
     pub async fn open_udp(&self) -> Result<UdpSession, Hysteria2ProtocolError> {
         let session = self.offer_session().await?;
         let mut udp = session.open_udp()?;
-        // Keep the Session (and thus QUIC + manager) alive for disable-reuse.
+        // Keep the Session (and thus QUIC + manager) alive for disable-reuse;
+        // last Arc drop closes the independent connection.
         udp.retain_owner(session);
         Ok(udp)
     }
@@ -283,8 +388,10 @@ impl Client {
     pub async fn close(&self) {
         self.invalidate().await;
         let mut endpoint = self.endpoint.lock().await;
-        if let Some(endpoint) = endpoint.take() {
-            endpoint.close(0_u32.into(), b"Hysteria2 client closed");
+        if let Some(cached) = endpoint.take() {
+            cached
+                .endpoint
+                .close(0_u32.into(), b"Hysteria2 client closed");
         }
     }
 
@@ -397,6 +504,7 @@ impl Client {
             inner: Arc::new(SessionInner {
                 connection,
                 closed: AtomicBool::new(false),
+                independent: self.options.disable_reuse,
                 udp_enabled: auth.udp_enabled,
                 udp,
                 udp_mtu,
@@ -410,12 +518,25 @@ impl Client {
         canonical: SocketAddr,
         hop: Option<HopConfig>,
     ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
+        let path = EndpointPathKey::new(canonical, hop.as_ref());
         let mut guard = self.endpoint.lock().await;
-        if let Some(endpoint) = guard.as_ref() {
-            return Ok(endpoint.clone());
+        if let Some(cached) = guard.as_ref()
+            && cached.path == path
+        {
+            return Ok(cached.endpoint.clone());
+        }
+        if let Some(previous) = guard.take() {
+            // DNS / hop address change: hop socket still has stale addrs if we
+            // reused the endpoint — rebuild instead.
+            previous
+                .endpoint
+                .close(0_u32.into(), b"Hysteria2 endpoint path changed");
         }
         let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
-        *guard = Some(endpoint.clone());
+        *guard = Some(CachedEndpoint {
+            endpoint: endpoint.clone(),
+            path,
+        });
         Ok(endpoint)
     }
 }
@@ -645,5 +766,93 @@ impl ServerCertVerifier for SkipServerVerification {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn endpoint_path_key_changes_when_canonical_ip_changes() {
+        let a = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443));
+        let b = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 443));
+        let hop_a = HopConfig {
+            addrs: vec![
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443)),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8443)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let hop_b = HopConfig {
+            addrs: vec![
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 443)),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 8443)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        assert_ne!(
+            EndpointPathKey::new(a, Some(&hop_a)),
+            EndpointPathKey::new(b, Some(&hop_b))
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_rebuilds_when_resolved_address_changes() {
+        let client = Client::new(ClientOptions {
+            server: "127.0.0.1".into(),
+            port: 1,
+            password: "x".into(),
+            tls: TlsOptions {
+                server_name: "test".into(),
+                skip_certificate_verification: true,
+                alpn: vec!["h3".into()],
+                custom_roots: Vec::new(),
+            },
+            hop_ports: vec![11_001, 11_002],
+            hop_interval_min_secs: 5,
+            hop_interval_max_secs: 5,
+            ..ClientOptions::default()
+        })
+        .expect("client");
+
+        let a = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11_001));
+        let hop_a = HopConfig {
+            addrs: vec![
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11_001)),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11_002)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let ep1 = client
+            .endpoint(a, Some(hop_a.clone()))
+            .await
+            .expect("first endpoint");
+        let ep1_again = client
+            .endpoint(a, Some(hop_a))
+            .await
+            .expect("same-path reuse");
+        // Same path must reuse the cached endpoint object.
+        assert_eq!(ep1.local_addr().ok(), ep1_again.local_addr().ok());
+
+        let b = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 11_001));
+        let hop_b = HopConfig {
+            addrs: vec![
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 11_001)),
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 11_002)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let ep2 = client
+            .endpoint(b, Some(hop_b))
+            .await
+            .expect("rebuilt endpoint");
+        // New path must bind a fresh UDP socket (different local port).
+        assert_ne!(ep1.local_addr().ok(), ep2.local_addr().ok());
     }
 }
