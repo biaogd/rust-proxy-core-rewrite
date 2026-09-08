@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use crate::cipher::{StreamCipherConn, derive_key, parse_stream_cipher};
 use crate::{ShadowsocksRProtocolError, obfs, protocol};
 
-/// Options accepted by the SSR-A TCP dial.
+/// Options accepted by the SSR-A/B TCP dial.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SsrClientOptions {
     pub password: String,
@@ -19,6 +19,9 @@ pub struct SsrClientOptions {
     pub protocol_param: String,
     pub obfs: String,
     pub obfs_param: String,
+    /// SSR server hostname (for http Host / tls camouflage SNI).
+    pub server_host: String,
+    pub server_port: u16,
 }
 
 /// Wraps an established TCP carrier in an SSR client session and writes the
@@ -36,28 +39,45 @@ pub async fn connect_tcp_on_stream(
     destination: &Destination,
     options: &SsrClientOptions,
 ) -> Result<BoxedStream, ShadowsocksRProtocolError> {
-    reject_non_ssr_a(options)?;
+    reject_non_ssr_stream(options)?;
     let kind = parse_stream_cipher(&options.cipher)?;
     let key = derive_key(&options.password, kind);
+    let obfs_overhead = obfs::overhead(&options.obfs)?;
+    let _ = protocol::overhead(&options.protocol)?;
 
-    let stream = obfs::wrap(&options.obfs, stream, &options.obfs_param)?;
-    let mut cipher_conn = StreamCipherConn::new(stream, kind, key)?;
+    let stream = obfs::wrap(
+        &options.obfs,
+        stream,
+        &obfs::ObfsContext {
+            host: &options.server_host,
+            port: options.server_port,
+            stream_key: &key,
+            iv_len: kind.iv_len(),
+            obfs_param: &options.obfs_param,
+        },
+    )?;
+    let mut cipher_conn = StreamCipherConn::new(stream, kind, key.clone())?;
     // Generate write IV before protocol wrap (Go ObtainWriteIV).
     let write_iv = cipher_conn.obtain_write_iv().to_vec();
     let stream: BoxedStream = Box::new(cipher_conn);
     let mut stream = protocol::wrap(
         &options.protocol,
         stream,
-        &write_iv,
-        &options.protocol_param,
+        &protocol::ProtocolContext {
+            write_iv: &write_iv,
+            stream_key: &key,
+            protocol_param: &options.protocol_param,
+            obfs_overhead,
+        },
     )?;
 
     let header = encode_socks_addr(destination)?;
     stream.write_all(&header).await?;
+    stream.flush().await?;
     Ok(stream)
 }
 
-fn reject_non_ssr_a(options: &SsrClientOptions) -> Result<(), ShadowsocksRProtocolError> {
+fn reject_non_ssr_stream(options: &SsrClientOptions) -> Result<(), ShadowsocksRProtocolError> {
     // AEAD / SS2022 names must never be treated as SSR stream ciphers.
     let lower = options.cipher.to_ascii_lowercase();
     if lower.contains("gcm")
@@ -109,6 +129,19 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, duplex};
     use tokio::net::TcpListener;
 
+    fn base_options() -> SsrClientOptions {
+        SsrClientOptions {
+            password: "ssr-a-password".into(),
+            cipher: "aes-128-cfb".into(),
+            protocol: "origin".into(),
+            protocol_param: String::new(),
+            obfs: "plain".into(),
+            obfs_param: String::new(),
+            server_host: "127.0.0.1".into(),
+            server_port: 8388,
+        }
+    }
+
     #[tokio::test]
     async fn origin_plain_roundtrip_echo() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -117,7 +150,6 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         let server = tokio::spawn(async move {
             let (mut inbound, _) = listener.accept().await.expect("accept");
-            // Minimal SSR origin/plain server: read IV, decrypt SOCKS+payload, echo payload.
             let mut key = vec![0_u8; 16];
             openssl_bytes_to_key(b"ssr-a-password", &mut key);
             let mut iv = [0_u8; 16];
@@ -132,7 +164,6 @@ mod tests {
             let _ = dec.decrypt_packet(&mut payload);
             assert_eq!(&payload, b"hello-ssr-a");
 
-            // Reply: write server IV + encrypted echo.
             let mut reply_iv = [7_u8; 16];
             rand::fill(&mut reply_iv);
             let mut enc = Cipher::new(CipherKind::AES_128_CFB128, &key, &reply_iv);
@@ -143,14 +174,8 @@ mod tests {
         });
 
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        let options = SsrClientOptions {
-            password: "ssr-a-password".into(),
-            cipher: "aes-128-cfb".into(),
-            protocol: "origin".into(),
-            protocol_param: String::new(),
-            obfs: "plain".into(),
-            obfs_param: String::new(),
-        };
+        let mut options = base_options();
+        options.server_port = addr.port();
         let dest = Destination {
             host: Host::Ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
             port: 9,
@@ -166,16 +191,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_auth_sha1_loudly() {
+    fn rejects_auth_sha1_v4_loudly() {
         let (_a, b) = duplex(64);
-        let options = SsrClientOptions {
-            password: "x".into(),
-            cipher: "aes-128-cfb".into(),
-            protocol: "auth_sha1_v4".into(),
-            protocol_param: String::new(),
-            obfs: "plain".into(),
-            obfs_param: String::new(),
-        };
+        let mut options = base_options();
+        options.protocol = "auth_sha1_v4".into();
         let dest = Destination {
             host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             port: 1,
@@ -188,6 +207,6 @@ mod tests {
         let Err(err) = result else {
             panic!("must reject");
         };
-        assert!(err.to_string().contains("origin only"));
+        assert!(err.to_string().contains("auth_aes128"));
     }
 }

@@ -37,6 +37,8 @@ pub async fn connect_ssr_with_options(
         protocol_param: protocol_param.to_owned(),
         obfs: obfs.to_owned(),
         obfs_param: obfs_param.to_owned(),
+        server_host: server.host.to_string(),
+        server_port: server.port,
     };
     rewrite_protocol_shadowsocksr::connect_tcp_on_stream(Box::new(stream), destination, &options)
         .await

@@ -144,8 +144,9 @@ fn ssr_a_configuration_is_supported_and_scoped() {
 
     for unsupported in [
         "cipher: aes-128-gcm\n    protocol: origin\n    obfs: plain",
-        "cipher: aes-128-cfb\n    protocol: auth_aes128_md5\n    obfs: plain",
-        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: http_simple",
+        "cipher: aes-128-cfb\n    protocol: auth_sha1_v4\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: auth_chain_a\n    obfs: plain",
+        "cipher: aes-128-cfb\n    protocol: origin\n    obfs: random_head",
         "cipher: aes-128-cfb\n    protocol: origin\n    obfs: plain\n    udp: true",
         "cipher: aes-192-cfb\n    protocol: origin\n    obfs: plain",
     ] {
@@ -156,6 +157,45 @@ fn ssr_a_configuration_is_supported_and_scoped() {
             Config::from_yaml(&source).is_err(),
             "accepted {unsupported}"
         );
+    }
+}
+
+#[test]
+fn ssr_b_configuration_accepts_auth_and_obfs() {
+    use std::fmt::Write as _;
+    for (protocol, protocol_param, obfs, obfs_param) in [
+        ("auth_aes128_md5", "1000:passwd", "plain", ""),
+        (
+            "auth_aes128_sha1",
+            "1000:passwd",
+            "http_simple",
+            "cloudflare.com",
+        ),
+        ("origin", "", "http_post", "cloudflare.com"),
+        ("origin", "", "tls1.2_ticket_auth", "www.microsoft.com"),
+        (
+            "auth_aes128_md5",
+            "42:secret",
+            "tls1.2_ticket_fastauth",
+            "download.windowsupdate.com",
+        ),
+    ] {
+        let mut source = format!(
+            "{MINIMAL}\nproxies:\n  - name: ssr\n    type: ssr\n    server: example.com\n    port: 443\n    password: secret\n    cipher: aes-256-cfb\n    protocol: {protocol}\n    obfs: {obfs}\n"
+        );
+        if !protocol_param.is_empty() {
+            let _ = writeln!(source, "    protocol-param: \"{protocol_param}\"");
+        }
+        if !obfs_param.is_empty() {
+            let _ = writeln!(source, "    obfs-param: {obfs_param}");
+        }
+        let config =
+            Config::from_yaml(&source).unwrap_or_else(|e| panic!("{protocol}/{obfs}: {e}"));
+        let ssr = config.proxies[0].ssr.as_ref().expect("ssr");
+        assert_eq!(ssr.protocol, protocol);
+        assert_eq!(ssr.obfs, obfs);
+        assert_eq!(ssr.protocol_param, protocol_param);
+        assert_eq!(ssr.obfs_param, obfs_param);
     }
 }
 

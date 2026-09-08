@@ -227,10 +227,10 @@ pub struct ProxyConfig {
     pub headers: BTreeMap<String, String>,
 }
 
-/// Clash `type: ssr` options accepted in SSR-A (origin + plain + AES-CFB).
+/// Clash `type: ssr` options accepted in SSR-A/B.
 ///
-/// Auth protocols, non-plain obfs, UDP, AEAD/SS2022, and other stream ciphers
-/// remain rejected until later SSR phases.
+/// `auth_sha1_v4`, `auth_chain_*`, `random_head`, UDP, AEAD/SS2022, and other
+/// stream ciphers remain rejected until later SSR phases.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SsrProxyConfig {
     pub protocol: String,

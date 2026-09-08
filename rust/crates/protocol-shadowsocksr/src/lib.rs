@@ -1,13 +1,18 @@
-//! `ShadowsocksR` outbound protocol (SSR-A: origin + plain + AES-CFB).
+//! `ShadowsocksR` outbound protocol (SSR-A/B: origin + `auth_aes128` + plain/http/`tls1.2_ticket` camouflage).
 //!
 //! Layering (innermost → network):
 //! address+data → protocol encode → stream cipher → obfs → TCP.
 //!
 //! AEAD / SIP022 / SS2022 are not SSR and are rejected. Unimplemented
 //! protocol/obfs/cipher combinations fail loudly (no silent downgrade).
+//!
+//! `tls1.2_ticket_*` is TLS **camouflage only** (not real TLS; no rustls).
+
+#![allow(clippy::doc_markdown)]
 
 mod cipher;
 mod client;
+mod crypto_util;
 mod obfs;
 mod protocol;
 mod udp;

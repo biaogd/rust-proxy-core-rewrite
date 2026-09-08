@@ -6,10 +6,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aes.workspace = true
+base64.workspace = true
 bytes.workspace = true
+hmac.workspace = true
+md-5.workspace = true
 rand.workspace = true
 rewrite-io = { path = "../io" }
 rewrite-model = { path = "../model" }
+sha1.workspace = true
 shadowsocks-crypto = { workspace = true, default-features = false, features = ["v1", "v1-stream"] }
 thiserror.workspace = true
 tokio.workspace = true

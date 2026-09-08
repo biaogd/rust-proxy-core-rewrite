@@ -3025,10 +3025,15 @@ dependencies = [
 name = "rewrite-protocol-shadowsocksr"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
+ "base64 0.22.1",
  "bytes",
+ "hmac 0.12.1",
+ "md-5 0.10.6",
  "rand 0.10.2",
  "rewrite-io",
  "rewrite-model",
+ "sha1 0.10.7",
  "shadowsocks-crypto",
  "thiserror 2.0.20",
  "tokio",

@@ -1150,12 +1150,21 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
     })
 }
 
-const SSR_A_CIPHERS: [&str; 2] = ["aes-128-cfb", "aes-256-cfb"];
-const SSR_A_ACCEPTED_EXTRA: &[&str] = &["obfs", "obfs-param", "protocol", "protocol-param"];
+const SSR_CIPHERS: [&str; 2] = ["aes-128-cfb", "aes-256-cfb"];
+const SSR_ACCEPTED_EXTRA: &[&str] = &["obfs", "obfs-param", "protocol", "protocol-param"];
+const SSR_PROTOCOLS: [&str; 3] = ["origin", "auth_aes128_md5", "auth_aes128_sha1"];
+const SSR_OBFS: [&str; 5] = [
+    "plain",
+    "http_simple",
+    "http_post",
+    "tls1.2_ticket_auth",
+    "tls1.2_ticket_fastauth",
+];
 
 #[allow(clippy::too_many_lines)]
 fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
-    // SSR-A: origin + plain + aes-128/256-cfb only. Everything else fails loudly.
+    // SSR-A/B: origin + auth_aes128_* ; plain/http_*/tls1.2_ticket_* ; aes-128/256-cfb.
+    // Auth_sha1_v4, auth_chain_*, random_head, UDP, AEAD remain rejected loudly.
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -1184,7 +1193,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
     if proxy
         .extra
         .keys()
-        .any(|key| !SSR_A_ACCEPTED_EXTRA.contains(&key.as_str()))
+        .any(|key| !SSR_ACCEPTED_EXTRA.contains(&key.as_str()))
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -1206,7 +1215,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let cipher = proxy
         .cipher
-        .filter(|cipher| SSR_A_CIPHERS.contains(&cipher.as_str()))
+        .filter(|cipher| SSR_CIPHERS.contains(&cipher.as_str()))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     let protocol = hysteria2_extra_string(&mut proxy.extra, "protocol")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
@@ -1220,10 +1229,16 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
     let obfs_param = hysteria2_extra_string(&mut proxy.extra, "obfs-param")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
         .unwrap_or_default();
-    if protocol != "origin" || !protocol_param.is_empty() {
+    if !SSR_PROTOCOLS.contains(&protocol.as_str()) {
         return Err(ConfigError::UnsupportedProxy(name));
     }
-    if obfs != "plain" || !obfs_param.is_empty() {
+    if protocol == "origin" && !protocol_param.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if !SSR_OBFS.contains(&obfs.as_str()) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if obfs == "plain" && !obfs_param.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name));
     }
     if !proxy.extra.is_empty() {
