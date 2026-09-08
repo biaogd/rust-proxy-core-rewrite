@@ -1279,7 +1279,8 @@ mod tests {
     }
 
     fn hop_path(octet: u8, ports: [u16; 2]) -> (SocketAddr, HopConfig) {
-        let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[0]));
+        let canonical =
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[0]));
         let hop = HopConfig {
             addrs: vec![
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), ports[0])),
