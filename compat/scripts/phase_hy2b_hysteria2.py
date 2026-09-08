@@ -64,23 +64,48 @@ class BidirectionalUdpRelay:
         self.target_port = target_port
         self.listen_host = listen_host
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread: threading.Thread | None = None
+        self._listen: socket.socket | None = None
+        self._upstream: socket.socket | None = None
+        self._lock = threading.Lock()
+        self.client_datagrams = 0
 
     def start(self) -> None:
+        """Bind synchronously so listen failures propagate to the caller."""
+        if self._thread is not None:
+            raise RuntimeError("relay already started")
+        self._listen, self._upstream = self._bind_sockets()
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=2)
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+        for sock in (self._listen, self._upstream):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self._listen = None
+        self._upstream = None
 
-    def _run(self) -> None:
-        listen = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def _bind_sockets(self) -> tuple[socket.socket, socket.socket]:
+        listen = _udp_socket_for_host(self.listen_host)
         listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listen.bind((self.listen_host, self.listen_port))
         upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         upstream.bind(("127.0.0.1", 0))
         listen.setblocking(False)
         upstream.setblocking(False)
+        return listen, upstream
+
+    def _run(self) -> None:
+        assert self._listen is not None and self._upstream is not None
+        listen = self._listen
+        upstream = self._upstream
         client_addr: tuple[str, int] | None = None
         try:
             while not self._stop.is_set():
@@ -88,6 +113,8 @@ class BidirectionalUdpRelay:
                 if listen in readable:
                     data, addr = listen.recvfrom(65535)
                     client_addr = addr
+                    with self._lock:
+                        self.client_datagrams += 1
                     upstream.sendto(data, ("127.0.0.1", self.target_port))
                 if upstream in readable:
                     data, _ = upstream.recvfrom(65535)
@@ -96,6 +123,99 @@ class BidirectionalUdpRelay:
         finally:
             listen.close()
             upstream.close()
+
+
+def _udp_socket_for_host(host: str) -> socket.socket:
+    infos = socket.getaddrinfo(
+        host, 0, type=socket.SOCK_DGRAM, flags=socket.AI_NUMERICHOST
+    )
+    if not infos:
+        raise OSError(f"no addrinfo for {host}")
+    family = infos[0][0]
+    return socket.socket(family, socket.SOCK_DGRAM)
+
+
+def can_bind_udp(host: str) -> bool:
+    """True when `host` accepts a UDP bind (portable loopback probe)."""
+    try:
+        sock = _udp_socket_for_host(host)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, 0))
+            return True
+        finally:
+            sock.close()
+    except OSError:
+        return False
+
+
+def bindable_loopback_pair() -> tuple[str, str]:
+    """Two distinct loopback addresses that accept UDP binds.
+
+    Prefers `127.0.0.1` + `127.0.0.2` when available; falls back to `::1`
+    so default macOS (no 127.0.0.2 alias) still has a second path.
+    """
+    primary = "127.0.0.1"
+    if not can_bind_udp(primary):
+        raise RuntimeError(f"primary loopback {primary} is not bindable")
+    for candidate in ("127.0.0.2", "127.0.0.3", "127.0.0.127", "::1"):
+        if candidate == primary:
+            continue
+        if can_bind_udp(candidate):
+            return primary, candidate
+    raise RuntimeError(
+        "no bindable second loopback address "
+        "(tried 127.0.0.2/3/127 and ::1)"
+    )
+
+
+class MarkerEchoHandler(socketserver.BaseRequestHandler):
+    """Echo payload with a fixed prefix so dials can prove which backend hit."""
+
+    marker: bytes = b""
+
+    def handle(self) -> None:
+        while True:
+            data = self.request.recv(65535)
+            if not data:
+                return
+            self.request.sendall(self.marker + data)
+
+
+def start_marker_echo(marker: bytes) -> tuple[socketserver.ThreadingTCPServer, int]:
+    class Handler(MarkerEchoHandler):
+        pass
+
+    Handler.marker = marker
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.allow_reuse_address = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, int(server.server_address[1])
+
+
+def tcp_exchange_marked(
+    mixed_port: int,
+    host: str,
+    target_port: int,
+    payload: bytes,
+    marker: bytes,
+    *,
+    attempts: int = 8,
+) -> bool:
+    """SOCKS TCP exchange expecting `marker + payload` from the backend."""
+    expected = marker + payload
+    for _ in range(attempts):
+        try:
+            with connect_domain(mixed_port, host, target_port) as stream:
+                stream.settimeout(IO_DEADLINE)
+                stream.sendall(payload)
+                got = recv_exact(stream, len(expected))
+                if got == expected:
+                    return True
+        except OSError:
+            time.sleep(0.15)
+    return False
 
 
 def hy2_record(
@@ -600,11 +720,14 @@ def exercise_dns_hop_switch(
 
     Rust: process-local resolve-map file (`REWRITE_HY2_RESOLVE_FILE`), same Client.
     Go: Clash `hosts:` + controller reload (Clash DNS path).
-    Cross-platform: never mutates system hosts files.
+    Cross-platform: never mutates system hosts files; second path uses a
+    bindable loopback address (`127.0.0.2` when available, else `::1`).
     """
     from phase1 import reload_via_controller
 
-    echo = start_server(EchoHandler)
+    ip_a, ip_b = bindable_loopback_pair()
+    echo_a, echo_a_port = start_marker_echo(b"A:")
+    echo_b, echo_b_port = start_marker_echo(b"B:")
     hop_ports = [reserve_port() for _ in range(3)]
     ports_yaml = ",".join(str(port) for port in hop_ports)
     mixed_port, controller_port = reserve_port(), reserve_port()
@@ -625,6 +748,7 @@ def exercise_dns_hop_switch(
             BidirectionalUdpRelay(port, auth_port, listen_host=ip) for port in hop_ports
         ]
         for relay in relays:
+            # Bind happens in start(); OSError must surface to the main test.
             relay.start()
         return authority, a_out, a_err, relays
 
@@ -666,41 +790,51 @@ rules:
     relays_b: list[BidirectionalUdpRelay] = []
     process = stdout = stderr = None
     try:
-        _write_resolve_map(resolve_map, "127.0.0.1")
-        authority_a, a_out_a, a_err_a, relays_a = bring_up("127.0.0.1", "a")
-        config = write_config("127.0.0.1")
+        _write_resolve_map(resolve_map, ip_a)
+        authority_a, a_out_a, a_err_a, relays_a = bring_up(ip_a, "a")
+        config = write_config(ip_a)
         extra_env = {RESOLVE_OVERRIDE_ENV: str(resolve_map)} if engine == "rust" else None
         process, stdout, stderr = launch(binary, config, scratch, extra_env=extra_env)
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
         time.sleep(0.3)
 
-        # Hold an old-path stream open across the DNS switch.
-        with connect_domain(mixed_port, "127.0.0.1", echo.port) as old_stream:
+        # Hold an old-path stream open across the DNS switch (marker A).
+        with connect_domain(mixed_port, "127.0.0.1", echo_a_port) as old_stream:
             old_stream.settimeout(IO_DEADLINE)
             old_stream.sendall(b"dns-hold")
-            if recv_exact(old_stream, 8) != b"dns-hold":
+            if recv_exact(old_stream, 10) != b"A:dns-hold":
                 raise AssertionError("old-path setup echo failed")
             before = True
 
             # Bring up new path while old relays stay alive (continuity).
-            _write_resolve_map(resolve_map, "127.0.0.2")
-            authority_b, a_out_b, a_err_b, relays_b = bring_up("127.0.0.2", "b")
+            _write_resolve_map(resolve_map, ip_b)
+            authority_b, a_out_b, a_err_b, relays_b = bring_up(ip_b, "b")
             if engine == "go":
-                config = write_config("127.0.0.2")
+                config = write_config(ip_b)
                 reload_via_controller(process, controller_port, config, secret=SECRET)
                 time.sleep(0.3)
 
-            after = tcp_exchange(mixed_port, "127.0.0.1", echo.port, b"dns-after")
+            after = tcp_exchange_marked(
+                mixed_port, "127.0.0.1", echo_b_port, b"dns-after", b"B:"
+            )
+            new_path_datagrams = sum(relay.client_datagrams for relay in relays_b)
+            # Distinct marker proves the dialed backend; relay counters prove
+            # the new hop IP actually received the QUIC traffic.
+            new_ip_used = after and new_path_datagrams > 0
 
             old_stream.sendall(b"still-old")
-            old_alive = recv_exact(old_stream, 9) == b"still-old"
+            old_alive = recv_exact(old_stream, 11) == b"A:still-old"
 
         return {
             "before-ok": before,
             "after-ok": after,
+            "new-ip-used": new_ip_used,
+            "new-path-datagrams": new_path_datagrams,
             "old-conn-alive": old_alive,
             "process-alive": process.poll() is None,
+            "ip-a": ip_a,
+            "ip-b": ip_b,
         }
     finally:
         if process is not None:
@@ -721,7 +855,10 @@ rules:
                 a_out.close()
             if a_err is not None:
                 a_err.close()
-        echo.close()
+        echo_a.shutdown()
+        echo_a.server_close()
+        echo_b.shutdown()
+        echo_b.server_close()
 
 
 def main() -> int:
@@ -767,7 +904,7 @@ def main() -> int:
                     scratch,
                     engine=engine,
                 )
-                if not (dns.get("before-ok") and dns.get("after-ok")):
+                if not (dns.get("before-ok") and dns.get("after-ok") and dns.get("new-ip-used")):
                     raise AssertionError(
                         f"{engine} dns-hop-switch failed: {dns}"
                     )
@@ -780,6 +917,9 @@ def main() -> int:
                 observations[engine]["dns-hop-switch"] = {
                     "before-ok": dns["before-ok"],
                     "after-ok": dns["after-ok"],
+                    "new-ip-used": dns["new-ip-used"],
+                    "ip-a": dns["ip-a"],
+                    "ip-b": dns["ip-b"],
                     "process-alive": dns["process-alive"],
                 }
             observations["rust-rejects-gecko"] = not config_validation(

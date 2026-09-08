@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use quinn::congestion::BbrConfig;
@@ -118,6 +118,8 @@ struct SessionInner {
     udp_mtu: usize,
     #[allow(dead_code)] // retained for future live Brutal rate introspection
     brutal: Option<BrutalControl>,
+    /// Keeps the dial's endpoint alive; release triggers retired-endpoint GC.
+    _endpoint_lease: EndpointLease,
 }
 
 impl Drop for SessionInner {
@@ -132,6 +134,8 @@ impl Drop for SessionInner {
             self.connection
                 .close(0_u32.into(), b"Hysteria2 session closed");
         }
+        // `_endpoint_lease` Drop runs after this body and may release a retired
+        // endpoint once no sessions remain on that path.
     }
 }
 
@@ -279,8 +283,149 @@ impl EndpointPathKey {
 }
 
 struct CachedEndpoint {
-    endpoint: quinn::Endpoint,
+    slot: Arc<EndpointSlot>,
     path: EndpointPathKey,
+}
+
+/// Shared Quinn endpoint with session refcount for retired-path GC.
+struct EndpointSlot {
+    /// `None` after the slot was released (idle + retired).
+    endpoint: std::sync::Mutex<Option<quinn::Endpoint>>,
+    live_sessions: AtomicUsize,
+    retired: AtomicBool,
+    /// Shared retired list so session Drop can GC without the Client.
+    retired_set: Arc<RetiredEndpointSet>,
+}
+
+impl EndpointSlot {
+    fn new(endpoint: quinn::Endpoint, retired_set: Arc<RetiredEndpointSet>) -> Arc<Self> {
+        Arc::new(Self {
+            endpoint: std::sync::Mutex::new(Some(endpoint)),
+            live_sessions: AtomicUsize::new(0),
+            retired: AtomicBool::new(false),
+            retired_set,
+        })
+    }
+
+    fn endpoint(&self) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
+        self.endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                Hysteria2ProtocolError::Protocol("Hysteria2 endpoint was released".to_owned())
+            })
+    }
+
+    fn retain_session(self: &Arc<Self>) -> EndpointLease {
+        self.live_sessions.fetch_add(1, Ordering::AcqRel);
+        EndpointLease {
+            slot: Arc::clone(self),
+        }
+    }
+
+    fn release_session(&self) {
+        let prev = self.live_sessions.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "endpoint session refcount underflow");
+        if prev == 1 && self.retired.load(Ordering::Acquire) {
+            self.shutdown();
+            self.retired_set.gc();
+        }
+    }
+
+    fn mark_retired(self: &Arc<Self>) {
+        self.retired.store(true, Ordering::Release);
+        if self.live_sessions.load(Ordering::Acquire) == 0 {
+            self.shutdown();
+        }
+        self.retired_set.push(Arc::clone(self));
+    }
+
+    fn shutdown(&self) {
+        if let Some(endpoint) = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            endpoint.close(0_u32.into(), b"Hysteria2 endpoint retired");
+        }
+    }
+
+    fn is_released(&self) -> bool {
+        self.endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    }
+
+    #[cfg(test)]
+    fn retain_for_test(self: &Arc<Self>) -> EndpointLease {
+        self.retain_session()
+    }
+}
+
+/// RAII session → endpoint refcount.
+struct EndpointLease {
+    slot: Arc<EndpointSlot>,
+}
+
+impl Drop for EndpointLease {
+    fn drop(&mut self) {
+        self.slot.release_session();
+    }
+}
+
+/// Retired endpoints awaiting session drain + GC.
+struct RetiredEndpointSet {
+    slots: std::sync::Mutex<Vec<Arc<EndpointSlot>>>,
+}
+
+impl RetiredEndpointSet {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            slots: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn push(&self, slot: Arc<EndpointSlot>) {
+        let mut guard = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.push(slot);
+        Self::gc_locked(&mut guard);
+    }
+
+    fn gc(&self) {
+        let mut guard = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::gc_locked(&mut guard);
+    }
+
+    fn gc_locked(slots: &mut Vec<Arc<EndpointSlot>>) {
+        slots.retain(|slot| !slot.is_released());
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    fn take_all(&self) -> Vec<Arc<EndpointSlot>> {
+        std::mem::take(
+            &mut *self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
 }
 
 /// Long-lived Hysteria2 client with optional session reuse.
@@ -288,9 +433,9 @@ pub struct Client {
     options: ClientOptions,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Option<CachedEndpoint>>,
-    /// Endpoints retired after a path (DNS/hop) change. Kept alive so
-    /// in-flight independent connections are not torn down by a new dial.
-    retired_endpoints: Mutex<Vec<quinn::Endpoint>>,
+    /// Endpoints retired after a path (DNS/hop) change. Kept alive while
+    /// sessions still reference them; GC'd when the last session releases.
+    retired_endpoints: Arc<RetiredEndpointSet>,
     /// When Brutal is enabled, dial installs a fresh control into this slot
     /// before `connect` so each QUIC connection gets independent negotiation.
     brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
@@ -318,7 +463,7 @@ impl Client {
             options,
             session: Mutex::new(None),
             endpoint: Mutex::new(None),
-            retired_endpoints: Mutex::new(Vec::new()),
+            retired_endpoints: RetiredEndpointSet::new(),
             brutal_next,
             brutal_dial: Mutex::new(()),
         })
@@ -393,17 +538,11 @@ impl Client {
         self.invalidate().await;
         let mut endpoint = self.endpoint.lock().await;
         if let Some(cached) = endpoint.take() {
-            cached
-                .endpoint
-                .close(0_u32.into(), b"Hysteria2 client closed");
+            cached.slot.shutdown();
         }
         drop(endpoint);
-        let retired = {
-            let mut guard = self.retired_endpoints.lock().await;
-            std::mem::take(&mut *guard)
-        };
-        for endpoint in retired {
-            endpoint.close(0_u32.into(), b"Hysteria2 client closed");
+        for slot in self.retired_endpoints.take_all() {
+            slot.shutdown();
         }
     }
 
@@ -467,7 +606,9 @@ impl Client {
         });
 
         let (canonical, hop) = resolve_endpoint(&self.options).await?;
-        let endpoint = self.endpoint(canonical, hop).await?;
+        let slot = self.endpoint_slot(canonical, hop).await?;
+        let endpoint = slot.endpoint()?;
+        let lease = slot.retain_session();
         let connecting = endpoint.connect(canonical, &self.options.tls.server_name)?;
         let connection = connecting
             .await
@@ -521,47 +662,65 @@ impl Client {
                 udp,
                 udp_mtu,
                 brutal,
+                _endpoint_lease: lease,
             }),
         })
     }
 
+    async fn endpoint_slot(
+        &self,
+        canonical: SocketAddr,
+        hop: Option<HopConfig>,
+    ) -> Result<Arc<EndpointSlot>, Hysteria2ProtocolError> {
+        // Opportunistic GC of idle retired endpoints from prior path changes.
+        self.retired_endpoints.gc();
+        let path = EndpointPathKey::new(canonical, hop.as_ref());
+        let previous;
+        let slot = {
+            let mut guard = self.endpoint.lock().await;
+            if let Some(cached) = guard.as_ref()
+                && cached.path == path
+            {
+                return Ok(Arc::clone(&cached.slot));
+            }
+            previous = guard.take();
+            let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
+            let slot = EndpointSlot::new(endpoint, Arc::clone(&self.retired_endpoints));
+            *guard = Some(CachedEndpoint {
+                slot: Arc::clone(&slot),
+                path,
+            });
+            slot
+        };
+        if let Some(previous) = previous {
+            // Retire from new dials but keep the endpoint alive while sessions
+            // still hold leases (disable-reuse continuity).
+            previous.slot.mark_retired();
+        }
+        Ok(slot)
+    }
+
+    #[cfg(test)]
     async fn endpoint(
         &self,
         canonical: SocketAddr,
         hop: Option<HopConfig>,
     ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
-        let path = EndpointPathKey::new(canonical, hop.as_ref());
-        let previous;
-        let endpoint = {
-            let mut guard = self.endpoint.lock().await;
-            if let Some(cached) = guard.as_ref()
-                && cached.path == path
-            {
-                return Ok(cached.endpoint.clone());
-            }
-            previous = guard.take();
-            let endpoint =
-                build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
-            *guard = Some(CachedEndpoint {
-                endpoint: endpoint.clone(),
-                path,
-            });
-            endpoint
-        };
-        if let Some(previous) = previous {
-            // Retire from new dials but keep the endpoint alive so existing
-            // independent connections (disable-reuse) are not interrupted.
-            self.retired_endpoints
-                .lock()
-                .await
-                .push(previous.endpoint);
-        }
-        Ok(endpoint)
+        self.endpoint_slot(canonical, hop).await?.endpoint()
     }
 
     #[cfg(test)]
-    async fn retired_endpoints_len_for_test(&self) -> usize {
-        self.retired_endpoints.lock().await.len()
+    fn retired_endpoints_len_for_test(&self) -> usize {
+        self.retired_endpoints.len()
+    }
+
+    #[cfg(test)]
+    async fn current_endpoint_slot_for_test(&self) -> Option<Arc<EndpointSlot>> {
+        self.endpoint
+            .lock()
+            .await
+            .as_ref()
+            .map(|cached| Arc::clone(&cached.slot))
     }
 }
 
@@ -828,7 +987,7 @@ impl ServerCertVerifier for SkipServerVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
 
     #[test]
     fn endpoint_path_key_changes_when_canonical_ip_changes() {
@@ -910,13 +1069,105 @@ mod tests {
             .expect("rebuilt endpoint");
         // New path must bind a fresh UDP socket (different local port).
         assert_ne!(ep1.local_addr().ok(), ep2.local_addr().ok());
-        // Old endpoint must remain open (retired, not closed) so in-flight
-        // independent connections keep working.
-        assert_eq!(client.retired_endpoints_len_for_test().await, 1);
-        assert!(
-            ep1.local_addr().is_ok(),
-            "retired endpoint was closed on path change"
+        // No live sessions on the old path → retire + GC immediately.
+        assert_eq!(client.retired_endpoints_len_for_test(), 0);
+    }
+
+    #[tokio::test]
+    async fn retired_endpoints_gc_after_multiple_address_switches() {
+        let client = Client::new(ClientOptions {
+            server: "127.0.0.1".into(),
+            port: 1,
+            password: "x".into(),
+            tls: TlsOptions {
+                server_name: "test".into(),
+                skip_certificate_verification: true,
+                alpn: vec!["h3".into()],
+                custom_roots: Vec::new(),
+            },
+            hop_ports: vec![12_001, 12_002],
+            hop_interval_min_secs: 5,
+            hop_interval_max_secs: 5,
+            ..ClientOptions::default()
+        })
+        .expect("client");
+
+        let path = |octet: u8| {
+            let canonical =
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), 12_001));
+            let hop = HopConfig {
+                addrs: vec![
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), 12_001)),
+                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, octet), 12_002)),
+                ],
+                interval_min: Duration::from_secs(5),
+                interval_max: Duration::from_secs(5),
+            };
+            (canonical, hop)
+        };
+
+        // Idle switches must not accumulate retired endpoints.
+        for octet in 1_u8..=4 {
+            let (canonical, hop) = path(octet);
+            let _ = client
+                .endpoint(canonical, Some(hop))
+                .await
+                .expect("endpoint");
+            assert_eq!(
+                client.retired_endpoints_len_for_test(),
+                0,
+                "idle switch to 127.0.0.{octet} left retired endpoints"
+            );
+        }
+
+        // Hold a session lease across a switch → retired stays until release.
+        let (canonical_a, hop_a) = path(5);
+        let _ = client
+            .endpoint(canonical_a, Some(hop_a))
+            .await
+            .expect("path 5");
+        let lease = client
+            .current_endpoint_slot_for_test()
+            .await
+            .expect("cached slot")
+            .retain_for_test();
+        assert_eq!(client.retired_endpoints_len_for_test(), 0);
+
+        let (canonical_b, hop_b) = path(6);
+        let _ = client
+            .endpoint(canonical_b, Some(hop_b))
+            .await
+            .expect("path 6");
+        assert_eq!(
+            client.retired_endpoints_len_for_test(),
+            1,
+            "live lease must keep the prior endpoint retired (not GC'd)"
         );
+
+        let (canonical_c, hop_c) = path(7);
+        let _ = client
+            .endpoint(canonical_c, Some(hop_c))
+            .await
+            .expect("path 7");
+        // Path 6 had no lease → GC'd; path 5 still held.
+        assert_eq!(client.retired_endpoints_len_for_test(), 1);
+
+        drop(lease);
+        assert_eq!(
+            client.retired_endpoints_len_for_test(),
+            0,
+            "releasing the last session must GC the retired endpoint"
+        );
+
+        // Further switches stay clean.
+        for octet in 8_u8..=10 {
+            let (canonical, hop) = path(octet);
+            let _ = client
+                .endpoint(canonical, Some(hop))
+                .await
+                .expect("endpoint");
+            assert_eq!(client.retired_endpoints_len_for_test(), 0);
+        }
     }
 
     #[test]
@@ -927,5 +1178,9 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)))
         );
         assert_eq!(resolve_override_ip_from(text, "missing.test"), None);
+        assert_eq!(
+            resolve_override_ip_from("hy2.example.test ::1\n", "hy2.example.test"),
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
     }
 }

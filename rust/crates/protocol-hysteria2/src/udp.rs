@@ -815,7 +815,8 @@ mod tests {
 
     impl UdpSessionManager {
         /// Test helper: stand-in recv task cancelled cooperatively (no QUIC).
-        pub(crate) fn new_with_cancel_task_for_test() -> (Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
+        pub(crate) fn new_with_cancel_task_for_test()
+        -> (Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
             let cancel = CancellationToken::new();
             let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
             let child = cancel.clone();
