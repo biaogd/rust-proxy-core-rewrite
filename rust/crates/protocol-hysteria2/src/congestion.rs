@@ -10,12 +10,20 @@
 //! Instead it tracks the recent ACK success rate and *speeds up* to compensate
 //! for losses (sending `rate / ackRate`, so 20% loss → ~25% faster).
 //!
-//! Mapping to quinn: quinn derives its pacing rate from the congestion window
-//! (`window / srtt`), so unlike the Go reference (which has an independent
-//! pacer) we encode the target rate into the window itself:
-//! `window = bps * srtt / ackRate`. quinn's window-capped pacing then emits at
-//! ~`bps / ackRate`. `on_congestion_event` deliberately does **not** shrink the
-//! window — that is the whole point of Brutal.
+//! ## Quinn mapping (not a claim of Go pacer identity)
+//!
+//! Go Brutal owns an **independent token-bucket pacer** at `bps / ackRate` and
+//! separately sizes the congestion window for in-flight
+//! (`~2 * bps * RTT / ackRate`). Quinn's [`Controller`] trait only exposes
+//! `window()`; Quinn's internal pacer always refills at
+//! `~1.25 * window / RTT` and ignores `ControllerMetrics::pacing_rate`.
+//!
+//! To approximate the Go send-rate under that constraint we set:
+//! `window = (bps / ackRate) * RTT / 1.25`, so Quinn's pacer emits at
+//! `~bps / ackRate`. The previous `≥10 KiB` floor is removed — it made low
+//! bandwidth / low RTT configs send far above the configured rate.
+//! Echo success alone must not be treated as Brutal parity; see the Brutal
+//! rate differential.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -34,11 +42,16 @@ use std::{
 };
 
 use quinn_proto::RttEstimator;
-use quinn_proto::congestion::{BbrConfig, Controller, ControllerFactory};
+use quinn_proto::congestion::{BbrConfig, Controller, ControllerFactory, ControllerMetrics};
 
 const SLOT_COUNT: usize = 5; // seconds of ACK/loss history
 const MIN_SAMPLE_COUNT: u64 = 50;
 const MIN_ACK_RATE: f64 = 0.8;
+/// Quinn's internal pacer refills at ~1.25×window/RTT (draft recovery §7.7).
+const QUINN_PACING_GAIN: f64 = 1.25;
+/// Assumed RTT used only before the first sample (matches Go's early 10 KiB
+/// behaviour order-of-magnitude without locking a huge floor forever).
+const INITIAL_RTT_HINT: Duration = Duration::from_millis(100);
 
 /// Shared Brutal rate (bytes/sec) plus the flag that hands the window to BBR.
 pub(crate) type BrutalControl = (Arc<AtomicU64>, Arc<AtomicBool>);
@@ -110,6 +123,30 @@ impl Brutal {
         let rate = acks as f64 / (acks + losses) as f64;
         self.ack_rate = rate.max(MIN_ACK_RATE);
     }
+
+    /// Target application send rate after ACK-rate compensation (bytes/sec).
+    fn target_bps(&self) -> f64 {
+        let bps = self.rate.load(Ordering::Relaxed) as f64;
+        if bps <= 0.0 {
+            return 0.0;
+        }
+        bps / self.ack_rate.max(MIN_ACK_RATE)
+    }
+
+    /// Window that makes Quinn's 1.25×window/RTT pacer emit ≈ `target_bps`.
+    fn window_for_rate(&self, rtt: Duration) -> u64 {
+        // Floor at 1 byte — a multi-KiB / MTU floor (old 10 KiB, or even one
+        // full datagram) makes low bandwidth × low RTT configs send far above
+        // the configured rate under Quinn's window-derived pacer.
+        let floor = 1u64;
+        let target = self.target_bps();
+        if target <= 0.0 {
+            return self.mtu.max(floor);
+        }
+        let rtt = if rtt.is_zero() { INITIAL_RTT_HINT } else { rtt };
+        let cwnd = target * rtt.as_secs_f64() / QUINN_PACING_GAIN;
+        (cwnd as u64).max(floor)
+    }
 }
 
 impl Controller for Brutal {
@@ -142,13 +179,16 @@ impl Controller for Brutal {
     }
 
     fn window(&self) -> u64 {
-        let floor = (self.mtu * 2).max(10_240);
-        if self.srtt.is_zero() {
-            return floor;
-        }
-        let bps = self.rate.load(Ordering::Relaxed) as f64;
-        let cwnd = bps * self.srtt.as_secs_f64() / self.ack_rate;
-        (cwnd as u64).max(floor)
+        self.window_for_rate(self.srtt)
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        // Documented for qlog only — Quinn's pacer does not consume this.
+        // ControllerMetrics is non_exhaustive; mutate a default instance.
+        let mut metrics = ControllerMetrics::default();
+        metrics.congestion_window = self.window();
+        metrics.pacing_rate = Some((self.target_bps() * 8.0) as u64);
+        metrics
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {
@@ -156,7 +196,7 @@ impl Controller for Brutal {
     }
 
     fn initial_window(&self) -> u64 {
-        (self.mtu * 2).max(10_240)
+        self.window_for_rate(INITIAL_RTT_HINT)
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
@@ -255,6 +295,14 @@ impl Controller for SwitchableController {
         }
     }
 
+    fn metrics(&self) -> ControllerMetrics {
+        if self.bbr_active() {
+            self.bbr.metrics()
+        } else {
+            self.brutal.metrics()
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(Self {
             brutal: self.brutal.clone(),
@@ -292,5 +340,40 @@ impl ControllerFactory for SwitchableFactory {
             bbr,
             use_bbr: self.use_bbr.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_tracks_configured_rate_without_10kib_floor() {
+        let rate = Arc::new(AtomicU64::new(100_000)); // 100 KB/s
+        let mut brutal = Brutal::new(rate, 1200);
+        brutal.srtt = Duration::from_millis(10);
+        brutal.ack_rate = 1.0;
+        // window = 100_000 * 0.01 / 1.25 = 800
+        assert_eq!(brutal.window(), 800);
+        // Old floor of 10_240 would have forced ~1.28 MB/s here.
+        assert!(brutal.window() < 10_240);
+    }
+
+    #[test]
+    fn window_scales_with_ack_rate_compensation() {
+        let rate = Arc::new(AtomicU64::new(1_000_000));
+        let mut brutal = Brutal::new(rate, 1200);
+        brutal.srtt = Duration::from_millis(40);
+        brutal.ack_rate = 0.8;
+        // target = 1e6/0.8 = 1.25e6; window = 1.25e6 * 0.04 / 1.25 = 40_000
+        assert_eq!(brutal.window(), 40_000);
+    }
+
+    #[test]
+    fn initial_window_uses_rate_hint_not_fixed_10kib() {
+        let rate = Arc::new(AtomicU64::new(50_000));
+        let brutal = Brutal::new(rate, 1200);
+        // 50_000 * 0.1 / 1.25 = 4_000
+        assert_eq!(brutal.initial_window(), 4_000);
     }
 }

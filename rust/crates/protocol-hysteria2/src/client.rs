@@ -56,7 +56,8 @@ pub struct ClientOptions {
     pub port: u16,
     pub password: String,
     pub tls: TlsOptions,
-    /// When true, never reuse a QUIC session after the first stream batch.
+    /// When true, each dial opens an independent QUIC session and does not
+    /// close or replace any prior live session (concurrent connections OK).
     pub disable_reuse: bool,
     /// Upload bandwidth (bytes/sec). `0` → stock BBR.
     pub up_bps: u64,
@@ -71,7 +72,7 @@ pub struct ClientOptions {
     pub hop_interval_max_secs: u64,
     /// QUIC datagram payload budget (fragmentation threshold).
     pub udp_mtu: u16,
-    /// QUIC handshake / connect timeout.
+    /// QUIC connect + HTTP/3 `/auth` budget (covers the full dial, not just TLS).
     pub handshake_timeout: Duration,
     /// Optional stream receive window override.
     pub stream_receive_window: Option<u64>,
@@ -283,20 +284,22 @@ impl Client {
     }
 
     async fn offer_session(&self) -> Result<Session, Hysteria2ProtocolError> {
-        {
+        if !self.options.disable_reuse {
             let guard = self.session.lock().await;
             if let Some(session) = guard.as_ref()
                 && !session.is_closed()
-                && !self.options.disable_reuse
             {
                 return Ok(session.clone());
             }
         }
         let session = self.dial_session().await?;
+        if self.options.disable_reuse {
+            // Independent concurrent connections: do not store or close peers.
+            return Ok(session);
+        }
         let mut guard = self.session.lock().await;
         if let Some(existing) = guard.as_ref()
             && !existing.is_closed()
-            && !self.options.disable_reuse
         {
             session.close();
             return Ok(existing.clone());
@@ -308,13 +311,27 @@ impl Client {
     }
 
     async fn dial_session(&self) -> Result<Session, Hysteria2ProtocolError> {
+        // Full connect+auth must honor handshake-timeout (and cancel via drop).
+        match tokio::time::timeout(self.options.handshake_timeout, self.dial_session_inner()).await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Hysteria2ProtocolError::Quinn(
+                "handshake timed out".to_owned(),
+            )),
+        }
+    }
+
+    async fn dial_session_inner(&self) -> Result<Session, Hysteria2ProtocolError> {
         let (canonical, hop) = resolve_endpoint(&self.options).await?;
         let endpoint = self.endpoint(canonical, hop).await?;
         let connecting = endpoint.connect(canonical, &self.options.tls.server_name)?;
-        let connection = tokio::time::timeout(self.options.handshake_timeout, connecting)
+        let connection = connecting
             .await
-            .map_err(|_| Hysteria2ProtocolError::Quinn("handshake timed out".to_owned()))?
             .map_err(|error| Hysteria2ProtocolError::Quinn(format!("handshake failed: {error}")))?;
+
+        // Close the QUIC connection if auth / post-setup is cancelled (timeout
+        // drop) or fails — Quinn does not CONNECTION_CLOSE on handle drop.
+        let mut guard = HandshakeConnGuard(Some(connection.clone()));
 
         let auth = auth::authenticate(
             connection.clone(),
@@ -339,6 +356,9 @@ impl Client {
             None
         };
         let udp_mtu = usize::from(self.options.udp_mtu.max(64));
+
+        // Disarm the abort-on-drop guard — session now owns the connection.
+        guard.0.take();
 
         Ok(Session {
             inner: Arc::new(SessionInner {
@@ -476,17 +496,32 @@ fn build_endpoint(
     Ok(endpoint)
 }
 
+/// Closes a QUIC connection if dropped before the handshake completes.
+struct HandshakeConnGuard(Option<quinn::Connection>);
+
+impl Drop for HandshakeConnGuard {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.take() {
+            conn.close(0_u32.into(), b"handshake aborted");
+        }
+    }
+}
+
 async fn resolve_endpoint(
     options: &ClientOptions,
 ) -> Result<(SocketAddr, Option<HopConfig>), Hysteria2ProtocolError> {
-    let mut ports = options.hop_ports.clone();
-    if ports.is_empty() {
-        ports.push(options.port);
-    } else if !ports.contains(&options.port) {
-        ports.insert(0, options.port);
-        ports.sort_unstable();
-        ports.dedup();
-    }
+    // Go: when `ports` is set, hop exclusively over that set — do not inject
+    // the scalar `port` (it may be 0 or outside the hop range).
+    let ports = if options.hop_ports.is_empty() {
+        if options.port == 0 {
+            return Err(Hysteria2ProtocolError::Protocol(
+                "Hysteria2 port is required when ports is empty".to_owned(),
+            ));
+        }
+        vec![options.port]
+    } else {
+        options.hop_ports.clone()
+    };
     let first = ports[0];
     let address = resolve_server(&options.server, first).await?;
     let addrs: Vec<SocketAddr> = ports

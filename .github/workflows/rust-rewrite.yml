@@ -384,6 +384,7 @@ jobs:
           for phase_script in \
           compat/scripts/phase_hy2a_hysteria2_tcp.py \
           compat/scripts/phase_hy2b_hysteria2.py \
+          compat/scripts/phase_hy2b_brutal_rate.py \
           compat/scripts/phase_hy2c_hysteria2.py \
           compat/scripts/phase_hy2c_hysteria2_soak.py \
           compat/scripts/phase5c_provider_refresh.py \

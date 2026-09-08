@@ -8,7 +8,7 @@
 )]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU32, Ordering},
@@ -33,10 +33,12 @@ pub(crate) const MAX_MESSAGE_LENGTH: u64 = 2048;
 const SESSION_CHAN_SIZE: usize = 1024;
 /// Soft cap on concurrent UDP sessions per QUIC connection.
 const MAX_SESSIONS: usize = 256;
-/// Drop incomplete reassembly state after this age.
+/// Drop incomplete reassembly state after this age (Go LRU `WithAge(10)`).
 const DEFRAG_TTL: Duration = Duration::from_secs(10);
-/// Bound buffered fragment bytes held by a single [`Defragger`].
+/// Bound buffered fragment bytes held across all in-flight packet IDs.
 const MAX_DEFRAG_BYTES: usize = 4 * 1024 * 1024;
+/// Bound concurrent packet IDs awaiting reassembly (Go caches per packet ID).
+const MAX_DEFRAG_PACKETS: usize = 64;
 
 /// A UDP datagram encapsulated for relay over QUIC's unreliable datagram channel.
 ///
@@ -188,32 +190,74 @@ pub(crate) fn frag_udp_message(m: &UdpMessage, max_size: usize) -> Vec<UdpMessag
     frags
 }
 
-/// Reassembles fragmented UDP messages. Tracks one packet ID at a time; a new
-/// packet ID (or TTL expiry) discards prior state. Buffered fragment bytes are
-/// capped by [`MAX_DEFRAG_BYTES`].
-#[derive(Default)]
-pub(crate) struct Defragger {
-    pkt_id: u16,
+/// Partial reassembly state for one packet ID.
+struct PacketAssembly {
     frags: Vec<Option<UdpMessage>>,
     count: u8,
     size: usize,
-    started: Option<Instant>,
+    started: Instant,
+}
+
+impl PacketAssembly {
+    fn new(frag_count: u8, now: Instant) -> Self {
+        Self {
+            frags: vec![None; frag_count as usize],
+            count: 0,
+            size: 0,
+            started: now,
+        }
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= DEFRAG_TTL
+    }
+}
+
+/// Reassembles fragmented UDP messages with a bounded multi-packet table
+/// (Go `udpDefragger` LRU keyed by packet ID). Interleaved fragments from
+/// different packet IDs no longer wipe each other. Age, packet-count, and
+/// buffered-byte caps prevent unbounded growth.
+#[derive(Default)]
+pub(crate) struct Defragger {
+    packets: HashMap<u16, PacketAssembly>,
+    /// Insertion / touch order for eviction (oldest first).
+    order: VecDeque<u16>,
+    /// Total buffered fragment payload bytes across all assemblies.
+    size: usize,
 }
 
 impl Defragger {
-    fn clear(&mut self) {
-        self.pkt_id = 0;
-        self.frags.clear();
-        self.count = 0;
-        self.size = 0;
-        self.started = None;
+    fn touch(&mut self, packet_id: u16) {
+        self.order.retain(|id| *id != packet_id);
+        self.order.push_back(packet_id);
     }
 
-    fn drop_if_expired(&mut self, now: Instant) {
-        if let Some(started) = self.started
-            && now.saturating_duration_since(started) >= DEFRAG_TTL
-        {
-            self.clear();
+    fn remove_packet(&mut self, packet_id: u16) {
+        if let Some(item) = self.packets.remove(&packet_id) {
+            self.size = self.size.saturating_sub(item.size);
+        }
+        self.order.retain(|id| *id != packet_id);
+    }
+
+    fn drop_expired(&mut self, now: Instant) {
+        let expired: Vec<u16> = self
+            .packets
+            .iter()
+            .filter_map(|(id, item)| item.expired(now).then_some(*id))
+            .collect();
+        for id in expired {
+            self.remove_packet(id);
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        while self.packets.len() >= MAX_DEFRAG_PACKETS || self.size > MAX_DEFRAG_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(item) = self.packets.remove(&oldest) {
+                self.size = self.size.saturating_sub(item.size);
+            }
         }
     }
 
@@ -221,7 +265,7 @@ impl Defragger {
     /// message once all fragments have arrived, otherwise `None`.
     pub fn feed(&mut self, m: UdpMessage) -> Option<UdpMessage> {
         let now = Instant::now();
-        self.drop_if_expired(now);
+        self.drop_expired(now);
 
         if m.frag_count <= 1 {
             return Some(m);
@@ -229,54 +273,84 @@ impl Defragger {
         if m.frag_id >= m.frag_count {
             return None;
         }
-
-        if m.packet_id != self.pkt_id || m.frag_count as usize != self.frags.len() {
-            // New message — reset state.
-            if m.data.len() > MAX_DEFRAG_BYTES {
-                self.clear();
-                return None;
-            }
-            self.pkt_id = m.packet_id;
-            self.frags = vec![None; m.frag_count as usize];
-            self.size = m.data.len();
-            self.count = 1;
-            self.started = Some(now);
-            let frag_id = m.frag_id as usize;
-            self.frags[frag_id] = Some(m);
-            None
-        } else if self.frags[m.frag_id as usize].is_none() {
-            if self.size.saturating_add(m.data.len()) > MAX_DEFRAG_BYTES {
-                self.clear();
-                return None;
-            }
-            self.size += m.data.len();
-            self.count += 1;
-            let frag_id = m.frag_id as usize;
-            self.frags[frag_id] = Some(m);
-            if self.count as usize == self.frags.len() {
-                // All fragments present — assemble in order.
-                let mut data = Vec::with_capacity(self.size);
-                let mut first: Option<UdpMessage> = None;
-                for slot in &mut self.frags {
-                    if let Some(frag) = slot.take() {
-                        data.extend_from_slice(&frag.data);
-                        if first.is_none() {
-                            first = Some(frag);
-                        }
-                    }
-                }
-                self.clear();
-                let mut out = first?;
-                out.data = data;
-                out.frag_id = 0;
-                out.frag_count = 1;
-                Some(out)
-            } else {
-                None
-            }
-        } else {
-            None
+        if m.data.len() > MAX_DEFRAG_BYTES {
+            return None;
         }
+
+        let packet_id = m.packet_id;
+        let needs_reset = self
+            .packets
+            .get(&packet_id)
+            .is_some_and(|item| item.frags.len() != m.frag_count as usize);
+        if needs_reset {
+            self.remove_packet(packet_id);
+        }
+
+        if self.packets.contains_key(&packet_id) {
+            self.touch(packet_id);
+        } else {
+            // Reserve room before inserting a new assembly.
+            while self.packets.len() >= MAX_DEFRAG_PACKETS
+                || self.size.saturating_add(m.data.len()) > MAX_DEFRAG_BYTES
+            {
+                if self.order.is_empty() {
+                    return None;
+                }
+                self.evict_oldest();
+            }
+            self.packets
+                .insert(packet_id, PacketAssembly::new(m.frag_count, now));
+            self.touch(packet_id);
+        }
+
+        // Check room / duplicate without holding a long-lived map borrow.
+        let data_len = m.data.len();
+        let frag_id = m.frag_id as usize;
+        let (duplicate, over_budget) = {
+            let item = self.packets.get(&packet_id)?;
+            (
+                item.frags.get(frag_id).is_some_and(Option::is_some),
+                self.size.saturating_add(data_len) > MAX_DEFRAG_BYTES,
+            )
+        };
+        if duplicate {
+            return None;
+        }
+        if over_budget {
+            self.remove_packet(packet_id);
+            return None;
+        }
+
+        let complete = {
+            let item = self.packets.get_mut(&packet_id)?;
+            self.size += data_len;
+            item.size += data_len;
+            item.count = item.count.saturating_add(1);
+            item.frags[frag_id] = Some(m);
+            item.count as usize == item.frags.len()
+        };
+        if !complete {
+            return None;
+        }
+
+        // All fragments present — assemble in order and drop the table entry.
+        let item = self.packets.remove(&packet_id)?;
+        self.order.retain(|id| *id != packet_id);
+        self.size = self.size.saturating_sub(item.size);
+
+        let mut data = Vec::with_capacity(item.size);
+        let mut first: Option<UdpMessage> = None;
+        for frag in item.frags.into_iter().flatten() {
+            data.extend_from_slice(&frag.data);
+            if first.is_none() {
+                first = Some(frag);
+            }
+        }
+        let mut out = first?;
+        out.data = data;
+        out.frag_id = 0;
+        out.frag_count = 1;
+        Some(out)
     }
 }
 
@@ -343,21 +417,32 @@ impl UdpSessionManager {
     fn remove(&self, id: u32) {
         self.sessions.lock().unwrap().remove(&id);
     }
+
+    /// Drop every session sender so blocked `recv` callers wake with EOF
+    /// (QUIC closed / receive loop exit).
+    fn close_all(&self) {
+        self.sessions.lock().unwrap().clear();
+    }
 }
 
 async fn receive_loop(conn: quinn::Connection, mgr: Weak<UdpSessionManager>) {
     loop {
-        match conn.read_datagram().await {
-            Ok(data) => {
-                if let Some(msg) = UdpMessage::parse(&data) {
-                    match mgr.upgrade() {
-                        Some(m) => m.dispatch(msg),
-                        None => return, // manager dropped
-                    }
+        if let Ok(data) = conn.read_datagram().await {
+            if let Some(msg) = UdpMessage::parse(&data) {
+                match mgr.upgrade() {
+                    Some(m) => m.dispatch(msg),
+                    None => return, // manager dropped
                 }
-                // Invalid datagram — skip, like Go.
             }
-            Err(_) => return, // connection closed; senders drop, sessions see EOF
+            // Invalid datagram — skip, like Go.
+        } else {
+            // Connection closed: actively close session channels so
+            // receivers wake (senders do not drop merely because this
+            // task exits — they live in the manager map).
+            if let Some(m) = mgr.upgrade() {
+                m.close_all();
+            }
+            return;
         }
     }
 }
@@ -380,13 +465,13 @@ impl UdpSession {
         self.id
     }
 
-    /// Send `data` to `addr` (`host:port`) through the proxy, fragmenting if the
-    /// payload exceeds the current QUIC datagram limit.
+    /// Send `data` to `addr` (`host:port`) through the proxy, fragmenting when
+    /// the payload exceeds the configured `udp-mtu` (or the live QUIC datagram
+    /// limit, whichever is tighter). Go fragments by configured MTU first.
     ///
     /// # Errors
     ///
-    /// Returns when the QUIC datagram send fails (other than `TooLarge`, which
-    /// triggers fragmentation).
+    /// Returns when the QUIC datagram send fails.
     pub fn send(&self, data: &[u8], addr: &str) -> Result<(), Hysteria2ProtocolError> {
         let msg = UdpMessage {
             session_id: self.id,
@@ -397,27 +482,24 @@ impl UdpSession {
             data: data.to_vec(),
         };
 
-        // Fast path: try to send unfragmented.
-        let mut buf = vec![0u8; msg.size().max(MAX_UDP_SIZE)];
-        if let Some(n) = msg.serialize(&mut buf) {
-            match self.conn.send_datagram(Bytes::copy_from_slice(&buf[..n])) {
-                Ok(()) => return Ok(()),
-                Err(quinn::SendDatagramError::TooLarge) => { /* fall through to fragment */ }
-                Err(e) => {
-                    return Err(Hysteria2ProtocolError::Protocol(format!(
-                        "send datagram: {e}"
-                    )));
-                }
-            }
-        }
-
-        // Fragment to the configured/current datagram limit and send each piece.
         let max = self
             .conn
             .max_datagram_size()
             .unwrap_or(MAX_DATAGRAM_FRAME_SIZE)
             .min(self.udp_mtu)
             .max(64);
+
+        // Honor configured MTU before send (do not rely on Quinn TooLarge alone).
+        if msg.size() <= max {
+            let mut buf = vec![0u8; msg.size()];
+            if let Some(n) = msg.serialize(&mut buf) {
+                self.conn
+                    .send_datagram(Bytes::copy_from_slice(&buf[..n]))
+                    .map_err(|e| Hysteria2ProtocolError::Protocol(format!("send datagram: {e}")))?;
+            }
+            return Ok(());
+        }
+
         let mut frag = msg;
         frag.packet_id = rand::rng().random_range(1..=u16::MAX);
         for f in frag_udp_message(&frag, max) {
@@ -525,22 +607,60 @@ mod tests {
     }
 
     #[test]
-    fn defrag_new_packet_id_resets_state() {
-        let p1: Vec<u8> = vec![1; 300];
-        let m1 = msg(&p1, 0, 2, 1); // only first frag of packet 1
-        let p2: Vec<u8> = vec![2; 200];
-        let f2 = frag_udp_message(&msg(&p2, 0, 1, 2), msg(&p2, 0, 1, 2).header_size() + 50);
+    fn defrag_interleaved_packet_ids_reassemble_both() {
+        // A0 → B0 → A1 → B1 must not clear either assembly (Go multi-ID cache).
+        let a: Vec<u8> = vec![0xA; 300];
+        let b: Vec<u8> = vec![0xB; 300];
+        let a_frags = frag_udp_message(&msg(&a, 0, 1, 1), msg(&a, 0, 1, 1).header_size() + 150);
+        let b_frags = frag_udp_message(&msg(&b, 0, 1, 2), msg(&b, 0, 1, 2).header_size() + 150);
+        assert_eq!(a_frags.len(), 2);
+        assert_eq!(b_frags.len(), 2);
 
         let mut d = Defragger::default();
-        assert!(d.feed(m1).is_none());
-        // A different packet arrives; previous partial state is dropped.
+        assert!(d.feed(a_frags[0].clone()).is_none());
+        assert!(d.feed(b_frags[0].clone()).is_none());
+        let full_a = d.feed(a_frags[1].clone()).expect("packet A");
+        let full_b = d.feed(b_frags[1].clone()).expect("packet B");
+        assert_eq!(full_a.data, a);
+        assert_eq!(full_b.data, b);
+        assert_eq!(d.size, 0);
+        assert!(d.packets.is_empty());
+    }
+
+    #[test]
+    fn defrag_reordered_fragments_within_packet() {
+        let payload: Vec<u8> = (0..500u32).map(|i| i as u8).collect();
+        let frags = frag_udp_message(
+            &msg(&payload, 0, 1, 9),
+            msg(&payload, 0, 1, 9).header_size() + 100,
+        );
+        assert!(frags.len() > 2);
+
+        let mut d = Defragger::default();
         let mut out = None;
-        for f in f2 {
+        // Feed in reverse order.
+        for f in frags.into_iter().rev() {
             if let Some(full) = d.feed(f) {
                 out = Some(full);
             }
         }
-        assert_eq!(out.unwrap().data, p2);
+        assert_eq!(out.expect("reassembled").data, payload);
+    }
+
+    #[test]
+    fn defrag_packet_count_cap_evicts_oldest() {
+        let mut d = Defragger::default();
+        for packet_id in 0..MAX_DEFRAG_PACKETS as u16 {
+            let m = msg(&[1, 2, 3, 4], 0, 2, packet_id.wrapping_add(1));
+            assert!(d.feed(m).is_none());
+        }
+        assert_eq!(d.packets.len(), MAX_DEFRAG_PACKETS);
+        // One more distinct packet ID evicts the oldest incomplete assembly.
+        let m = msg(&[9, 9, 9, 9], 0, 2, 0xBEEF);
+        assert!(d.feed(m).is_none());
+        assert!(d.packets.len() <= MAX_DEFRAG_PACKETS);
+        assert!(!d.packets.contains_key(&1));
+        assert!(d.packets.contains_key(&0xBEEF));
     }
 
     #[test]
@@ -585,10 +705,10 @@ mod tests {
                 "defrag size exceeded bound: {}",
                 defrag.size
             );
+            assert!(defrag.packets.len() <= MAX_DEFRAG_PACKETS);
         }
-        // Explicit oversize first fragment is rejected and clears state.
+        // Explicit oversize first fragment is rejected.
         let huge = msg(&vec![0u8; MAX_DEFRAG_BYTES + 1], 0, 2, 99);
         assert!(defrag.feed(huge).is_none());
-        assert_eq!(defrag.size, 0);
     }
 }

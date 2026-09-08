@@ -170,6 +170,28 @@ fn hysteria2_hy2b_configuration_is_supported_and_scoped() {
     assert!(default_opts.obfs.is_none());
     assert!(default_opts.hop_ports.is_empty());
 
+    // Go allows ports-only (scalar port omitted / zero) when `ports` is set.
+    let ports_only = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2-ports\n    type: hysteria2\n    server: 127.0.0.1\n    ports: 8443,9000\n    password: secret\n"
+    ))
+    .expect("ports-only Hysteria2");
+    assert_eq!(ports_only.proxies[0].port, 0);
+    assert_eq!(
+        ports_only.proxies[0]
+            .hysteria2
+            .as_ref()
+            .expect("opts")
+            .hop_ports,
+        [8443, 9000]
+    );
+    assert!(
+        Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - name: hy2-noport\n    type: hysteria2\n    server: 127.0.0.1\n    password: secret\n"
+        ))
+        .is_err(),
+        "port and ports both empty must fail"
+    );
+
     for unsupported in [
         "obfs: gecko\n    obfs-password: x",
         "obfs: salamander",

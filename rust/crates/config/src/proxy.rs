@@ -382,11 +382,22 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         .server
         .filter(|server| !server.is_empty())
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let ports_raw = hysteria2_extra_string(&mut proxy.extra, "ports")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let hop_ports = match ports_raw.as_deref().unwrap_or("") {
+        "" => Vec::new(),
+        raw => {
+            parse_hysteria2_ports(raw).ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?
+        }
+    };
+    // Go allows `port: 0` when `ports` is non-empty; require at least one.
     let port = proxy
         .port
         .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port != 0)
-        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+        .unwrap_or(0);
+    if port == 0 && hop_ports.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.clone()));
+    }
     let password = proxy
         .password
         .filter(|password| !password.is_empty())
@@ -405,14 +416,6 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
     let down_bps = parse_hysteria2_bps(down_raw.as_deref().unwrap_or(""))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
 
-    let ports_raw = hysteria2_extra_string(&mut proxy.extra, "ports")
-        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
-    let hop_ports = match ports_raw.as_deref().unwrap_or("") {
-        "" => Vec::new(),
-        raw => {
-            parse_hysteria2_ports(raw).ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?
-        }
-    };
     let hop_raw = hysteria2_extra_string(&mut proxy.extra, "hop-interval")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
     let (hop_interval_min_secs, hop_interval_max_secs) =

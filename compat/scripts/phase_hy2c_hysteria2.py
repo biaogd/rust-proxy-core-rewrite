@@ -609,10 +609,11 @@ def exercise(
         relay.stop()
         if kernel_netem.get("available"):
             clear_kernel_netem()
+        # Recovery without intentional reload: clean relay only. Stacks must
+        # re-establish on their own after loss is removed.
         relay = NetemUdpRelay(front_port, authority_port)
         relay.start()
         time.sleep(0.2)
-        reload_via_controller(process, controller_port, config, secret=SECRET)
         after_netem = wait_exchange(
             process, mixed_port, echo.port, b"after-netem", deadline_secs=20.0
         )
@@ -658,9 +659,10 @@ def exercise(
             "during-interrupt-rejected": interrupted,
             "after-interrupt": after_interrupt,
             "netem-throughput-class": under_netem["throughput-class"],
-            # At least one successful TCP round under fixed loss; exact count is
-            # stripped in normalize (Go/Rust diverge under intentional loss).
-            "netem-rounds-ok": under_netem["rounds-ok"] >= 1,
+            # Keep raw success floors in the compared surface (P1): a fully
+            # unavailable Rust stack under loss must not normalize equal to Go.
+            "netem-rounds-ok": under_netem["rounds-ok"],
+            "netem-rounds-floor": under_netem["rounds-ok"] >= 2,
             "netem-udp": under_netem_udp,
             "after-netem": after_netem,
             "kernel-netem-available": bool(kernel_netem.get("available")),
@@ -724,12 +726,34 @@ def normalize(entry: dict[str, Any]) -> dict[str, Any]:
     out = dict(entry)
     out.pop("kernel-netem-available", None)
     out.pop("netem-mode", None)
-    # QUIC under intentional loss is best-effort across stacks; prove recovery
-    # via after-netem / process-alive instead of round-count parity.
-    out.pop("netem-udp", None)
-    out.pop("netem-rounds-ok", None)
-    out.pop("netem-throughput-class", None)
+    # Keep success floors and coarse throughput in the compared surface.
+    # Tolerance: map exact round counts to a floor boolean so Go/Rust may
+    # differ by a round or two under intentional loss, but neither may be
+    # fully unavailable. Throughput class stays for performance tolerance.
+    rounds = int(out.pop("netem-rounds-ok", 0))
+    out["netem-rounds-floor"] = rounds >= 2
+    # Collapse "high"/"medium" into "ok" so modest rate variance under netem
+    # does not fail the differential; "low"/"zero" remain distinct failures.
+    cls = out.get("netem-throughput-class")
+    if cls in ("high", "medium"):
+        out["netem-throughput-class"] = "ok"
     return out
+
+
+def assert_netem_floors(engine: str, entry: dict[str, Any]) -> None:
+    """Hard floors independent of Go/Rust equality (blocks all-failure masquerade)."""
+    rounds = int(entry.get("netem-rounds-ok", 0))
+    if rounds < 2:
+        raise AssertionError(
+            f"{engine} netem TCP success floor failed: rounds-ok={rounds} (need >= 2)"
+        )
+    if not entry.get("netem-udp"):
+        raise AssertionError(f"{engine} netem UDP success floor failed")
+    cls = entry.get("netem-throughput-class")
+    if cls in (None, "zero"):
+        raise AssertionError(f"{engine} netem throughput floor failed: class={cls!r}")
+    if not entry.get("after-netem"):
+        raise AssertionError(f"{engine} after-netem recovery (no reload) failed")
 
 
 def main() -> int:
@@ -744,6 +768,7 @@ def main() -> int:
                 observations[engine] = exercise(
                     binaries[engine], binaries["go"], scratch
                 )
+                assert_netem_floors(engine, observations[engine])
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
