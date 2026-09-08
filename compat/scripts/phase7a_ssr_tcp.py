@@ -3,7 +3,8 @@
 
 Server pin: shadowsocksrr/shadowsocksr @ SSR_SERVER_PIN (Python SSR, not Clash inbound).
 Fetch-time shims: Python 3 `collections.abc`, empty `--forbidden-ip` for loopback
-echo targets, and TCP half-close relay in `tcprelay.py` (upstream destroys on FIN).
+echo targets, TCP half-close relay in `tcprelay.py` (upstream destroys on FIN), and
+pure-Python RC4 fallback when libcrypto disables RC4 (`auth_chain` / `rc4-md5`).
 """
 
 from __future__ import annotations

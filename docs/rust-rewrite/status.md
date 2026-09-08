@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-08
 
-SSR-C (same branch/PR as SSR-A/B) adds outbound `auth_sha1_v4` / `auth_chain_a` / `auth_chain_b`, obfs `random_head`, remaining Go stream ciphers + `none`/`dummy`, and SSR UDP (cipher→protocol; TCP obfs only). Groups/providers/health/reload follow existing outbound patterns; controller reports `udp` from config. Pin: shadowsocksrr `fd723a92` + existing shims; phases `phase7a`/`phase7b`/`phase7c_ssr.py`. SSR-D (malformed/stress/soak/three-platform release) deferred. Loud reject for AEAD/SS2022 and unmapped legacy `chacha20`/`xchacha20`.
+SSR-C (same branch/PR as SSR-A/B) adds outbound `auth_sha1_v4` / `auth_chain_a` / `auth_chain_b`, obfs `random_head`, remaining Go stream ciphers + `none`/`dummy`, and SSR UDP (cipher→protocol; TCP obfs only). Groups/providers/health/reload follow existing outbound patterns; controller reports `udp` from config. Pin: shadowsocksrr `fd723a92` + shims (py3, forbidden-ip empty, half-close, pure-RC4); phases `phase7a`/`phase7b`/`phase7c_ssr.py`. SSR-D (malformed/stress/soak/three-platform release) deferred. Loud reject for AEAD/SS2022 and unmapped legacy `chacha20`/`xchacha20`. Optional mudb multi-user e2e for `uid:passwd` still not claimed (pin is single-password).
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
