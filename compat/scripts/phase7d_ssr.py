@@ -357,8 +357,7 @@ rules:
 def hang_ssr_listener() -> tuple[socket.socket, int, list[socket.socket]]:
     """Accept TCP, stay mute briefly, then close — no SSR bytes.
 
-    A forever-hold peer would only surface the client's own socket timeout; we
-    close without speaking so the product must fail the handshake with EOF/reset.
+    Proves the product fails on peer EOF/reset (not client wait-timeout).
     """
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -386,6 +385,27 @@ def hang_ssr_listener() -> tuple[socket.socket, int, list[socket.socket]]:
             except OSError:
                 return
             threading.Thread(target=mute_then_close, args=(conn,), daemon=True).start()
+
+    threading.Thread(target=accept_loop, daemon=True).start()
+    return listener, port, held
+
+
+def silent_ssr_listener() -> tuple[socket.socket, int, list[socket.socket]]:
+    """Accept TCP and never speak or close — product must time out on its own."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    port = int(listener.getsockname()[1])
+    held: list[socket.socket] = []
+
+    def accept_loop() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            held.append(conn)
 
     threading.Thread(target=accept_loop, daemon=True).start()
     return listener, port, held
@@ -422,14 +442,17 @@ def product_closed_exchange(
         return True, f"os-error:{type(error).__name__}"
 
 
-def handshake_timeout_bounded(
+def _launch_ssr_mixed(
     binary: pathlib.Path,
     scratch: pathlib.Path,
+    *,
+    label: str,
     hang_port: int,
-    echo_port: int,
-) -> bool:
-    """Dial SSR against a mute peer; product must close (not client wait-timeout)."""
-    hang_scratch = scratch / "hang-timeout"
+    cipher: str,
+    protocol: str,
+    obfs: str,
+) -> tuple[Any, Any, Any, int]:
+    hang_scratch = scratch / label
     hang_scratch.mkdir(exist_ok=True)
     hang_mixed = reserve_port()
     hang_config = hang_scratch / "config.yaml"
@@ -444,17 +467,37 @@ proxies:
     server: 127.0.0.1
     port: {hang_port}
     password: {PASSWORD}
-    cipher: {CIPHER}
-    protocol: {PROTOCOL}
-    obfs: {OBFS}
+    cipher: {cipher}
+    protocol: {protocol}
+    obfs: {obfs}
 rules:
   - MATCH,ssr-hang
 """,
         encoding="utf-8",
     )
     process, stdout, stderr = launch(binary, hang_config, hang_scratch)
+    wait_ready(process, hang_mixed)
+    return process, stdout, stderr, hang_mixed
+
+
+def handshake_peer_close_bounded(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    hang_port: int,
+    echo_port: int,
+) -> bool:
+    """Mute peer that later closes; product must EOF/reset (not client wait-timeout)."""
+    process = stdout = stderr = None
     try:
-        wait_ready(process, hang_mixed)
+        process, stdout, stderr, hang_mixed = _launch_ssr_mixed(
+            binary,
+            scratch,
+            label="hang-peer-close",
+            hang_port=hang_port,
+            cipher=CIPHER,
+            protocol=PROTOCOL,
+            obfs=OBFS,
+        )
         fds_before = process_fd_count(process.pid)
         started = time.monotonic()
         closed, reason = product_closed_exchange(
@@ -463,8 +506,6 @@ rules:
         elapsed = time.monotonic() - started
         alive = process.poll() is None
         fds_after = process_fd_count(process.pid)
-        # Product-driven close should finish well under the client wait; a pass
-        # that only rides the 5s socket timeout is rejected via reason.
         fd_ok = (
             fds_before is None
             or fds_after is None
@@ -478,9 +519,63 @@ rules:
             and fd_ok
         )
     finally:
-        stop(process)
-        stdout.close()
-        stderr.close()
+        if process is not None:
+            stop(process)
+        if stdout is not None:
+            stdout.close()
+        if stderr is not None:
+            stderr.close()
+
+
+def product_handshake_timeout_bounded(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    hang_port: int,
+    echo_port: int,
+) -> bool:
+    """Always-silent peer: product camouflage handshake deadline must fire alone.
+
+    Uses tls1.2_ticket_auth so the 5s obfs handshake Sleep arms. Client wait is
+    longer than the product deadline; client-wait-timeout is failure.
+    """
+    process = stdout = stderr = None
+    try:
+        process, stdout, stderr, hang_mixed = _launch_ssr_mixed(
+            binary,
+            scratch,
+            label="hang-silent-timeout",
+            hang_port=hang_port,
+            cipher="aes-128-cfb",
+            protocol="origin",
+            obfs="tls1.2_ticket_auth",
+        )
+        fds_before = process_fd_count(process.pid)
+        started = time.monotonic()
+        closed, reason = product_closed_exchange(
+            hang_mixed, "127.0.0.1", echo_port, wait=8.0
+        )
+        elapsed = time.monotonic() - started
+        alive = process.poll() is None
+        fds_after = process_fd_count(process.pid)
+        fd_ok = (
+            fds_before is None
+            or fds_after is None
+            or fds_after <= fds_before + (32 if os.name == "nt" else 16)
+        )
+        return (
+            closed
+            and reason != "client-wait-timeout"
+            and 3.0 <= elapsed <= 7.5
+            and alive
+            and fd_ok
+        )
+    finally:
+        if process is not None:
+            stop(process)
+        if stdout is not None:
+            stdout.close()
+        if stderr is not None:
+            stderr.close()
 
 
 def truncate_mid_stream(mixed_port: int, echo_port: int) -> bool:
@@ -594,7 +689,7 @@ def exercise(
 
         hang_listener, hang_port, hang_held = hang_ssr_listener()
         try:
-            hang_timeout_ok = handshake_timeout_bounded(
+            hang_timeout_ok = handshake_peer_close_bounded(
                 binary, scratch, hang_port, echo_server.port
             )
         finally:
@@ -604,6 +699,23 @@ def exercise(
                     conn.close()
                 except OSError:
                     pass
+
+        rust_only: dict[str, bool] = {}
+        if scratch.name == "rust":
+            silent_listener, silent_port, silent_held = silent_ssr_listener()
+            try:
+                rust_only["rust-product-handshake-timeout"] = (
+                    product_handshake_timeout_bounded(
+                        binary, scratch, silent_port, echo_server.port
+                    )
+                )
+            finally:
+                silent_listener.close()
+                for conn in silent_held:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
 
         # Rust-only config rejects (Go SSR allowlists differ; same as 7a/7b/7c).
         reject_scratch = scratch / "rejects"
@@ -683,6 +795,7 @@ def exercise(
             "after-reload-udp": after_reload_udp,
             "process-alive": process.poll() is None,
             "ssr-server-pin": SSR_SERVER_PIN,
+            **rust_only,
             **rust_rejects,
             **resources,
         }
@@ -798,6 +911,7 @@ def main() -> int:
         "rust-rejects-aead",
         "rust-rejects-unknown-protocol",
         "rust-rejects-legacy-chacha20",
+        "rust-product-handshake-timeout",
     )
     rust_ok = all(observations["rust"].get(key) for key in required_true + rust_only)
     go_ok = all(observations["go"].get(key) for key in required_true)

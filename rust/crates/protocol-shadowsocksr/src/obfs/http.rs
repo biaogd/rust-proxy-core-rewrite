@@ -10,6 +10,10 @@ use rewrite_io::BoxedStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::crypto_util::random_u32_bounded;
+use crate::obfs::limits::{
+    HandshakeDeadlineSlot, arm_handshake_deadline, clear_handshake_deadline,
+    poll_handshake_deadline,
+};
 
 const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.162 Safari/537.36",
@@ -32,6 +36,7 @@ pub(crate) struct HttpObfsConn {
     recv_buf: BytesMut,
     pending_write: Vec<u8>,
     pending_offset: usize,
+    handshake_deadline: HandshakeDeadlineSlot,
 }
 
 impl HttpObfsConn {
@@ -55,7 +60,17 @@ impl HttpObfsConn {
             recv_buf: BytesMut::new(),
             pending_write: Vec::new(),
             pending_offset: 0,
+            handshake_deadline: None,
         }
+    }
+
+    fn check_deadline(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        poll_handshake_deadline(
+            &mut self.handshake_deadline,
+            self.has_recv_header,
+            cx,
+            "http_obfs",
+        )
     }
 
     fn pick_host(&self) -> (String, String) {
@@ -161,6 +176,11 @@ impl AsyncRead for HttpObfsConn {
         // Do not map header-only reads to AsyncRead EOF (Ready + 0 filled). Go's
         // `(0, nil)` after headers is "wait for body"; Tokio treats 0 as EOF.
         loop {
+            match self.check_deadline(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
             if self.has_recv_header {
                 if !self.recv_buf.is_empty() {
                     let n = buf.remaining().min(self.recv_buf.len());
@@ -178,6 +198,7 @@ impl AsyncRead for HttpObfsConn {
             {
                 self.has_recv_header = true;
                 self.recv_buf.advance(pos + 4);
+                clear_handshake_deadline(&mut self.handshake_deadline);
                 // Headers alone: keep reading for encrypted payload instead of
                 // returning Ready(Ok) with an empty ReadBuf.
                 continue;
@@ -216,6 +237,11 @@ impl AsyncWrite for HttpObfsConn {
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = self.as_mut().get_mut();
+        match this.check_deadline(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
         match this.poll_flush_pending(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -227,6 +253,7 @@ impl AsyncWrite for HttpObfsConn {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        arm_handshake_deadline(&mut this.handshake_deadline);
         this.pending_write = this.build_request(buf);
         this.pending_offset = 0;
         this.has_sent_header = true;

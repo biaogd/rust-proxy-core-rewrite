@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 
 use rewrite_model::{Destination, Host};
 use thiserror::Error;
@@ -15,6 +16,8 @@ pub enum SsrProxyError {
     ProtocolCore(#[from] rewrite_protocol_shadowsocksr::ShadowsocksRProtocolError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("ShadowsocksR dial timed out")]
+    Timeout,
 }
 
 fn ssr_client_options(
@@ -56,19 +59,30 @@ pub async fn connect_ssr_with_options(
     obfs_param: &str,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, SsrProxyError> {
-    let stream = connect_with_options(server, allow_ipv6, options).await?;
-    let options = ssr_client_options(
-        server,
-        password,
-        cipher,
-        protocol,
-        protocol_param,
-        obfs,
-        obfs_param,
-    );
-    rewrite_protocol_shadowsocksr::connect_tcp_on_stream(Box::new(stream), destination, &options)
+    let dial = async {
+        let stream = connect_with_options(server, allow_ipv6, options).await?;
+        let options = ssr_client_options(
+            server,
+            password,
+            cipher,
+            protocol,
+            protocol_param,
+            obfs,
+            obfs_param,
+        );
+        rewrite_protocol_shadowsocksr::connect_tcp_on_stream(
+            Box::new(stream),
+            destination,
+            &options,
+        )
         .await
-        .map_err(Into::into)
+        .map_err(SsrProxyError::from)
+    };
+    // Match Go tunnel DefaultTCPTimeout (5s) covering TCP + StreamConn setup.
+    match tokio::time::timeout(Duration::from_secs(5), dial).await {
+        Ok(result) => result,
+        Err(_) => Err(SsrProxyError::Timeout),
+    }
 }
 
 /// Opens an SSR UDP association (cipher → protocol packet layering).

@@ -9,6 +9,10 @@ use rewrite_io::BoxedStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::crypto_util::{append_rand, crc32_ieee, random_u32_bounded};
+use crate::obfs::limits::{
+    HandshakeDeadlineSlot, PRE_HANDSHAKE_BUF_MAX, arm_handshake_deadline, buffer_cap_error,
+    clear_handshake_deadline, drop_on_shutdown_error, poll_handshake_deadline,
+};
 
 /// Random leading bytes + inverted CRC32, then raw passthrough after first read.
 pub(crate) struct RandomHeadConn {
@@ -19,6 +23,7 @@ pub(crate) struct RandomHeadConn {
     buf: Vec<u8>,
     pending_write: Vec<u8>,
     pending_offset: usize,
+    handshake_deadline: HandshakeDeadlineSlot,
 }
 
 impl RandomHeadConn {
@@ -31,7 +36,17 @@ impl RandomHeadConn {
             buf: Vec::new(),
             pending_write: Vec::new(),
             pending_offset: 0,
+            handshake_deadline: None,
         }
+    }
+
+    fn handshake_complete(&self) -> bool {
+        self.raw_trans_recv && self.raw_trans_sent && self.buf.is_empty()
+    }
+
+    fn check_deadline(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        let complete = self.handshake_complete();
+        poll_handshake_deadline(&mut self.handshake_deadline, complete, cx, "random_head")
     }
 
     fn build_header() -> Vec<u8> {
@@ -79,6 +94,12 @@ impl AsyncRead for RandomHeadConn {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.as_mut().get_mut();
+        match this.check_deadline(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
+
         if !this.raw_trans_recv {
             let mut scratch = [0_u8; 16 * 1024];
             let mut tmp = ReadBuf::new(&mut scratch);
@@ -88,6 +109,7 @@ impl AsyncRead for RandomHeadConn {
                     let _ = tmp.filled();
                     this.raw_trans_recv = true;
                     this.queue_buffered_payload();
+                    clear_handshake_deadline(&mut this.handshake_deadline);
                 }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
@@ -111,6 +133,11 @@ impl AsyncWrite for RandomHeadConn {
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         let this = self.as_mut().get_mut();
+        match this.check_deadline(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
         match this.poll_flush_pending(cx) {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
@@ -121,14 +148,23 @@ impl AsyncWrite for RandomHeadConn {
             return Pin::new(&mut this.inner).poll_write(cx, buf);
         }
 
-        this.buf.extend_from_slice(buf);
+        arm_handshake_deadline(&mut this.handshake_deadline);
+        if this.buf.len() >= PRE_HANDSHAKE_BUF_MAX {
+            // Backpressure without self-wake (deadline Sleep wakes mute peers).
+            return Poll::Pending;
+        }
+        let accept = buf.len().min(PRE_HANDSHAKE_BUF_MAX - this.buf.len());
+        if accept == 0 {
+            return Poll::Ready(Err(buffer_cap_error("random_head")));
+        }
+        this.buf.extend_from_slice(&buf[..accept]);
 
         if !this.has_sent_header {
             this.has_sent_header = true;
             this.pending_write = Self::build_header();
             this.pending_offset = 0;
             match this.poll_flush_pending(cx) {
-                Poll::Ready(Ok(())) | Poll::Pending => return Poll::Ready(Ok(buf.len())),
+                Poll::Ready(Ok(())) | Poll::Pending => return Poll::Ready(Ok(accept)),
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             }
         }
@@ -136,11 +172,11 @@ impl AsyncWrite for RandomHeadConn {
         if this.raw_trans_recv {
             this.queue_buffered_payload();
             match this.poll_flush_pending(cx) {
-                Poll::Ready(Ok(())) | Poll::Pending => Poll::Ready(Ok(buf.len())),
+                Poll::Ready(Ok(())) | Poll::Pending => Poll::Ready(Ok(accept)),
                 Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             }
         } else {
-            Poll::Ready(Ok(buf.len()))
+            Poll::Ready(Ok(accept))
         }
     }
 
@@ -149,6 +185,11 @@ impl AsyncWrite for RandomHeadConn {
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.as_mut().get_mut();
+        match this.check_deadline(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending => return Poll::Pending,
+        }
         match this.poll_flush_pending(cx) {
             Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_flush(cx),
             other => other,
@@ -161,8 +202,134 @@ impl AsyncWrite for RandomHeadConn {
     ) -> Poll<Result<(), std::io::Error>> {
         let this = self.as_mut().get_mut();
         match this.poll_flush_pending(cx) {
-            Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_shutdown(cx),
+            Poll::Ready(Ok(())) => {
+                if !this.buf.is_empty() {
+                    return Poll::Ready(Err(drop_on_shutdown_error("random_head")));
+                }
+                Pin::new(&mut this.inner).poll_shutdown(cx)
+            }
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::poll_fn;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
+
+    #[tokio::test]
+    async fn shutdown_before_handshake_errors_instead_of_dropping_payload() {
+        let (client, mut server) = duplex(4096);
+        let mut conn = RandomHeadConn::new(Box::new(client));
+        let payload = vec![0x5a_u8; 2048];
+        conn.write_all(&payload).await.unwrap();
+        // Header reached the peer; application payload is still buffered.
+        let mut header = vec![0_u8; 256];
+        let n = server.read(&mut header).await.unwrap();
+        assert!(n > 0);
+        let err = conn.shutdown().await.expect_err("must not silent-drop");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("drop pre-handshake payload"));
+    }
+
+    #[tokio::test]
+    async fn handshake_then_payload_reaches_server_before_shutdown() {
+        let (client, mut server) = duplex(8192);
+        let mut conn = RandomHeadConn::new(Box::new(client));
+        let payload = b"post-handshake-payload".to_vec();
+        conn.write_all(&payload).await.unwrap();
+        let mut header = vec![0_u8; 256];
+        assert!(server.read(&mut header).await.unwrap() > 0);
+        // Complete camouflage, then drive client until buffered payload flushes.
+        server.write_all(&[0x00]).await.unwrap();
+        let mut sink = [0_u8; 32];
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            poll_fn(|cx| {
+                if conn.raw_trans_recv && conn.buf.is_empty() && conn.pending_write.is_empty() {
+                    return Poll::Ready(());
+                }
+                let mut buf = ReadBuf::new(&mut sink);
+                match Pin::new(&mut conn).poll_read(cx, &mut buf) {
+                    Poll::Pending => {
+                        if conn.raw_trans_recv
+                            && conn.buf.is_empty()
+                            && conn.pending_write.is_empty()
+                        {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Ok(())) => {
+                        if conn.raw_trans_recv
+                            && conn.buf.is_empty()
+                            && conn.pending_write.is_empty()
+                        {
+                            Poll::Ready(())
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Err(error)) => panic!("{error}"),
+                }
+            }),
+        )
+        .await
+        .expect("drive handshake + flush");
+        let mut got = vec![0_u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(1), server.read(&mut got))
+            .await
+            .expect("payload read")
+            .unwrap();
+        got.truncate(n);
+        assert_eq!(got, payload);
+        conn.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_handshake_buffer_applies_backpressure_then_times_out() {
+        // Large duplex so the camouflage header can flush; otherwise writes Pending
+        // until the handshake Sleep fires.
+        let (client, _server) = duplex(PRE_HANDSHAKE_BUF_MAX + 1024);
+        let mut conn = RandomHeadConn::new(Box::new(client));
+        let chunk = vec![0x11_u8; 16 * 1024];
+        let mut accepted = 0_usize;
+        loop {
+            let step = poll_fn(|cx| match Pin::new(&mut conn).poll_write(cx, &chunk) {
+                Poll::Pending => Poll::Ready(None),
+                Poll::Ready(outcome) => Poll::Ready(Some(outcome)),
+            })
+            .await;
+            match step {
+                None => break,
+                Some(Ok(n)) => {
+                    accepted += n;
+                    if accepted >= PRE_HANDSHAKE_BUF_MAX {
+                        break;
+                    }
+                }
+                Some(Err(error)) => panic!("unexpected write error before cap: {error}"),
+            }
+        }
+        assert!(accepted > 0);
+        assert!(conn.buf.len() <= PRE_HANDSHAKE_BUF_MAX);
+        assert!(
+            poll_fn(|cx| {
+                let ready = Pin::new(&mut conn).poll_write(cx, &chunk);
+                Poll::Ready(matches!(ready, Poll::Pending))
+            })
+            .await
+        );
+
+        crate::obfs::limits::force_deadline_elapsed(&mut conn.handshake_deadline);
+        let err = poll_fn(|cx| Pin::new(&mut conn).poll_write(cx, &chunk))
+            .await
+            .expect_err("deadline");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 }
