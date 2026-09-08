@@ -183,8 +183,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 | Phase 6G-D AnyTLS idle/heartbeat/recovery | Complete in declared client scope | Idle-session check/timeout floors and janitor matching Go, min-idle keep, HeartRequest→HeartResponse, dead-idle redial recovery, stress (`phase6g_anytls_idle.py`) |
 | Phase 6G-E AnyTLS Restls/ShadowTLS/JLS carriers | Complete in declared client scope | Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` parse + mutual exclusion; ShadowTLS + JLS dial replacing native TLS; url-test/healthcheck shares carrier dial (`phase6g_anytls_carriers.py`); Restls dial blocked on shared Restls TLS client transport (Go `restls-client-go` / utls fork; no Rust client) |
 | HY2-A Hysteria2 outbound TCP | Complete in declared client scope | Clash `type: hysteria2` parse (BBR when up/down unset via stock Quinn `BbrConfig`); HTTP/3 auth + custom QUIC TCP streams; TLS verify/skip; session reuse; groups/providers/health/reload; deferred knobs rejected; Go/Rust differential vs Go HY2 inbound (`phase_hy2a_hysteria2_tcp.py`) |
-| HY2-B Hysteria2 UDP/obfs/Brutal/hop | Complete in declared client scope | QUIC datagram UDP (bounded multi-packet reassembly), Salamander, up/down Brutal with Quinn 1.25× window compensation + rate differential (`phase_hy2b_brutal_rate.py`), stock BBR when unset, ports-only hop, udp-mtu-first fragment, handshake-timeout covers connect+auth; `cwnd`/`bbr-profile`/Gecko/Realm/ECH rejected; Go/Rust differential (`phase_hy2b_hysteria2.py`) |
-| HY2-C Hysteria2 stress/netem/soak | Complete in declared client scope | Concurrent TCP/UDP, cancel churn, authority restart + interrupt recovery, reload proxy-removal (404 + route + RSS/FD bounds), netem TCP success/throughput floors + after-netem TCP/UDP recovery **without** intentional reload. Diff: `phase_hy2c_hysteria2.py`. Soak harness `phase_hy2c_hysteria2_soak.py` (CI default 45s). **Full ≥2h soak passed** on `8a9b0761`. Realm/Gecko/ECH/0-RTT/v1/inbound still deferred |
+| HY2-B Hysteria2 UDP/obfs/Brutal/hop | Partial; Brutal experimental and deferred | UDP/Salamander/hop differential exists; current production target uses stock BBR with up/down omitted. Approximate Brutal remains in code/tests but precise pacing/parity and Quinn patch work are deferred by user. See 2026-09-08 readiness update; no production claim. |
+| HY2-C Hysteria2 stress/netem/soak | Production acceptance open | Stress/recovery differential passed locally with native samples. Historical permissive soak on `8a9b0761` is not current acceptance; strict short soak exposed UDP association-churn timeouts in Go and Rust. Strict long release soak and native platform evidence remain open. |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
@@ -6281,3 +6281,72 @@ Same draft PR #12. Bounded production gate and CI matrix closeout for outbound H
 
 Still deferred: Realm, Gecko, ECH, 0-RTT, Hysteria v1, inbound.
 
+## 2026-09-08 HY2 production-readiness evidence repair (in progress)
+
+Based on PR 12 `5d94e701`; **production readiness remains unverified**.
+The historical green/soak claims above do not substitute for the stricter gates
+introduced here.
+
+- macOS startup failures were sampled before Rust `main`, at `_dyld_start`,
+  while executing the Cargo binary from an external target volume. HY2 runners
+  now copy the exact binary into their private temporary fixture directory,
+  just like the Go oracle. Build output remains outside the repository. The
+  10-second startup deadline is unchanged. HY2-B passed both the diagnostic
+  staging trial and the implemented staging path; Brutal and the existing
+  120-second-per-engine smoke also passed with staging.
+- Added `phase_hy2a_tls.py`: trusted custom root succeeds with verification on;
+  wrong SNI and untrusted roots reject. Negative cases have an independent
+  successful control connection to the same authority. Go constructs proxy TLS
+  pools before applying global roots, so both engines bootstrap roots and reload
+  the proxy for this differential. Rust must additionally pass trusted cold
+  startup. All cases passed locally on macOS arm64.
+- Added native resource sampling through development-only `psutil==7.2.2`
+  (BSD-3-Clause, macOS/Linux RSS+FD and Windows RSS+handle APIs). The old macOS
+  FD helper returned `None` and treated missing evidence as bounded; both stress
+  and soak now fail missing measurements. No Rust runtime dependency was added.
+- Soak now records actual samples, attempt/failure counts and resource deltas.
+  Counted traffic requires zero failures. Sampling completeness must reach 80%
+  of the five-second schedule with no missing fields. RSS range is capped at
+  64 MiB and first-to-last-quarter median growth at 16 MiB. FD range/growth is
+  capped at 16/8 (Windows handle range/growth 64/32). These are acceptance budgets,
+  not proof of absence of every leak. Seven gate unit tests passed locally;
+  stress/recovery passed using real macOS samples.
+- First strict 120-second run **failed**: Rust 1 failure / 2508 operations,
+  Go 0 / 2671. Both had all 24 resource samples and remained within RSS/FD
+  budgets. This would have passed the old <=5% error classifier. Added bounded
+  per-failure protocol/time/exception evidence for diagnosis; no error tolerance
+  or network retry was added to the counted soak workload.
+- Second strict 120-second run also failed, now with diagnostic events: Rust
+  UDP receive timeout at churn 1028 (64.006s), 1/2505 operations; Go UDP receive
+  timeout at churn 244 (18.705s), 1/2633. Both passed all real resource budgets.
+  This is not evidence of a Rust-only defect: the current workload repeatedly
+  creates/destroys SOCKS UDP associations. Stable UDP-session traffic and
+  association-churn lifecycle need separate diagnosis before readiness can be
+  claimed. Keep these failures; do not replace them with a retry-until-green run.
+- CI now runs HY2 differentials with release binaries and includes the TLS and
+  gate tests. Optional dispatch `hysteria2_production=true` requires release
+  and >=7200 seconds per engine on each existing native platform, with a
+  six-hour job budget. These new remote runs have NOT been executed yet.
+
+Reproduction (install `compat/requirements-hy2.txt` into a test virtualenv):
+
+```sh
+python -m unittest discover -s compat/scripts -p test_hy2_gates.py
+PHASE_HY2A_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python compat/scripts/phase_hy2a_tls.py
+HY2C_SOAK_SECONDS=120 PHASE_HY2C_SOAK_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python compat/scripts/phase_hy2c_hysteria2_soak.py
+# Full production resource gate; approximately four hours plus build/setup:
+HY2_PRODUCTION_GATE=1 HY2_BUILD_PROFILE=release HY2C_SOAK_SECONDS=7200 PHASE_HY2C_SOAK_CARGO_TARGET=/Users/ren/data/rust-target/mihomo python compat/scripts/phase_hy2c_hysteria2_soak.py
+```
+
+Current open production target: **BBR outbound with both up/down omitted**.
+Normal proxy resolver/address failover, TCP/UDP lifecycle diagnosis, strict long
+soak, release/native-platform execution and full shared harness regression
+remain open. This narrower profile is not yet production ready.
+
+**User decision 2026-09-08:** defer independent Brutal pacing, bandwidth/loss
+parity and Quinn fork/vendor work. The maintenance-choice question is withdrawn;
+no fork is needed for the current BBR slice. Retain the existing approximate
+Brutal implementation/tests as experimental, without silently changing accepted
+configuration semantics. Its measured throughput discrepancy (Go 124669 vs
+Rust 81140 bytes/s at 125000 bytes/s configured) remains recorded for later,
+but no longer blocks the declared BBR-only production scope.

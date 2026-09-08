@@ -2969,3 +2969,17 @@ Go-compatible rejection evidence.
 
 Only this gate may consider a default-binary switch. It does not require deleting
 the Go oracle.
+
+### Hysteria2 priority update — 2026-09-08
+
+Per user decision, the current production-readiness slice is **BBR outbound**:
+omit both `up` and `down` for the declared client profile. Finish verified TLS,
+normal resolver/address-failover evidence, TCP/UDP lifecycle diagnosis, strict
+resource soak and native release acceptance. This scope is not yet production
+ready; narrowing it does not waive its remaining failures.
+
+Accurate Brutal pacing, loss compensation, bandwidth parity and any Quinn
+fork/vendor work are deferred to a later independent slice. Retain the existing
+approximate implementation and its regression evidence as experimental; do not
+advertise it as production-compatible or silently reinterpret its configuration
+as BBR. Existing Brutal regressions remain tests, not proof of BBR readiness.

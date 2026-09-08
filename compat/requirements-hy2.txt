@@ -1,0 +1,2 @@
+# Development-only native RSS / Unix FD / Windows handle measurements.
+psutil==7.2.2

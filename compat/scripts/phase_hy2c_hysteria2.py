@@ -38,7 +38,8 @@ from phase1 import (
 )
 from phase3 import launch, stop
 from phase4e2 import SERVER_CERTIFICATE, SERVER_KEY
-from phase5b1a import build_binaries, connect_domain, debug_files
+from phase5b1a import connect_domain, debug_files
+from hy2_support import build_binaries
 from phase5d_proxies import request
 from phase5d_streams import SECRET, wait_controller
 from phase6e_vless_tcp import rejected_exchange
@@ -95,28 +96,22 @@ def start_udp_echo() -> tuple[socketserver.ThreadingUDPServer, int]:
 
 
 def process_rss_kib(pid: int) -> int | None:
-    status = pathlib.Path(f"/proc/{pid}/status")
-    if status.exists():
-        for line in status.read_text().splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1])
+    import psutil
+
     try:
-        out = subprocess.check_output(
-            ["ps", "-o", "rss=", "-p", str(pid)], text=True, timeout=2
-        ).strip()
-        return int(out) if out else None
-    except (OSError, subprocess.SubprocessError, ValueError):
+        return psutil.Process(pid).memory_info().rss // 1024
+    except psutil.Error:
         return None
 
 
 def process_fd_count(pid: int) -> int | None:
-    fd_dir = pathlib.Path(f"/proc/{pid}/fd")
-    if fd_dir.exists():
-        try:
-            return len(list(fd_dir.iterdir()))
-        except OSError:
-            return None
-    return None
+    import psutil
+
+    try:
+        process = psutil.Process(pid)
+        return process.num_handles() if os.name == "nt" else process.num_fds()
+    except psutil.Error:
+        return None
 
 
 def throughput_class(bytes_per_sec: float) -> str:
@@ -644,10 +639,10 @@ def exercise(
         rss_end = process_rss_kib(process.pid)
         fd_end = process_fd_count(process.pid)
 
-        rss_bounded = True
+        rss_bounded = False
         if rss_start is not None and rss_end is not None and rss_start > 0:
             rss_bounded = rss_end < rss_start * 8 + 256_000
-        fd_bounded = True
+        fd_bounded = False
         if fd_start is not None and fd_end is not None and fd_start > 0:
             fd_bounded = fd_end < fd_start + 256
 

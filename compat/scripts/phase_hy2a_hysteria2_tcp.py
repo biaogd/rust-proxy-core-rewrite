@@ -28,7 +28,8 @@ from phase1 import (
 )
 from phase3 import launch, stop
 from phase4e2 import ROOT_CERTIFICATE, SERVER_CERTIFICATE, SERVER_KEY
-from phase5b1a import build_binaries, connect_domain, debug_files
+from phase5b1a import connect_domain, debug_files
+from hy2_support import build_binaries
 from phase5d_proxies import request
 from phase5d_streams import SECRET, wait_controller
 from phase6e_vless_tcp import rejected_exchange

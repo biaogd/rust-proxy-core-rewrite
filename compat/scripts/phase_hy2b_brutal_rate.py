@@ -28,7 +28,8 @@ from phase1 import (
     wait_ready,
 )
 from phase3 import launch, stop
-from phase5b1a import build_binaries, connect_domain, debug_files
+from phase5b1a import connect_domain, debug_files
+from hy2_support import build_binaries
 from phase5d_streams import SECRET, wait_controller
 from phase_hy2b_hysteria2 import hy2_record, start_authority
 
