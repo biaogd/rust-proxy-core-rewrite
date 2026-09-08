@@ -250,15 +250,18 @@ impl Defragger {
         }
     }
 
-    fn evict_oldest(&mut self) {
-        while self.packets.len() >= MAX_DEFRAG_PACKETS || self.size > MAX_DEFRAG_BYTES {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(item) = self.packets.remove(&oldest) {
-                self.size = self.size.saturating_sub(item.size);
-            }
+    /// Evict a single oldest incomplete assembly. Always removes one entry when
+    /// the order queue is non-empty (callers that need room must not spin on a
+    /// no-op when `size` is under the byte cap but `size + incoming` would
+    /// exceed it).
+    fn evict_one_oldest(&mut self) -> bool {
+        let Some(oldest) = self.order.pop_front() else {
+            return false;
+        };
+        if let Some(item) = self.packets.remove(&oldest) {
+            self.size = self.size.saturating_sub(item.size);
         }
+        true
     }
 
     /// Feed a (possibly fragmented) message. Returns the fully reassembled
@@ -289,14 +292,15 @@ impl Defragger {
         if self.packets.contains_key(&packet_id) {
             self.touch(packet_id);
         } else {
-            // Reserve room before inserting a new assembly.
+            // Reserve room before inserting a new assembly. Each iteration must
+            // make progress (evict one) or reject — otherwise
+            // `size + incoming > MAX` with `size <= MAX` spins forever.
             while self.packets.len() >= MAX_DEFRAG_PACKETS
                 || self.size.saturating_add(m.data.len()) > MAX_DEFRAG_BYTES
             {
-                if self.order.is_empty() {
+                if !self.evict_one_oldest() {
                     return None;
                 }
-                self.evict_oldest();
             }
             self.packets
                 .insert(packet_id, PacketAssembly::new(m.frag_count, now));
@@ -399,8 +403,11 @@ impl UdpSessionManager {
             conn: self.conn.clone(),
             rx,
             defrag: Defragger::default(),
-            mgr: Arc::downgrade(self),
+            // Strong ref: keeps the manager (and its channel senders / receive
+            // loop) alive after `Client::open_udp` drops a non-reused Session.
+            mgr: Arc::clone(self),
             udp_mtu: udp_mtu.clamp(64, MAX_UDP_SIZE),
+            session_owner: None,
         })
     }
 
@@ -454,11 +461,21 @@ pub struct UdpSession {
     conn: quinn::Connection,
     rx: mpsc::Receiver<UdpMessage>,
     defrag: Defragger,
-    mgr: Weak<UdpSessionManager>,
+    /// Strong manager ownership so channel senders stay alive after a
+    /// non-reused [`crate::Session`] handle is dropped.
+    mgr: Arc<UdpSessionManager>,
     udp_mtu: usize,
+    /// Optional owner (typically the [`crate::Session`]) retained by
+    /// [`crate::Client::open_udp`] for `disable-reuse` dials.
+    session_owner: Option<Box<dyn Send + Sync>>,
 }
 
 impl UdpSession {
+    /// Retain an owner object for the lifetime of this UDP session.
+    pub(crate) fn retain_owner(&mut self, owner: impl Send + Sync + 'static) {
+        self.session_owner = Some(Box::new(owner));
+    }
+
     /// The Session ID assigned by the client.
     #[must_use]
     pub fn id(&self) -> u32 {
@@ -534,9 +551,7 @@ impl UdpSession {
 
 impl Drop for UdpSession {
     fn drop(&mut self) {
-        if let Some(mgr) = self.mgr.upgrade() {
-            mgr.remove(self.id);
-        }
+        self.mgr.remove(self.id);
     }
 }
 
@@ -661,6 +676,34 @@ mod tests {
         assert!(d.packets.len() <= MAX_DEFRAG_PACKETS);
         assert!(!d.packets.contains_key(&1));
         assert!(d.packets.contains_key(&0xBEEF));
+    }
+
+    #[test]
+    fn defrag_near_byte_cap_new_packet_returns_without_hanging() {
+        // Regression: size under MAX but size+incoming over MAX used to spin
+        // forever because eviction only ran when size was already over MAX.
+        let mut d = Defragger::default();
+        const PACKETS: usize = 17;
+        let chunk = 4_194_000 / PACKETS;
+        assert!(chunk * PACKETS <= MAX_DEFRAG_BYTES);
+        assert!(chunk * PACKETS + 1000 > MAX_DEFRAG_BYTES);
+        for packet_id in 1..=PACKETS as u16 {
+            let m = msg(&vec![0xA; chunk], 0, 2, packet_id);
+            assert!(d.feed(m).is_none());
+        }
+        assert_eq!(d.packets.len(), PACKETS);
+        assert_eq!(d.size, chunk * PACKETS);
+
+        // Must return (reject or evict+accept). A hang here is the bug.
+        let started = Instant::now();
+        let out = d.feed(msg(&vec![0xB; 1000], 0, 2, 0xBEEF));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "defrag feed hung under near-cap eviction"
+        );
+        assert!(out.is_none());
+        assert!(d.size <= MAX_DEFRAG_BYTES);
+        assert!(d.packets.len() <= MAX_DEFRAG_PACKETS);
     }
 
     #[test]

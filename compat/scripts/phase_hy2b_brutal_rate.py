@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """HY2-B Brutal send-rate differential (Go vs Rust).
 
-Echo success alone is not Brutal parity. With a low configured `up` and enough
-RTT that Quinn's window-derived pacer can express the rate (queued delay relay),
-both stacks must keep measured TCP goodput near the configured rate — not race
-to line rate.
+Measures sustained **unidirectional client upload** at a TCP sink (no echo
+return path). Server bandwidth is set high and numeric so the observed cap
+cannot be blamed on server send limits or `CC-RX: auto` → BBR.
 
-Quinn lacks Go's independent Brutal pacer; Rust approximates via a
-1.25-compensated congestion window (documented in congestion.rs). This gate
-fails if either side is uncapped or starved.
+Positive case: client `up: 1 Mbps` must stay near the configured rate.
+Negative control: client without `up` must be **uncapped** on the same path —
+if that control is misclassified as capped, the assertion is not client-side.
 """
 
 from __future__ import annotations
@@ -17,18 +16,15 @@ import json
 import pathlib
 import select
 import socket
+import socketserver
 import tempfile
 import threading
 import time
 from typing import Any
 
 from phase1 import (
-    EchoHandler,
-    IO_DEADLINE,
     ROOT,
-    recv_exact,
     reserve_port,
-    start_server,
     wait_ready,
 )
 from phase3 import launch, stop
@@ -39,19 +35,62 @@ from phase_hy2b_hysteria2 import hy2_record, start_authority
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-hy2b-brutal-rate-diff.json"
 PASSWORD = "phase-hy2b-password"  # must match phase_hy2b_hysteria2.PASSWORD
-# 1 Mbps with ~25 ms one-way queued delay → RTT ~50 ms; window ≫ MTU.
 UP = "1 Mbps"
 UP_BPS = 1_000_000 / 8  # bytes/sec
-DOWN = "10 Mbps"
-PAYLOAD = b"B" * 32_768
-ROUNDS = 12
+# High numeric server Rx keeps the client on Brutal (avoids CC-RX: auto → BBR)
+# without becoming the upload bottleneck for a 1 Mbps client `up`.
+SERVER_BW = "100 Mbps"
+CLIENT_DOWN = "100 Mbps"
+# ~25 ms one-way queued delay → RTT ~50 ms; Quinn window ≫ MTU for 1 Mbps.
 RELAY_DELAY_MS = 25.0
-CAP_MULTIPLIER = 4.0
-MIN_GOODPUT_FRACTION = 0.10
+# Measure time for the sink to receive this many bytes (steady unidirectional).
+MEASURE_BYTES = 256_000  # ~2.05 s at 1 Mbps
+CHUNK = b"U" * 16_384
+# Tight band around configured rate (not 0.1–4×).
+CAP_MAX_MULTIPLIER = 2.0
+CAP_MIN_FRACTION = 0.40
+# Negative control must clearly exceed the configured Brutal rate.
+UNCAP_MIN_MULTIPLIER = 3.0
+MEASURE_TIMEOUT = 30.0
+
+
+class CountingSinkHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        self.request.settimeout(60.0)
+        server = self.server
+        assert isinstance(server, CountingSinkServer)
+        try:
+            while True:
+                data = self.request.recv(65_536)
+                if not data:
+                    break
+                with server.lock:
+                    server.bytes_received += len(data)
+                    server.progress.notify_all()
+        except OSError:
+            pass
+
+
+class CountingSinkServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+    def __init__(self, address: tuple[str, int]) -> None:
+        super().__init__(address, CountingSinkHandler)
+        self.lock = threading.Lock()
+        self.progress = threading.Condition(self.lock)
+        self.bytes_received = 0
+
+
+def start_sink() -> tuple[CountingSinkServer, int]:
+    server = CountingSinkServer(("127.0.0.1", 0))
+    port = int(server.server_address[1])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
 
 
 class QueuedDelayRelay:
-    """Per-packet delay without blocking the receive loop (unlike sleep-per-forward)."""
+    """Per-packet delay without blocking the receive loop."""
 
     def __init__(self, listen_port: int, target_port: int, delay_ms: float) -> None:
         self.listen_port = listen_port
@@ -103,47 +142,98 @@ class QueuedDelayRelay:
             upstream.close()
 
 
-def rate_class(measured_bps: float) -> str:
+def rate_class(measured_bps: float, *, expect_capped: bool) -> str:
     if measured_bps <= 0:
         return "starved"
-    if measured_bps > UP_BPS * CAP_MULTIPLIER:
+    if expect_capped:
+        if measured_bps > UP_BPS * CAP_MAX_MULTIPLIER:
+            return "uncapped"
+        if measured_bps < UP_BPS * CAP_MIN_FRACTION:
+            return "starved"
+        return "capped"
+    if measured_bps >= UP_BPS * UNCAP_MIN_MULTIPLIER:
         return "uncapped"
-    if measured_bps < UP_BPS * MIN_GOODPUT_FRACTION:
-        return "starved"
-    return "capped"
+    return "still-capped"
 
 
-def measure_upload(mixed_port: int, echo_port: int) -> dict[str, Any]:
-    ok = 0
-    started = time.monotonic()
-    for _ in range(ROUNDS):
+def measure_unidirectional_upload(
+    mixed_port: int, sink: CountingSinkServer, sink_port: int
+) -> dict[str, Any]:
+    """Time how long the sink needs to receive MEASURE_BYTES (client upload)."""
+    stop = threading.Event()
+    send_error: list[BaseException] = []
+
+    def sender() -> None:
         try:
-            with connect_domain(mixed_port, "127.0.0.1", echo_port) as stream:
-                stream.settimeout(max(IO_DEADLINE, 30.0))
-                stream.sendall(PAYLOAD)
-                if recv_exact(stream, len(PAYLOAD)) == PAYLOAD:
-                    ok += 1
-        except (AssertionError, EOFError, OSError, TimeoutError):
-            continue
-    elapsed = max(time.monotonic() - started, 1e-3)
-    measured = (ok * len(PAYLOAD)) / elapsed
+            with connect_domain(mixed_port, "127.0.0.1", sink_port) as stream:
+                stream.settimeout(MEASURE_TIMEOUT + 5.0)
+                while not stop.is_set():
+                    try:
+                        stream.sendall(CHUNK)
+                    except (BrokenPipeError, ConnectionResetError, OSError, TimeoutError):
+                        break
+                try:
+                    stream.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+        except BaseException as error:  # noqa: BLE001 — surface to waiter
+            send_error.append(error)
+
+    with sink.lock:
+        sink.bytes_received = 0
+
+    thread = threading.Thread(target=sender, daemon=True)
+    thread.start()
+    try:
+        # Wait until the first byte reaches the sink (path ready), then mark.
+        deadline = time.monotonic() + MEASURE_TIMEOUT
+        with sink.progress:
+            while sink.bytes_received < 1:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("sink received no upload bytes")
+                sink.progress.wait(timeout=min(0.5, remaining))
+
+            baseline = sink.bytes_received
+            started = time.monotonic()
+            target = baseline + MEASURE_BYTES
+            while sink.bytes_received < target:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"sink only reached {sink.bytes_received - baseline} "
+                        f"of {MEASURE_BYTES} bytes"
+                    )
+                sink.progress.wait(timeout=min(0.5, remaining))
+            elapsed = max(time.monotonic() - started, 1e-3)
+            received = sink.bytes_received - baseline
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+
+    if send_error:
+        raise send_error[0]
+
     return {
-        "rounds-ok": ok,
-        "rounds": ROUNDS,
-        "measured-bps": int(measured),
+        "sink-bytes": received,
+        "elapsed-secs": round(elapsed, 3),
+        "measured-bps": int(received / elapsed),
         "configured-up-bps": int(UP_BPS),
-        "rate-class": rate_class(measured),
     }
 
 
-def wait_exchange(process, mixed_port: int, echo_port: int, payload: bytes) -> None:
+def wait_upload(process, mixed_port: int, sink_port: int, nbytes: int = 4096) -> None:
     deadline = time.monotonic() + 25.0
+    payload = b"w" * nbytes
     while True:
         try:
-            with connect_domain(mixed_port, "127.0.0.1", echo_port) as stream:
+            with connect_domain(mixed_port, "127.0.0.1", sink_port) as stream:
                 stream.settimeout(10.0)
                 stream.sendall(payload)
-                assert recv_exact(stream, len(payload)) == payload
+                try:
+                    stream.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
             return
         except (AssertionError, EOFError, OSError, TimeoutError):
             if process.poll() is not None or time.monotonic() >= deadline:
@@ -155,18 +245,22 @@ def exercise(
     binary: pathlib.Path,
     authority_binary: pathlib.Path,
     scratch: pathlib.Path,
+    *,
+    client_brutal: bool,
 ) -> dict[str, Any]:
-    echo = start_server(EchoHandler)
+    sink, sink_port = start_sink()
     authority_port = reserve_port()
     front_port = reserve_port()
     authority_scratch = scratch / "authority"
     authority_scratch.mkdir()
+    # High server up/down: numeric CC-RX (not auto) so client Brutal stays on,
+    # without a 1 Mbps return/receive bottleneck on the upload path.
     authority, a_out, a_err = start_authority(
         authority_binary,
         authority_scratch,
         authority_port,
-        up=UP,
-        down=DOWN,
+        up=SERVER_BW,
+        down=SERVER_BW,
     )
     time.sleep(0.4)
     if authority.poll() is not None:
@@ -176,6 +270,10 @@ def exercise(
     relay.start()
     mixed_port, controller_port = reserve_port(), reserve_port()
     config = scratch / "config.yaml"
+    up = UP if client_brutal else None
+    # Client `down` must be >0 so the server does not reply CC-RX: auto
+    # (sing-quic sets RxAuto when request.Rx==0).
+    down = CLIENT_DOWN
     config.write_text(
         f"""mixed-port: {mixed_port}
 external-controller: 127.0.0.1:{controller_port}
@@ -184,7 +282,7 @@ mode: rule
 log-level: info
 ipv6: true
 proxies:
-{hy2_record("hy2", front_port, password=PASSWORD, up=UP, down=DOWN)}proxy-groups:
+{hy2_record("hy2", front_port, password=PASSWORD, up=up, down=down)}proxy-groups:
   - name: hy2-select
     type: select
     proxies: [hy2]
@@ -197,14 +295,16 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_controller(process, controller_port)
-        wait_exchange(process, mixed_port, echo.port, b"warm")
+        wait_upload(process, mixed_port, sink_port)
         time.sleep(0.3)
-        measured = measure_upload(mixed_port, echo.port)
-        return {
-            **measured,
-            "process-alive": process.poll() is None,
-            "relay-delay-ms": RELAY_DELAY_MS,
-        }
+        measured = measure_unidirectional_upload(mixed_port, sink, sink_port)
+        measured["rate-class"] = rate_class(
+            float(measured["measured-bps"]), expect_capped=client_brutal
+        )
+        measured["client-brutal"] = client_brutal
+        measured["process-alive"] = process.poll() is None
+        measured["relay-delay-ms"] = RELAY_DELAY_MS
+        return measured
     finally:
         for stopper in (
             lambda: stop(process),
@@ -219,7 +319,8 @@ rules:
         stderr.close()
         a_out.close()
         a_err.close()
-        echo.close()
+        sink.shutdown()
+        sink.server_close()
 
 
 def main() -> int:
@@ -231,18 +332,38 @@ def main() -> int:
         )
         try:
             for engine in ("rust", "go"):
-                scratch = root / engine
-                scratch.mkdir()
-                observations[engine] = exercise(
-                    binaries[engine], binaries["go"], scratch
-                )
-                if observations[engine]["rate-class"] != "capped":
+                profiles: dict[str, Any] = {}
+                for name, brutal in (("capped", True), ("negative-uncapped", False)):
+                    scratch = root / engine / name
+                    scratch.mkdir(parents=True)
+                    profiles[name] = exercise(
+                        binaries[engine],
+                        binaries["go"],
+                        scratch,
+                        client_brutal=brutal,
+                    )
+                if profiles["capped"]["rate-class"] != "capped":
                     raise AssertionError(
-                        f"{engine} Brutal rate class "
-                        f"{observations[engine]['rate-class']!r} "
-                        f"(measured={observations[engine]['measured-bps']} "
+                        f"{engine} Brutal capped class "
+                        f"{profiles['capped']['rate-class']!r} "
+                        f"(measured={profiles['capped']['measured-bps']} "
                         f"configured={int(UP_BPS)})"
                     )
+                if profiles["negative-uncapped"]["rate-class"] != "uncapped":
+                    raise AssertionError(
+                        f"{engine} negative control must be uncapped without "
+                        f"client up; got {profiles['negative-uncapped']['rate-class']!r} "
+                        f"(measured={profiles['negative-uncapped']['measured-bps']})"
+                    )
+                observations[engine] = {
+                    "capped-class": profiles["capped"]["rate-class"],
+                    "negative-class": profiles["negative-uncapped"]["rate-class"],
+                    "capped-bps": profiles["capped"]["measured-bps"],
+                    "negative-bps": profiles["negative-uncapped"]["measured-bps"],
+                    "process-alive": profiles["capped"]["process-alive"]
+                    and profiles["negative-uncapped"]["process-alive"],
+                    "detail": profiles,
+                }
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
@@ -259,11 +380,13 @@ def main() -> int:
             raise
 
     go = {
-        "rate-class": observations["go"]["rate-class"],
+        "capped-class": observations["go"]["capped-class"],
+        "negative-class": observations["go"]["negative-class"],
         "process-alive": observations["go"]["process-alive"],
     }
     rust = {
-        "rate-class": observations["rust"]["rate-class"],
+        "capped-class": observations["rust"]["capped-class"],
+        "negative-class": observations["rust"]["negative-class"],
         "process-alive": observations["rust"]["process-alive"],
     }
     if go != rust:

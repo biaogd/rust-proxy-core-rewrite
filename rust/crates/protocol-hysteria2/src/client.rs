@@ -199,8 +199,12 @@ pub struct Client {
     options: ClientOptions,
     session: Mutex<Option<Session>>,
     endpoint: Mutex<Option<quinn::Endpoint>>,
-    /// Shared across endpoint rebuilds when Brutal is active.
-    brutal: Option<BrutalControl>,
+    /// When Brutal is enabled, dial installs a fresh control into this slot
+    /// before `connect` so each QUIC connection gets independent negotiation.
+    brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
+    /// Serializes Brutal slot install + connect so concurrent disable-reuse
+    /// dials cannot steal each other's controls.
+    brutal_dial: Mutex<()>,
 }
 
 impl Client {
@@ -213,11 +217,8 @@ impl Client {
                 "salamander password must be at least {MIN_PSK_LEN} bytes"
             )));
         }
-        let brutal = if options.up_bps > 0 {
-            Some((
-                Arc::new(AtomicU64::new(options.up_bps)),
-                Arc::new(AtomicBool::new(false)),
-            ))
+        let brutal_next = if options.up_bps > 0 {
+            Some(Arc::new(std::sync::Mutex::new(None)))
         } else {
             None
         };
@@ -225,7 +226,8 @@ impl Client {
             options,
             session: Mutex::new(None),
             endpoint: Mutex::new(None),
-            brutal,
+            brutal_next,
+            brutal_dial: Mutex::new(()),
         })
     }
 
@@ -264,7 +266,10 @@ impl Client {
     /// Returns dial/auth failures or when the server disabled UDP.
     pub async fn open_udp(&self) -> Result<UdpSession, Hysteria2ProtocolError> {
         let session = self.offer_session().await?;
-        session.open_udp()
+        let mut udp = session.open_udp()?;
+        // Keep the Session (and thus QUIC + manager) alive for disable-reuse.
+        udp.retain_owner(session);
+        Ok(udp)
     }
 
     /// Forces the next dial to open a fresh QUIC session.
@@ -322,12 +327,34 @@ impl Client {
     }
 
     async fn dial_session_inner(&self) -> Result<Session, Hysteria2ProtocolError> {
+        // Hold across install+connect so concurrent dials cannot swap controls.
+        let brutal_dial_guard = if self.brutal_next.is_some() {
+            Some(self.brutal_dial.lock().await)
+        } else {
+            None
+        };
+
+        // Fresh Brutal controls per dial — do not inherit a prior connection's
+        // CC-RX: auto flip or clamped rate.
+        let brutal = self.brutal_next.as_ref().map(|slot| {
+            let control = (
+                Arc::new(AtomicU64::new(self.options.up_bps)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(control.clone());
+            control
+        });
+
         let (canonical, hop) = resolve_endpoint(&self.options).await?;
         let endpoint = self.endpoint(canonical, hop).await?;
         let connecting = endpoint.connect(canonical, &self.options.tls.server_name)?;
         let connection = connecting
             .await
             .map_err(|error| Hysteria2ProtocolError::Quinn(format!("handshake failed: {error}")))?;
+        // Slot consumed by the congestion factory during connect; release dial lock.
+        drop(brutal_dial_guard);
 
         // Close the QUIC connection if auth / post-setup is cancelled (timeout
         // drop) or fails — Quinn does not CONNECTION_CLOSE on handle drop.
@@ -341,12 +368,18 @@ impl Client {
         .await
         .map_err(|error| Hysteria2ProtocolError::Protocol(format!("auth failed: {error}")))?;
 
-        if let Some((rate, use_bbr)) = &self.brutal {
+        if let Some((rate, use_bbr)) = &brutal {
+            // Apply the full negotiation outcome for this connection only.
             if auth.rx_auto {
                 use_bbr.store(true, Ordering::Relaxed);
-            } else if auth.rx > 0 {
-                let clamped = self.options.up_bps.min(auth.rx);
-                rate.store(clamped, Ordering::Relaxed);
+            } else {
+                use_bbr.store(false, Ordering::Relaxed);
+                if auth.rx > 0 {
+                    rate.store(self.options.up_bps.min(auth.rx), Ordering::Relaxed);
+                } else {
+                    // Server advertised no numeric Rx — keep configured up.
+                    rate.store(self.options.up_bps, Ordering::Relaxed);
+                }
             }
         }
 
@@ -367,7 +400,7 @@ impl Client {
                 udp_enabled: auth.udp_enabled,
                 udp,
                 udp_mtu,
-                brutal: self.brutal.clone(),
+                brutal,
             }),
         })
     }
@@ -381,7 +414,7 @@ impl Client {
         if let Some(endpoint) = guard.as_ref() {
             return Ok(endpoint.clone());
         }
-        let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal.clone())?;
+        let endpoint = build_endpoint(&self.options, canonical, hop, self.brutal_next.clone())?;
         *guard = Some(endpoint.clone());
         Ok(endpoint)
     }
@@ -391,7 +424,7 @@ fn build_endpoint(
     options: &ClientOptions,
     canonical: SocketAddr,
     hop: Option<HopConfig>,
-    brutal: Option<BrutalControl>,
+    brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
 ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
     let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let mut roots = RootCertStore::empty();
@@ -453,9 +486,12 @@ fn build_endpoint(
     transport.datagram_receive_buffer_size(Some(MAX_DATAGRAM_FRAME_SIZE * 1024));
     transport.datagram_send_buffer_size(MAX_DATAGRAM_FRAME_SIZE * 1024);
 
-    match brutal {
-        Some((rate, use_bbr)) => {
-            transport.congestion_controller_factory(Arc::new(SwitchableFactory { rate, use_bbr }));
+    match brutal_next {
+        Some(next) => {
+            transport.congestion_controller_factory(Arc::new(SwitchableFactory {
+                up_bps: options.up_bps,
+                next,
+            }));
         }
         None => {
             transport.congestion_controller_factory(Arc::new(BbrConfig::default()));

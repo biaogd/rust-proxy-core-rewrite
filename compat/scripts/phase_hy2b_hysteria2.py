@@ -108,6 +108,7 @@ def hy2_record(
     ports: str | None = None,
     hop_interval: str | None = None,
     udp_mtu: int | None = None,
+    disable_reuse: bool = False,
 ) -> str:
     lines = [
         f"  - name: {name}",
@@ -120,6 +121,8 @@ def hy2_record(
         f"    skip-cert-verify: {'true' if skip_verify else 'false'}",
         "    udp: true",
     ]
+    if disable_reuse:
+        lines.append("    disable-reuse: true")
     if salamander:
         lines.append("    obfs: salamander")
         lines.append(f"    obfs-password: {obfs_password}")
@@ -314,6 +317,7 @@ def exercise_profile(
     salamander: bool,
     brutal: bool,
     hop: bool,
+    disable_reuse: bool = False,
 ) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     udp_echo, udp_port = start_udp_echo()
@@ -373,6 +377,7 @@ proxies:
     ports=ports_yaml,
     hop_interval=hop_interval,
     udp_mtu=800 if salamander else None,
+    disable_reuse=disable_reuse,
 )}
 proxy-groups:
   - name: hy2-select
@@ -430,7 +435,17 @@ rules:
                     )
                     response, _ = datagram.recvfrom(65_535)
                     _, _, body = decode_socks_udp(response)
-                    concurrent = tcp_part and body == b"keep-udp"
+                    # Second UDP after TCP: disable-reuse must not have dropped
+                    # the association when the dial Session handle was released.
+                    datagram.sendto(
+                        socks_udp_packet("127.0.0.1", udp_port, b"still-udp"),
+                        ("127.0.0.1", bind_port),
+                    )
+                    response2, _ = datagram.recvfrom(65_535)
+                    _, _, body2 = decode_socks_udp(response2)
+                    concurrent = (
+                        tcp_part and body == b"keep-udp" and body2 == b"still-udp"
+                    )
                 except (
                     AssertionError,
                     BrokenPipeError,
@@ -558,6 +573,15 @@ def main() -> int:
                     (
                         "salamander-brutal",
                         {"salamander": True, "brutal": True, "hop": False},
+                    ),
+                    (
+                        "disable-reuse",
+                        {
+                            "salamander": False,
+                            "brutal": False,
+                            "hop": False,
+                            "disable_reuse": True,
+                        },
                     ),
                 ):
                     scratch = root / engine / name

@@ -35,7 +35,7 @@
 use std::{
     any::Any,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -326,21 +326,34 @@ impl Controller for SwitchableController {
     }
 }
 
-/// Factory for [`SwitchableController`]. `rate` drives Brutal; flipping
-/// `use_bbr` hands the window over to BBR.
+/// Factory for [`SwitchableController`]. Each QUIC connection gets a fresh
+/// rate / BBR-switch pair (taken from [`Self::next`] when dial installs one,
+/// otherwise created from [`Self::up_bps`]) so redials do not inherit a prior
+/// connection's `CC-RX: auto` or clamped rate.
 pub(crate) struct SwitchableFactory {
-    pub rate: Arc<AtomicU64>,
-    pub use_bbr: Arc<AtomicBool>,
+    pub up_bps: u64,
+    pub next: Arc<Mutex<Option<BrutalControl>>>,
 }
 
 impl ControllerFactory for SwitchableFactory {
     fn build(self: Arc<Self>, now: Instant, current_mtu: u16) -> Box<dyn Controller> {
-        let brutal = Brutal::new(self.rate.clone(), current_mtu);
+        let (rate, use_bbr) = self
+            .next
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                (
+                    Arc::new(AtomicU64::new(self.up_bps)),
+                    Arc::new(AtomicBool::new(false)),
+                )
+            });
+        let brutal = Brutal::new(rate, current_mtu);
         let bbr = Arc::new(BbrConfig::default()).build(now, current_mtu);
         Box::new(SwitchableController {
             brutal,
             bbr,
-            use_bbr: self.use_bbr.clone(),
+            use_bbr,
         })
     }
 }
