@@ -1,7 +1,8 @@
-//! SSR obfs plugins (SSR-A: `plain`; SSR-B: http_* + tls1.2_ticket_* camouflage).
+//! SSR obfs plugins (SSR-A: `plain`; SSR-B: http_* + tls1.2_ticket_*; SSR-C: `random_head`).
 
 mod http;
 mod plain;
+mod random_head;
 mod tls12_ticket;
 
 use rewrite_io::BoxedStream;
@@ -55,18 +56,26 @@ pub(crate) fn wrap(
                 ctx.stream_key.to_vec(),
             )))
         }
+        "random_head" => {
+            if !ctx.obfs_param.is_empty() {
+                return Err(ShadowsocksRProtocolError::Configuration(
+                    "obfs-param is not accepted for SSR obfs `random_head`".into(),
+                ));
+            }
+            Ok(Box::new(random_head::RandomHeadConn::new(stream)))
+        }
         other => Err(ShadowsocksRProtocolError::Obfs(format!(
-            "{other} (SSR-B implements plain / http_simple / http_post / tls1.2_ticket_auth / tls1.2_ticket_fastauth only)"
+            "{other} (SSR-C implements plain / http_simple / http_post / tls1.2_ticket_auth / tls1.2_ticket_fastauth / random_head)"
         ))),
     }
 }
 
 pub(crate) fn overhead(name: &str) -> Result<usize, ShadowsocksRProtocolError> {
     match name {
-        "plain" | "http_simple" | "http_post" => Ok(0),
+        "plain" | "http_simple" | "http_post" | "random_head" => Ok(0),
         "tls1.2_ticket_auth" | "tls1.2_ticket_fastauth" => Ok(5),
         other => Err(ShadowsocksRProtocolError::Obfs(format!(
-            "{other} (SSR-B implements plain / http_simple / http_post / tls1.2_ticket_auth / tls1.2_ticket_fastauth only)"
+            "{other} (SSR-C implements plain / http_simple / http_post / tls1.2_ticket_auth / tls1.2_ticket_fastauth / random_head)"
         ))),
     }
 }

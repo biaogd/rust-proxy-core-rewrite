@@ -1,4 +1,5 @@
-//! `ShadowsocksR` outbound protocol (SSR-A/B: origin + `auth_aes128` + plain/http/`tls1.2_ticket` camouflage).
+//! `ShadowsocksR` outbound protocol (SSR-A/B/C: origin, `auth_aes128_*`, `auth_sha1_v4`,
+//! `auth_chain_*`, plus plain/http/`tls1.2_ticket`/`random_head` camouflage).
 //!
 //! Layering (innermost → network):
 //! address+data → protocol encode → stream cipher → obfs → TCP.

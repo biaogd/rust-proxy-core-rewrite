@@ -95,3 +95,55 @@ pub(crate) fn trapezoid_random(max: i32, d: f64) -> i32 {
     }
     (base * f64::from(max)) as i32
 }
+
+/// IEEE CRC-32 (`hash/crc32` ChecksumIEEE).
+pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
+    crc32fast::hash(data)
+}
+
+/// Adler-32 checksum (`hash/adler32`).
+pub(crate) fn adler32_checksum(data: &[u8]) -> u32 {
+    adler2::adler32_slice(data)
+}
+
+/// XorShift128+ PRNG matching Go `tools.XorShift128Plus`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct XorShift128Plus {
+    s: [u64; 2],
+}
+
+impl XorShift128Plus {
+    pub(crate) fn next(&mut self) -> u64 {
+        let mut x = self.s[0];
+        let y = self.s[1];
+        self.s[0] = y;
+        x ^= x << 23;
+        x ^= y ^ (x >> 17) ^ (y >> 26);
+        self.s[1] = x;
+        x.wrapping_add(y)
+    }
+
+    pub(crate) fn init_from_bin(&mut self, bin: &[u8]) {
+        let mut full = [0_u8; 16];
+        let n = bin.len().min(16);
+        full[..n].copy_from_slice(&bin[..n]);
+        self.s[0] = u64::from_le_bytes(full[0..8].try_into().expect("8 bytes"));
+        self.s[1] = u64::from_le_bytes(full[8..16].try_into().expect("8 bytes"));
+    }
+
+    /// Init from a **copy** of `bin` with `length` written as u16 LE at offset 0, then 4× `Next`.
+    ///
+    /// HMAC-MD5 inputs are always 16 bytes; shorter bins are zero-padded like Go.
+    pub(crate) fn init_from_bin_and_length(&mut self, bin: &[u8], length: usize) {
+        let mut full = [0_u8; 16];
+        let n = bin.len().min(16);
+        full[..n].copy_from_slice(&bin[..n]);
+        let len_u16 = u16::try_from(length).unwrap_or(u16::MAX);
+        full[0..2].copy_from_slice(&len_u16.to_le_bytes());
+        self.s[0] = u64::from_le_bytes(full[0..8].try_into().expect("8 bytes"));
+        self.s[1] = u64::from_le_bytes(full[8..16].try_into().expect("8 bytes"));
+        for _ in 0..4 {
+            let _ = self.next();
+        }
+    }
+}
