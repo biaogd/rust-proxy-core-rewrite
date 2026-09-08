@@ -411,6 +411,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2938,6 +2947,7 @@ dependencies = [
  "rewrite-model",
  "rewrite-platform",
  "rewrite-protocol-anytls",
+ "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",
  "rewrite-protocol-vless",
@@ -2973,6 +2983,29 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-hysteria2"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "bytes",
+ "futures-util",
+ "h3",
+ "h3-quinn",
+ "http",
+ "quinn",
+ "quinn-proto",
+ "rand 0.10.2",
+ "rewrite-io",
+ "rewrite-model",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-util",
 ]
 
 [[package]]

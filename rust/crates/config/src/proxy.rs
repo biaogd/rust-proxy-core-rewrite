@@ -11,12 +11,12 @@ use url::Url;
 use crate::error::ConfigError;
 use crate::load::resolve_controller_pem;
 use crate::model::{
-    AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, LoadBalanceStrategy, ProviderHealthConfig,
-    ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind, ProxyProviderConfig,
-    ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig, TrojanProxyConfig,
-    TrojanTransport, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode,
-    VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
-    VmessSecurity, VmessTransport,
+    AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
+    ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
+    ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
+    TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode, VlessProxyConfig,
+    VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions,
+    VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,
@@ -137,6 +137,7 @@ pub(crate) fn parse_proxies(
             Some("vless") => outbounds.push(parse_vless_proxy(name, proxy)?),
             Some("trojan") => outbounds.push(parse_trojan_proxy(name, proxy)?),
             Some("anytls") => outbounds.push(parse_anytls_proxy(name, proxy, home_directory)?),
+            Some("hysteria2") => outbounds.push(parse_hysteria2_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -291,8 +292,410 @@ fn parse_anytls_proxy(
             disable_reuse: proxy.disable_reuse.unwrap_or(false),
             carrier,
         }),
+        hysteria2: None,
         headers: BTreeMap::new(),
     })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    // HY2-B: accept bandwidth / hop / salamander / window knobs; still reject
+    // Gecko, Realm, ECH, cwnd/BBR profile, dialer-proxy, and cert overrides.
+    const REJECTED_EXTRA: &[&str] = &[
+        "obfs-min-packet-size",
+        "obfs-max-packet-size",
+        "cwnd",
+        "bbr-profile",
+        "realm-opts",
+        "ech-opts",
+        "disable-mtu-discovery",
+        "fast-open",
+        "dialer-proxy",
+    ];
+    const ACCEPTED_EXTRA: &[&str] = &[
+        "up",
+        "down",
+        "ports",
+        "hop-interval",
+        "obfs",
+        "obfs-password",
+        "udp-mtu",
+        "handshake-timeout",
+        "initial-stream-receive-window",
+        "max-stream-receive-window",
+        "initial-connection-receive-window",
+        "max-connection-receive-window",
+        "recv-window-conn",
+        "recv-window",
+    ];
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
+        || proxy.mkcp_opts.is_some()
+        || proxy.mekya_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.reality_opts.is_some()
+        || proxy.headers.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.client_metadata.is_some()
+        || proxy.idle_session_check_interval.is_some()
+        || proxy.idle_session_timeout.is_some()
+        || proxy.min_idle_session.is_some()
+        || proxy.shadow_tls_opts.is_some()
+        || proxy.restls_opts.is_some()
+        || proxy.jls_opts.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy
+            .extra
+            .keys()
+            .any(|key| REJECTED_EXTRA.contains(&key.as_str()))
+        || proxy
+            .extra
+            .keys()
+            .any(|key| !ACCEPTED_EXTRA.contains(&key.as_str()))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let ports_raw = hysteria2_extra_string(&mut proxy.extra, "ports")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let hop_ports = match ports_raw.as_deref().unwrap_or("") {
+        "" => Vec::new(),
+        raw => {
+            parse_hysteria2_ports(raw).ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?
+        }
+    };
+    // Go allows `port: 0` when `ports` is non-empty; require at least one.
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .unwrap_or(0);
+    if port == 0 && hop_ports.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name.clone()));
+    }
+    let password = proxy
+        .password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let alpn = proxy.alpn.unwrap_or_else(|| vec!["h3".to_owned()]);
+    if alpn.is_empty() || alpn.iter().any(String::is_empty) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    let up_raw = hysteria2_extra_string(&mut proxy.extra, "up")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let down_raw = hysteria2_extra_string(&mut proxy.extra, "down")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let up_bps = parse_hysteria2_bps(up_raw.as_deref().unwrap_or(""))
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let down_bps = parse_hysteria2_bps(down_raw.as_deref().unwrap_or(""))
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+
+    let hop_raw = hysteria2_extra_string(&mut proxy.extra, "hop-interval")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let (hop_interval_min_secs, hop_interval_max_secs) =
+        parse_hysteria2_hop_interval(hop_raw.as_deref().unwrap_or(""))
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+
+    let obfs_raw = hysteria2_extra_string(&mut proxy.extra, "obfs")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let obfs_password = hysteria2_extra_string(&mut proxy.extra, "obfs-password")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?;
+    let obfs_password = obfs_password.unwrap_or_default();
+    let obfs = match obfs_raw.as_deref().unwrap_or("") {
+        "" => None,
+        "salamander" => {
+            if obfs_password.is_empty() {
+                return Err(ConfigError::UnsupportedProxy(name));
+            }
+            Some("salamander".to_owned())
+        }
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+
+    let udp_mtu = match hysteria2_extra_u64(&mut proxy.extra, "udp-mtu")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+    {
+        None | Some(0) => 1197,
+        Some(value) => u16::try_from(value)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?
+            .max(1),
+    };
+    // Clash YAML is seconds (Go); store milliseconds for the outbound client.
+    let handshake_timeout_ms = match hysteria2_extra_u64(&mut proxy.extra, "handshake-timeout")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+    {
+        None | Some(0) => 0,
+        Some(secs) => secs.saturating_mul(1000),
+    };
+
+    let stream_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+    let connection_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Hysteria2,
+        server,
+        port,
+        username: None,
+        password: Some(password.clone()),
+        cipher: None,
+        tls: true,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        reality: None,
+        // Go `NewHysteria2` always sets Base.UDP = true; default-on when unset.
+        udp: proxy.udp.unwrap_or(true),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: None,
+        hysteria2: Some(Hysteria2ProxyConfig {
+            password,
+            alpn,
+            disable_reuse: proxy.disable_reuse.unwrap_or(false),
+            up_bps,
+            down_bps,
+            obfs,
+            obfs_password,
+            hop_ports,
+            hop_interval_min_secs,
+            hop_interval_max_secs,
+            udp_mtu,
+            handshake_timeout_ms,
+            stream_receive_window,
+            connection_receive_window,
+        }),
+        headers: BTreeMap::new(),
+    })
+}
+
+fn hysteria2_extra_string(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Result<Option<String>, ()> {
+    let Some(value) = extra.remove(key) else {
+        return Ok(None);
+    };
+    match value {
+        serde_yaml_ng::Value::Null => Ok(Some(String::new())),
+        serde_yaml_ng::Value::String(text) => Ok(Some(text)),
+        serde_yaml_ng::Value::Number(number) => Ok(Some(number.to_string())),
+        serde_yaml_ng::Value::Bool(flag) => Ok(Some(flag.to_string())),
+        _ => Err(()),
+    }
+}
+
+fn hysteria2_extra_u64(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+) -> Result<Option<u64>, ()> {
+    let Some(value) = extra.remove(key) else {
+        return Ok(None);
+    };
+    match value {
+        serde_yaml_ng::Value::Null => Ok(Some(0)),
+        serde_yaml_ng::Value::Number(number) => number.as_u64().map(Some).ok_or(()),
+        serde_yaml_ng::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Ok(Some(0))
+            } else {
+                trimmed.parse().map(Some).map_err(|_| ())
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn resolve_hysteria2_window(
+    name: &str,
+    initial: Option<u64>,
+    max: Option<u64>,
+    legacy: Option<u64>,
+) -> Result<Option<u64>, ConfigError> {
+    // If both initial-* and max-* are set to different non-zero values, reject.
+    if let (Some(initial), Some(max)) = (initial, max)
+        && initial != 0
+        && max != 0
+        && initial != max
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    // Otherwise take the single non-zero value (legacy aliases included).
+    let mut chosen = None;
+    for candidate in [initial, max, legacy].into_iter().flatten() {
+        if candidate == 0 {
+            continue;
+        }
+        match chosen {
+            None => chosen = Some(candidate),
+            Some(existing) if existing == candidate => {}
+            Some(_) => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+        }
+    }
+    Ok(chosen)
+}
+
+/// Clash/Go `utils.StringToBps`: bare int → Mbps; empty → `0`; invalid → `None`.
+fn parse_hysteria2_bps(raw: &str) -> Option<u64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    if let Ok(value) = trimmed.parse::<u64>() {
+        return Some(value.saturating_mul(1_000_000 / 8));
+    }
+    let bytes = trimmed.as_bytes();
+    let mut index = 0_usize;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == 0 {
+        return None;
+    }
+    let number: u64 = trimmed[..index].parse().ok()?;
+    let mut rest = trimmed[index..].trim_start();
+    let mut scale: u64 = 1;
+    if let Some(prefix) = rest.chars().next() {
+        match prefix {
+            'K' => {
+                scale = 1_000;
+                rest = rest[1..].trim_start();
+            }
+            'M' => {
+                scale = 1_000_000;
+                rest = rest[1..].trim_start();
+            }
+            'G' => {
+                scale = 1_000_000_000;
+                rest = rest[1..].trim_start();
+            }
+            'T' => {
+                scale = 1_000_000_000_000;
+                rest = rest[1..].trim_start();
+            }
+            _ => {}
+        }
+    }
+    let is_bits = match rest {
+        "bps" => true,
+        "Bps" => false,
+        _ => return None,
+    };
+    let mut n = number.saturating_mul(scale);
+    if is_bits {
+        n /= 8;
+    }
+    Some(n)
+}
+
+/// Parse `"443,8443,9000-9002"`. Rejects `*` / `all` / ranges larger than 4096 ports.
+fn parse_hysteria2_ports(spec: &str) -> Option<Vec<u16>> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() || trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+        return None;
+    }
+    let mut ports = Vec::new();
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        if let Some((start, end)) = part.split_once('-') {
+            let mut lo: u16 = start.trim().parse().ok()?;
+            let mut hi: u16 = end.trim().parse().ok()?;
+            if lo > hi {
+                std::mem::swap(&mut lo, &mut hi);
+            }
+            if u32::from(hi) - u32::from(lo) > 4096 {
+                return None;
+            }
+            ports.extend(lo..=hi);
+        } else {
+            ports.push(part.parse().ok()?);
+        }
+    }
+    if ports.is_empty() {
+        return None;
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
+}
+
+/// Parse hop-interval as seconds (`15` or `10-30`). Empty → `(0, 0)`.
+fn parse_hysteria2_hop_interval(spec: &str) -> Option<(u64, u64)> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Some((0, 0));
+    }
+    if let Some((lo, hi)) = trimmed.split_once('-') {
+        let min: u64 = lo.trim().parse().ok()?;
+        let max: u64 = hi.trim().parse().ok()?;
+        if min == 0 || max == 0 {
+            return None;
+        }
+        return Some((min.min(max), min.max(max)));
+    }
+    let value: u64 = trimmed.parse().ok()?;
+    if value == 0 {
+        return None;
+    }
+    Some((value, value))
 }
 
 fn parse_anytls_carrier(
@@ -540,6 +943,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
             transport,
         }),
         anytls: None,
+        hysteria2: None,
         headers: BTreeMap::new(),
     })
 }
@@ -642,6 +1046,7 @@ fn parse_remote_proxy(
         vless: None,
         trojan: None,
         anytls: None,
+        hysteria2: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -734,6 +1139,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         vless: None,
         trojan: None,
         anytls: None,
+        hysteria2: None,
         headers: BTreeMap::new(),
     })
 }
@@ -832,6 +1238,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         vless: None,
         trojan: None,
         anytls: None,
+        hysteria2: None,
         headers: BTreeMap::new(),
     })
 }
@@ -942,6 +1349,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         }),
         trojan: None,
         anytls: None,
+        hysteria2: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1978,6 +2386,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         vless: None,
         trojan: None,
         anytls: None,
+        hysteria2: None,
         headers: BTreeMap::new(),
     }
 }
@@ -2340,6 +2749,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Vless => "Vless",
             ProxyKind::Trojan => "Trojan",
             ProxyKind::AnyTls => "AnyTLS",
+            ProxyKind::Hysteria2 => "Hysteria2",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",

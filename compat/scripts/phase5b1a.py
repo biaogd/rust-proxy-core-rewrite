@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -36,7 +37,12 @@ def build_binaries(
     output: pathlib.Path,
     cargo_target_variable: str = "PHASE5B1A_CARGO_TARGET",
     default_target_name: str = "phase5b1a",
+    *,
+    profile: str = "debug",
+    stage_runtime: bool = False,
 ) -> dict[str, pathlib.Path]:
+    if profile not in ("debug", "release"):
+        raise ValueError(f"unsupported compatibility build profile: {profile}")
     assert_go_oracle_baseline()
     executable_suffix = ".exe" if os.name == "nt" else ""
     go_binary = output / f"go-oracle{executable_suffix}"
@@ -47,13 +53,21 @@ def build_binaries(
     )
     target = cargo_target_path(cargo_target_variable, default_target_name)
     subprocess.run(
-        ["cargo", "build", "--workspace", "--target-dir", str(target)],
+        ["cargo", "build", "--workspace", "--target-dir", str(target)]
+        + (["--release"] if profile == "release" else []),
         cwd=RUST_ROOT,
         check=True,
     )
+    rust_binary = target / profile / f"rewrite-core{executable_suffix}"
+    if stage_runtime:
+        # Execute a private snapshot, not a mutable Cargo artifact on a possibly
+        # slow external volume. Keep compiler output in the configured target.
+        staged = output / f"rust-under-test{executable_suffix}"
+        shutil.copy2(rust_binary, staged)
+        rust_binary = staged
     return {
         "go": go_binary,
-        "rust": target / "debug" / f"rewrite-core{executable_suffix}",
+        "rust": rust_binary,
     }
 
 

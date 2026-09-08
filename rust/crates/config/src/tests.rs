@@ -129,6 +129,94 @@ fn trojan_native_tls_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn hysteria2_hy2b_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: hy2.example\n    alpn: [h3]\n    skip-cert-verify: true\n    disable-reuse: true\n    up: 30 Mbps\n    down: 200\n    obfs: salamander\n    obfs-password: salamander-secret\n    ports: 443,8443,9000-9002\n    hop-interval: 10-30\n    udp-mtu: 1200\n    handshake-timeout: 15\n    initial-stream-receive-window: 8388608\n    max-stream-receive-window: 8388608\n    recv-window-conn: 20971520\n"
+    );
+    let config = Config::from_yaml(&source).expect("HY2-B Hysteria2 config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Hysteria2);
+    assert!(proxy.tls);
+    assert!(proxy.udp);
+    assert_eq!(proxy.sni.as_deref(), Some("hy2.example"));
+    assert!(proxy.skip_cert_verify);
+    let options = proxy.hysteria2.as_ref().expect("Hysteria2 options");
+    assert_eq!(options.password, "secret");
+    assert_eq!(options.alpn, ["h3"]);
+    assert!(options.disable_reuse);
+    assert_eq!(options.up_bps, 30_000_000 / 8);
+    assert_eq!(options.down_bps, 200_000_000 / 8);
+    assert_eq!(options.obfs.as_deref(), Some("salamander"));
+    assert_eq!(options.obfs_password, "salamander-secret");
+    assert_eq!(options.hop_ports, [443, 8443, 9000, 9001, 9002]);
+    assert_eq!(options.hop_interval_min_secs, 10);
+    assert_eq!(options.hop_interval_max_secs, 30);
+    assert_eq!(options.udp_mtu, 1200);
+    assert_eq!(options.handshake_timeout_ms, 15_000);
+    assert_eq!(options.stream_receive_window, Some(8_388_608));
+    assert_eq!(options.connection_receive_window, Some(20_971_520));
+
+    let defaults = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2-defaults\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n"
+    ))
+    .expect("HY2-B defaults");
+    assert!(defaults.proxies[0].udp);
+    let default_opts = defaults.proxies[0]
+        .hysteria2
+        .as_ref()
+        .expect("Hysteria2 defaults");
+    assert_eq!(default_opts.udp_mtu, 1197);
+    assert_eq!(default_opts.handshake_timeout_ms, 0);
+    assert!(default_opts.obfs.is_none());
+    assert!(default_opts.hop_ports.is_empty());
+
+    // Go allows ports-only (scalar port omitted / zero) when `ports` is set.
+    let ports_only = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hy2-ports\n    type: hysteria2\n    server: 127.0.0.1\n    ports: 8443,9000\n    password: secret\n"
+    ))
+    .expect("ports-only Hysteria2");
+    assert_eq!(ports_only.proxies[0].port, 0);
+    assert_eq!(
+        ports_only.proxies[0]
+            .hysteria2
+            .as_ref()
+            .expect("opts")
+            .hop_ports,
+        [8443, 9000]
+    );
+    assert!(
+        Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - name: hy2-noport\n    type: hysteria2\n    server: 127.0.0.1\n    password: secret\n"
+        ))
+        .is_err(),
+        "port and ports both empty must fail"
+    );
+
+    for unsupported in [
+        "obfs: gecko\n    obfs-password: x",
+        "obfs: salamander",
+        "cwnd: 10",
+        "bbr-profile: aggressive",
+        "realm-opts:\n      enable: true",
+        "ports: '*'",
+        "up: nope",
+        "fingerprint: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "name-cert-verify: other.example",
+        "certificate: ./client.crt",
+        "private-key: ./client.key",
+        "initial-stream-receive-window: 100\n    max-stream-receive-window: 200",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: hysteria2\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
@@ -1445,6 +1533,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 vless: None,
                 trojan: None,
                 anytls: None,
+                hysteria2: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1527,6 +1616,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             vless: None,
             trojan: None,
             anytls: None,
+            hysteria2: None,
             headers: BTreeMap::new(),
         }],
     };

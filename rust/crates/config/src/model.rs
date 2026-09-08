@@ -163,6 +163,7 @@ pub enum ProxyKind {
     Vless,
     Trojan,
     AnyTls,
+    Hysteria2,
     Direct,
     Reject,
     Dns,
@@ -220,6 +221,7 @@ pub struct ProxyConfig {
     pub vless: Option<VlessProxyConfig>,
     pub trojan: Option<TrojanProxyConfig>,
     pub anytls: Option<AnyTlsProxyConfig>,
+    pub hysteria2: Option<Hysteria2ProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -234,6 +236,31 @@ pub struct AnyTlsProxyConfig {
     pub disable_reuse: bool,
     /// Outer security carrier replacing native TLS when set (Go-compatible).
     pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `type: hysteria2` options accepted in HY2-B (TCP + UDP outbound).
+///
+/// Gecko obfs, Realm, ECH, `cwnd` / `bbr-profile`, client cert / fingerprint,
+/// dialer-proxy, and MTU-discovery overrides remain rejected until later phases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hysteria2ProxyConfig {
+    pub password: String,
+    pub alpn: Vec<String>,
+    pub disable_reuse: bool,
+    pub up_bps: u64,
+    pub down_bps: u64,
+    /// `"salamander"` when set; `None` means cleartext QUIC.
+    pub obfs: Option<String>,
+    pub obfs_password: String,
+    pub hop_ports: Vec<u16>,
+    pub hop_interval_min_secs: u64,
+    pub hop_interval_max_secs: u64,
+    /// Default `1197` when unset / zero in YAML.
+    pub udp_mtu: u16,
+    /// Milliseconds; `0` means client default (`10000`).
+    pub handshake_timeout_ms: u64,
+    pub stream_receive_window: Option<u64>,
+    pub connection_receive_window: Option<u64>,
 }
 
 /// Clash `shadow-tls-opts` / `restls-opts` / `jls-opts` (mutually exclusive).

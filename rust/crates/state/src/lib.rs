@@ -54,6 +54,8 @@ pub struct RuntimeState {
     grpc_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::GrpcClient>)>>,
     xhttp_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::XHttpClient>)>>,
     anytls_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::AnyTlsClient>)>>,
+    hysteria2_clients:
+        AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::Hysteria2Client>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
 }
 
@@ -87,6 +89,7 @@ impl Default for RuntimeState {
             grpc_clients: AsyncMutex::new(BTreeMap::new()),
             xhttp_clients: AsyncMutex::new(BTreeMap::new()),
             anytls_clients: AsyncMutex::new(BTreeMap::new()),
+            hysteria2_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
         }
     }
@@ -190,6 +193,40 @@ impl RuntimeState {
     pub async fn clear_anytls_clients(&self) {
         let clients = {
             let mut clients = self.anytls_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
+        }
+    }
+
+    pub async fn hysteria2_client(
+        &self,
+        name: &str,
+        identity: String,
+        client: rewrite_outbound::Hysteria2Client,
+    ) -> Arc<rewrite_outbound::Hysteria2Client> {
+        let previous = {
+            let mut clients = self.hysteria2_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(client);
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_hysteria2_clients(&self) {
+        let clients = {
+            let mut clients = self.hysteria2_clients.lock().await;
             std::mem::take(&mut *clients)
         };
         for (_, client) in clients.into_values() {

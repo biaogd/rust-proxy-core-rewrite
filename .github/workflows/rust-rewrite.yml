@@ -11,6 +11,11 @@ on:
       - main
       - "codex/**"
   workflow_dispatch:
+    inputs:
+      hysteria2_production:
+        description: "Run strict release Hysteria2 soak (2h per engine, all native platforms)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -138,7 +143,7 @@ jobs:
   full-differential:
     name: Differential (${{ matrix.os }}, ${{ matrix.shard }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.hysteria2_production && matrix.shard == 'hysteria2' && 360 || 120 }}
     strategy:
       fail-fast: false
       max-parallel: 15
@@ -159,6 +164,7 @@ jobs:
           - vless
           - trojan
           - anytls
+          - hysteria2
           - local-runtime
           - builtins
     defaults:
@@ -319,6 +325,14 @@ jobs:
       PHASE6FTROJANGRPC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6FTROJANREALITY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6GANYTLS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE_HY2A_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE_HY2B_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE_HY2B_BRUTAL_RATE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE_HY2C_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE_HY2C_SOAK_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      HY2_BUILD_PROFILE: "release"
+      HY2C_SOAK_SECONDS: ${{ inputs.hysteria2_production && '7200' || '45' }}
+      HY2_PRODUCTION_GATE: ${{ inputs.hysteria2_production && '1' || '0' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -334,6 +348,14 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+
+      - name: Install Hysteria2 measurement dependencies
+        if: matrix.shard == 'hysteria2'
+        run: python -m pip install -r compat/requirements-hy2.txt
+
+      - name: Test Hysteria2 evidence gates
+        if: matrix.shard == 'hysteria2'
+        run: python -m unittest discover -s compat/scripts -p test_hy2_gates.py
 
       - name: Set up Rust
         run: |
@@ -368,12 +390,19 @@ jobs:
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
+            hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
           esac
           selected=0
           for phase_script in \
+          compat/scripts/phase_hy2a_hysteria2_tcp.py \
+          compat/scripts/phase_hy2a_tls.py \
+          compat/scripts/phase_hy2b_hysteria2.py \
+          compat/scripts/phase_hy2b_brutal_rate.py \
+          compat/scripts/phase_hy2c_hysteria2.py \
+          compat/scripts/phase_hy2c_hysteria2_soak.py \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
           compat/scripts/phase5c_fallback.py \

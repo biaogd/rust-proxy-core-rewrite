@@ -533,10 +533,37 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::Hysteria2 => {
+            connect_hysteria2_proxy(proxy, destination, state, custom_roots).await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
     }
+}
+
+async fn connect_hysteria2_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let client = hysteria2_client_for_proxy(proxy, state, custom_roots).await?;
+    client
+        .create_proxy(destination)
+        .await
+        .map_err(|error| format!("Hysteria2 proxy connection failed: {error}"))
+}
+
+pub(super) async fn hysteria2_client_for_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<std::sync::Arc<rewrite_outbound::Hysteria2Client>, String> {
+    let identity = format!("{proxy:?}|roots={custom_roots:?}");
+    let client = rewrite_outbound::Hysteria2Client::from_proxy(proxy, custom_roots)
+        .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
+    Ok(state.hysteria2_client(&proxy.name, identity, client).await)
 }
 
 async fn connect_anytls_proxy(
