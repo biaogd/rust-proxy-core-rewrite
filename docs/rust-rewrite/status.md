@@ -2,7 +2,7 @@
 
 Last updated: 2026-09-08
 
-SSR-C (same branch/PR as SSR-A/B) adds outbound `auth_sha1_v4` / `auth_chain_a` / `auth_chain_b`, obfs `random_head`, remaining Go stream ciphers + `none`/`dummy`, and SSR UDP (cipher→protocol; TCP obfs only). Groups/providers/health/reload follow existing outbound patterns; controller reports `udp` from config. Pin: shadowsocksrr `fd723a92` + shims (py3, forbidden-ip empty, half-close, pure-RC4); phases `phase7a`/`phase7b`/`phase7c_ssr.py`. SSR-D (malformed/stress/soak/three-platform release) deferred. Loud reject for AEAD/SS2022 and unmapped legacy `chacha20`/`xchacha20`. Optional mudb multi-user e2e for `uid:passwd` still not claimed (pin is single-password).
+SSR outbound A–D complete on this branch: TCP protocols/obfs/ciphers + UDP (A–C), production hardening (D). Pin: shadowsocksrr `fd723a92` + shims (py3, forbidden-ip empty, half-close, pure-RC4). Phases `phase7a`/`7b`/`7c`/`7d_ssr.py` + `phase7d_ssr_soak.py`. SSR-D gates: wrong-password/cipher/protocol/obfs mismatch, hang-handshake timeout, truncate/cancel, concurrent TCP+UDP, reload-under-load, soft RSS/FD bounds; soak default `SSR_D_SOAK_SECONDS=45` (long opt-in `7200`; `SSR_PRODUCTION_GATE=1` requires release + ≥7200). Fixtures use only `127.0.0.1` (no `/etc/hosts` / `127.0.0.2`); CI shard `controller-services-outbound` runs 7a–7d on Linux/macOS/Windows like peer phases. Remaining gaps: no inbound SSR listener; mudb multi-user `uid:passwd` e2e not claimed (config accepts, pin is single-password); multi-hour soak is opt-in not PR-blocking.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 

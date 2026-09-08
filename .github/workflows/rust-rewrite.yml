@@ -330,9 +330,16 @@ jobs:
       PHASE_HY2B_BRUTAL_RATE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE_HY2C_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE_HY2C_SOAK_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7A_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7B_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7C_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7D_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7D_SSR_SOAK_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       HY2_BUILD_PROFILE: "release"
       HY2C_SOAK_SECONDS: ${{ inputs.hysteria2_production && '7200' || '45' }}
       HY2_PRODUCTION_GATE: ${{ inputs.hysteria2_production && '1' || '0' }}
+      SSR_D_SOAK_SECONDS: "45"
+      SSR_PRODUCTION_GATE: "0"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -386,7 +393,7 @@ jobs:
             cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
             rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
-            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c)_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
@@ -449,6 +456,8 @@ jobs:
             compat/scripts/phase7a_ssr_tcp.py \
             compat/scripts/phase7b_ssr_tcp.py \
             compat/scripts/phase7c_ssr.py \
+            compat/scripts/phase7d_ssr.py \
+            compat/scripts/phase7d_ssr_soak.py \
             compat/scripts/phase6c_shadowsocks_extra_aead.py \
             compat/scripts/phase6c_shadowsocks_2022.py \
             compat/scripts/phase6c_shadowsocks_2022_eih.py \
