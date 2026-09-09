@@ -164,6 +164,7 @@ pub enum ProxyKind {
     Trojan,
     AnyTls,
     Hysteria2,
+    ShadowsocksR,
     Direct,
     Reject,
     Dns,
@@ -222,7 +223,20 @@ pub struct ProxyConfig {
     pub trojan: Option<TrojanProxyConfig>,
     pub anytls: Option<AnyTlsProxyConfig>,
     pub hysteria2: Option<Hysteria2ProxyConfig>,
+    pub ssr: Option<SsrProxyConfig>,
     pub headers: BTreeMap<String, String>,
+}
+
+/// Clash `type: ssr` options accepted in SSR-A/B.
+///
+/// `auth_sha1_v4`, `auth_chain_*`, `random_head`, UDP, AEAD/SS2022, and other
+/// stream ciphers remain rejected until later SSR phases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SsrProxyConfig {
+    pub protocol: String,
+    pub protocol_param: String,
+    pub obfs: String,
+    pub obfs_param: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

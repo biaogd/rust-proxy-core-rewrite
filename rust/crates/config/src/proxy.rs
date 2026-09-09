@@ -14,9 +14,9 @@ use crate::model::{
     AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
     ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
     ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
-    TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode, VlessProxyConfig,
-    VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions,
-    VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
+    SsrProxyConfig, TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode,
+    VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions,
+    VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,
@@ -133,6 +133,7 @@ pub(crate) fn parse_proxies(
                 )?);
             }
             Some("ss") => outbounds.push(parse_shadowsocks_proxy(name, proxy)?),
+            Some("ssr") => outbounds.push(parse_ssr_proxy(name, proxy)?),
             Some("vmess") => outbounds.push(parse_vmess_proxy(name, proxy)?),
             Some("vless") => outbounds.push(parse_vless_proxy(name, proxy)?),
             Some("trojan") => outbounds.push(parse_trojan_proxy(name, proxy)?),
@@ -293,6 +294,7 @@ fn parse_anytls_proxy(
             carrier,
         }),
         hysteria2: None,
+        ssr: None,
         headers: BTreeMap::new(),
     })
 }
@@ -519,6 +521,7 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
             stream_receive_window,
             connection_receive_window,
         }),
+        ssr: None,
         headers: BTreeMap::new(),
     })
 }
@@ -944,6 +947,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         }),
         anytls: None,
         hysteria2: None,
+        ssr: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1047,6 +1051,7 @@ fn parse_remote_proxy(
         trojan: None,
         anytls: None,
         hysteria2: None,
+        ssr: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -1140,6 +1145,154 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         trojan: None,
         anytls: None,
         hysteria2: None,
+        ssr: None,
+        headers: BTreeMap::new(),
+    })
+}
+
+const SSR_CIPHERS: [&str; 10] = [
+    "none",
+    "dummy",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "rc4-md5",
+    "chacha20-ietf",
+];
+const SSR_ACCEPTED_EXTRA: &[&str] = &["obfs", "obfs-param", "protocol", "protocol-param"];
+const SSR_PROTOCOLS: [&str; 6] = [
+    "origin",
+    "auth_aes128_md5",
+    "auth_aes128_sha1",
+    "auth_sha1_v4",
+    "auth_chain_a",
+    "auth_chain_b",
+];
+const SSR_OBFS: [&str; 6] = [
+    "plain",
+    "http_simple",
+    "http_post",
+    "tls1.2_ticket_auth",
+    "tls1.2_ticket_fastauth",
+    "random_head",
+];
+
+#[allow(clippy::too_many_lines)]
+fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    // SSR-A/B/C: stream ciphers + none/dummy; protocols through auth_chain_*;
+    // obfs through random_head; UDP outbound allowed. AEAD/SS2022 remain rejected.
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.alpn.is_some()
+        || proxy.headers.is_some()
+        || proxy.disable_reuse.is_some()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if proxy
+        .extra
+        .keys()
+        .any(|key| !SSR_ACCEPTED_EXTRA.contains(&key.as_str()))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let udp = proxy.udp.unwrap_or(false);
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let password = proxy
+        .password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let cipher = proxy
+        .cipher
+        .filter(|cipher| SSR_CIPHERS.contains(&cipher.as_str()))
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let protocol = hysteria2_extra_string(&mut proxy.extra, "protocol")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_else(|| "origin".to_owned());
+    let protocol_param = hysteria2_extra_string(&mut proxy.extra, "protocol-param")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_default();
+    let obfs = hysteria2_extra_string(&mut proxy.extra, "obfs")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_else(|| "plain".to_owned());
+    let obfs_param = hysteria2_extra_string(&mut proxy.extra, "obfs-param")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_default();
+    if !SSR_PROTOCOLS.contains(&protocol.as_str()) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if protocol == "origin" && !protocol_param.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if !SSR_OBFS.contains(&obfs.as_str()) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if (obfs == "plain" || obfs == "random_head") && !obfs_param.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::ShadowsocksR,
+        server,
+        port,
+        username: None,
+        password: Some(password),
+        cipher: Some(cipher),
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        reality: None,
+        udp,
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: None,
+        hysteria2: None,
+        ssr: Some(SsrProxyConfig {
+            protocol,
+            protocol_param,
+            obfs,
+            obfs_param,
+        }),
         headers: BTreeMap::new(),
     })
 }
@@ -1239,6 +1392,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         trojan: None,
         anytls: None,
         hysteria2: None,
+        ssr: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1350,6 +1504,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         trojan: None,
         anytls: None,
         hysteria2: None,
+        ssr: None,
         headers: BTreeMap::new(),
     })
 }
@@ -2387,6 +2542,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         trojan: None,
         anytls: None,
         hysteria2: None,
+        ssr: None,
         headers: BTreeMap::new(),
     }
 }
@@ -2750,6 +2906,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Trojan => "Trojan",
             ProxyKind::AnyTls => "AnyTLS",
             ProxyKind::Hysteria2 => "Hysteria2",
+            ProxyKind::ShadowsocksR => "ShadowsocksR",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",

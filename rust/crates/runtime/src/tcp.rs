@@ -485,6 +485,9 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
+        ProxyKind::ShadowsocksR => {
+            connect_ssr_proxy(proxy, destination, allow_ipv6, socket_options).await
+        }
         ProxyKind::Vmess => {
             connect_vmess_proxy(
                 proxy,
@@ -1736,6 +1739,39 @@ async fn connect_shadowsocks_proxy(
     )
     .await
     .map_err(|error| format!("Shadowsocks proxy connection failed: {error}"))
+}
+
+async fn connect_ssr_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    allow_ipv6: bool,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let server = Destination {
+        host: proxy
+            .server
+            .parse()
+            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+        port: proxy.port,
+    };
+    let ssr = proxy
+        .ssr
+        .as_ref()
+        .ok_or_else(|| "ShadowsocksR proxy missing ssr options".to_owned())?;
+    rewrite_outbound::connect_ssr_with_options(
+        &server,
+        destination,
+        allow_ipv6,
+        proxy.password.as_deref().unwrap_or_default(),
+        proxy.cipher.as_deref().unwrap_or_default(),
+        &ssr.protocol,
+        &ssr.protocol_param,
+        &ssr.obfs,
+        &ssr.obfs_param,
+        socket_options,
+    )
+    .await
+    .map_err(|error| format!("ShadowsocksR proxy connection failed: {error}"))
 }
 
 pub(super) fn group_retry_delay(attempt: usize) -> Duration {

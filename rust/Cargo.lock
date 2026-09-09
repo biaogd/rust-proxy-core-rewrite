@@ -2706,6 +2706,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc4"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f1256e23efe6097f27aa82d6ca6889361c001586ae0f6917cbad072f05eb275"
+dependencies = [
+ "cipher 0.4.4",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2949,6 +2958,7 @@ dependencies = [
  "rewrite-protocol-anytls",
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-shadowsocksr",
  "rewrite-protocol-trojan",
  "rewrite-protocol-vless",
  "rewrite-protocol-vmess",
@@ -3016,6 +3026,27 @@ dependencies = [
  "rewrite-io",
  "rewrite-model",
  "shadowsocks",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-shadowsocksr"
+version = "0.1.0"
+dependencies = [
+ "adler2",
+ "aes 0.8.4",
+ "base64 0.22.1",
+ "bytes",
+ "crc32fast",
+ "hmac 0.12.1",
+ "md-5 0.10.6",
+ "rand 0.10.2",
+ "rc4",
+ "rewrite-io",
+ "rewrite-model",
+ "sha1 0.10.7",
+ "shadowsocks-crypto",
  "thiserror 2.0.20",
  "tokio",
 ]

@@ -1,0 +1,26 @@
+[package]
+name = "rewrite-protocol-shadowsocksr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+adler2 = { workspace = true }
+aes.workspace = true
+base64.workspace = true
+bytes.workspace = true
+crc32fast.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+rand.workspace = true
+rc4 = { workspace = true }
+rewrite-io = { path = "../io" }
+rewrite-model = { path = "../model" }
+sha1.workspace = true
+shadowsocks-crypto = { workspace = true, default-features = false, features = ["v1", "v1-stream"] }
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

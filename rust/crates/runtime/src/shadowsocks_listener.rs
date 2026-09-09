@@ -534,6 +534,12 @@ async fn run_shadowsocks_inbound_udp_session(
             )
             .await;
         }
+        UdpSessionMode::ShadowsocksR(proxy) => state.log(
+            "error",
+            format!(
+                "ShadowsocksR UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"
+            ),
+        ),
         UdpSessionMode::Vmess(proxy) => state.log(
             "error",
             format!("VMess UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"),
@@ -727,6 +733,12 @@ async fn serve_shadowsocks_inbound_uot<S>(
             )
             .await;
         }
+        UdpSessionMode::ShadowsocksR(proxy) => state.log(
+            "error",
+            format!(
+                "ShadowsocksR UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"
+            ),
+        ),
         UdpSessionMode::Vmess(proxy) => state.log(
             "error",
             format!("VMess UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"),
