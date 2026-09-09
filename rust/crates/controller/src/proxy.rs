@@ -353,6 +353,28 @@ pub(super) async fn measure_http_delay(
                     .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
                 port: proxy.port,
             };
+            let server = match &server.host {
+                Host::Ip(_) => server,
+                Host::Domain(domain) => {
+                    let use_hosts = config.dns.as_ref().is_some_and(|dns| dns.use_hosts);
+                    match rewrite_dns::resolve_proxy_server_host(
+                        &config.hosts,
+                        use_hosts,
+                        config.dns.as_ref(),
+                        domain,
+                        config.ipv6,
+                    )
+                    .await
+                    {
+                        Ok(address) => Destination {
+                            host: Host::Ip(address),
+                            port: server.port,
+                        },
+                        Err(rewrite_dns::DnsError::Inactive) => server,
+                        Err(_) => return Err(()),
+                    }
+                }
+            };
             match proxy.kind {
                 rewrite_config::ProxyKind::Direct => rewrite_outbound::connect_with_options(
                     &destination,
@@ -780,8 +802,13 @@ pub(super) async fn measure_http_delay(
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::Hysteria2 => {
-                    let client = rewrite_outbound::Hysteria2Client::from_proxy(
+                    let dial_server = match &server.host {
+                        Host::Ip(address) => address.to_string(),
+                        Host::Domain(domain) => domain.clone(),
+                    };
+                    let client = rewrite_outbound::Hysteria2Client::from_proxy_with_dial_server(
                         proxy,
+                        &dial_server,
                         &config.trust_certificates,
                     )
                     .map_err(|_| ())?;
@@ -799,6 +826,7 @@ pub(super) async fn measure_http_delay(
                         &ssr.protocol_param,
                         &ssr.obfs,
                         &ssr.obfs_param,
+                        &proxy.server,
                         controller_socket_options(config),
                     )
                     .await

@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::client::conn::http1::SendRequest as Http1SendRequest;
 use rewrite_config::{
-    Config, DnsConfig, DnsMainKind, DnsMode, DnsResolverClient, DohProtocol, HostEntry,
+    Config, DnsConfig, DnsMainKind, DnsMode, DnsResolverClient, DohProtocol, HostEntry, HostTable,
 };
 use rewrite_state::RuntimeState;
 use serde::Serialize;
@@ -659,6 +659,10 @@ pub async fn resolve_direct_domain(
 
 /// Resolves a proxy endpoint through `dns.proxy-server-nameserver`.
 ///
+/// Matches Go `ProxyServerHostResolver`: prefer proxy-server policy / PSN set,
+/// and when that set is empty fall back to the main resolver (not the system
+/// stub). Proxy outbound dials must use this path instead of OS `lookup_host`.
+///
 /// # Errors
 ///
 /// Returns [`DnsError`] when the set is empty or produces no permitted address.
@@ -667,15 +671,33 @@ pub async fn resolve_proxy_domain(
     host: &str,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    preferred_address(
-        lookup_domain_from_set(
-            selected_policy(&config.proxy_policies, host).unwrap_or(&config.proxy_resolvers),
-            host,
-            allow_ipv6,
-            config.ipv6_timeout,
-        )
-        .await?,
+    preferred_address(lookup_proxy_domain(config, host, allow_ipv6).await?)
+}
+
+/// Ordered A/AAAA lookup for proxy-server hosts (PSN / policy / main fallback).
+///
+/// # Errors
+///
+/// Returns [`DnsError`] when neither address family produces a permitted answer.
+pub async fn lookup_proxy_domain(
+    config: &DnsConfig,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<Vec<IpAddr>, DnsError> {
+    if let Some(resolvers) = selected_policy(&config.proxy_policies, host) {
+        return lookup_domain_from_set(resolvers, host, allow_ipv6, config.ipv6_timeout).await;
+    }
+    if config.proxy_resolvers.is_empty() {
+        // Go executor: Invalid ProxyResolver → ProxyServerHostResolver = main Resolver.
+        return lookup_domain_with(config, host, allow_ipv6, false).await;
+    }
+    lookup_domain_from_set(
+        &config.proxy_resolvers,
+        host,
+        allow_ipv6,
+        config.ipv6_timeout,
     )
+    .await
 }
 
 /// Resolves a bootstrap name through `dns.default-nameserver`.
@@ -697,6 +719,43 @@ pub async fn resolve_default_domain(
         )
         .await?,
     )
+}
+
+/// Resolves a proxy server hostname the way Go's dialer does for outbound
+/// adapters: configured `hosts` first, then [`resolve_proxy_domain`] (PSN /
+/// policy / main fallback). Callers without DNS enabled should keep the domain
+/// and let the OS resolver handle it.
+///
+/// # Errors
+///
+/// Returns [`DnsError::Inactive`] when DNS is disabled, or other [`DnsError`]
+/// variants when hosts miss and the proxy-server resolver fails.
+pub async fn resolve_proxy_server_host(
+    hosts: &HostTable,
+    use_hosts: bool,
+    dns: Option<&DnsConfig>,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<IpAddr, DnsError> {
+    if use_hosts
+        && let Some(HostEntry::Addresses(addresses)) = hosts.search(host)
+        && let Some(address) = preferred_host_address(addresses, allow_ipv6)
+    {
+        return Ok(address);
+    }
+    let Some(dns) = dns else {
+        return Err(DnsError::Inactive);
+    };
+    resolve_proxy_domain(dns, host, allow_ipv6).await
+}
+
+fn preferred_host_address(addresses: &[IpAddr], allow_ipv6: bool) -> Option<IpAddr> {
+    addresses.iter().copied().find(IpAddr::is_ipv4).or_else(|| {
+        addresses
+            .iter()
+            .copied()
+            .find(|address| allow_ipv6 || address.is_ipv4())
+    })
 }
 
 pub(crate) fn preferred_address(addresses: Vec<IpAddr>) -> Result<IpAddr, DnsError> {

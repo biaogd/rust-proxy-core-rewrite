@@ -4,6 +4,8 @@ Last updated: 2026-09-09
 
 SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/negatives/soak. Follow-ups: HTTP header-then-payload; TLS Finished flush under Pending; UDP skips TCP obfs; pre-handshake shutdown fails loud; pre-handshake buffer cap + 5s deadline + **write-waker wake on handshake/buffer free**; peer-close + rust-only silent-peer product timeout. Pin: shadowsocksrr `fd723a92` + shims. Phases `phase7a`/`7b`/`7c`/`7d` + soak. Remaining gaps: no inbound SSR; mudb multi-user e2e unclaimed; multi-hour soak opt-in; **macOS CI SSR pin-server start failure not yet diagnosed** (no three-platform claim); do not over-claim production readiness.
 
+**PSN consumer fix (2026-09-09):** Go dials every proxy adapter host via `ProxyServerHostResolver` (`dns.proxy-server-nameserver`, falling back to the main resolver). Rust previously used OS `lookup_host` for SSR/SS/VMess/… dials, so polluted system DNS broke live nodes (e.g. suying). Runtime/`controller` now resolve proxy dial hosts through `resolve_proxy_server_host` / `resolve_proxy_dial_server` before TCP/UDP connect; SSR keeps the configured hostname for obfs SNI. Hysteria2 dials through the same helper (`from_proxy_with_dial_server`). DIRECT/UDP destination lookups use configured DNS when enabled instead of the OS stub.
+
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ## Overall status
@@ -71,7 +73,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 4F4 DHCP resolver | Partial, privileged native gates pending | `DNS-04`; `dhcproto` now owns packet/options codecs; config/runtime, exact DHCPv4 wire and interface/invalidation contracts re-pass; native UDP 67/68 parity remains pending |
 | Phase 4F5 RCODE/Tailscale DNS boundary | Complete in declared scope; DNS-05 partial | Six synthetic RCODE wire paths and the named Tailscale resolver registration lifecycle pass; actual tsnet transport remains Phase 7K |
 | Phase 4F6 classic DNS wrappers | Complete in declared scope; DNS-10 partial | Per-upstream ECS/disable wrappers pass on UDP/TCP, including invalid/false values, multi-section filtering and wrapper identity; proxy/rule routing remains |
-| Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; complete bootstrap/proxy consumers remain |
+| Phase 4F7 resolver-set core | Complete in declared core; DNS-11 partial | Default/main/fallback/direct/proxy-server sets, multi-client selection and direct-follow-policy pass; proxy TCP/UDP dials (including Hysteria2) consume PSN via `resolve_proxy_dial_server`; UDP destination resolution uses configured DNS when enabled; remaining bootstrap consumers stay open |
 | Phase 4F8 resolver policies | Complete in declared core; DNS-12 partial | Ordered main/proxy multi-resolver domain/GeoSite/inline-rule-set policies pass; external providers, attributes and adapter consumers remain |
 | Phase 4F9 fallback decision core | Complete in declared core; DNS-13 partial | GeoIP.dat/GeoSite/domain/IPv4/IPv6 filters, multiple fallback clients and eager/lazy failure/timeout ordering pass; MMDB and broader integration remain |
 | Phase 4F10 dual-stack/ECH/lazy tunnel | Complete in declared scope; DNS-14 parity | Concurrent A/AAAA with A-first ordering and configurable wait, primary IPv4, IP literals, HTTPS ECH extraction and tunnel lazy rule resolution pass |

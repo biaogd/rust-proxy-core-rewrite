@@ -17,9 +17,28 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tcp::{
     apply_host_mapping, configured_proxy, direct_tcp_options, mode_decision,
-    resolve_rematch_target, serve_connection,
+    resolve_proxy_dial_server, resolve_rematch_target, serve_connection,
 };
 use crate::types::LocalTcpListener;
+
+async fn proxy_dial_server(
+    proxy: &rewrite_config::ProxyConfig,
+    config: &Config,
+) -> Result<Destination, String> {
+    resolve_proxy_dial_server(
+        Destination {
+            host: proxy
+                .server
+                .parse()
+                .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
+            port: proxy.port,
+        },
+        &config.hosts,
+        config.dns.as_ref(),
+        config.ipv6,
+    )
+    .await
+}
 
 pub(super) async fn run_listener(
     kind: ListenerKind,
@@ -433,12 +452,15 @@ pub(super) async fn run_trojan_udp_session(
     let Some(trojan) = proxy.trojan.as_ref() else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let Ok(initial_address) =
         resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
@@ -504,7 +526,7 @@ pub(super) async fn run_trojan_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -540,12 +562,15 @@ pub(super) async fn run_anytls_udp_session(
     if proxy.anytls.is_none() {
         return;
     }
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let client = match super::tcp::anytls_client_for_proxy(
         proxy,
@@ -606,7 +631,7 @@ pub(super) async fn run_anytls_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -642,16 +667,13 @@ pub(super) async fn run_hysteria2_udp_session(
     if proxy.hysteria2.is_none() {
         return;
     }
-    let client =
-        match super::tcp::hysteria2_client_for_proxy(&proxy, &state, &config.trust_certificates)
-            .await
-        {
-            Ok(client) => client,
-            Err(error) => {
-                state.log("error", format!("Hysteria2 UDP client failed: {error}"));
-                return;
-            }
-        };
+    let client = match super::tcp::hysteria2_client_for_proxy(&proxy, &config, &state).await {
+        Ok(client) => client,
+        Err(error) => {
+            state.log("error", format!("Hysteria2 UDP client failed: {error}"));
+            return;
+        }
+    };
     let mut association = match rewrite_outbound::associate_hysteria2_udp(&client).await {
         Ok(association) => association,
         Err(error) => {
@@ -691,7 +713,7 @@ pub(super) async fn run_hysteria2_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -876,12 +898,15 @@ pub(super) async fn run_socks5_udp_session(
     let Some(proxy) = configured_proxy(&config, &proxy_name) else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let tls = proxy.tls.then_some(rewrite_outbound::HttpProxyTls {
         server_name: &proxy.server,
@@ -955,7 +980,7 @@ pub(super) async fn run_socks5_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -988,12 +1013,15 @@ pub(super) async fn run_shadowsocks_udp_session(
     let Some(proxy) = configured_proxy(&config, &proxy_name) else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
         &server,
@@ -1050,7 +1078,7 @@ pub(super) async fn run_shadowsocks_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -1086,12 +1114,15 @@ pub(super) async fn run_ssr_udp_session(
     let Some(ssr) = proxy.ssr.as_ref() else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("ShadowsocksR UDP association failed: {error}"),
+            );
+            return;
+        }
     };
     let mut association = match rewrite_outbound::associate_ssr_udp_with_options(
         &server,
@@ -1102,6 +1133,7 @@ pub(super) async fn run_ssr_udp_session(
         &ssr.protocol_param,
         &ssr.obfs,
         &ssr.obfs_param,
+        &proxy.server,
         direct_tcp_options(&config),
     )
     .await
@@ -1152,7 +1184,7 @@ pub(super) async fn run_ssr_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -1185,12 +1217,15 @@ pub(super) async fn run_shadowsocks_uot_session(
     let Some(proxy) = configured_proxy(&config, &proxy_name) else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let mut association = match rewrite_outbound::associate_shadowsocks_uot_with_options(
         &server,
@@ -1254,7 +1289,7 @@ pub(super) async fn run_shadowsocks_uot_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -1290,12 +1325,15 @@ pub(super) async fn run_vmess_udp_session(
     let Some(vmess) = proxy.vmess.as_ref() else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let Ok(initial_address) =
         resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
@@ -1387,7 +1425,7 @@ pub(super) async fn run_vmess_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -1423,12 +1461,15 @@ pub(super) async fn run_vless_udp_session(
     let Some(vless) = proxy.vless.as_ref() else {
         return;
     };
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
     };
     let Ok(initial_address) =
         resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
@@ -1529,7 +1570,7 @@ pub(super) async fn run_vless_udp_session(
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };
-                let Some(remote) = resolve_udp_response_source(&remote, config.ipv6).await else {
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
@@ -1565,14 +1606,27 @@ fn udp_proxy_destination(request: &UdpSessionPacket) -> Destination {
 
 pub(super) async fn resolve_udp_response_source(
     destination: &Destination,
-    allow_ipv6: bool,
+    config: &Config,
 ) -> Option<SocketAddr> {
-    match destination.host {
-        Host::Ip(address) => Some(SocketAddr::new(address, destination.port)),
-        Host::Domain(ref host) => tokio::net::lookup_host((host.as_str(), destination.port))
-            .await
-            .ok()?
-            .find(|address| allow_ipv6 || address.is_ipv4()),
+    match &destination.host {
+        Host::Ip(address) => {
+            if address.is_ipv6() && !config.ipv6 {
+                return None;
+            }
+            Some(SocketAddr::new(*address, destination.port))
+        }
+        Host::Domain(host) => {
+            if let Some(dns) = config.dns.as_ref() {
+                return rewrite_dns::resolve_domain(dns, host, config.ipv6)
+                    .await
+                    .ok()
+                    .map(|address| SocketAddr::new(address, destination.port));
+            }
+            tokio::net::lookup_host((host.as_str(), destination.port))
+                .await
+                .ok()?
+                .find(|address| config.ipv6 || address.is_ipv4())
+        }
     }
 }
 
@@ -1600,6 +1654,12 @@ pub(super) async fn resolve_udp_target(
             Ok(SocketAddr::new(*address, metadata.destination.port))
         }
         Host::Domain(domain) => {
+            if let Some(dns) = config.dns.as_ref() {
+                return rewrite_dns::resolve_domain(dns, domain, config.ipv6)
+                    .await
+                    .map(|address| SocketAddr::new(address, metadata.destination.port))
+                    .map_err(std::io::Error::other);
+            }
             tokio::net::lookup_host((domain.as_str(), metadata.destination.port))
                 .await?
                 .find(|address| config.ipv6 || address.is_ipv4())

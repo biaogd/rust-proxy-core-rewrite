@@ -37,7 +37,22 @@ impl Hysteria2Client {
         proxy: &ProxyConfig,
         custom_roots: &[String],
     ) -> Result<Self, Hysteria2ProxyError> {
-        let options = client_options_from_proxy(proxy, custom_roots)?;
+        Self::from_proxy_with_dial_server(proxy, &proxy.server, custom_roots)
+    }
+
+    /// Like [`Self::from_proxy`], but dials `dial_server` (typically a
+    /// PSN-resolved IP) while TLS SNI still uses `proxy.sni` / `proxy.server`.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the proxy is missing Hysteria2 options or client construction fails.
+    pub fn from_proxy_with_dial_server(
+        proxy: &ProxyConfig,
+        dial_server: &str,
+        custom_roots: &[String],
+    ) -> Result<Self, Hysteria2ProxyError> {
+        let mut options = client_options_from_proxy(proxy, custom_roots)?;
+        dial_server.clone_into(&mut options.server);
         let inner = rewrite_protocol_hysteria2::Client::new(options)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),

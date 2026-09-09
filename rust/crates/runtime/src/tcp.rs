@@ -383,10 +383,8 @@ pub(super) async fn connect_tcp_outbound(
             result = connect_configured_proxy(
                 proxy,
                 &metadata.destination,
-                config.ipv6,
+                config,
                 state,
-                &config.trust_certificates,
-                config.dns.as_ref(),
                 direct_tcp_options(config),
             ) => result,
         };
@@ -423,14 +421,16 @@ pub(super) fn direct_tcp_options(config: &Config) -> rewrite_outbound::DirectTcp
 pub(super) async fn connect_configured_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
-    allow_ipv6: bool,
+    config: &Config,
     state: &RuntimeState,
-    custom_roots: &[String],
-    dns: Option<&rewrite_config::DnsConfig>,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let clock = state.clock();
-    let server = proxy_server(proxy);
+    let allow_ipv6 = config.ipv6;
+    let custom_roots = config.trust_certificates.as_slice();
+    let dns = config.dns.as_ref();
+    let server =
+        resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6).await?;
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -476,6 +476,7 @@ pub(super) async fn connect_configured_proxy(
         ProxyKind::Shadowsocks => {
             connect_shadowsocks_proxy(
                 proxy,
+                &server,
                 destination,
                 allow_ipv6,
                 clock,
@@ -486,7 +487,7 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::ShadowsocksR => {
-            connect_ssr_proxy(proxy, destination, allow_ipv6, socket_options).await
+            connect_ssr_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
         }
         ProxyKind::Vmess => {
             connect_vmess_proxy(
@@ -536,9 +537,7 @@ pub(super) async fn connect_configured_proxy(
             )
             .await
         }
-        ProxyKind::Hysteria2 => {
-            connect_hysteria2_proxy(proxy, destination, state, custom_roots).await
-        }
+        ProxyKind::Hysteria2 => connect_hysteria2_proxy(proxy, destination, config, state).await,
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
@@ -548,10 +547,10 @@ pub(super) async fn connect_configured_proxy(
 async fn connect_hysteria2_proxy(
     proxy: &rewrite_config::ProxyConfig,
     destination: &Destination,
+    config: &Config,
     state: &RuntimeState,
-    custom_roots: &[String],
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let client = hysteria2_client_for_proxy(proxy, state, custom_roots).await?;
+    let client = hysteria2_client_for_proxy(proxy, config, state).await?;
     client
         .create_proxy(destination)
         .await
@@ -560,12 +559,30 @@ async fn connect_hysteria2_proxy(
 
 pub(super) async fn hysteria2_client_for_proxy(
     proxy: &rewrite_config::ProxyConfig,
+    config: &Config,
     state: &RuntimeState,
-    custom_roots: &[String],
 ) -> Result<std::sync::Arc<rewrite_outbound::Hysteria2Client>, String> {
-    let identity = format!("{proxy:?}|roots={custom_roots:?}");
-    let client = rewrite_outbound::Hysteria2Client::from_proxy(proxy, custom_roots)
-        .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
+    let dial = resolve_proxy_dial_server(
+        proxy_server(proxy),
+        &config.hosts,
+        config.dns.as_ref(),
+        config.ipv6,
+    )
+    .await?;
+    let dial_server = match &dial.host {
+        Host::Ip(address) => address.to_string(),
+        Host::Domain(domain) => domain.clone(),
+    };
+    let identity = format!(
+        "{proxy:?}|dial={dial_server}|roots={:?}",
+        config.trust_certificates
+    );
+    let client = rewrite_outbound::Hysteria2Client::from_proxy_with_dial_server(
+        proxy,
+        &dial_server,
+        &config.trust_certificates,
+    )
+    .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
     Ok(state.hysteria2_client(&proxy.name, identity, client).await)
 }
 
@@ -826,6 +843,31 @@ fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
             .parse()
             .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
         port: proxy.port,
+    }
+}
+
+/// Resolves a proxy adapter's dial host through configured hosts + PSN
+/// (`dns.proxy-server-nameserver`), matching Go `ProxyServerHostResolver`.
+/// When DNS is disabled, the domain is left for the OS resolver.
+pub(super) async fn resolve_proxy_dial_server(
+    server: Destination,
+    hosts: &rewrite_config::HostTable,
+    dns: Option<&rewrite_config::DnsConfig>,
+    allow_ipv6: bool,
+) -> Result<Destination, String> {
+    let Host::Domain(ref domain) = server.host else {
+        return Ok(server);
+    };
+    let use_hosts = dns.is_some_and(|dns| dns.use_hosts);
+    match rewrite_dns::resolve_proxy_server_host(hosts, use_hosts, dns, domain, allow_ipv6).await {
+        Ok(address) => Ok(Destination {
+            host: Host::Ip(address),
+            port: server.port,
+        }),
+        Err(rewrite_dns::DnsError::Inactive) => Ok(server),
+        Err(error) => Err(format!(
+            "proxy-server DNS resolution failed for {domain}: {error}"
+        )),
     }
 }
 
@@ -1681,8 +1723,10 @@ async fn wrap_vmess_transport(
     Ok(outer)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_shadowsocks_proxy(
     proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
     clock: Arc<rewrite_services::AdjustedClock>,
@@ -1690,13 +1734,6 @@ async fn connect_shadowsocks_proxy(
     dns: Option<&rewrite_config::DnsConfig>,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
-    };
     let resolved_ech = match proxy.shadowsocks_plugin.as_ref() {
         Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
             ech: Some(rewrite_model::V2rayEchConfig::Dns { query_server_name }),
@@ -1723,7 +1760,7 @@ async fn connect_shadowsocks_proxy(
         _ => None,
     };
     rewrite_outbound::connect_shadowsocks_with_plugin_options(
-        &server,
+        server,
         destination,
         allow_ipv6,
         proxy.password.as_deref().unwrap_or_default(),
@@ -1743,23 +1780,17 @@ async fn connect_shadowsocks_proxy(
 
 async fn connect_ssr_proxy(
     proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
     destination: &Destination,
     allow_ipv6: bool,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let server = Destination {
-        host: proxy
-            .server
-            .parse()
-            .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
-        port: proxy.port,
-    };
     let ssr = proxy
         .ssr
         .as_ref()
         .ok_or_else(|| "ShadowsocksR proxy missing ssr options".to_owned())?;
     rewrite_outbound::connect_ssr_with_options(
-        &server,
+        server,
         destination,
         allow_ipv6,
         proxy.password.as_deref().unwrap_or_default(),
@@ -1768,6 +1799,7 @@ async fn connect_ssr_proxy(
         &ssr.protocol_param,
         &ssr.obfs,
         &ssr.obfs_param,
+        &proxy.server,
         socket_options,
     )
     .await

@@ -20,8 +20,10 @@ pub enum SsrProxyError {
     Timeout,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ssr_client_options(
-    server: &Destination,
+    server_host: &str,
+    server_port: u16,
     password: &str,
     cipher: &str,
     protocol: &str,
@@ -36,12 +38,17 @@ fn ssr_client_options(
         protocol_param: protocol_param.to_owned(),
         obfs: obfs.to_owned(),
         obfs_param: obfs_param.to_owned(),
-        server_host: server.host.to_string(),
-        server_port: server.port,
+        // Camouflage Host/SNI must stay the configured server name even when
+        // the TCP/UDP dial target was already resolved to an IP via PSN.
+        server_host: server_host.to_owned(),
+        server_port,
     }
 }
 
 /// Opens the upstream TCP socket, then stacks SSR obfs → cipher → protocol.
+///
+/// `server` is the dial target (often an IP after proxy-server DNS).
+/// `server_host` is the configured hostname used for http/tls camouflage.
 ///
 /// # Errors
 ///
@@ -57,12 +64,14 @@ pub async fn connect_ssr_with_options(
     protocol_param: &str,
     obfs: &str,
     obfs_param: &str,
+    server_host: &str,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, SsrProxyError> {
     let dial = async {
         let stream = connect_with_options(server, allow_ipv6, options).await?;
         let options = ssr_client_options(
-            server,
+            server_host,
+            server.port,
             password,
             cipher,
             protocol,
@@ -100,6 +109,7 @@ pub async fn associate_ssr_udp_with_options(
     protocol_param: &str,
     obfs: &str,
     obfs_param: &str,
+    server_host: &str,
     options: DirectTcpOptions<'_>,
 ) -> Result<SsrUdpAssociation, SsrProxyError> {
     let server_address = resolve_server(server, allow_ipv6).await?;
@@ -113,7 +123,8 @@ pub async fn associate_ssr_udp_with_options(
     let socket = tokio::net::UdpSocket::from_std(socket)?;
     socket.connect(server_address).await?;
     let client = ssr_client_options(
-        server,
+        server_host,
+        server.port,
         password,
         cipher,
         protocol,
