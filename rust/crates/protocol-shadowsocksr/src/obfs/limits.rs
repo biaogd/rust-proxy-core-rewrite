@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use tokio::time::{Sleep, sleep};
@@ -102,4 +102,22 @@ pub(crate) fn buffer_cap_error(obfs: &str) -> io::Error {
         io::ErrorKind::OutOfMemory,
         format!("{obfs} pre-handshake buffer exceeded {PRE_HANDSHAKE_BUF_MAX} bytes"),
     )
+}
+
+/// Park a write that returned `Pending` at the pre-handshake buffer cap.
+pub(crate) fn park_write_waker(slot: &mut Option<Waker>, cx: &Context<'_>) {
+    let waker = cx.waker();
+    if slot
+        .as_ref()
+        .is_none_or(|existing| !existing.will_wake(waker))
+    {
+        *slot = Some(waker.clone());
+    }
+}
+
+/// Wake a writer blocked on the pre-handshake buffer (handshake done / freed / failed).
+pub(crate) fn wake_write_waker(slot: &mut Option<Waker>) {
+    if let Some(waker) = slot.take() {
+        waker.wake();
+    }
 }

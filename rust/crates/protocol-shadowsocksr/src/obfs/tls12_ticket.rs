@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::crypto_util::{append_rand, hmac_sha1, random_u32_bounded, unix_timestamp};
 use crate::obfs::limits::{
     HandshakeDeadlineSlot, PRE_HANDSHAKE_BUF_MAX, arm_handshake_deadline, clear_handshake_deadline,
-    drop_on_shutdown_error, poll_handshake_deadline,
+    drop_on_shutdown_error, park_write_waker, poll_handshake_deadline, wake_write_waker,
 };
 
 pub(crate) struct Tls12TicketConn {
@@ -31,6 +31,7 @@ pub(crate) struct Tls12TicketConn {
     pending_write: Vec<u8>,
     pending_offset: usize,
     handshake_deadline: HandshakeDeadlineSlot,
+    write_waker: Option<std::task::Waker>,
 }
 
 impl Tls12TicketConn {
@@ -50,6 +51,7 @@ impl Tls12TicketConn {
             pending_write: Vec::new(),
             pending_offset: 0,
             handshake_deadline: None,
+            write_waker: None,
         }
     }
 
@@ -237,7 +239,10 @@ impl AsyncRead for Tls12TicketConn {
         let this = self.as_mut().get_mut();
         match this.check_deadline(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
         if !this.decoded.is_empty() {
@@ -250,8 +255,15 @@ impl AsyncRead for Tls12TicketConn {
         // Drive remaining handshake writes (e.g. Finished under backpressure)
         // before waiting on server data — otherwise both sides stall.
         match this.poll_flush_pending(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                if this.handshake_status == 8 {
+                    wake_write_waker(&mut this.write_waker);
+                }
+            }
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
@@ -277,6 +289,7 @@ impl AsyncRead for Tls12TicketConn {
                 }
 
                 if filled.len() < 11 + 32 + 1 + 32 {
+                    wake_write_waker(&mut this.write_waker);
                     return Poll::Ready(Err(std::io::Error::other(
                         "tls1.2_ticket camouflage handshake too short",
                     )));
@@ -284,6 +297,7 @@ impl AsyncRead for Tls12TicketConn {
                 let mac1 = this.hmac(&filled[11..33]);
                 let mac2 = this.hmac(&filled[..filled.len() - 10]);
                 if mac1 != filled[33..43] || mac2.as_slice() != &filled[filled.len() - 10..] {
+                    wake_write_waker(&mut this.write_waker);
                     return Poll::Ready(Err(std::io::Error::other(
                         "tls1.2_ticket camouflage HMAC mismatch",
                     )));
@@ -292,6 +306,8 @@ impl AsyncRead for Tls12TicketConn {
                 this.pending_write = this.build_finish_flight();
                 this.pending_offset = 0;
                 clear_handshake_deadline(&mut this.handshake_deadline);
+                // send_buf drained into Finished flight — parked writers may resume.
+                wake_write_waker(&mut this.write_waker);
                 match this.poll_flush_pending(cx) {
                     Poll::Ready(Ok(())) | Poll::Pending => {
                         // No application data yet from this handshake reply.
@@ -301,7 +317,11 @@ impl AsyncRead for Tls12TicketConn {
                     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
                 }
             }
-            other => other,
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -315,16 +335,23 @@ impl AsyncWrite for Tls12TicketConn {
         let this = self.as_mut().get_mut();
         match this.check_deadline(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
         match this.poll_flush_pending(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
         if this.handshake_status == 8 {
+            this.write_waker = None;
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
@@ -342,11 +369,13 @@ impl AsyncWrite for Tls12TicketConn {
             // Bidirectional copy may Write large payloads before the server
             // handshake reply is Read (status still 1); queue framed chunks.
             if this.send_buf.len() >= PRE_HANDSHAKE_BUF_MAX {
+                park_write_waker(&mut this.write_waker, cx);
                 return Poll::Pending;
             }
             let room = PRE_HANDSHAKE_BUF_MAX - this.send_buf.len();
             let mut take = buf.len().min(room.saturating_sub(5));
             if take == 0 {
+                park_write_waker(&mut this.write_waker, cx);
                 return Poll::Pending;
             }
             let framed = loop {
@@ -356,9 +385,11 @@ impl AsyncWrite for Tls12TicketConn {
                 }
                 take /= 2;
                 if take == 0 {
+                    park_write_waker(&mut this.write_waker, cx);
                     return Poll::Pending;
                 }
             };
+            this.write_waker = None;
             this.send_buf.extend_from_slice(&framed);
             if this.handshake_status == 0 {
                 this.handshake_status = 1;
@@ -663,6 +694,102 @@ mod tests {
             .await
             .expect_err("deadline");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn buffer_cap_pending_write_resumes_after_handshake() {
+        use std::future::poll_fn;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, duplex};
+
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (client, mut server) = duplex(PRE_HANDSHAKE_BUF_MAX + 64 * 1024);
+        let mut conn = Tls12TicketConn::new(
+            Box::new(client),
+            "example.com".into(),
+            String::new(),
+            b"k".to_vec(),
+        );
+        let chunk = vec![0x9_u8; 16 * 1024];
+        loop {
+            let step = poll_fn(|cx| match Pin::new(&mut conn).poll_write(cx, &chunk) {
+                Poll::Pending => Poll::Ready(None),
+                Poll::Ready(outcome) => Poll::Ready(Some(outcome)),
+            })
+            .await;
+            match step {
+                None => break,
+                Some(Ok(_)) => {
+                    if conn.send_buf.len() >= PRE_HANDSHAKE_BUF_MAX.saturating_sub(5) {
+                        break;
+                    }
+                }
+                Some(Err(error)) => panic!("unexpected: {error}"),
+            }
+        }
+        let mut hello = vec![0_u8; 8192];
+        assert!(server.read(&mut hello).await.unwrap() > 0);
+
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut conn).poll_write(&mut cx, b"MORE"),
+            Poll::Pending
+        ));
+        assert!(!flag.0.load(Ordering::SeqCst));
+
+        let response = forge_server_handshake(&conn);
+        server.write_all(&response).await.unwrap();
+
+        let mut sink = [0_u8; 8];
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            poll_fn(|cx| {
+                if conn.handshake_status == 8 && conn.pending_write.is_empty() {
+                    return Poll::Ready(());
+                }
+                let mut buf = ReadBuf::new(&mut sink);
+                match Pin::new(&mut conn).poll_read(cx, &mut buf) {
+                    Poll::Pending => {
+                        if conn.handshake_status == 8 && conn.pending_write.is_empty() {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Ok(())) => {
+                        if conn.handshake_status == 8 && conn.pending_write.is_empty() {
+                            Poll::Ready(())
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Err(error)) => panic!("{error}"),
+                }
+            }),
+        )
+        .await
+        .expect("tls camouflage handshake");
+
+        assert!(
+            flag.0.load(Ordering::SeqCst),
+            "handshake completion must wake the parked writer"
+        );
+        tokio::time::timeout(Duration::from_secs(1), conn.write_all(b"MORE"))
+            .await
+            .expect("upload must resume without stalling")
+            .unwrap();
     }
 
     fn futures_task_noop() -> &'static std::task::Waker {

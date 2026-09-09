@@ -1,8 +1,8 @@
 # Rust rewrite status
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 
-SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/negatives/soak. Follow-ups: HTTP header-then-payload; TLS Finished flush under Pending; UDP skips TCP obfs; pre-handshake shutdown fails loud (no silent drop); pre-handshake buffer cap + 5s handshake Sleep deadline; peer-close + rust-only silent-peer product timeout gates. Pin: shadowsocksrr `fd723a92` + shims. Phases `phase7a`/`7b`/`7c`/`7d` + soak. Remaining gaps: no inbound SSR; mudb multi-user e2e unclaimed; multi-hour soak opt-in; do not over-claim production readiness.
+SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/negatives/soak. Follow-ups: HTTP header-then-payload; TLS Finished flush under Pending; UDP skips TCP obfs; pre-handshake shutdown fails loud; pre-handshake buffer cap + 5s deadline + **write-waker wake on handshake/buffer free**; peer-close + rust-only silent-peer product timeout. Pin: shadowsocksrr `fd723a92` + shims. Phases `phase7a`/`7b`/`7c`/`7d` + soak. Remaining gaps: no inbound SSR; mudb multi-user e2e unclaimed; multi-hour soak opt-in; **macOS CI SSR pin-server start failure not yet diagnosed** (no three-platform claim); do not over-claim production readiness.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 

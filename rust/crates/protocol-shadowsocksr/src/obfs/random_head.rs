@@ -11,7 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::crypto_util::{append_rand, crc32_ieee, random_u32_bounded};
 use crate::obfs::limits::{
     HandshakeDeadlineSlot, PRE_HANDSHAKE_BUF_MAX, arm_handshake_deadline, buffer_cap_error,
-    clear_handshake_deadline, drop_on_shutdown_error, poll_handshake_deadline,
+    clear_handshake_deadline, drop_on_shutdown_error, park_write_waker, poll_handshake_deadline,
+    wake_write_waker,
 };
 
 /// Random leading bytes + inverted CRC32, then raw passthrough after first read.
@@ -24,6 +25,7 @@ pub(crate) struct RandomHeadConn {
     pending_write: Vec<u8>,
     pending_offset: usize,
     handshake_deadline: HandshakeDeadlineSlot,
+    write_waker: Option<std::task::Waker>,
 }
 
 impl RandomHeadConn {
@@ -37,6 +39,7 @@ impl RandomHeadConn {
             pending_write: Vec::new(),
             pending_offset: 0,
             handshake_deadline: None,
+            write_waker: None,
         }
     }
 
@@ -96,7 +99,10 @@ impl AsyncRead for RandomHeadConn {
         let this = self.as_mut().get_mut();
         match this.check_deadline(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
@@ -110,15 +116,25 @@ impl AsyncRead for RandomHeadConn {
                     this.raw_trans_recv = true;
                     this.queue_buffered_payload();
                     clear_handshake_deadline(&mut this.handshake_deadline);
+                    wake_write_waker(&mut this.write_waker);
                 }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Err(error)) => {
+                    wake_write_waker(&mut this.write_waker);
+                    return Poll::Ready(Err(error));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
 
         match this.poll_flush_pending(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                // Buffer drained after handshake — any parked writer may proceed.
+                wake_write_waker(&mut this.write_waker);
+            }
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
@@ -135,28 +151,37 @@ impl AsyncWrite for RandomHeadConn {
         let this = self.as_mut().get_mut();
         match this.check_deadline(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
         match this.poll_flush_pending(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Err(error)) => {
+                wake_write_waker(&mut this.write_waker);
+                return Poll::Ready(Err(error));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
         if this.raw_trans_sent {
+            this.write_waker = None;
             return Pin::new(&mut this.inner).poll_write(cx, buf);
         }
 
         arm_handshake_deadline(&mut this.handshake_deadline);
         if this.buf.len() >= PRE_HANDSHAKE_BUF_MAX {
-            // Backpressure without self-wake (deadline Sleep wakes mute peers).
+            // Backpressure without self-wake; handshake completion wakes this waker.
+            park_write_waker(&mut this.write_waker, cx);
             return Poll::Pending;
         }
         let accept = buf.len().min(PRE_HANDSHAKE_BUF_MAX - this.buf.len());
         if accept == 0 {
             return Poll::Ready(Err(buffer_cap_error("random_head")));
         }
+        this.write_waker = None;
         this.buf.extend_from_slice(&buf[..accept]);
 
         if !this.has_sent_header {
@@ -331,5 +356,96 @@ mod tests {
             .await
             .expect_err("deadline");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn buffer_cap_pending_write_resumes_after_handshake() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let (client, mut server) = duplex(PRE_HANDSHAKE_BUF_MAX + 64 * 1024);
+        let mut conn = RandomHeadConn::new(Box::new(client));
+        let fill = vec![0x33_u8; PRE_HANDSHAKE_BUF_MAX];
+        conn.write_all(&fill).await.unwrap();
+        let mut header = vec![0_u8; 512];
+        assert!(server.read(&mut header).await.unwrap() > 0);
+
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut cx = Context::from_waker(&waker);
+        assert!(
+            matches!(
+                Pin::new(&mut conn).poll_write(&mut cx, b"MORE"),
+                Poll::Pending
+            ),
+            "must park once the pre-handshake buffer is full"
+        );
+        assert!(!flag.0.load(Ordering::SeqCst));
+
+        server.write_all(&[0x00]).await.unwrap();
+        let mut sink = [0_u8; 32];
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            poll_fn(|cx| {
+                if conn.raw_trans_recv && conn.buf.is_empty() && conn.pending_write.is_empty() {
+                    return Poll::Ready(());
+                }
+                let mut buf = ReadBuf::new(&mut sink);
+                match Pin::new(&mut conn).poll_read(cx, &mut buf) {
+                    Poll::Pending => {
+                        if conn.raw_trans_recv
+                            && conn.buf.is_empty()
+                            && conn.pending_write.is_empty()
+                        {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Ok(())) => {
+                        if conn.raw_trans_recv
+                            && conn.buf.is_empty()
+                            && conn.pending_write.is_empty()
+                        {
+                            Poll::Ready(())
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }
+                    Poll::Ready(Err(error)) => panic!("{error}"),
+                }
+            }),
+        )
+        .await
+        .expect("handshake");
+
+        assert!(
+            flag.0.load(Ordering::SeqCst),
+            "handshake completion must wake the parked writer"
+        );
+        tokio::time::timeout(Duration::from_secs(1), conn.write_all(b"MORE"))
+            .await
+            .expect("upload must resume without stalling")
+            .expect("write after handshake");
+        let mut got = vec![0_u8; PRE_HANDSHAKE_BUF_MAX + 16];
+        let mut total = 0_usize;
+        while total < fill.len() + 4 {
+            let n = tokio::time::timeout(Duration::from_secs(1), server.read(&mut got[total..]))
+                .await
+                .expect("server read")
+                .unwrap();
+            assert!(n > 0);
+            total += n;
+        }
+        assert_eq!(&got[fill.len()..fill.len() + 4], b"MORE");
     }
 }
