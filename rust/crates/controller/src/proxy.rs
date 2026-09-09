@@ -162,7 +162,7 @@ pub(super) async fn proxy_delay(
     }
     let result = tokio::time::timeout(
         Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
-        measure_http_delay(&tested_name, url, &expected, &config),
+        measure_http_delay(&tested_name, url, &expected, &config, &state.runtime),
     )
     .await;
     match result {
@@ -230,12 +230,13 @@ pub(super) async fn group_delay(
     if let Some(group) = automatic_group {
         let timeout = Duration::from_millis(u64::try_from(timeout).unwrap_or_default());
         let config = config.as_ref();
+        let runtime = &state.runtime;
         let results = join_all(group.proxies.iter().map(|member| {
             let expected = &expected;
             async move {
                 let result = tokio::time::timeout(
                     timeout,
-                    measure_http_delay(member, url, expected, config),
+                    measure_http_delay(member, url, expected, config, runtime),
                 )
                 .await;
                 (member, result)
@@ -268,7 +269,7 @@ pub(super) async fn group_delay(
     }
     let result = tokio::time::timeout(
         Duration::from_millis(u64::try_from(timeout).unwrap_or_default()),
-        measure_http_delay("DIRECT", url, &expected, &config),
+        measure_http_delay("DIRECT", url, &expected, &config, &state.runtime),
     )
     .await;
     match result {
@@ -301,6 +302,7 @@ pub(super) async fn measure_http_delay(
     raw_url: &str,
     expected: &[(u16, u16)],
     config: &Config,
+    state: &RuntimeState,
 ) -> Result<DelayMeasurement, ()> {
     let url = url::Url::parse(raw_url).map_err(|_| ())?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -816,6 +818,7 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::ShadowsocksR => {
                     let ssr = proxy.ssr.as_ref().ok_or(())?;
+                    let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
                     rewrite_outbound::connect_ssr_with_options(
                         &server,
                         &destination,
@@ -828,6 +831,7 @@ pub(super) async fn measure_http_delay(
                         &ssr.obfs_param,
                         &proxy.server,
                         controller_socket_options(config),
+                        &client_state,
                     )
                     .await
                     .map_err(|_| ())?
@@ -1432,7 +1436,13 @@ pub async fn healthcheck_proxy_provider_config(
         async move {
             let result = tokio::time::timeout(
                 timeout,
-                measure_http_delay(&member.name, &provider.health_check.url, expected, config),
+                measure_http_delay(
+                    &member.name,
+                    &provider.health_check.url,
+                    expected,
+                    config,
+                    state,
+                ),
             )
             .await;
             (&member.name, result)
@@ -1467,7 +1477,7 @@ pub async fn healthcheck_proxy_group(
         async move {
             let result = tokio::time::timeout(
                 timeout,
-                measure_http_delay(member, &group.test_url, expected, config),
+                measure_http_delay(member, &group.test_url, expected, config, state),
             )
             .await;
             (member, result)

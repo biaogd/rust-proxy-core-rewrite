@@ -16,6 +16,7 @@ use rewrite_io::BoxedStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ShadowsocksRProtocolError;
+use crate::client_state::AuthState;
 use crate::crypto_util::{
     HashKind, XorShift128Plus, aes128_cbc_encrypt_block, append_rand, kdf, random_u32_bounded,
     unix_timestamp,
@@ -42,23 +43,6 @@ impl AuthChainKind {
 struct UserData {
     user_key: Vec<u8>,
     user_id: [u8; 4],
-}
-
-struct AuthState {
-    client_id: [u8; 4],
-    connection_id: u32,
-}
-
-impl AuthState {
-    fn next_connection() -> Self {
-        let mut client_id = [0_u8; 4];
-        rand::fill(&mut client_id);
-        let connection_id = random_u32_bounded(0x0100_0000);
-        Self {
-            client_id,
-            connection_id: connection_id.saturating_add(1).max(1),
-        }
-    }
 }
 
 fn parse_user(param: &str, stream_key: &[u8]) -> UserData {
@@ -148,6 +132,11 @@ pub(crate) struct AuthChainConn {
 }
 
 impl AuthChainConn {
+    pub(crate) fn with_state(mut self, state: &crate::SsrClientState) -> Self {
+        self.auth = state.next();
+        self
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new(
         inner: BoxedStream,

@@ -15,6 +15,7 @@ use rewrite_io::BoxedStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ShadowsocksRProtocolError;
+use crate::client_state::AuthState;
 use crate::crypto_util::{
     HashKind, aes128_cbc_encrypt_block, append_rand, kdf, random_u32_bounded, trapezoid_random,
     unix_timestamp,
@@ -42,23 +43,6 @@ pub(crate) const AUTH_AES128_SHA1: AuthAes128Kind = AuthAes128Kind {
 struct UserData {
     user_key: Vec<u8>,
     user_id: [u8; 4],
-}
-
-struct AuthState {
-    client_id: [u8; 4],
-    connection_id: u32,
-}
-
-impl AuthState {
-    fn next_connection() -> Self {
-        let mut client_id = [0_u8; 4];
-        rand::fill(&mut client_id);
-        let connection_id = random_u32_bounded(0x0100_0000);
-        Self {
-            client_id,
-            connection_id: connection_id.saturating_add(1).max(1),
-        }
-    }
 }
 
 fn parse_user(param: &str, kind: AuthAes128Kind, stream_key: &[u8]) -> UserData {
@@ -117,6 +101,11 @@ pub(crate) struct AuthAes128Conn {
 }
 
 impl AuthAes128Conn {
+    pub(crate) fn with_state(mut self, state: &crate::SsrClientState) -> Self {
+        self.auth = state.next();
+        self
+    }
+
     pub(crate) fn new(
         inner: BoxedStream,
         kind: AuthAes128Kind,

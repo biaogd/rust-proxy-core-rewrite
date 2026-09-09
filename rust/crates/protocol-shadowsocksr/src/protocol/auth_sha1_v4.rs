@@ -14,6 +14,7 @@ use rewrite_io::BoxedStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ShadowsocksRProtocolError;
+use crate::client_state::AuthState;
 use crate::crypto_util::{
     adler32_checksum, append_rand, crc32_ieee, hmac_sha1, random_u32_bounded, unix_timestamp,
 };
@@ -21,23 +22,6 @@ use crate::crypto_util::{
 const AUTH_OVERHEAD: usize = 7;
 const MAX_CHUNK: usize = 8100;
 const SALT: &[u8] = b"auth_sha1_v4";
-
-struct AuthState {
-    client_id: [u8; 4],
-    connection_id: u32,
-}
-
-impl AuthState {
-    fn next_connection() -> Self {
-        let mut client_id = [0_u8; 4];
-        rand::fill(&mut client_id);
-        let connection_id = random_u32_bounded(0x0100_0000);
-        Self {
-            client_id,
-            connection_id: connection_id.saturating_add(1).max(1),
-        }
-    }
-}
 
 fn get_head_size(data: &[u8], default: usize) -> usize {
     if data.len() < 2 {
@@ -73,6 +57,11 @@ pub(crate) struct AuthSha1V4Conn {
 }
 
 impl AuthSha1V4Conn {
+    pub(crate) fn with_state(mut self, state: &crate::SsrClientState) -> Self {
+        self.auth = state.next();
+        self
+    }
+
     pub(crate) fn new(
         inner: BoxedStream,
         stream_key: Vec<u8>,

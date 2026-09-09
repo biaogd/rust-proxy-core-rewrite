@@ -2,6 +2,29 @@
 
 Last updated: 2026-09-09
 
+### SSR concurrent client-identity correction — 2026-09-09
+
+`auth_aes128_*`, `auth_sha1_v4` and `auth_chain_*` now obtain authentication
+client/connection IDs from a per-configured-adapter state, following Go's
+`transport/ssr/protocol/base.go` counter and rollover rules. Previously every
+connection generated a new client ID, exhausting the pinned SSR server's default
+64 active-client slots. Against an unchanged local authority, Go retained 96/96
+connections while the pre-fix Rust binary retained exactly 64/96, with 32 EOFs,
+for both `rc4-md5/auth_aes128_md5/plain` and `tls1.2_ticket_auth`.
+
+The new `compat/scripts/phase7d_ssr_identity.py` keeps 96 connections alive and
+checks round trips again after the burst; it is included in the native CI shard.
+Credentials/configuration changes and reload replace the per-adapter identity;
+resolved IP changes do not. Counter allocation is synchronized across concurrent
+dials; controller health checks share the same identity. Local macOS
+arm64 differential passed: Go and fixed Rust each opened and retained 96/96
+connections with zero errors for AES128 MD5 (plain and TLS ticket auth), AES128
+SHA1, SHA1 v4, chain A and chain B (plain). Workspace format checking,
+all-target/all-feature Clippy and all-feature tests (including doc-tests) passed;
+SSR has 32 passing unit tests, including concurrent ID allocation and rollover.
+Native CI revalidation remains pending; this does not establish general production
+readiness, and unrelated EOF causes remain possible.
+
 SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/negatives/soak. Follow-ups: HTTP header-then-payload; TLS Finished flush under Pending; UDP skips TCP obfs; pre-handshake shutdown fails loud; pre-handshake buffer cap + 5s deadline + **write-waker wake on handshake/buffer free**; peer-close + rust-only silent-peer product timeout. Pin: shadowsocksrr `fd723a92` + shims. Phases `phase7a`/`7b`/`7c`/`7d` + soak. Remaining gaps: no inbound SSR; mudb multi-user e2e unclaimed; multi-hour soak opt-in; **macOS CI SSR pin-server start failure not yet diagnosed** (no three-platform claim); do not over-claim production readiness.
 
 **PSN consumer fix (2026-09-09):** Go dials every proxy adapter host via `ProxyServerHostResolver` (`dns.proxy-server-nameserver`, falling back to the main resolver). Rust previously used OS `lookup_host` for SSR/SS/VMess/… dials, so polluted system DNS broke live nodes (e.g. suying). Runtime/`controller` now resolve proxy dial hosts through `resolve_proxy_server_host` / `resolve_proxy_dial_server` before TCP/UDP connect; SSR keeps the configured hostname for obfs SNI. Hysteria2 dials through the same helper (`from_proxy_with_dial_server`). DIRECT/UDP destination lookups use configured DNS when enabled instead of the OS stub.

@@ -4,6 +4,31 @@ mod groups;
 mod model;
 mod storage;
 #[cfg(test)]
+mod ssr_identity_tests {
+    use super::*;
+
+    #[test]
+    fn shares_only_unchanged_adapter_identity_and_clears_on_reload() {
+        let state = RuntimeState::default();
+        let first = state.ssr_client("node", "config-a".into());
+        assert!(Arc::ptr_eq(
+            &first,
+            &state.ssr_client("node", "config-a".into())
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &state.ssr_client("other", "config-a".into())
+        ));
+        let replaced = state.ssr_client("node", "config-b".into());
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        state.clear_ssr_clients();
+        assert!(!Arc::ptr_eq(
+            &replaced,
+            &state.ssr_client("node", "config-b".into())
+        ));
+    }
+}
+#[cfg(test)]
 mod tests;
 
 use std::collections::hash_map::RandomState;
@@ -57,6 +82,7 @@ pub struct RuntimeState {
     hysteria2_clients:
         AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::Hysteria2Client>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
+    ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
 }
 
 impl Default for RuntimeState {
@@ -91,11 +117,45 @@ impl Default for RuntimeState {
             anytls_clients: AsyncMutex::new(BTreeMap::new()),
             hysteria2_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
+            ssr_clients: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl RuntimeState {
+    /// Reuses SSR authentication identity until the configured adapter changes.
+    pub fn ssr_client(
+        &self,
+        name: &str,
+        identity: String,
+    ) -> Arc<rewrite_outbound::SsrClientState> {
+        let mut clients = self
+            .ssr_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = clients.entry(name.to_owned()).or_insert_with(|| {
+            (
+                identity.clone(),
+                Arc::new(rewrite_outbound::SsrClientState::default()),
+            )
+        });
+        if entry.0 != identity {
+            *entry = (
+                identity,
+                Arc::new(rewrite_outbound::SsrClientState::default()),
+            );
+        }
+        Arc::clone(&entry.1)
+    }
+
+    /// Drops adapter identities when a new configuration generation is installed.
+    pub fn clear_ssr_clients(&self) {
+        self.ssr_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     pub async fn grpc_client(
         &self,
         name: &str,

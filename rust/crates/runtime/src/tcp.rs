@@ -487,7 +487,15 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::ShadowsocksR => {
-            connect_ssr_proxy(proxy, &server, destination, allow_ipv6, socket_options).await
+            connect_ssr_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                socket_options,
+                state,
+            )
+            .await
         }
         ProxyKind::Vmess => {
             connect_vmess_proxy(
@@ -1784,11 +1792,13 @@ async fn connect_ssr_proxy(
     destination: &Destination,
     allow_ipv6: bool,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    state: &RuntimeState,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let ssr = proxy
         .ssr
         .as_ref()
         .ok_or_else(|| "ShadowsocksR proxy missing ssr options".to_owned())?;
+    let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
     rewrite_outbound::connect_ssr_with_options(
         server,
         destination,
@@ -1801,6 +1811,7 @@ async fn connect_ssr_proxy(
         &ssr.obfs_param,
         &proxy.server,
         socket_options,
+        &client_state,
     )
     .await
     .map_err(|error| format!("ShadowsocksR proxy connection failed: {error}"))

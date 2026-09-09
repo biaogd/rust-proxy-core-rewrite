@@ -13,12 +13,15 @@
 
 mod cipher;
 mod client;
+mod client_state;
 mod crypto_util;
 mod obfs;
 mod protocol;
 mod udp;
 
+pub use client::connect_tcp_on_stream_with_state;
 pub use client::{SsrClientOptions, connect_tcp_on_stream};
+pub use client_state::SsrClientState;
 pub use udp::{SsrUdpAssociation, associate_udp};
 
 use thiserror::Error;

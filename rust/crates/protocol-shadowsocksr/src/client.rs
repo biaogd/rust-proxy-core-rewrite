@@ -26,6 +26,8 @@ pub struct SsrClientOptions {
 
 /// Wraps an established TCP carrier in an SSR client session and writes the
 /// SOCKS destination header.
+/// This convenience function creates a one-shot identity. Repeated adapter
+/// dials must use [`connect_tcp_on_stream_with_state`] with persistent state.
 ///
 /// Layer order matches Go `ShadowSocksR.StreamConnContext`:
 /// `obfs → stream cipher → protocol → SOCKS addr`.
@@ -38,6 +40,25 @@ pub async fn connect_tcp_on_stream(
     stream: BoxedStream,
     destination: &Destination,
     options: &SsrClientOptions,
+) -> Result<BoxedStream, ShadowsocksRProtocolError> {
+    connect_tcp_on_stream_with_state(
+        stream,
+        destination,
+        options,
+        &crate::SsrClientState::default(),
+    )
+    .await
+}
+
+/// Opens a session using the adapter's persistent authentication identity.
+///
+/// # Errors
+/// Returns configuration, framing or underlying I/O errors.
+pub async fn connect_tcp_on_stream_with_state(
+    stream: BoxedStream,
+    destination: &Destination,
+    options: &SsrClientOptions,
+    state: &crate::SsrClientState,
 ) -> Result<BoxedStream, ShadowsocksRProtocolError> {
     reject_non_ssr_stream(options)?;
     let cipher = parse_stream_cipher(&options.cipher)?;
@@ -64,6 +85,7 @@ pub async fn connect_tcp_on_stream(
         &options.protocol,
         stream,
         &protocol::ProtocolContext {
+            state,
             write_iv: &write_iv,
             stream_key: &key,
             protocol_param: &options.protocol_param,

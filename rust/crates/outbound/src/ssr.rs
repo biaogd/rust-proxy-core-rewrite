@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+pub use rewrite_protocol_shadowsocksr::SsrClientState;
+
 use rewrite_model::{Destination, Host};
 use thiserror::Error;
 
@@ -66,6 +68,7 @@ pub async fn connect_ssr_with_options(
     obfs_param: &str,
     server_host: &str,
     options: DirectTcpOptions<'_>,
+    client_state: &SsrClientState,
 ) -> Result<BoxedOutboundStream, SsrProxyError> {
     let dial = async {
         let stream = connect_with_options(server, allow_ipv6, options).await?;
@@ -79,10 +82,11 @@ pub async fn connect_ssr_with_options(
             obfs,
             obfs_param,
         );
-        rewrite_protocol_shadowsocksr::connect_tcp_on_stream(
+        rewrite_protocol_shadowsocksr::connect_tcp_on_stream_with_state(
             Box::new(stream),
             destination,
             &options,
+            client_state,
         )
         .await
         .map_err(SsrProxyError::from)

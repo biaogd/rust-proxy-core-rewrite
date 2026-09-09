@@ -457,6 +457,7 @@ jobs:
             compat/scripts/phase7b_ssr_tcp.py \
             compat/scripts/phase7c_ssr.py \
             compat/scripts/phase7d_ssr.py \
+            compat/scripts/phase7d_ssr_identity.py \
             compat/scripts/phase7d_ssr_soak.py \
             compat/scripts/phase6c_shadowsocks_extra_aead.py \
             compat/scripts/phase6c_shadowsocks_2022.py \

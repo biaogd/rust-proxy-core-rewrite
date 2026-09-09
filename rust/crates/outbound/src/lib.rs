@@ -59,7 +59,8 @@ pub use socks5::{
     connect_socks5_with_options,
 };
 pub use ssr::{
-    SsrProxyError, SsrUdpAssociation, associate_ssr_udp_with_options, connect_ssr_with_options,
+    SsrClientState, SsrProxyError, SsrUdpAssociation, associate_ssr_udp_with_options,
+    connect_ssr_with_options,
 };
 pub use trojan::{
     TrojanProxyError, TrojanUdpAssociation, associate_trojan_udp_on_stream,
