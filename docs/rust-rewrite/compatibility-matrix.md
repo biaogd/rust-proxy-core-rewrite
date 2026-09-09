@@ -10,6 +10,12 @@ aggregate row in this matrix does not erase a more-specific inventory gap.
 
 ## Legend
 
+Planning update (2026-09-09): **SSR closure → TUIC v5 outbound → TUN**;
+see [roadmap](roadmap.md#next-work-priority--2026-09-09).
+[Status](status.md#planning-update-and-checkout-scope--2026-09-09) records the
+Hysteria2/SSR merges into `codex/rust-rewrite` and remaining acceptance gaps.
+Planning priority and successful unit tests do not change a row to Parity.
+
 | State | Meaning |
 | --- | --- |
 | Oracle | Present in the pinned Go reference implementation |
@@ -85,7 +91,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Named listeners | Oracle | Partial | Phase 6C-N implements named `shadowsocks` listeners with simple-obfs, shadow-tls v3, 2022 TCP/EIH, UoT and identity-changing reload. The corrected native differential passes proxy-observed `handshake.proxy`, discriminating `IN-TYPE,INNER`, reload and fail-closed fields; ShadowTLS `IN-USER` and EIH inbound remain Rust-only evidence. Common listener fields and remaining listener types stay open |
 | Hosts | Oracle | Partial | Phase 4B exact configured IP/CNAME plus native Darwin system-host subset; wildcard, `lan` and broad platform behavior are not started |
 | DNS and fake-IP configuration | Oracle | Partial | Phase 4A/4B classic/hosts, Phase 4C fake settings, Phase 4D1 policy, Phase 4D2 fallback and Phase 4D3A single local direct resolver; general fallback, proxy-server/respect-rules and encrypted DNS remain unclaimed |
-| TUN and route settings | Oracle | Not started | Per-OS parse/apply fixtures |
+| TUN and route settings | Oracle | Not started — priority after TUIC v5 outbound | Phase 8 per-OS parse/apply, route cleanup and failure rollback fixtures |
 | Static tunnels and proxy validation | Oracle | Not started | TCP/UDP target fixtures |
 | NTP | Oracle | Partial | Direct SNTP config/defaults, bounded exchange, adjusted process clock and reload/disable/shutdown reset have deterministic Rust contracts; Go/Rust lifecycle/log differential, named UDP dialer proxy and system-clock writes remain open |
 | iptables | Oracle | Not started | Linux namespace integration tests |
@@ -107,7 +113,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Redir | Yes | Platform-dependent | Oracle | Not started | Linux/Darwin/FreeBSD socket tests |
 | TProxy | Yes | Linux-real semantics | Oracle | Not started | Linux network namespace tests |
 | Tunnel | Yes | Yes | Oracle | Not started | Fixed target and write-back tests |
-| TUN | Yes | Yes | Oracle | Not started | Per-stack/per-OS integration tests |
+| TUN | Yes | Yes | Oracle | Not started — priority after TUIC v5 outbound | Phase 8: Linux device/stack/rules/outbound return path first; then macOS arm64 and Windows native gates |
 | Shadowsocks | Yes | Yes | Oracle | Partial | Phase 6C-N implements the roadmap's declared ss-config/named TCP and UDP first-server slice. The corrected full Go/Rust `phase6c_shadowsocks_inbound.py` passes on Darwin arm64 after the protocol-crate refactor; full inbound cipher matrix and remaining server features stay open |
 | Snell | Yes | Yes | Oracle | Not started | Version and UDP interop matrix |
 | VMess | Yes | Transport-dependent | Oracle | Not started | v2ray interop and transport matrix |
@@ -165,7 +171,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Snell | Oracle | Not started | Version/UDP/pool interop |
 | Trojan | Oracle | **Partial — Phase 6F-A–E client scope** | A proves native TLS TCP authentication/framing/relay; B proves native TLS UDP framing, splitting and reuse; C proves TCP and UDP over WSS with path, Host/custom headers and WebSocket ALPN; D proves TCP and UDP over HTTP/2 Gun/gRPC, service path, User-Agent and pooled client controls; E proves native TCP and UDP over REALITY with Chrome fingerprint, public-key/short-id authentication and strict unsupported-combination rejection. TLS name override/skip still rely on shared transport evidence; fallback and server direction remain open |
 | Hysteria / Hysteria2 | Oracle | **Partial — BBR outbound production gate OPEN** | TCP/UDP/reuse/Salamander/hop/stress differentials and verified TLS contracts exist. Historical ≥2h soak on `8a9b0761` used permissive resource/error gates and is not current production acceptance. Strict sampled release soak, UDP lifecycle, native evidence and real resolver/failover remain required. Brutal precision and Quinn patch work are deferred, not blockers for the declared BBR-only profile; current Brutal remains experimental. Gecko/Realm/ECH/v1/inbound remain deferred. |
-| TUIC | Oracle | Not started | v4/v5/0-RTT/congestion interop |
+| TUIC | Oracle | Not started — next outbound protocol | 6H-A/B/C prioritize v5 TCP, UDP, lifecycle and three-platform differential gates; v4, 0-RTT and inbound deferred |
 | ShadowQUIC | Oracle | Not started | QUIC stream/datagram interop |
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
 | SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
@@ -237,7 +243,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Phase 4C fake IPv4/IPv6 pool subset | Oracle | **Parity** | First/+4 allocation, case-stable reuse, v4/v6 separation, exact blacklist/whitelist bypass, /29 wrap, 1000-entry memory eviction and graceful-restart recovery in `compat/scripts/phase4c.py`; the fixture enables the oracle's IPv6 test escape hatch on hosts without global-unicast IPv6 |
 | Full fake-IP behavior and persistence format | Oracle | **Partial** | Phase 4F14 proves every filter rule kind, GeoSite plus inline domain/classical providers, v4/v6 Go bbolt interchange, current TCP/UDP reverse routing, reload/range behavior, REST flush and malformed-cache recovery; file/HTTP/MRS providers, redir/TProxy/TUN and future inbound families, concurrent writers and broader native platforms remain unclaimed |
 | EDNS0 echo, UDP size and truncation | Oracle | **Parity** | Phase 4F1; 1232 OPT echo with DO preservation, upstream OPT preservation, implicit 512, advertised 256-as-512 and advertised 900 truncation, plus untruncated TCP evidence |
-| DNS hijack through TUN | Oracle | Not started | Platform TUN integration |
+| DNS hijack through TUN | Oracle | Not started | Phase 8 platform TUN integration, fake-IP reverse lookup and loop avoidance; existing DNS tests do not prove interception |
 | Phase 4D4 local DNS REST A/AAAA/CNAME query and positive-cache flush subset | Oracle | **Parity** | Authenticated query JSON plus REST/local-listener shared cache hit/flush/refetch behavior in `compat/scripts/phase4d4.py` |
 | Full DNS REST query and cache control | Oracle | Partial | Phase 4F15 accepts the oracle RR type-name table, renders representative simple/structured/character-string RR JSON, and proves authenticated DNS/fake-IP flush status, method handling and ordinary cache invalidation; exhaustive presentation vectors for every legacy/obsolete Go-known RDATA type remain unclaimed |
 

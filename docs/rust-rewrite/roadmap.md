@@ -1287,17 +1287,61 @@ Go-runtime diagnostics or protocols not already executable in Rust.
 
 ## Phase 6 — established remote protocols
 
-Port in small interop-gated slices, initially prioritizing commonly deployed
-protocols and available maintained Rust primitives. A likely order is SOCKS5,
-HTTP, Shadowsocks, Trojan, VMess/VLESS, WireGuard and Hysteria2/TUIC, but the
-order must be approved against actual product needs and dependency feasibility.
-Each client and server direction is a separate matrix claim.
+Port in independently testable slices, prioritizing the requested common-client
+surface rather than requiring every Go protocol. Each client and server
+direction is a separate matrix claim. Phase identifiers are ownership labels,
+not a requirement to finish all lower-numbered phases before starting another.
 
-The current planning order is: **6A** DIRECT and built-ins, **6B** HTTP/SOCKS5,
-**6C** Shadowsocks, **6D** VMess, **6E** VLESS, **6F** Trojan, **6G**
-Hysteria/Hysteria2, **6H** TUIC, **6I** WireGuard/AmneziaWG and **6J** SSH.
+The canonical labels are **6A** DIRECT and built-ins, **6B** HTTP/SOCKS5,
+**6C** Shadowsocks, **6D** VMess, **6E** VLESS, **6F** Trojan, **6G** AnyTLS,
+**HY2-A/B/C** Hysteria2, **6H** TUIC, **6I** WireGuard/AmneziaWG and **6J** SSH.
+The historical assignment of Hysteria to 6G is superseded; existing AnyTLS 6G
+and Hysteria2 HY2 test names must not be mechanically renumbered. Hysteria v1
+is deferred and does not inherit HY2 evidence.
 TCP and UDP, client and server, and each security/transport variant remain
 separate exit gates inside these labels.
+
+### Next-work priority — 2026-09-09
+
+The agreed next-work order is **SSR review/CI closure → TUIC v5 outbound →
+TUN integration**. This supersedes the previous numerical development order.
+Existing-protocol regressions remain release blockers; this schedule does not
+declare Hysteria2, SSR or any other partial implementation production-ready.
+See [status](status.md) for branch-specific evidence versus implementation in
+this checkout, and [compatibility matrix](compatibility-matrix.md) for claims.
+
+1. **SSR closure (7A–7D, OUT-06):** resolve PR #13 review findings and fixture
+   failures; obtain Linux, macOS arm64 and Windows differential evidence before
+   claiming those platforms. Keep pre-handshake half-close rejection, missing
+   multi-user evidence and outstanding long-soak gates explicit.
+2. **TUIC v5 (6H, OUT-12):** implement outbound only. Defer v4, 0-RTT and server
+   direction; unsupported options must fail explicitly rather than downgrade.
+3. **TUN (Phase 8):** start with the Linux vertical slice, then macOS arm64 and
+   Windows native gates. TUN is packet ingress/platform integration, not another
+   remote proxy protocol. Other remote-protocol inbounds remain deferred;
+   preserve the existing Shadowsocks inbound scope without expanding it.
+
+WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
+prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
+deferred; the declared BBR profile still needs its own release evidence.
+
+### Phase 6H — TUIC v5 outbound acceptance plan (not implemented)
+
+- **6H-A:** YAML → mixed HTTP/SOCKS TCP → rules/groups → verified QUIC/TLS →
+  TUIC v5 authentication and TCP relay. Prove UUID/password validation, address
+  types, TLS rejection, concurrent streams, large transfers and close behavior
+  against Go. Reuse QUIC primitives only after checking the required boundary.
+- **6H-B:** SOCKS/mixed UDP → TUIC v5 UDP relay → local UDP authority. Cover
+  native datagram and QUIC-stream relay modes, packet/session IDs, destination
+  changes, size/fragmentation boundaries, loss and association cleanup.
+- **6H-C:** connection reuse, heartbeat, reconnection, cancellation, bounded
+  queues, provider/health/reload integration and supported congestion options.
+  Run malformed-peer and bounded stress/soak tests; require fmt, workspace
+  clippy/test and Go/Rust differential evidence on Linux, macOS arm64 and Windows.
+
+The matrix rows are **TUIC outbound** and the applicable configuration,
+groups/providers and native-platform rows. The TUIC inbound row stays
+unimplemented. These are planned acceptance gates, not new support claims.
 
 ### Phase 6A1 accepted scope
 
@@ -2929,17 +2973,28 @@ separate slices.
 
 ## Phase 7 — advanced and project-specific protocols
 
-Snell, Mieru, AnyTLS, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
+Snell, Mieru, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
 Tailscale, ZeroTier, SSR, obfuscation plugins and less common transports are
 separate slices. No aggregate "protocol parity" claim is allowed.
 
-Use **7A–7L** for the protocol families listed in `OUT-06` and `OUT-10` through
-`OUT-20`. Use **7T** subphases for shared dialer chains, mux, WebSocket,
+Reserve **7A–7D** for the existing SSR work/test names. Older inventory mappings
+of Snell to 7B or ShadowQUIC to 7C are superseded: deferred families use their
+stable `OUT-*` IDs until a non-conflicting phase is assigned. AnyTLS belongs to
+6G, Hysteria2 to HY2, TUIC to 6H, WireGuard to 6I and SSH to 6J, even where a
+grouped inventory row mentions them alongside a deferred protocol.
+Use **7T** subphases for shared dialer chains, mux, WebSocket,
 HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, plugins, Reality, ECH, JLS, ReSTLS,
 ShadowTLS and TLSMirror. A protocol gate may depend on a 7T transport gate but
 cannot inherit its wire-compatibility claim.
 
 ## Phase 8 — TUN, transparent proxying and platform breadth
+
+TUN is the next priority after the declared TUIC v5 outbound gates, without
+waiting for 6I/6J or all of Phase 7. It is currently unimplemented. The first
+Linux gate must connect YAML → TUN device/IP packets → TCP/UDP stack → existing
+rules/outbound → return packets, and prove route cleanup on stop/failure.
+DNS interception, fake-IP reverse lookup, loop avoidance and privilege/error
+handling need explicit native tests before claiming system-wide operation.
 
 - Linux TUN stacks, routing, TProxy, redir, socket marks and iptables in isolated
   namespaces first.

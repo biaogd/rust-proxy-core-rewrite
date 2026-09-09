@@ -8,6 +8,24 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ## Overall status
 
+### Planning update and checkout scope — 2026-09-09
+
+Next: **SSR CI closure → TUIC v5 outbound (6H-A/B/C) → TUN (Phase 8)**.
+TUIC and TUN remain unimplemented; TUIC v4/0-RTT, additional remote-protocol
+inbounds, WireGuard/AmneziaWG, SSH and other Phase 7 families are deferred.
+Canonical numbering is AnyTLS **6G**, Hysteria2 **HY2**, TUIC **6H**, SSR
+**7A–7D**. The [roadmap](roadmap.md#next-work-priority--2026-09-09) owns the plan.
+
+Hysteria2 PR #12 (`311a22dd`) and SSR PR #13 (`13995788`) are now merged into
+`codex/rust-rewrite`. SSR head `d89f7b60` passed 30 crate tests, format checking
+and the independent buffer-cap/resume probe locally. Merge was explicitly
+requested before CI was fully green; it is not production acceptance. Native
+differentials and the previously failing macOS authority startup remain open
+until verified. Hysteria2's BBR-only release gate remains open; accurate
+Brutal/Quinn work stays deferred. These are dated evidence snapshots, not live
+CI status. This documentation integration imports no implementation from the
+older `codex/restls-client` worktree; historical slice records remain below.
+
 | Workstream | State | Evidence / next gate |
 | --- | --- | --- |
 | Phase 0 baseline and governance | Complete | Six migration documents and root `AGENTS.md` |
