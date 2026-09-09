@@ -2263,7 +2263,7 @@ fn phase6d_vmess_rejects_fields_outside_phase6d_i_scope() {
         "    cipher: aes-256-gcm\n",
         "    network: xhttp\n",
         "    packet-encoding: unsupported\n",
-        "    network: ws\n    udp: true\n",
+        "    network: http\n    udp: true\n",
         "    network: ws\n    ws-opts:\n      max-early-data: -1\n",
         "    network: tcp\n    ws-opts:\n      path: /wrong\n",
         "    name-cert-verify: ignored-without-tls.example\n",
@@ -2290,6 +2290,54 @@ fn phase6d_vmess_rejects_fields_outside_phase6d_i_scope() {
         Config::from_yaml(&missing_cipher),
         Err(ConfigError::UnsupportedProxy(_))
     ));
+}
+
+#[test]
+fn parses_vmess_udp_over_tls_ws_wss_and_grpc_carriers() {
+    for (extra, expect_tls, expect_network) in [
+        (
+            "    network: tcp\n    udp: true\n    tls: true\n    servername: tls.phase6d.test\n    cipher: aes-128-gcm\n",
+            true,
+            "tcp",
+        ),
+        (
+            "    network: ws\n    udp: true\n    cipher: aes-128-gcm\n    ws-opts:\n      path: /udp\n      headers:\n        Host: udp-ws.phase6d\n",
+            false,
+            "ws",
+        ),
+        (
+            "    network: ws\n    udp: true\n    tls: true\n    servername: wss.phase6d.test\n    cipher: aes-128-gcm\n    ws-opts:\n      path: /udp-wss\n",
+            true,
+            "ws",
+        ),
+        (
+            "    network: grpc\n    udp: true\n    tls: true\n    servername: grpc.phase6d.test\n    cipher: aes-128-gcm\n    grpc-opts:\n      grpc-service-name: udp\n",
+            true,
+            "grpc",
+        ),
+        (
+            "    network: ws\n    udp: true\n    cipher: auto\n    tags: tw\n    ws-opts:\n      path: /tagged\n",
+            false,
+            "ws",
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: udp-carrier\n    type: vmess\n    server: 127.0.0.1\n    port: 10002\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n{extra}"
+        );
+        let config = Config::from_yaml(&source).unwrap_or_else(|error| {
+            panic!("expected accepted VMess UDP carrier for {extra:?}: {error}")
+        });
+        let proxy = &config.proxies[0];
+        assert!(proxy.udp, "{extra:?}");
+        assert_eq!(proxy.tls, expect_tls, "{extra:?}");
+        let transport = &proxy.vmess.as_ref().expect("vmess").transport;
+        match (expect_network, transport) {
+            ("tcp", crate::VmessTransport::Tcp)
+            | ("ws", crate::VmessTransport::WebSocket { .. })
+            | ("grpc", crate::VmessTransport::Grpc { .. }) => {}
+            _ => panic!("unexpected transport for {extra:?}: {transport:?}"),
+        }
+    }
 }
 
 #[test]

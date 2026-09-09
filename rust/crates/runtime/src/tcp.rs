@@ -1292,14 +1292,49 @@ async fn connect_vmess_proxy(
     custom_roots: &[String],
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
-    let clock = state.clock();
     let vmess = proxy
         .vmess
         .as_ref()
         .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
-    let security = outbound_vmess_security(vmess.security);
-    let outer = if let rewrite_config::VmessTransport::Mkcp(options) = &vmess.transport {
-        connect_vmess_mkcp_outer(
+    let outer = connect_vmess_carrier(
+        proxy,
+        server,
+        vmess,
+        allow_ipv6,
+        state,
+        custom_roots,
+        socket_options,
+    )
+    .await?;
+    rewrite_outbound::connect_vmess_on_stream(
+        outer,
+        destination,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
+            security: outbound_vmess_security(vmess.security),
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
+    )
+    .await
+    .map_err(|error| format!("VMess proxy connection failed: {error}"))
+}
+
+/// Builds the same outer carrier used by `VMess` TCP dials so UDP associations
+/// can reuse TLS / WS / WSS / Gun without re-implementing framing.
+pub(super) async fn connect_vmess_carrier(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    vmess: &rewrite_config::VmessProxyConfig,
+    allow_ipv6: bool,
+    state: &RuntimeState,
+    custom_roots: &[String],
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let clock = state.clock();
+    if let rewrite_config::VmessTransport::Mkcp(options) = &vmess.transport {
+        return connect_vmess_mkcp_outer(
             proxy,
             server,
             options,
@@ -1308,9 +1343,10 @@ async fn connect_vmess_proxy(
             custom_roots,
             socket_options,
         )
-        .await?
-    } else if let rewrite_config::VmessTransport::Mekya(options) = &vmess.transport {
-        connect_vmess_mekya_outer(
+        .await;
+    }
+    if let rewrite_config::VmessTransport::Mekya(options) = &vmess.transport {
+        return connect_vmess_mekya_outer(
             proxy,
             server,
             options,
@@ -1318,8 +1354,9 @@ async fn connect_vmess_proxy(
             Arc::clone(&clock),
             custom_roots,
             socket_options,
-        )?
-    } else if let rewrite_config::VmessTransport::Grpc {
+        );
+    }
+    if let rewrite_config::VmessTransport::Grpc {
         service_name,
         user_agent,
         ping_interval,
@@ -1341,7 +1378,7 @@ async fn connect_vmess_proxy(
         let identity =
             format!("{proxy:?}|ipv6={allow_ipv6}|roots={custom_roots:?}|socket={socket_options:?}");
         let client = state.grpc_client(&proxy.name, identity, options).await;
-        client
+        return client
             .connect(|| async {
                 connect_vmess_physical_outer(
                     proxy,
@@ -1356,32 +1393,18 @@ async fn connect_vmess_proxy(
                 .map_err(std::io::Error::other)
             })
             .await
-            .map_err(|error| format!("VMess gRPC transport failed: {error}"))?
-    } else {
-        connect_vmess_outer(
-            proxy,
-            server,
-            vmess,
-            allow_ipv6,
-            clock,
-            custom_roots,
-            socket_options,
-        )
-        .await?
-    };
-    rewrite_outbound::connect_vmess_on_stream(
-        outer,
-        destination,
-        rewrite_outbound::VmessTcpOptions {
-            uuid: vmess.uuid,
-            alter_id: vmess.alter_id,
-            security,
-            global_padding: vmess.global_padding,
-            authenticated_length: vmess.authenticated_length,
-        },
+            .map_err(|error| format!("VMess gRPC transport failed: {error}"));
+    }
+    connect_vmess_outer(
+        proxy,
+        server,
+        vmess,
+        allow_ipv6,
+        clock,
+        custom_roots,
+        socket_options,
     )
     .await
-    .map_err(|error| format!("VMess proxy connection failed: {error}"))
 }
 
 fn outbound_vmess_security(

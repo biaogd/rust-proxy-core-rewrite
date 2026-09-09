@@ -40,6 +40,28 @@ async fn proxy_dial_server(
     .await
 }
 
+/// Go tunnel `DefaultUDPTimeout` (equal to `DefaultTCPTimeout`): covers DNS,
+/// TCP dial, carrier handshake (TLS/WS/WSS/gRPC), and protocol association,
+/// including deferred WebSocket early-data upgrades on first write.
+const UDP_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn await_udp_setup<T, E>(
+    shutdown: &CancellationToken,
+    work: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+{
+    tokio::select! {
+        () = shutdown.cancelled() => Err("UDP setup cancelled".to_owned()),
+        result = tokio::time::timeout(UDP_SETUP_TIMEOUT, work) => match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("UDP setup timed out".to_owned()),
+        }
+    }
+}
+
 pub(super) async fn run_listener(
     kind: ListenerKind,
     listener: LocalTcpListener,
@@ -237,7 +259,7 @@ impl UdpSessions {
         let (sender, receiver) = mpsc::channel(64);
         self.entries.insert(source, (session_id, sender));
         self.tasks.spawn(async move {
-            run_udp_session(
+            Box::pin(run_udp_session(
                 context.listener,
                 source,
                 request,
@@ -248,7 +270,7 @@ impl UdpSessions {
                 decision,
                 mode,
                 context.shutdown,
-            )
+            ))
             .await;
             (source, session_id)
         });
@@ -400,15 +422,15 @@ pub(super) async fn run_udp_session(
             .await;
         }
         UdpSessionMode::Vmess(proxy) => {
-            run_vmess_udp_session(
+            Box::pin(run_vmess_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
-            )
+            ))
             .await;
         }
         UdpSessionMode::Vless(proxy) => {
-            run_vless_udp_session(
+            Box::pin(run_vless_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
-            )
+            ))
             .await;
         }
         UdpSessionMode::Trojan(proxy) => {
@@ -1325,25 +1347,6 @@ pub(super) async fn run_vmess_udp_session(
     let Some(vmess) = proxy.vmess.as_ref() else {
         return;
     };
-    let server = match proxy_dial_server(proxy, &config).await {
-        Ok(server) => server,
-        Err(error) => {
-            state.log(
-                "error",
-                format!("proxy-server DNS resolution failed: {error}"),
-            );
-            return;
-        }
-    };
-    let Ok(initial_address) =
-        resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
-    else {
-        return;
-    };
-    let initial_destination = Destination {
-        host: Host::Ip(initial_address.ip()),
-        port: initial_address.port(),
-    };
     let security = match vmess.security {
         rewrite_config::VmessSecurity::Auto => rewrite_outbound::VmessSecurity::Auto,
         rewrite_config::VmessSecurity::None => rewrite_outbound::VmessSecurity::None,
@@ -1360,25 +1363,45 @@ pub(super) async fn run_vmess_udp_session(
         }
         rewrite_config::VmessPacketMode::Xudp => rewrite_outbound::VmessPacketMode::Xudp,
     };
-    let mut association = match rewrite_outbound::associate_vmess_udp_with_options(
-        &server,
-        &initial_destination,
-        config.ipv6,
-        rewrite_outbound::VmessTcpOptions {
-            uuid: vmess.uuid,
-            alter_id: vmess.alter_id,
-            security,
-            global_padding: vmess.global_padding,
-            authenticated_length: vmess.authenticated_length,
-        },
-        packet_mode,
-        direct_tcp_options(&config),
-    )
-    .await
-    {
+    let setup = async {
+        let server = proxy_dial_server(proxy, &config).await?;
+        let initial_address =
+            resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config)
+                .await
+                .map_err(|error| error.to_string())?;
+        let initial_destination = Destination {
+            host: Host::Ip(initial_address.ip()),
+            port: initial_address.port(),
+        };
+        let outer = super::tcp::connect_vmess_carrier(
+            proxy,
+            &server,
+            vmess,
+            config.ipv6,
+            &state,
+            &config.trust_certificates,
+            direct_tcp_options(&config),
+        )
+        .await?;
+        rewrite_outbound::associate_vmess_udp_on_stream(
+            outer,
+            &initial_destination,
+            rewrite_outbound::VmessTcpOptions {
+                uuid: vmess.uuid,
+                alter_id: vmess.alter_id,
+                security,
+                global_padding: vmess.global_padding,
+                authenticated_length: vmess.authenticated_length,
+            },
+            packet_mode,
+        )
+        .await
+        .map_err(|error| format!("VMess UDP association failed: {error}"))
+    };
+    let mut association = match await_udp_setup(&shutdown, setup).await {
         Ok(association) => association,
         Err(error) => {
-            state.log("error", format!("VMess UDP association failed: {error}"));
+            state.log("error", format!("VMess UDP setup failed: {error}"));
             return;
         }
     };
@@ -1461,25 +1484,6 @@ pub(super) async fn run_vless_udp_session(
     let Some(vless) = proxy.vless.as_ref() else {
         return;
     };
-    let server = match proxy_dial_server(proxy, &config).await {
-        Ok(server) => server,
-        Err(error) => {
-            state.log(
-                "error",
-                format!("proxy-server DNS resolution failed: {error}"),
-            );
-            return;
-        }
-    };
-    let Ok(initial_address) =
-        resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config).await
-    else {
-        return;
-    };
-    let initial_destination = Destination {
-        host: Host::Ip(initial_address.ip()),
-        port: initial_address.port(),
-    };
     let packet_mode = match vless.packet_mode {
         rewrite_config::VlessPacketMode::Standard => rewrite_outbound::VlessPacketMode::Standard,
         rewrite_config::VlessPacketMode::PacketAddr => {
@@ -1487,43 +1491,48 @@ pub(super) async fn run_vless_udp_session(
         }
         rewrite_config::VlessPacketMode::Xudp => rewrite_outbound::VlessPacketMode::Xudp,
     };
-    let (outer, vision_control) = match super::tcp::connect_vless_outer(
-        proxy,
-        &server,
-        vless,
-        config.ipv6,
-        &state,
-        &config.trust_certificates,
-        direct_tcp_options(&config),
-    )
-    .await
-    {
-        Ok(outer) => outer,
-        Err(error) => {
-            state.log("error", format!("VLESS UDP carrier failed: {error}"));
-            return;
-        }
+    let setup = async {
+        let server = proxy_dial_server(proxy, &config).await?;
+        let initial_address =
+            resolve_udp_target(&first.metadata, first.fake_host.as_deref(), &config)
+                .await
+                .map_err(|error| error.to_string())?;
+        let initial_destination = Destination {
+            host: Host::Ip(initial_address.ip()),
+            port: initial_address.port(),
+        };
+        let (outer, vision_control) = super::tcp::connect_vless_outer(
+            proxy,
+            &server,
+            vless,
+            config.ipv6,
+            &state,
+            &config.trust_certificates,
+            direct_tcp_options(&config),
+        )
+        .await?;
+        debug_assert!(vision_control.is_none());
+        rewrite_outbound::associate_vless_udp_on_stream(
+            outer,
+            &initial_destination,
+            rewrite_outbound::VlessTcpOptions {
+                uuid: vless.uuid,
+                flow: vless.flow.map(|flow| match flow {
+                    rewrite_config::VlessFlow::XtlsRprxVision => {
+                        rewrite_outbound::VlessFlow::XtlsRprxVision
+                    }
+                }),
+            },
+            packet_mode,
+            vless_xudp_global_id(source),
+        )
+        .await
+        .map_err(|error| format!("VLESS UDP association failed: {error}"))
     };
-    debug_assert!(vision_control.is_none());
-    let mut association = match rewrite_outbound::associate_vless_udp_on_stream(
-        outer,
-        &initial_destination,
-        rewrite_outbound::VlessTcpOptions {
-            uuid: vless.uuid,
-            flow: vless.flow.map(|flow| match flow {
-                rewrite_config::VlessFlow::XtlsRprxVision => {
-                    rewrite_outbound::VlessFlow::XtlsRprxVision
-                }
-            }),
-        },
-        packet_mode,
-        vless_xudp_global_id(source),
-    )
-    .await
-    {
+    let mut association = match await_udp_setup(&shutdown, setup).await {
         Ok(association) => association,
         Err(error) => {
-            state.log("error", format!("VLESS UDP association failed: {error}"));
+            state.log("error", format!("VLESS UDP setup failed: {error}"));
             return;
         }
     };

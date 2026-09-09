@@ -73,5 +73,6 @@ pub use vless::{
 };
 pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
-    associate_vmess_udp_with_options, connect_vmess_on_stream, connect_vmess_with_options,
+    associate_vmess_udp_on_stream, associate_vmess_udp_with_options, connect_vmess_on_stream,
+    connect_vmess_with_options,
 };

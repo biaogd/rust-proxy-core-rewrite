@@ -89,21 +89,70 @@ impl V2rayGrpcClient {
             }
         };
 
-        transport.acquire();
+        let lease = ActiveGrpcLease::new(transport);
         let request = grpc_request(&self.options)?;
-        match open_h2_request(transport.sender.clone(), request).await {
-            Ok(stream) => Ok(Box::new(GunStream::with_transport(stream, transport))),
-            Err(error) => {
-                transport.release();
-                transport.close();
-                Err(error)
-            }
+        match open_h2_request(lease.transport().sender.clone(), request).await {
+            Ok(stream) => Ok(Box::new(GunStream::with_transport(
+                stream,
+                lease.into_held(),
+            ))),
+            Err(error) => Err(error),
         }
     }
 
     pub async fn retire(&self) {
         for transport in self.transports.lock().await.iter() {
             transport.retire();
+        }
+    }
+
+    #[cfg(test)]
+    async fn transport_active_counts(&self) -> Vec<usize> {
+        self.transports
+            .lock()
+            .await
+            .iter()
+            .map(|transport| transport.active())
+            .collect()
+    }
+}
+
+/// Holds one pool `active` lease until the Gun stream is established or the
+/// dial is cancelled/fails. Dropping during `open_h2_request` must release so
+/// timeouts cannot permanently inflate the pool counter.
+struct ActiveGrpcLease {
+    transport: Option<Arc<GrpcTransport>>,
+}
+
+impl ActiveGrpcLease {
+    fn new(transport: Arc<GrpcTransport>) -> Self {
+        transport.acquire();
+        Self {
+            transport: Some(transport),
+        }
+    }
+
+    fn transport(&self) -> &Arc<GrpcTransport> {
+        self.transport
+            .as_ref()
+            .expect("gRPC lease is alive until transferred or dropped")
+    }
+
+    fn into_held(mut self) -> Arc<GrpcTransport> {
+        self.transport
+            .take()
+            .expect("gRPC lease is alive until transferred or dropped")
+    }
+}
+
+impl Drop for ActiveGrpcLease {
+    fn drop(&mut self) {
+        if let Some(transport) = self.transport.take() {
+            // Cancelling one request is not a physical-connection failure.
+            // open_h2_request drops its per-stream handles (h2 resets that
+            // stream); other Gun streams may still be using this transport.
+            // The connection driver handles physical failures independently.
+            transport.release();
         }
     }
 }
@@ -473,10 +522,13 @@ fn decode_uvarint(input: &[u8]) -> io::Result<Option<(u64, usize)>> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        GunStream, V2rayGrpcClientOptions, ping_duration, service_name_to_path,
+        GunStream, V2rayGrpcClient, V2rayGrpcClientOptions, ping_duration, service_name_to_path,
         should_create_transport,
     };
     use crate::BoxedStream;
@@ -507,6 +559,158 @@ mod tests {
                 b'd', b'e', b'r',
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_response_header_wait_releases_active_lease() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("silent gRPC listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("client dial");
+            let mut connection = h2::server::handshake(stream)
+                .await
+                .expect("server HTTP/2 handshake");
+            // Accept the Gun request but never send response headers so the
+            // client stays parked after acquire().
+            if let Some(result) = connection.accept().await {
+                let (_request, _respond) = result.expect("Gun request");
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let client = V2rayGrpcClient::new(V2rayGrpcClientOptions {
+            host: "dot.phase4.test".to_owned(),
+            service_name: "udp".to_owned(),
+            user_agent: "phase6d-udp/1.0".to_owned(),
+            ping_interval: 0,
+            max_connections: 1,
+            min_streams: 0,
+            max_streams: 0,
+        });
+        let connect = client.connect(|| async {
+            let stream = TcpStream::connect(address).await?;
+            Ok(Box::new(stream) as BoxedStream)
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), connect)
+                .await
+                .is_err(),
+            "silent response headers must keep connect pending"
+        );
+        assert_eq!(
+            client.transport_active_counts().await,
+            vec![0],
+            "cancelled response-header wait must release the pool lease"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_one_request_preserves_another_stream_and_pool_reuse() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_io, server_io) = tokio::io::duplex(65_536);
+            let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(4);
+            let (reset_tx, reset_rx) = tokio::sync::oneshot::channel();
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let server_shutdown = shutdown.clone();
+            let server = tokio::spawn(async move {
+                let mut connection = h2::server::handshake(server_io).await.unwrap();
+                let mut workers = tokio::task::JoinSet::new();
+                let mut count = 0;
+                let mut reset_tx = Some(reset_tx);
+                loop {
+                    tokio::select! {
+                        () = server_shutdown.cancelled() => break,
+                        request = connection.accept() => {
+                            let Some(request) = request else { break };
+                            let (request, mut respond) = request.unwrap();
+                            count += 1;
+                            let index = count;
+                            let reset_tx = if index == 2 { reset_tx.take() } else { None };
+                            let done = server_shutdown.clone();
+                            workers.spawn(async move {
+                                let mut body = request.into_body();
+                                if index == 2 {
+                                    // Hold only this response. Reset must arrive on
+                                    // cancellation without closing stream 1.
+                                    tokio::select! {
+                                        () = done.cancelled() => {}
+                                        reset = std::future::poll_fn(|cx| respond.poll_reset(cx)) => {
+                                            assert_eq!(reset.unwrap(), h2::Reason::CANCEL);
+                                            reset_tx.unwrap().send(()).unwrap();
+                                        }
+                                    }
+                                } else {
+                                    let response = http::Response::builder().status(200).body(()).unwrap();
+                                    let mut sender = respond.send_response(response, false).unwrap();
+                                    loop {
+                                        tokio::select! {
+                                            () = done.cancelled() => break,
+                                            data = body.data() => {
+                                                let Some(Ok(data)) = data else { break };
+                                                body.flow_control().release_capacity(data.len()).unwrap();
+                                                sender.send_data(data, false).unwrap();
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            accepted_tx.send(index).await.unwrap();
+                        }
+                    }
+                }
+                while let Some(result) = workers.join_next().await {
+                    result.unwrap();
+                }
+            });
+            let client = V2rayGrpcClient::new(V2rayGrpcClientOptions {
+                host: "localhost".to_owned(),
+                service_name: "udp".to_owned(),
+                user_agent: "cancel-regression".to_owned(),
+                ping_interval: 0,
+                max_connections: 1,
+                min_streams: 0,
+                max_streams: 0,
+            });
+            let mut first = client.connect(|| async { Ok(Box::new(client_io) as BoxedStream) })
+                .await.unwrap();
+            assert_eq!(accepted_rx.recv().await, Some(1));
+            first.write_all(b"before").await.unwrap();
+            first.flush().await.unwrap();
+            let mut before = [0; 6];
+            first.read_exact(&mut before).await.unwrap();
+            assert_eq!(&before, b"before");
+
+            let mut second = Box::pin(client.connect(|| async {
+                panic!("must reuse the physical connection")
+            }));
+            tokio::select! {
+                result = &mut second => panic!("response must remain pending: {}", result.is_ok()),
+                accepted = accepted_rx.recv() => assert_eq!(accepted, Some(2)),
+            }
+            assert_eq!(client.transport_active_counts().await, vec![2]);
+            drop(second);
+            assert_eq!(client.transport_active_counts().await, vec![1]);
+            reset_rx.await.expect("cancelled stream must receive RST_STREAM");
+            first.write_all(b"after").await.unwrap();
+            first.flush().await.unwrap();
+            let mut after = [0; 5];
+            first.read_exact(&mut after).await.unwrap();
+            assert_eq!(&after, b"after");
+            let third = client.connect(|| async {
+                panic!("cancel must not evict a healthy physical connection")
+            }).await.unwrap();
+            assert_eq!(accepted_rx.recv().await, Some(3));
+            assert_eq!(client.transport_active_counts().await, vec![2]);
+            drop(third);
+            drop(first);
+            assert_eq!(client.transport_active_counts().await, vec![0]);
+            client.retire().await;
+            shutdown.cancel();
+            server.await.unwrap();
+        }).await.expect("bounded cancellation regression");
     }
 
     #[test]

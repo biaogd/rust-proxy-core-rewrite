@@ -59,11 +59,19 @@ pub async fn associate_vmess_udp_with_options(
     let remote = connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| VmessProxyError::Transport(error.to_string()))?;
-    rewrite_protocol_vmess::associate_vmess_udp_on_stream(
-        Box::new(remote),
-        destination,
-        options,
-        mode,
-    )
-    .await
+    associate_vmess_udp_on_stream(Box::new(remote), destination, options, mode).await
+}
+
+/// Starts a `VMess` UDP association over an established outer transport.
+///
+/// # Errors
+///
+/// Returns a `VMess` handshake or packet framing error.
+pub async fn associate_vmess_udp_on_stream(
+    remote: BoxedOutboundStream,
+    destination: &Destination,
+    options: VmessTcpOptions,
+    mode: VmessPacketMode,
+) -> Result<VmessUdpAssociation, VmessProxyError> {
+    rewrite_protocol_vmess::associate_vmess_udp_on_stream(remote, destination, options, mode).await
 }

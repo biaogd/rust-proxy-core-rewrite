@@ -1297,9 +1297,11 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
     })
 }
 
-fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    strip_ignored_proxy_metadata(&mut proxy.extra);
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let tls = proxy.tls.unwrap_or(false);
+    let udp = proxy.udp.unwrap_or(false);
     let has_tls_options = proxy.sni.is_some()
         || proxy.skip_cert_verify.is_some()
         || proxy.name_cert_verify.is_some()
@@ -1335,7 +1337,9 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         || proxy.xhttp_opts.is_some()
         || (!matches!(network, "mkcp" | "kcp") && proxy.mkcp_opts.is_some())
         || (network != "mekya" && proxy.mekya_opts.is_some())
-        || (proxy.udp.unwrap_or(false) && (tls || network != "tcp"))
+        // UDP associations reuse the TCP carriers that already exist for native
+        // TLS, plaintext WS, WSS and Gun/gRPC (same shape as VLESS Phase 6E-I).
+        || (udp && !matches!(network, "tcp" | "ws" | "grpc"))
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
@@ -1375,7 +1379,7 @@ fn parse_vmess_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         private_key: None,
         client_fingerprint: None,
         reality: None,
-        udp: proxy.udp.unwrap_or(false),
+        udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,
@@ -3333,4 +3337,9 @@ fn parse_provider_health_check(
         timeout: raw.and_then(|raw| raw.timeout).unwrap_or(5_000).max(1),
         lazy: raw.and_then(|raw| raw.lazy).unwrap_or(true),
     })
+}
+
+/// Clash Meta UI/filter keys that Go accepts but does not consume for dialing.
+fn strip_ignored_proxy_metadata(extra: &mut BTreeMap<String, serde_yaml_ng::Value>) {
+    extra.remove("tags");
 }
