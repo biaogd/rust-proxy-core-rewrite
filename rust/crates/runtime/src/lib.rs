@@ -4,6 +4,7 @@ mod listener;
 mod services;
 mod shadowsocks_listener;
 mod tcp;
+mod tun;
 mod types;
 
 pub use lifecycle::{run, run_with_reload, run_with_reload_lifecycle};

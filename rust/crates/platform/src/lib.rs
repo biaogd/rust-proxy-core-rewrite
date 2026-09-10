@@ -1,12 +1,14 @@
 //! Small, testable operating-system boundaries used by the Rust rewrite.
 
 mod dhcp;
+mod route;
 
 pub use dhcp::{
     DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
     DhcpRefreshTracker, INTERFACE_TTL, build_dhcp_discover, dhcp_interface_snapshot,
     parse_dhcp_offer, resolve_dns_from_dhcp,
 };
+pub use route::{OwnedRoute, RouteOwner, install_device_route, protect_host_route};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,9 +23,20 @@ use std::net::{IpAddr, SocketAddr};
 ))]
 use std::num::NonZeroU32;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Number of missed refreshes retained by the Go system resolver.
 pub const SYSTEM_DNS_DELETE_TIMES: u32 = 12;
+
+#[derive(Debug, Error)]
+pub enum PlatformError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("{0}")]
+    Command(String),
+    #[error("{0}")]
+    Unsupported(String),
+}
 
 /// Binds a nonblocking TCP listener and applies the Linux/Android socket mark
 /// before bind, matching the controller listen boundary.

@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::listener::run_listener;
 use crate::services::hydrate_http_proxy_providers;
 use crate::shadowsocks_listener::{ShadowsocksListener, run_shadowsocks_listener};
+use crate::tun::run_tun_listener;
 use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
 };
@@ -30,6 +31,7 @@ pub(super) async fn apply_generation(
     listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
+    tun: &mut Option<RuntimeTask>,
 ) -> Result<(), RuntimeError> {
     hydrate_http_proxy_providers(&mut next, state).await;
     let desired_listeners = next.listener_ports()?;
@@ -154,6 +156,7 @@ pub(super) async fn apply_generation(
     state.clear_ssr_clients();
     state.clear_hysteria2_clients().await;
     state.clear_tuic_clients().await;
+    let desired_tun = next.tun.clone();
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
@@ -243,7 +246,72 @@ pub(super) async fn apply_generation(
             stop_task(task).await;
         }
     }
+
+    apply_tun_task(desired_tun, config_receiver, state, dns_service, tun).await?;
     Ok(())
+}
+
+async fn apply_tun_task(
+    desired: Option<rewrite_config::TunConfig>,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    tun: &mut Option<RuntimeTask>,
+) -> Result<(), RuntimeError> {
+    let enable = desired.as_ref().is_some_and(|config| config.enable);
+    if !enable {
+        if let Some(task) = tun.take() {
+            stop_task(task).await;
+        }
+        return Ok(());
+    }
+    let Some(tun_config) = desired else {
+        return Ok(());
+    };
+    if let Some(task) = tun.take() {
+        stop_task(task).await;
+    }
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns = Arc::clone(dns_service);
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.child_token();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        if let Err(error) = run_tun_listener(
+            tun_config,
+            task_config,
+            task_state.clone(),
+            task_dns,
+            child_shutdown,
+            Some(ready_tx),
+        )
+        .await
+        {
+            task_state.log("error", format!("TUN listener failed: {error}"));
+        }
+    });
+    match ready_rx.await {
+        Ok(Ok(())) => {
+            *tun = Some(RuntimeTask {
+                shutdown: task_shutdown,
+                handle,
+            });
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            task_shutdown.cancel();
+            let _ = handle.await;
+            Err(error)
+        }
+        Err(_) => {
+            task_shutdown.cancel();
+            let _ = handle.await;
+            Err(RuntimeError::Tun(
+                "TUN startup cancelled before becoming ready".to_owned(),
+            ))
+        }
+    }
 }
 
 pub(super) fn controller_keys(config: &Config) -> Result<Vec<ControllerKey>, ConfigError> {

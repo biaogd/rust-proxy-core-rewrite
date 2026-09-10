@@ -636,12 +636,82 @@ rules:
 
 #[test]
 fn refuses_undeclared_features() {
-    let source = format!("{MINIMAL}\ntun:\n  enable: true\n");
+    let source = format!("{MINIMAL}\nsniffer:\n  enable: true\n");
     let spec = ConfigSpec::from_yaml(&source).expect("spec preserves unknown keys");
     assert!(matches!(
         spec.validate_declared_surface(),
-        Err(ConfigError::UnsupportedKey(key)) if key == "tun"
+        Err(ConfigError::UnsupportedKey(key)) if key == "sniffer"
     ));
+}
+
+#[test]
+fn parses_phase_eight_a_tun_smoltcp_defaults() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-route: true\n");
+    let config = Config::from_yaml(&source).expect("tun config");
+    let tun = config.tun.expect("tun present");
+    assert!(tun.enable);
+    assert_eq!(tun.stack, TunStack::Smoltcp);
+    assert!(tun.auto_route);
+    assert_eq!(tun.dns_hijack, vec!["0.0.0.0:53".to_owned()]);
+    assert_eq!(
+        tun.inet4_address,
+        vec!["198.18.0.1/30".parse().expect("prefix")]
+    );
+}
+
+#[test]
+fn rejects_go_tun_stack_names_without_remapping() {
+    for stack in ["system", "gvisor", "mixed", "System", "gVisor", "Mixed"] {
+        let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: {stack}\n");
+        let error = Config::from_yaml(&source).expect_err("go stack names must fail");
+        assert!(
+            error.to_string().contains("smoltcp"),
+            "unexpected error for {stack}: {error}"
+        );
+        assert!(
+            error.to_string().contains("does not remap"),
+            "unexpected error for {stack}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_deferred_tun_knobs() {
+    let source =
+        format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-redirect: true\n");
+    let error = Config::from_yaml(&source).expect_err("auto-redirect deferred");
+    assert!(error.to_string().contains("auto-redirect"));
+}
+
+#[test]
+fn rejects_unknown_tun_keys() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  mystery: true\n");
+    let error = Config::from_yaml(&source).expect_err("unknown tun key");
+    assert!(error.to_string().contains("tun.mystery"));
+}
+
+#[test]
+fn rejects_inet6_when_ipv6_disabled() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  inet6-address:\n    - fdfe:dcba:9876::1/64\n"
+    );
+    let error = Config::from_yaml(&source).expect_err("ipv6 leak");
+    let message = error.to_string();
+    assert!(
+        message.contains("inet6-address") || message.contains("IPv6"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn hijacks_wildcard_dns_entries() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n");
+    let tun = Config::from_yaml(&source)
+        .expect("tun")
+        .tun
+        .expect("present");
+    assert!(tun.hijacks_dns("1.1.1.1:53".parse().expect("dns")));
+    assert!(!tun.hijacks_dns("1.1.1.1:5353".parse().expect("not dns")));
 }
 
 #[test]

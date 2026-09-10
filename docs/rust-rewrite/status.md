@@ -127,11 +127,16 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 (6H-A/B/C) are done in this checkout (v4/0-RTT/inbound deferred). Device pin:
 `tun-rs` **2.8.9** (+ async). Stack pin: `netstack-smoltcp` **0.2.4**. Rust
 accepts `stack: smoltcp` only; Go `system`/`gvisor`/`mixed` are explicit
-rejects (never silent remap). Implementation begins after Phase 8 docs and the
-SOCKS UDP reply-framing / shared UDP session relay decoupling. TUN is not yet
-Parity. Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other
-Phase 7 families remain deferred. Canonical numbering is AnyTLS **6G**,
-Hysteria2 **HY2**, TUIC **6H**, SSR **7A–7D**. The
+rejects (never silent remap). 8A implementation has landed for YAML parse,
+UDP reply-sink reuse, Linux device/stack/session wiring, DNS hijack into the
+existing DNS service, owned auto-route plus loop-avoidance host routes, and
+init-failure/stop cleanup. Unprivileged evidence: config/stack-identity unit
+tests plus `compat/scripts/phase8a_tun.py`. Privileged Linux netns traffic
+(HTTP/DNS/UDP echo, Go/Rust content differential) remains the native 8A
+acceptance gate and is fail-closed (`PHASE8A_NATIVE=1`). TUN is not Parity.
+Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other Phase 7
+families remain deferred. Canonical numbering is AnyTLS **6G**, Hysteria2
+**HY2**, TUIC **6H**, SSR **7A–7D**. The
 [roadmap](roadmap.md#next-work-priority--2026-09-09) owns the plan
 ([Phase 8 stages](roadmap.md#phase-8--tun-transparent-proxying-and-platform-breadth)).
 
@@ -151,6 +156,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 0B exhaustive Go capability census | Complete | Stable CLI/config/inbound/rule/outbound/DNS/runtime/API/service/platform inventory IDs and planned gates |
 | Go reference implementation | Preserved | No existing Go source modified or deleted |
 | Native CI portability hardening | Local gates pass; Windows rerun pending | Windows `.exe`, home/cache isolation, restart child-process cleanup, Winsock error text and cold data-plane boundaries are represented explicitly; the seven directly affected Phase 4C/4E15/4F14/5A1/5C/5D/6E differentials pass locally, with native parity unclaimed until CI |
+| Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged tests + `phase8a_tun.py`; native netns traffic unclaimed |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |

@@ -15,6 +15,8 @@ pub enum RuntimeError {
     Config(#[from] ConfigError),
     #[error("local listener error: {0}")]
     Listener(#[from] std::io::Error),
+    #[error("TUN error: {0}")]
+    Tun(String),
 }
 
 pub(crate) struct RuntimeTask {

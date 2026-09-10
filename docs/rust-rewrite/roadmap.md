@@ -2997,8 +2997,9 @@ cannot inherit its wire-compatibility claim.
 ## Phase 8 — TUN, transparent proxying and platform breadth
 
 TUN is current after SSR and TUIC v5 outbound in this checkout, without waiting
-for 6I/6J or all of Phase 7. Implementation begins after this documentation and
-a small UDP prerequisite refactor (below). Delivery order: **8A → 8B → 8C**,
+for 6I/6J or all of Phase 7. The UDP reply-sink refactor and 8A Linux
+parse/runtime wiring have landed; privileged netns traffic remains the 8A
+acceptance gate. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
 OS needs native configuration, listener, routing, process, persistence and
 shutdown evidence; unsupported combinations require explicit rejection evidence
@@ -3025,9 +3026,8 @@ shutdown evidence; unsupported combinations require explicit rejection evidence
 
 ### Prerequisite — SOCKS UDP reply framing
 
-Before TUN work: decouple SOCKS UDP reply framing from the shared UDP session
-relay so TUN (and other non-SOCKS) consumers can reuse the relay without
-SOCKS-specific write-back.
+Done: SOCKS UDP reply framing is an inbound-edge `UdpReplySink`; TUN reuses the
+shared UDP session relay without SOCKS write-back.
 
 ### Delivery stages
 

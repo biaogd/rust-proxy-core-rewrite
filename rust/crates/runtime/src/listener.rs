@@ -126,13 +126,13 @@ pub(super) async fn run_listener(
                     udp_sessions.dispatch(
                         source,
                         request,
-                        UdpSessionContext {
-                            reply: UdpReplySink::Socks5(Arc::clone(socket)),
-                            config: connection_config,
-                            state: Arc::clone(&state),
-                            dns_service: Arc::clone(&dns_service),
-                            shutdown: shutdown.child_token(),
-                        },
+                        UdpSessionContext::new(
+                            UdpReplySink::Socks5(Arc::clone(socket)),
+                            connection_config,
+                            Arc::clone(&state),
+                            Arc::clone(&dns_service),
+                            shutdown.child_token(),
+                        ),
                     );
                 }
             }
@@ -164,6 +164,7 @@ pub(super) async fn receive_udp(
 #[derive(Clone)]
 pub(super) enum UdpReplySink {
     Socks5(Arc<UdpSocket>),
+    Tun { tx: rewrite_tun::TunUdpReplyTx },
 }
 
 impl UdpReplySink {
@@ -178,6 +179,9 @@ impl UdpReplySink {
                 let packet = rewrite_inbound::encode_socks5_udp(remote, payload);
                 listener.send_to(&packet, session_peer).await.map(|_| ())
             }
+            Self::Tun { tx } => tx
+                .send((payload.to_vec(), remote, session_peer))
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
         }
     }
 }
@@ -186,6 +190,35 @@ pub(super) struct UdpSessionPacket {
     metadata: Metadata,
     fake_host: Option<String>,
     payload: Vec<u8>,
+    force_dns: bool,
+}
+
+impl UdpSessionPacket {
+    pub(super) fn from_parts(
+        metadata: Metadata,
+        fake_host: Option<String>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            metadata,
+            fake_host,
+            payload,
+            force_dns: false,
+        }
+    }
+
+    pub(super) fn dns_hijack(
+        metadata: Metadata,
+        fake_host: Option<String>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            metadata,
+            fake_host,
+            payload,
+            force_dns: true,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -195,6 +228,24 @@ pub(super) struct UdpSessionContext {
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
+}
+
+impl UdpSessionContext {
+    pub(super) fn new(
+        reply: UdpReplySink,
+        config: Arc<Config>,
+        state: Arc<RuntimeState>,
+        dns_service: Arc<rewrite_dns::DnsService>,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self {
+            reply,
+            config,
+            state,
+            dns_service,
+            shutdown,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -215,13 +266,16 @@ pub(super) enum UdpSessionMode {
 
 #[derive(Default)]
 pub(super) struct UdpSessions {
-    tasks: JoinSet<(SocketAddr, u64)>,
+    pub(super) tasks: JoinSet<(SocketAddr, u64)>,
     entries: BTreeMap<SocketAddr, (u64, mpsc::Sender<UdpSessionPacket>)>,
     next_id: u64,
 }
 
 impl UdpSessions {
-    fn reap(&mut self, result: Option<&Result<(SocketAddr, u64), tokio::task::JoinError>>) {
+    pub(super) fn reap(
+        &mut self,
+        result: Option<&Result<(SocketAddr, u64), tokio::task::JoinError>>,
+    ) {
         if let Some(Ok((source, session_id))) = result
             && self
                 .entries
@@ -232,7 +286,7 @@ impl UdpSessions {
         }
     }
 
-    fn dispatch(
+    pub(super) fn dispatch(
         &mut self,
         source: SocketAddr,
         request: UdpSessionPacket,
@@ -242,9 +296,7 @@ impl UdpSessions {
             match sender.try_send(request) {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    context
-                        .state
-                        .log("error", "SOCKS5 UDP session queue is full");
+                    context.state.log("error", "UDP session queue is full");
                     return;
                 }
                 Err(mpsc::error::TrySendError::Closed(request)) => {
@@ -273,8 +325,13 @@ impl UdpSessions {
         ) else {
             return;
         };
-        let Some(mode) = udp_session_mode(&target, &context.config) else {
-            return;
+        let mode = if request.force_dns {
+            UdpSessionMode::Dns
+        } else {
+            let Some(mode) = udp_session_mode(&target, &context.config) else {
+                return;
+            };
+            mode
         };
         let session_id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -298,7 +355,7 @@ impl UdpSessions {
         });
     }
 
-    async fn shutdown(mut self, state: &RuntimeState) {
+    pub(super) async fn shutdown(mut self, state: &RuntimeState) {
         self.entries.clear();
         while let Some(result) = self.tasks.join_next().await {
             if let Err(join_error) = result {
@@ -384,6 +441,7 @@ pub(super) fn prepare_udp_request(
         metadata,
         fake_host,
         payload: accepted.payload.to_vec(),
+        force_dns: false,
     })
 }
 
@@ -984,7 +1042,11 @@ pub(super) async fn run_dns_udp_session(
                 .await
             {
                 let remote = dns_adapter_response_addr(&request.metadata);
-                if reply.send_datagram(source, remote, &response).await.is_err() {
+                if reply
+                    .send_datagram(source, remote, &response)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 downloaded = downloaded.saturating_add(response.len() as u64);

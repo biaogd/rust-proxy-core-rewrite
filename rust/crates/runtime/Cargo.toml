@@ -20,6 +20,7 @@ rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-rules = { path = "../rules" }
 rewrite-services = { path = "../services" }
 rewrite-state = { path = "../state" }
+rewrite-tun = { path = "../tun" }
 shadowsocks.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -30,6 +31,7 @@ tokio-tfo.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 url.workspace = true
+ipnet.workspace = true
 
 [dev-dependencies]
 quinn.workspace = true

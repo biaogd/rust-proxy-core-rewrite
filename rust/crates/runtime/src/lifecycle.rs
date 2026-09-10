@@ -87,6 +87,7 @@ pub(super) async fn run_with_reload_inner(
     let mut listeners = BTreeMap::new();
     let mut controllers = BTreeMap::new();
     let mut dns: Option<(SocketAddr, RuntimeTask)> = None;
+    let mut tun: Option<RuntimeTask> = None;
 
     apply_generation(
         initial,
@@ -98,6 +99,7 @@ pub(super) async fn run_with_reload_inner(
         &mut listeners,
         &mut controllers,
         &mut dns,
+        &mut tun,
     )
     .await?;
     let health = start_group_health_scheduler(config_receiver.clone(), Arc::clone(&state));
@@ -140,6 +142,7 @@ pub(super) async fn run_with_reload_inner(
                             &mut listeners,
                             &mut controllers,
                             &mut dns,
+                            &mut tun,
                         ).await {
                             state.log("error", format!("configuration reload failed: {error}"));
                             eprintln!("configuration reload failed: {error}");
@@ -164,6 +167,7 @@ pub(super) async fn run_with_reload_inner(
                     &mut listeners,
                     &mut controllers,
                     &mut dns,
+                    &mut tun,
                 ).await {
                     restart_requested = true;
                     break;
@@ -185,6 +189,9 @@ pub(super) async fn run_with_reload_inner(
         cleanup_controller_key(&key);
     }
     if let Some((_, task)) = dns {
+        stop_task(task).await;
+    }
+    if let Some(task) = tun {
         stop_task(task).await;
     }
     stop_task(health).await;
@@ -213,6 +220,7 @@ pub(super) async fn apply_controller_update(
     listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
+    tun: &mut Option<RuntimeTask>,
 ) -> bool {
     if matches!(&update.kind, rewrite_controller::ConfigUpdateKind::Restart) {
         let _ = update.completion.send(Ok(()));
@@ -255,6 +263,7 @@ pub(super) async fn apply_controller_update(
             listeners,
             controllers,
             dns,
+            tun,
         )
         .await
         .map_err(|error| error.to_string()),
