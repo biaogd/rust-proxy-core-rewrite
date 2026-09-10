@@ -1,6 +1,9 @@
 //! TinyRLE: a small PackBits-style compressor.
 //!
-//! On `x86_64`, the hot path is pure assembly (`asm_x86_64`).
+//! Pure-assembly hot paths:
+//! - `x86_64` → [`asm_x86_64`]
+//! - `aarch64` (Apple Silicon / ARM64) → [`asm_aarch64`]
+//!
 //! Other targets use the Rust reference implementation.
 
 mod format;
@@ -8,6 +11,9 @@ mod rle_rust;
 
 #[cfg(target_arch = "x86_64")]
 mod asm_x86_64;
+
+#[cfg(target_arch = "aarch64")]
+mod asm_aarch64;
 
 pub use format::{max_compressed_size, MAX_LITERAL, MAX_RUN, MIN_RUN};
 
@@ -47,6 +53,22 @@ impl std::fmt::Display for DecompressError {
 
 impl std::error::Error for DecompressError {}
 
+/// Which native backend the current target uses.
+pub fn backend_name() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        "x86_64 assembly"
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        "aarch64 assembly (Apple Silicon / ARM64)"
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        "Rust reference"
+    }
+}
+
 /// Compress with the architecture-native backend.
 pub fn compress(src: &[u8]) -> Result<Vec<u8>, CompressError> {
     let mut dst = vec![0u8; max_compressed_size(src.len())];
@@ -56,17 +78,24 @@ pub fn compress(src: &[u8]) -> Result<Vec<u8>, CompressError> {
 }
 
 pub fn compress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, CompressError> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let n = unsafe {
-            asm_x86_64::tinyrle_compress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            #[cfg(target_arch = "x86_64")]
+            {
+                asm_x86_64::tinyrle_compress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                asm_aarch64::tinyrle_compress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            }
         };
         if n < 0 {
             return Err(CompressError::OutputTooSmall);
         }
         Ok(n as usize)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         rle_rust::compress_into(src, dst)
     }
@@ -74,7 +103,6 @@ pub fn compress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, CompressError>
 
 /// Decompress with the architecture-native backend.
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>, DecompressError> {
-    // Bound output size using a Rust scan so asm only fills a sized buffer.
     let out_len = uncompressed_len(src)?;
     let mut dst = vec![0u8; out_len];
     let n = decompress_into(src, &mut dst)?;
@@ -85,13 +113,19 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>, DecompressError> {
 }
 
 pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, DecompressError> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let n = unsafe {
-            asm_x86_64::tinyrle_decompress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            #[cfg(target_arch = "x86_64")]
+            {
+                asm_x86_64::tinyrle_decompress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                asm_aarch64::tinyrle_decompress(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len())
+            }
         };
         if n < 0 {
-            // Distinguish truncated vs too-small when possible.
             if uncompressed_len(src).is_err() {
                 return Err(DecompressError::Truncated);
             }
@@ -99,7 +133,7 @@ pub fn decompress_into(src: &[u8], dst: &mut [u8]) -> Result<usize, DecompressEr
         }
         Ok(n as usize)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         rle_rust::decompress_into(src, dst)
     }
@@ -188,5 +222,16 @@ mod tests {
         let c = compress(text).unwrap();
         assert!(c.len() < text.len());
         assert_eq!(decompress(&c).unwrap(), text);
+    }
+
+    #[test]
+    fn reports_native_backend() {
+        let name = backend_name();
+        assert!(
+            name.contains("assembly") || name.contains("Rust"),
+            "unexpected backend: {name}"
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert!(name.contains("assembly"));
     }
 }

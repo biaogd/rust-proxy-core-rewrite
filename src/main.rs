@@ -1,11 +1,11 @@
-use rle_codec::{compress, decompress, reference};
+use rle_codec::{backend_name, compress, decompress, reference};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 fn usage() -> &'static str {
-    "TinyRLE demo (Rust API + x86_64 pure asm core)
+    "TinyRLE demo (Rust API + x86_64 / aarch64 pure asm core)
 
 Usage:
   rle-demo                 # built-in sample round-trip
@@ -17,11 +17,7 @@ Usage:
 
 fn demo_sample() -> io::Result<()> {
     let input = b"AAAABBBAAAAAAAAAAAAAHello, TinyRLE!....~~~~;;;;";
-    let backend = if cfg!(target_arch = "x86_64") {
-        "x86_64 assembly"
-    } else {
-        "Rust reference"
-    };
+    let backend = backend_name();
 
     let compressed = compress(input).expect("compress");
     let roundtrip = decompress(&compressed).expect("decompress");
