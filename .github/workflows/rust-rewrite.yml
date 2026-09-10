@@ -165,6 +165,7 @@ jobs:
           - trojan
           - anytls
           - hysteria2
+          - tuic
           - local-runtime
           - builtins
     defaults:
@@ -331,6 +332,7 @@ jobs:
       PHASE_HY2B_BRUTAL_RATE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE_HY2C_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE_HY2C_SOAK_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE6HTUIC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7A_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7B_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7C_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -399,6 +401,7 @@ jobs:
             trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
+            tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
             local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
@@ -411,6 +414,10 @@ jobs:
           compat/scripts/phase_hy2b_brutal_rate.py \
           compat/scripts/phase_hy2c_hysteria2.py \
           compat/scripts/phase_hy2c_hysteria2_soak.py \
+          compat/scripts/phase6h_tuic_tcp.py \
+          compat/scripts/phase6h_tuic_udp.py \
+          compat/scripts/phase6h_tuic_lifecycle.py \
+          compat/scripts/phase6h_tuic_soak.py \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
           compat/scripts/phase5c_fallback.py \

@@ -12,7 +12,7 @@ build profile.
 
 Priority update (2026-09-09): this remains a full capability census, not a
 requirement to implement every protocol before shipping the requested common
-client surface. Next work is **SSR closure → TUIC v5 outbound → TUN**. Use 6G
+client surface. Next work is **TUN**. Use 6G
 for AnyTLS, HY2 for Hysteria2 and 7A–7D for SSR. Deferred protocols retain stable
 OUT IDs rather than conflicting phase numbers. See [roadmap](roadmap.md#next-work-priority--2026-09-09)
 and [status](status.md#planning-update-and-checkout-scope--2026-09-09) for scope.
@@ -149,7 +149,7 @@ The product parser enumerates outbound types in
 | OUT-09 | Trojan: TLS/security extensions, fallback and UDP | Not started | 6F |
 | OUT-10 | Snell versions, obfs/security extensions, UDP and pool | Not started | Deferred OUT-10; old 7B assignment superseded by SSR |
 | OUT-11 | Hysteria v1/v2: QUIC/fake TCP, obfs, congestion, UDP and PMTUD | Partial: HY2-A/B/C implement Clash `type: hysteria2` outbound TCP+UDP with HTTP/3 auth, TLS verify/skip, stock Quinn BBR (up/down unset), Brutal/CC-RX reconcile, Salamander, port hop, udp-mtu/windows, stress/netem/reload-removal, soak harness (CI short; **full ≥2h passed on `8a9b0761`**), session reuse, groups/providers/health/reload and Go/Rust differentials; `cwnd`/`bbr-profile`/Gecko/Realm/ECH rejected at parse | Hysteria v1 and inbound remain open |
-| OUT-12 | TUIC v4/v5: QUIC, 0-RTT, congestion and UDP relay | Not started; next outbound protocol | 6H-A/B/C: v5 TCP → UDP → lifecycle/native gates; v4/0-RTT/inbound deferred |
+| OUT-12 | TUIC v4/v5: QUIC, 0-RTT, congestion and UDP relay | Partial; 6H-A/B/C v5 TCP+UDP+lifecycle outbound | 6H-A/B/C: `phase6h_tuic_tcp.py`, `phase6h_tuic_udp.py`, `phase6h_tuic_lifecycle.py`, `phase6h_tuic_soak.py`; crate `udp_lifecycle` for blocked send / recv-on-close; v4/0-RTT/inbound deferred; congestion names only |
 | OUT-13 | ShadowQUIC | Not started | Deferred OUT-13; old 7C assignment superseded by SSR |
 | OUT-14 | WireGuard and AmneziaWG: userspace stacks, peers, routes and DNS | Not started | 6I deferred until after priority TUIC/TUN work |
 | OUT-15 | SSH: authentication, host-key policy, keepalive and multiplexing | Not started | 6J deferred until after priority TUIC/TUN work |

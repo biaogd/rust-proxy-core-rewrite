@@ -21,6 +21,7 @@ rewrite-protocol-hysteria2 = { path = "../protocol-hysteria2" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-protocol-shadowsocksr = { path = "../protocol-shadowsocksr" }
 rewrite-protocol-trojan = { path = "../protocol-trojan" }
+rewrite-protocol-tuic = { path = "../protocol-tuic" }
 rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }
 rewrite-services = { path = "../services" }
@@ -28,6 +29,7 @@ rewrite-transport = { path = "../transport" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -169,6 +169,7 @@ pub enum ProxyKind {
     Reject,
     Dns,
     Rematch,
+    Tuic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +224,7 @@ pub struct ProxyConfig {
     pub trojan: Option<TrojanProxyConfig>,
     pub anytls: Option<AnyTlsProxyConfig>,
     pub hysteria2: Option<Hysteria2ProxyConfig>,
+    pub tuic: Option<TuicProxyConfig>,
     pub ssr: Option<SsrProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
@@ -250,6 +252,27 @@ pub struct AnyTlsProxyConfig {
     pub disable_reuse: bool,
     /// Outer security carrier replacing native TLS when set (Go-compatible).
     pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).
+///
+/// v4 `token`, `reduce-rtt` / 0-RTT, ECH, UDP-over-stream, Brutal/`cwnd` /
+/// `bbr-profile`, client certificates and inbound remain rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TuicProxyConfig {
+    pub uuid: [u8; 16],
+    pub password: String,
+    pub alpn: Vec<String>,
+    pub congestion_controller: String,
+    pub udp_relay_mode: String,
+    pub request_timeout_ms: u64,
+    pub heartbeat_interval_ms: u64,
+    pub max_open_streams: u64,
+    pub disable_sni: bool,
+    pub stream_receive_window: Option<u64>,
+    pub connection_receive_window: Option<u64>,
+    /// YAML `max-udp-relay-packet-size`; `0` means Go's default 1252 before caps.
+    pub max_udp_relay_packet_size: u64,
 }
 
 /// Clash `type: hysteria2` options accepted in HY2-B (TCP + UDP outbound).

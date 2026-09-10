@@ -1325,19 +1325,23 @@ WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
 prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
 deferred; the declared BBR profile still needs its own release evidence.
 
-### Phase 6H — TUIC v5 outbound acceptance plan (not implemented)
+### Phase 6H — TUIC v5 outbound acceptance plan
 
-- **6H-A:** YAML → mixed HTTP/SOCKS TCP → rules/groups → verified QUIC/TLS →
-  TUIC v5 authentication and TCP relay. Prove UUID/password validation, address
-  types, TLS rejection, concurrent streams, large transfers and close behavior
-  against Go. Reuse QUIC primitives only after checking the required boundary.
-- **6H-B:** SOCKS/mixed UDP → TUIC v5 UDP relay → local UDP authority. Cover
+- **6H-A (implemented):** YAML → mixed HTTP/SOCKS TCP → rules/groups → verified QUIC/TLS →
+  TUIC v5 authentication and TCP relay. Evidence: `compat/scripts/phase6h_tuic_tcp.py`.
+- **6H-B (implemented):** SOCKS/mixed UDP → TUIC v5 UDP relay → local UDP authority. Cover
   native datagram and QUIC-stream relay modes, packet/session IDs, destination
-  changes, size/fragmentation boundaries, loss and association cleanup.
-- **6H-C:** connection reuse, heartbeat, reconnection, cancellation, bounded
-  queues, provider/health/reload integration and supported congestion options.
-  Run malformed-peer and bounded stress/soak tests; require fmt, workspace
-  clippy/test and Go/Rust differential evidence on Linux, macOS arm64 and Windows.
+  changes, size/fragmentation boundaries, loss/reorder/duplicate reassembly
+  (unit tests) and association cleanup. Evidence: `compat/scripts/phase6h_tuic_udp.py`
+  plus `protocol-tuic` `udp_lifecycle` (blocked QUIC send cancel; recv ends on
+  peer close) and `rewrite-runtime` mixed SOCKS shutdown cancel
+  (`tuic_mixed_udp_cancel`).
+- **6H-C (implemented):** connection reuse, TUIC Heartbeat datagrams plus QUIC
+  keep-alive (`heartbeat-interval`), reconnection after authority restart, cancel
+  isolation, `max-open-streams` pooling, congestion *names*, reload, concurrent
+  TCP+UDP, malformed-command decode tests, and a short soak. Evidence:
+  `compat/scripts/phase6h_tuic_lifecycle.py` and `phase6h_tuic_soak.py`.
+  Three-platform CI pending; algorithm identity with quic-go is not claimed.
 
 The matrix rows are **TUIC outbound** and the applicable configuration,
 groups/providers and native-platform rows. The TUIC inbound row stays

@@ -153,6 +153,7 @@ pub(super) async fn apply_generation(
     state.clear_anytls_clients().await;
     state.clear_ssr_clients();
     state.clear_hysteria2_clients().await;
+    state.clear_tuic_clients().await;
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;

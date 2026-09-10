@@ -17,6 +17,7 @@ members = [
   "crates/protocol-shadowsocks",
   "crates/protocol-shadowsocksr",
   "crates/protocol-trojan",
+  "crates/protocol-tuic",
   "crates/protocol-vless",
   "crates/protocol-vmess",
   "crates/rules",

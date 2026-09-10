@@ -2,6 +2,21 @@
 
 Baseline: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`).
 
+TUIC / Darwin arm64 Phase 6H-C follow-up: cold-start pool coordination and
+mixed UDP blocked-send cancellation have focused Rust regression contracts in
+`protocol-tuic/tests/udp_lifecycle.rs` and
+`runtime/tests/tuic_mixed_udp_cancel.rs`. These tests do not expand protocol
+support or replace Go differentials and native three-platform gates; see
+`status.md` for execution evidence.
+The follow-up also covers pool reuse during stalled expansion and peer-observed
+close on runtime shutdown. Bounded, best-effort Dissociate (32 queued IDs,
+one-second send timeout) is an explicitly Rust-specific teardown safety policy;
+it does not expand the Go parity claim.
+TUIC UDP follow-up: per-connection association IDs are never reused (allocation
+exhaustion moves new work to another connection), and native fragmentation
+retries `TooLarge` against the actual peer limit/header size. ID allocation is
+Rust-specific safety policy; final focused validation is recorded in `status.md`.
+
 This is the authority for support claims. A Rust implementation is compatible
 only when the relevant row is marked **Parity** with named test evidence.
 `go-capability-inventory.md` is the exhaustive planning census: future slices
@@ -121,7 +136,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Trojan | Yes | Yes | Oracle | Not started | TLS/auth/fallback/UDP interop |
 | Hysteria2 | Yes | Yes | Oracle | Partial | Current production target is BBR outbound with up/down omitted; verified TLS contracts added, resolver/failover, UDP lifecycle, strict release soak and native evidence remain open. Accurate Brutal and Quinn patch work deferred by user; current Brutal is experimental. Gecko/Realm/ECH/v1/inbound → later |
 | Hysteria2 realm | Yes | Yes | Oracle | Not started | Realm routing/interoperability |
-| TUIC | Yes | Yes | Oracle | Not started | v4/v5/QUIC interop |
+| TUIC | Yes | Yes | Oracle | Partial | 6H-A/B/C v5 outbound TCP+UDP+lifecycle vs Go inbound; v4/0-RTT/inbound deferred |
 | ShadowQUIC | Yes | Yes | Oracle | Not started | QUIC extension and datagram interop |
 | AnyTLS | Yes | Protocol-dependent | Oracle | Partial | Phase 6G-A/B/C/D/E outbound native TLS TCP auth/padding/relay + session reuse/mux + UDP/UoT v2 + idle/heartbeat/recovery + ShadowTLS/JLS carriers (Restls dial blocked on shared Restls client transport); inbound remains open |
 | Mieru | Yes | Yes | Oracle | Not started | TCP/UDP/mux interop |
@@ -171,7 +186,7 @@ Go unit tests are useful evidence but are not Go/Rust differential evidence.
 | Snell | Oracle | Not started | Version/UDP/pool interop |
 | Trojan | Oracle | **Partial — Phase 6F-A–E client scope** | A proves native TLS TCP authentication/framing/relay; B proves native TLS UDP framing, splitting and reuse; C proves TCP and UDP over WSS with path, Host/custom headers and WebSocket ALPN; D proves TCP and UDP over HTTP/2 Gun/gRPC, service path, User-Agent and pooled client controls; E proves native TCP and UDP over REALITY with Chrome fingerprint, public-key/short-id authentication and strict unsupported-combination rejection. TLS name override/skip still rely on shared transport evidence; fallback and server direction remain open |
 | Hysteria / Hysteria2 | Oracle | **Partial — BBR outbound production gate OPEN** | TCP/UDP/reuse/Salamander/hop/stress differentials and verified TLS contracts exist. Historical ≥2h soak on `8a9b0761` used permissive resource/error gates and is not current production acceptance. Strict sampled release soak, UDP lifecycle, native evidence and real resolver/failover remain required. Brutal precision and Quinn patch work are deferred, not blockers for the declared BBR-only profile; current Brutal remains experimental. Gecko/Realm/ECH/v1/inbound remain deferred. |
-| TUIC | Oracle | Not started — next outbound protocol | 6H-A/B/C prioritize v5 TCP, UDP, lifecycle and three-platform differential gates; v4, 0-RTT and inbound deferred |
+| TUIC | Oracle | **Partial — 6H-A/B/C v5 TCP+UDP+lifecycle outbound** | YAML/UUID/password, QUIC/TLS exporter auth, TCP relay, native/QUIC UDP relay, Heartbeat datagrams + QUIC keep-alive, `max-open-streams` pooling, congestion names, cancel/restart/reload/soak in `phase6h_tuic_tcp.py`, `phase6h_tuic_udp.py`, `phase6h_tuic_lifecycle.py`, `phase6h_tuic_soak.py`. Oracle-aligned `disable-sni` (no SNI extension), explicit empty ALPN, v5 `request-timeout` unused for open, swapped-legacy-window fix, UDP send cancel + recv-on-close crate fixtures. v4, 0-RTT, inbound, ECH and UDP-over-stream remain rejected/deferred; quic-go congestion identity not claimed; three-platform CI pending |
 | ShadowQUIC | Oracle | Not started | QUIC stream/datagram interop |
 | WireGuard / AmneziaWG | Oracle | Not started | Tunnel, routing and DNS integration |
 | SSH | Oracle | Not started | Auth/host-key/keepalive/mux tests |
@@ -374,7 +389,10 @@ separate build and runtime claim.
 | Darwin arm64 — Phase 6D-C VMess native-TCP security modes | Oracle | **Parity in declared scope** | Native `phase6d_vmess_security.py` passes case-insensitive `none`, `zero` and AES-128-CFB through an independent Go authority, including ignored non-AEAD framing flags, domain/IPv4/IPv6, small/128 KiB relay and half-close, 2026-09-01 |
 | Darwin arm64 — Phase 6D-D VMess legacy AlterID native TCP | Oracle | **Parity in declared scope** | Native `phase6d_vmess_alterid.py` passes positive counts 1/2/64 and every supported security mode through an independent Go authority, including provider selector routing, domain/IPv4/IPv6, small/128 KiB relay, half-close, wrong-UUID rejection and process survival, 2026-09-01 |
 | Darwin arm64 — Phase 6D-E VMess UDP packet modes | Oracle | **Parity in declared scope** | Native `phase6d_vmess_udp.py` passes ordinary UDP, packet-address and XUDP through an independent Go authority, including resolved-domain/fixed-target reuse, IPv4/IPv6 multi-destination associations, legacy AlterID, framing options, controller capability and process survival, 2026-09-01 |
-| Darwin arm64 — Phase 6D-E2 VMess UDP TLS/WS/WSS/gRPC | Oracle | **Parity in declared scope** | Native `phase6d_vmess_udp_carriers.py` passes ordinary/packet-address/XUDP over native TLS, plaintext WS, WSS and TLS Gun (12 combos), silent-WS disconnect/exit, and healthy-stream survival over exactly one physical connection while another Gun request times out. Immediate WS disconnect and zero exit compare Go/Rust; bounded deferred early-data disconnect is explicitly Rust-only. Cancellation/reset/count/pool-reuse unit tests also pass, 2026-09-09; native CI revalidation pending |
+| Darwin arm64 — Phase 6D-E2 VMess UDP TLS/WS/WSS/gRPC | Oracle | **Parity in declared scope** | Native `phase6d_vmess_udp_carriers.py` passes ordinary/packet-address/XUDP over native TLS, plaintext WS, WSS and TLS Gun (12 combos), silent-WS disconnect/exit, and healthy-stream survival over exactly one physical connection while another Gun request times out. Immediate WS disconnect and zero exit compare Go/Rust; bounded deferred early-data disconnect is explicitly Rust-only. Cancellation/reset/count/pool-reuse unit tests also pass, 2026-09-09; native CI revalidation pending. Config treats `skip-cert-verify: false` without `tls` as plaintext, matching ClashMeta exports |
+| Darwin arm64 — Phase 6H-A TUIC v5 outbound TCP | Oracle | **Parity in declared scope** | Native `phase6h_tuic_tcp.py` vs Go TUIC inbound passed on Darwin arm64, 2026-09-10: domain/IPv4/IPv6, large payload, half-close, concurrent streams, cancel isolation, wrong-password/cert/target-refused, provider/health/reload. UDP/v4/0-RTT/inbound remain open; three-platform CI pending |
+| Darwin arm64 — Phase 6H-B TUIC v5 outbound UDP | Oracle | **Parity in declared scope** | Native `phase6h_tuic_udp.py` vs Go TUIC inbound passed on Darwin arm64, 2026-09-10: SOCKS UDP ASSOCIATE through mixed-port, native DATAGRAM and `udp-relay-mode: quic` uni-stream, IPv4 echo, large payload native fragmentation, same-association destination change, empty payload, re-associate after close, process survival. Loss/reorder/duplicate covered by defragger unit tests. Blocked uni-stream send cancel and recv-on-QUIC-close covered by `protocol-tuic` `udp_lifecycle` fixtures (not the restart-new-association path). Three-platform CI pending |
+| Darwin arm64 — Phase 6H-C TUIC v5 outbound lifecycle | Oracle | **Parity in declared scope** | Native `phase6h_tuic_lifecycle.py` / `phase6h_tuic_soak.py` vs Go TUIC inbound passed on Darwin arm64, 2026-09-10: reuse, Heartbeat idle, cubic/new_reno/bbr names, `max-open-streams: 2` pooling, cancel, authority restart+reload, TCP+UDP concurrency, 45s soak (0 failures), process survival. Three-platform CI pending; congestion algorithm identity not claimed |
 | Darwin arm64 — Phase 6D-F VMess TLS and WebSocket TCP | Oracle | **Parity in declared scope** | Native `phase6d_vmess_websocket.py` passes native TLS, plaintext WS and WSS through an independent Go authority with exact SNI/Host/path, custom-root/name/skip verification, untrusted rejection, domain/128 KiB relay, half-close and process survival, 2026-09-01 |
 | Darwin arm64 — Phase 6D-G VMess WebSocket variants | Oracle | **Parity in declared scope** | Native `phase6d_vmess_websocket_variants.py` passes named-header/path/query early data, raw HTTP Upgrade and forced write-before-response fast open over plaintext/TLS, with exact request observations, large relay, half-close and process survival, 2026-09-01 |
 | Darwin arm64 — Phase 6D-H VMess HTTP transports | Oracle | **Parity in declared scope** | Native `phase6d_vmess_http.py` passes HTTP/HTTPS first-write requests and h2c/H2 PUT streams with configured/default Host/path, exact headers, legacy/AEAD/raw representatives, 128 KiB relay, oracle H2 half-close failure and process survival, 2026-09-01 |

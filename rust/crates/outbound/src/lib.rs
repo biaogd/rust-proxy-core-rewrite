@@ -7,6 +7,7 @@ mod shadowsocks;
 mod socks5;
 mod ssr;
 mod trojan;
+mod tuic;
 mod vless;
 mod vmess;
 
@@ -66,6 +67,7 @@ pub use trojan::{
     TrojanProxyError, TrojanUdpAssociation, associate_trojan_udp_on_stream,
     connect_trojan_on_stream,
 };
+pub use tuic::{TuicClient, TuicProxyError, TuicUdpAssociation, associate_tuic_udp};
 pub use vless::{
     VlessFlow, VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
     associate_vless_udp_on_stream, associate_vless_udp_with_options, connect_vless_on_stream,

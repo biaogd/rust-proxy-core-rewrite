@@ -546,6 +546,7 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Hysteria2 => connect_hysteria2_proxy(proxy, destination, config, state).await,
+        ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
@@ -592,6 +593,48 @@ pub(super) async fn hysteria2_client_for_proxy(
     )
     .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
     Ok(state.hysteria2_client(&proxy.name, identity, client).await)
+}
+
+async fn connect_tuic_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    config: &Config,
+    state: &RuntimeState,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let client = tuic_client_for_proxy(proxy, config, state).await?;
+    client
+        .create_proxy(destination)
+        .await
+        .map_err(|error| format!("TUIC proxy connection failed: {error}"))
+}
+
+pub(super) async fn tuic_client_for_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    config: &Config,
+    state: &RuntimeState,
+) -> Result<std::sync::Arc<rewrite_outbound::TuicClient>, String> {
+    let dial = resolve_proxy_dial_server(
+        proxy_server(proxy),
+        &config.hosts,
+        config.dns.as_ref(),
+        config.ipv6,
+    )
+    .await?;
+    let dial_server = match &dial.host {
+        Host::Ip(address) => address.to_string(),
+        Host::Domain(domain) => domain.clone(),
+    };
+    let identity = format!(
+        "{proxy:?}|dial={dial_server}|roots={:?}",
+        config.trust_certificates
+    );
+    let client = rewrite_outbound::TuicClient::from_proxy_with_dial_server(
+        proxy,
+        &dial_server,
+        &config.trust_certificates,
+    )
+    .map_err(|error| format!("TUIC client failed: {error}"))?;
+    Ok(state.tuic_client(&proxy.name, identity, client).await)
 }
 
 async fn connect_anytls_proxy(

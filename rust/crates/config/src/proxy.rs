@@ -14,9 +14,10 @@ use crate::model::{
     AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
     ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
     ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
-    SsrProxyConfig, TrojanProxyConfig, TrojanTransport, VlessFlow, VlessPacketMode,
-    VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions,
-    VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity, VmessTransport,
+    SsrProxyConfig, TrojanProxyConfig, TrojanTransport, TuicProxyConfig, VlessFlow,
+    VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions,
+    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
+    VmessTransport,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,
@@ -139,6 +140,7 @@ pub(crate) fn parse_proxies(
             Some("trojan") => outbounds.push(parse_trojan_proxy(name, proxy)?),
             Some("anytls") => outbounds.push(parse_anytls_proxy(name, proxy, home_directory)?),
             Some("hysteria2") => outbounds.push(parse_hysteria2_proxy(name, proxy)?),
+            Some("tuic") => outbounds.push(parse_tuic_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -294,6 +296,7 @@ fn parse_anytls_proxy(
             carrier,
         }),
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     })
@@ -520,6 +523,216 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
             handshake_timeout_ms,
             stream_receive_window,
             connection_receive_window,
+        }),
+        tuic: None,
+        ssr: None,
+        headers: BTreeMap::new(),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    const REJECTED_EXTRA: &[&str] = &[
+        "token",
+        "reduce-rtt",
+        "ech-opts",
+        "udp-over-stream",
+        "udp-over-stream-version",
+        "fast-open",
+        "cwnd",
+        "bbr-profile",
+        "disable-mtu-discovery",
+        "dialer-proxy",
+        "max-datagram-frame-size",
+        "ip",
+    ];
+    const ACCEPTED_EXTRA: &[&str] = &[
+        "congestion-controller",
+        "udp-relay-mode",
+        "heartbeat-interval",
+        "request-timeout",
+        "max-open-streams",
+        "disable-sni",
+        "recv-window-conn",
+        "recv-window",
+        "initial-stream-receive-window",
+        "max-stream-receive-window",
+        "initial-connection-receive-window",
+        "max-connection-receive-window",
+        "max-udp-relay-packet-size",
+    ];
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.cipher.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
+        || proxy.mkcp_opts.is_some()
+        || proxy.mekya_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.reality_opts.is_some()
+        || proxy.headers.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.client_metadata.is_some()
+        || proxy.idle_session_check_interval.is_some()
+        || proxy.idle_session_timeout.is_some()
+        || proxy.min_idle_session.is_some()
+        || proxy.shadow_tls_opts.is_some()
+        || proxy.restls_opts.is_some()
+        || proxy.jls_opts.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.disable_reuse.is_some()
+        || proxy
+            .extra
+            .keys()
+            .any(|key| REJECTED_EXTRA.contains(&key.as_str()))
+        || proxy
+            .extra
+            .keys()
+            .any(|key| !ACCEPTED_EXTRA.contains(&key.as_str()))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = u16::try_from(
+        proxy
+            .port
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?,
+    )
+    .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
+    if port == 0 {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    let uuid_raw = proxy
+        .uuid
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let uuid = uuid::Uuid::parse_str(&uuid_raw)
+        .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?
+        .into_bytes();
+    let password = proxy.password.unwrap_or_default();
+    // Go: `ALPN != nil` (including `alpn: []`) keeps that slice; only a missing
+    // field defaults to `h3`.
+    let alpn = proxy.alpn.unwrap_or_else(|| vec!["h3".to_owned()]);
+
+    let congestion_controller = hysteria2_extra_string(&mut proxy.extra, "congestion-controller")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_default();
+    match congestion_controller.as_str() {
+        "" | "cubic" | "new_reno" | "bbr" => {}
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    }
+    let udp_relay_mode = hysteria2_extra_string(&mut proxy.extra, "udp-relay-mode")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or_default();
+    match udp_relay_mode.to_ascii_lowercase().as_str() {
+        "" | "native" | "quic" => {}
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    }
+    let request_timeout_ms = hysteria2_extra_u64(&mut proxy.extra, "request-timeout")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0);
+    let heartbeat_interval_ms = hysteria2_extra_u64(&mut proxy.extra, "heartbeat-interval")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0);
+    let max_open_streams = hysteria2_extra_u64(&mut proxy.extra, "max-open-streams")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0);
+    let disable_sni = match proxy.extra.remove("disable-sni") {
+        Some(serde_yaml_ng::Value::Bool(flag)) => flag,
+        None | Some(serde_yaml_ng::Value::Null) => false,
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+    // Go `adapter/outbound/tuic.go`: `recv-window-conn` is the stream window
+    // and `recv-window` is the connection window (HY2 mapping is the opposite).
+    let stream_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-stream-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+    let connection_receive_window = resolve_hysteria2_window(
+        &name,
+        hysteria2_extra_u64(&mut proxy.extra, "initial-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "max-connection-receive-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
+    )?;
+    let max_udp_relay_packet_size =
+        hysteria2_extra_u64(&mut proxy.extra, "max-udp-relay-packet-size")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+            .unwrap_or(0);
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Tuic,
+        server,
+        port,
+        username: None,
+        password: Some(password.clone()),
+        cipher: None,
+        tls: true,
+        sni: proxy.sni.filter(|sni| !sni.is_empty()),
+        skip_cert_verify: proxy.skip_cert_verify.unwrap_or(false),
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        reality: None,
+        udp: proxy.udp.unwrap_or(true),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: None,
+        hysteria2: None,
+        tuic: Some(TuicProxyConfig {
+            uuid,
+            password,
+            alpn,
+            congestion_controller,
+            udp_relay_mode,
+            request_timeout_ms,
+            heartbeat_interval_ms,
+            max_open_streams,
+            disable_sni,
+            stream_receive_window,
+            connection_receive_window,
+            max_udp_relay_packet_size,
         }),
         ssr: None,
         headers: BTreeMap::new(),
@@ -947,6 +1160,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         }),
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     })
@@ -1051,6 +1265,7 @@ fn parse_remote_proxy(
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: proxy.headers.unwrap_or_default(),
     })
@@ -1145,6 +1360,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     })
@@ -1287,6 +1503,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: Some(SsrProxyConfig {
             protocol,
             protocol_param,
@@ -1303,7 +1520,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
     let tls = proxy.tls.unwrap_or(false);
     let udp = proxy.udp.unwrap_or(false);
     let has_tls_options = proxy.sni.is_some()
-        || proxy.skip_cert_verify.is_some()
+        || proxy.skip_cert_verify.unwrap_or(false)
         || proxy.name_cert_verify.is_some()
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
@@ -1396,6 +1613,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     })
@@ -1508,6 +1726,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     })
@@ -2546,6 +2765,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         trojan: None,
         anytls: None,
         hysteria2: None,
+        tuic: None,
         ssr: None,
         headers: BTreeMap::new(),
     }
@@ -2910,6 +3130,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Trojan => "Trojan",
             ProxyKind::AnyTls => "AnyTLS",
             ProxyKind::Hysteria2 => "Hysteria2",
+            ProxyKind::Tuic => "Tuic",
             ProxyKind::ShadowsocksR => "ShadowsocksR",
             ProxyKind::Direct => "Direct",
             ProxyKind::Reject => "Reject",

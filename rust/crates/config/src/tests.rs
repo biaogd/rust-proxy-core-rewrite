@@ -320,6 +320,89 @@ fn hysteria2_hy2b_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn tuic_v5_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    sni: tuic.example\n    alpn: [h3]\n    skip-cert-verify: true\n    congestion-controller: bbr\n    udp-relay-mode: native\n    heartbeat-interval: 8000\n    request-timeout: 5000\n    max-open-streams: 32\n"
+    );
+    let config = Config::from_yaml(&source).expect("6H-A TUIC config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Tuic);
+    assert!(proxy.tls);
+    assert!(proxy.udp);
+    assert_eq!(proxy.sni.as_deref(), Some("tuic.example"));
+    let options = proxy.tuic.as_ref().expect("TUIC options");
+    assert_eq!(
+        uuid::Uuid::from_bytes(options.uuid).to_string(),
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+    assert_eq!(options.password, "secret");
+    assert_eq!(options.alpn, ["h3"]);
+    assert_eq!(options.congestion_controller, "bbr");
+    assert_eq!(options.udp_relay_mode, "native");
+    assert_eq!(options.request_timeout_ms, 5000);
+    assert_eq!(options.heartbeat_interval_ms, 8000);
+    assert_eq!(options.max_open_streams, 32);
+    assert_eq!(options.max_udp_relay_packet_size, 0);
+
+    let empty_alpn = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-empty-alpn\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    alpn: []\n"
+    ))
+    .expect("explicit empty TUIC ALPN");
+    assert!(
+        empty_alpn.proxies[0]
+            .tuic
+            .as_ref()
+            .expect("empty alpn")
+            .alpn
+            .is_empty()
+    );
+
+    let windows = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-windows\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    recv-window: 1111\n    recv-window-conn: 2222\n"
+    ))
+    .expect("TUIC receive windows");
+    let window_opts = windows.proxies[0].tuic.as_ref().expect("windows");
+    assert_eq!(window_opts.stream_receive_window, Some(2222));
+    assert_eq!(window_opts.connection_receive_window, Some(1111));
+
+    let sized = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-udp\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    udp-relay-mode: quic\n    max-udp-relay-packet-size: 1200\n"
+    ))
+    .expect("TUIC UDP options");
+    let sized_opts = sized.proxies[0].tuic.as_ref().expect("sized");
+    assert_eq!(sized_opts.udp_relay_mode, "quic");
+    assert_eq!(sized_opts.max_udp_relay_packet_size, 1200);
+
+    let defaults = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-defaults\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n"
+    ))
+    .expect("TUIC defaults");
+    let default_opts = defaults.proxies[0].tuic.as_ref().expect("defaults");
+    assert!(default_opts.congestion_controller.is_empty());
+    assert!(defaults.proxies[0].udp);
+
+    for unsupported in [
+        "token: v4-token",
+        "reduce-rtt: true",
+        "udp-over-stream: true",
+        "cwnd: 32",
+        "bbr-profile: aggressive",
+        "congestion-controller: brutal",
+        "max-datagram-frame-size: 1400",
+        "fingerprint: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "uuid: not-a-uuid",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
@@ -1637,6 +1720,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 trojan: None,
                 anytls: None,
                 hysteria2: None,
+                tuic: None,
                 ssr: None,
                 headers: BTreeMap::new(),
             })
@@ -1721,6 +1805,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             trojan: None,
             anytls: None,
             hysteria2: None,
+            tuic: None,
             ssr: None,
             headers: BTreeMap::new(),
         }],
@@ -2316,7 +2401,7 @@ fn parses_vmess_udp_over_tls_ws_wss_and_grpc_carriers() {
             "grpc",
         ),
         (
-            "    network: ws\n    udp: true\n    cipher: auto\n    tags: tw\n    ws-opts:\n      path: /tagged\n",
+            "    network: ws\n    udp: true\n    cipher: auto\n    tags: tw\n    skip-cert-verify: false\n    ws-opts:\n      path: /tagged\n",
             false,
             "ws",
         ),

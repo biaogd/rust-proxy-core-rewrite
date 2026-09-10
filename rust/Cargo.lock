@@ -2344,6 +2344,16 @@ dependencies = [
 
 [[package]]
 name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
+name = "pem"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
@@ -2715,6 +2725,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem 3.0.6",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2904,7 +2927,7 @@ dependencies = [
  "blake3",
  "curve25519-dalek",
  "ml-kem",
- "pem",
+ "pem 4.0.0",
  "rand 0.10.2",
  "thiserror 2.0.20",
  "x25519-dalek",
@@ -2960,6 +2983,7 @@ dependencies = [
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-shadowsocksr",
  "rewrite-protocol-trojan",
+ "rewrite-protocol-tuic",
  "rewrite-protocol-vless",
  "rewrite-protocol-vmess",
  "rewrite-services",
@@ -2967,6 +2991,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uuid",
 ]
 
 [[package]]
@@ -3064,6 +3089,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rewrite-protocol-tuic"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "quinn",
+ "rand 0.10.2",
+ "rcgen",
+ "rewrite-io",
+ "rewrite-model",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uuid",
+]
+
+[[package]]
 name = "rewrite-protocol-vless"
 version = "0.1.0"
 dependencies = [
@@ -3126,7 +3169,9 @@ dependencies = [
  "futures-util",
  "notify",
  "psl",
+ "quinn",
  "rand 0.10.2",
+ "rcgen",
  "reqwest",
  "rewrite-config",
  "rewrite-controller",
@@ -4934,6 +4979,15 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]
