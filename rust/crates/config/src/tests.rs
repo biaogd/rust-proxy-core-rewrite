@@ -2316,7 +2316,7 @@ fn parses_vmess_udp_over_tls_ws_wss_and_grpc_carriers() {
             "grpc",
         ),
         (
-            "    network: ws\n    udp: true\n    cipher: auto\n    tags: tw\n    ws-opts:\n      path: /tagged\n",
+            "    network: ws\n    udp: true\n    cipher: auto\n    tags: tw\n    skip-cert-verify: false\n    ws-opts:\n      path: /tagged\n",
             false,
             "ws",
         ),

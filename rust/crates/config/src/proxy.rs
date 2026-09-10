@@ -1303,7 +1303,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
     let tls = proxy.tls.unwrap_or(false);
     let udp = proxy.udp.unwrap_or(false);
     let has_tls_options = proxy.sni.is_some()
-        || proxy.skip_cert_verify.is_some()
+        || proxy.skip_cert_verify.unwrap_or(false)
         || proxy.name_cert_verify.is_some()
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
