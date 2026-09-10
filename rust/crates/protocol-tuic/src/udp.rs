@@ -1,6 +1,7 @@
 //! TUIC v5 UDP relay: native QUIC DATAGRAM and uni-stream modes.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,11 +12,12 @@ use tokio::sync::mpsc;
 use crate::TuicProtocolError;
 use crate::lease::StreamLease;
 use crate::protocol::{
-    DecodeProgress, PACKET_OVERHEAD_GO, Packet, encode_dissociate, encode_packet,
-    try_decode_command,
+    DecodeProgress, Packet, encode_dissociate, encode_packet, try_decode_command,
 };
 
 const DEFRAG_TTL: Duration = Duration::from_secs(10);
+const DISSOCIATE_QUEUE: usize = 32;
+const DISSOCIATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Clash `udp-relay-mode`. Empty / `native` uses QUIC DATAGRAM frames.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +95,26 @@ pub(crate) struct UdpHub {
     mode: UdpRelayMode,
     max_packet: usize,
     associations: Mutex<HashMap<u16, mpsc::Sender<Packet>>>,
+    dissociate: mpsc::Sender<u16>,
+    ids: AssociationIds,
+}
+
+#[derive(Default)]
+struct AssociationIds(AtomicU32);
+
+impl AssociationIds {
+    fn available(&self) -> bool {
+        u16::try_from(self.0.load(Ordering::Acquire)).is_ok()
+    }
+
+    fn allocate(&self) -> Option<u16> {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+                u16::try_from(next).is_ok().then_some(next + 1)
+            })
+            .ok()
+            .and_then(|id| u16::try_from(id).ok())
+    }
 }
 
 impl UdpHub {
@@ -101,11 +123,15 @@ impl UdpHub {
         mode: UdpRelayMode,
         max_packet: usize,
     ) -> Arc<Self> {
+        let (dissociate, pending) = mpsc::channel(DISSOCIATE_QUEUE);
+        spawn_dissociate_worker(connection.clone(), pending);
         let hub = Arc::new(Self {
             connection,
             mode,
             max_packet: max_packet.max(1),
             associations: Mutex::new(HashMap::new()),
+            dissociate,
+            ids: AssociationIds::default(),
         });
         spawn_close_watcher(Arc::clone(&hub));
         spawn_datagram_loop(Arc::clone(&hub));
@@ -120,11 +146,7 @@ impl UdpHub {
         let mut map = self.associations.lock().map_err(|_| {
             TuicProtocolError::Protocol("TUIC UDP association map is poisoned".to_owned())
         })?;
-        for _ in 0..32 {
-            let assoc_id = rand::random::<u16>();
-            if map.contains_key(&assoc_id) {
-                continue;
-            }
+        if let Some(assoc_id) = self.ids.allocate() {
             map.insert(assoc_id, tx);
             return Ok(UdpSession {
                 hub: Arc::clone(self),
@@ -137,6 +159,10 @@ impl UdpHub {
         Err(TuicProtocolError::Protocol(
             "failed to allocate a TUIC UDP association id".to_owned(),
         ))
+    }
+
+    pub(crate) fn has_available_ids(&self) -> bool {
+        self.ids.available()
     }
 
     fn dispatch(&self, packet: Packet) {
@@ -188,22 +214,28 @@ impl UdpHub {
     }
 
     fn send_native(&self, packet: &Packet) -> Result<(), TuicProtocolError> {
-        if packet.data.len() > self.max_packet {
-            return self.frag_write_native(packet, self.max_packet);
-        }
-        let bytes = encode_packet(packet)?;
-        match self.connection.send_datagram(Bytes::from(bytes)) {
+        let initial = if packet.data.len() > self.max_packet {
+            self.frag_write_native(packet, self.max_packet)
+        } else {
+            self.connection
+                .send_datagram(Bytes::from(encode_packet(packet)?))
+                .map_err(Into::into)
+        };
+        match initial {
             Ok(()) => Ok(()),
-            Err(quinn::SendDatagramError::TooLarge) => {
+            Err(TuicProtocolError::Datagram(quinn::SendDatagramError::TooLarge)) => {
+                let overhead = encode_packet(packet)?.len() - packet.data.len();
                 let frag = self
                     .connection
                     .max_datagram_size()
-                    .unwrap_or(1200)
-                    .saturating_sub(PACKET_OVERHEAD_GO)
-                    .max(1);
+                    .and_then(|size| size.checked_sub(overhead))
+                    .filter(|size| *size > 0)
+                    .ok_or(TuicProtocolError::Datagram(
+                        quinn::SendDatagramError::TooLarge,
+                    ))?;
                 self.frag_write_native(packet, frag)
             }
-            Err(error) => Err(TuicProtocolError::Quinn(error.to_string())),
+            Err(error) => Err(error),
         }
     }
 
@@ -218,7 +250,7 @@ impl UdpHub {
             return self
                 .connection
                 .send_datagram(Bytes::from(encoded))
-                .map_err(|error| TuicProtocolError::Quinn(error.to_string()));
+                .map_err(Into::into);
         }
         let frag_count = u8::try_from(payload.len().div_ceil(frag_size).max(1)).map_err(|_| {
             TuicProtocolError::Protocol("TUIC UDP fragment count exceeds 255".to_owned())
@@ -239,24 +271,44 @@ impl UdpHub {
             let encoded = encode_packet(&fragment)?;
             self.connection
                 .send_datagram(Bytes::from(encoded))
-                .map_err(|error| TuicProtocolError::Quinn(error.to_string()))?;
+                .map_err(TuicProtocolError::from)?;
             offset = end;
             frag_id = frag_id.saturating_add(1);
         }
         Ok(())
     }
+}
 
-    async fn send_dissociate(&self, assoc_id: u16) -> Result<(), TuicProtocolError> {
-        let mut stream = self.connection.open_uni().await?;
-        stream
-            .write_all(&encode_dissociate(assoc_id))
-            .await
-            .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
-        stream
-            .finish()
-            .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
-        Ok(())
-    }
+async fn send_dissociate(
+    connection: &quinn::Connection,
+    assoc_id: u16,
+) -> Result<(), TuicProtocolError> {
+    let mut stream = connection.open_uni().await?;
+    stream
+        .write_all(&encode_dissociate(assoc_id))
+        .await
+        .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+    stream
+        .finish()
+        .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+    Ok(())
+}
+
+fn spawn_dissociate_worker(connection: quinn::Connection, mut pending: mpsc::Receiver<u16>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = connection.closed() => break,
+                assoc_id = pending.recv() => {
+                    let Some(assoc_id) = assoc_id else { break };
+                    tokio::select! {
+                        _ = connection.closed() => break,
+                        _ = tokio::time::timeout(DISSOCIATE_TIMEOUT, send_dissociate(&connection, assoc_id)) => {}
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// One TUIC UDP association (`ASSOC_ID`) with fragment reassembly.
@@ -333,11 +385,8 @@ impl UdpSession {
 impl Drop for UdpSession {
     fn drop(&mut self) {
         self.hub.unregister(self.assoc_id);
-        let hub = Arc::clone(&self.hub);
-        let assoc_id = self.assoc_id;
-        tokio::spawn(async move {
-            let _ = hub.send_dissociate(assoc_id).await;
-        });
+        // Best effort: never block teardown or allocate an unbounded number of tasks.
+        let _ = self.hub.dissociate.try_send(self.assoc_id);
     }
 }
 
@@ -418,6 +467,19 @@ mod tests {
     use super::*;
     use rewrite_model::Host;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn association_ids_never_reuse_even_after_retirement() {
+        let ids = AssociationIds::default();
+        for expected in 0..=u16::MAX {
+            assert!(ids.available());
+            assert_eq!(ids.allocate(), Some(expected));
+            // A delayed cleanup for any previous ID cannot name a newer session.
+        }
+        assert!(!ids.available());
+        assert_eq!(ids.allocate(), None);
+        assert_eq!(ids.allocate(), None);
+    }
 
     fn dest() -> Destination {
         Destination {

@@ -135,6 +135,8 @@ impl SessionInner {
 pub struct Client {
     options: ClientOptions,
     inner: Mutex<ClientState>,
+    // Coordinate pool reservations across a pending dial without blocking close().
+    reservation: Mutex<()>,
 }
 
 struct ClientState {
@@ -161,6 +163,7 @@ impl Client {
         }
         Ok(Self {
             options,
+            reservation: Mutex::new(()),
             inner: Mutex::new(ClientState {
                 endpoint: None,
                 sessions: Vec::new(),
@@ -217,7 +220,11 @@ impl Client {
                     }
                     Err(error) => {
                         lease.release_now();
-                        session.invalidate();
+                        // Exhausted IDs retire this connection from allocation,
+                        // not from existing streams and associations.
+                        if session.udp.has_available_ids() {
+                            session.invalidate();
+                        }
                         last_error = Some(error);
                     }
                 }
@@ -244,6 +251,24 @@ impl Client {
         &self,
         max_open_streams: u64,
     ) -> Result<(Arc<SessionInner>, StreamLease), TuicProtocolError> {
+        if let Some(reserved) = self.try_reserve_existing(max_open_streams).await? {
+            return Ok(reserved);
+        }
+        let _reservation = self.reservation.lock().await;
+        if let Some(reserved) = self.try_reserve_existing(max_open_streams).await? {
+            return Ok(reserved);
+        }
+        let session = self.dial().await?;
+        let lease = session
+            .try_reserve(max_open_streams)
+            .ok_or_else(|| TuicProtocolError::Protocol("TUIC too many open streams".to_owned()))?;
+        Ok((session, lease))
+    }
+
+    async fn try_reserve_existing(
+        &self,
+        max_open_streams: u64,
+    ) -> Result<Option<(Arc<SessionInner>, StreamLease)>, TuicProtocolError> {
         {
             let mut state = self.inner.lock().await;
             if state.closed {
@@ -252,7 +277,7 @@ impl Client {
             prune_sessions(&mut state.sessions);
             let mut best: Option<Arc<SessionInner>> = None;
             for session in &state.sessions {
-                if !session.live() {
+                if !session.live() || !session.udp.has_available_ids() {
                     continue;
                 }
                 let current = session.open_streams.load(Ordering::Acquire);
@@ -266,14 +291,10 @@ impl Client {
             if let Some(session) = best
                 && let Some(lease) = session.try_reserve(max_open_streams)
             {
-                return Ok((session, lease));
+                return Ok(Some((session, lease)));
             }
         }
-        let session = self.dial().await?;
-        let lease = session
-            .try_reserve(max_open_streams)
-            .ok_or_else(|| TuicProtocolError::Protocol("TUIC too many open streams".to_owned()))?;
-        Ok((session, lease))
+        Ok(None)
     }
 
     async fn dial(&self) -> Result<Arc<SessionInner>, TuicProtocolError> {

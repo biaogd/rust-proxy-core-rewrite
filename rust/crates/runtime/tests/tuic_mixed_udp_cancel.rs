@@ -97,16 +97,32 @@ async fn run_mixed_against_stub(max_uni: u32) {
     rewrite_services::install_default_crypto_provider();
     let stub = bind_stub(max_uni);
     let stub_port = stub.local_addr().expect("stub addr").port();
-    let _stub = tokio::spawn(async move {
-        let Some(incoming) = stub.accept().await else {
-            return;
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let stub_task = tokio::spawn(async move {
+        let incoming = stub.accept().await.expect("incoming");
+        let connection = incoming.await.expect("handshake");
+        // Keep the authentication stream alive without consuming FIN: otherwise
+        // dropping it returns uni-stream credit and the UDP send need not block.
+        let auth = if max_uni == 1 {
+            let mut auth = connection.accept_uni().await.expect("auth stream");
+            // Leave the UUID/token unread too: reading the final bytes can
+            // consume FIN and return credit even while RecvStream is retained.
+            let mut header = [0_u8; 2];
+            auth.read_exact(&mut header).await.expect("auth header");
+            assert_eq!(header, [5, 0]);
+            Some(auth)
+        } else {
+            None
         };
-        let Ok(connection) = incoming.await else {
-            return;
-        };
-        let _ = connection.accept_uni().await;
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        connection.close(0_u32.into(), b"hold");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), connection.accept_uni())
+                .await
+                .is_err(),
+            "no uni credit may be returned before cancellation"
+        );
+        ready_tx.send(()).expect("test still waiting");
+        connection.closed().await;
+        drop(auth);
     });
 
     let mixed = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve mixed");
@@ -126,7 +142,10 @@ async fn run_mixed_against_stub(max_uni: u32) {
         .send_to(&socks_udp_ipv4(9, b"ping"), dest)
         .await
         .expect("udp send");
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::timeout(Duration::from_secs(3), ready_rx)
+        .await
+        .expect("stub reached blocked-I/O state")
+        .expect("stub ready");
 
     let started = Instant::now();
     shutdown.cancel();
@@ -135,6 +154,10 @@ async fn run_mixed_against_stub(max_uni: u32) {
         .expect("runtime must stop without the 1m UDP idle timeout")
         .expect("runtime task")
         .expect("runtime ok");
+    tokio::time::timeout(Duration::from_secs(2), stub_task)
+        .await
+        .expect("stub closes with runtime")
+        .expect("stub task");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "mixed UDP shutdown stuck after blocked TUIC QUIC I/O"

@@ -79,6 +79,44 @@ new_reno / bbr *names*, concurrent TCP+UDP, and a short TCP+UDP soak. v4, 0-RTT,
 inbound, ECH and UDP-over-stream remain rejected. Algorithm identity with
 quic-go Cubic/BBR is not claimed. Three-platform CI pending.
 
+PR #14 follow-up: pool reservations now use a separate mutex so cold concurrent
+requests recheck the completed dial instead of each opening a QUIC connection;
+`close()` does not acquire this mutex. A bounded 32-association cold-start test
+asserts one accepted connection. The mixed UDP cancellation fixture retains the
+authentication stream without consuming FIN, synchronizes on server readiness,
+checks that no additional uni stream arrives, and joins its server task on exit.
+These are Rust lifecycle regression contracts, not new Go/Rust parity evidence.
+Further lifecycle fixes: healthy pool reservations bypass the dial mutex, with
+a second pool check after acquiring it for expansion. Runtime shutdown explicitly
+retires TUIC clients after stopping producers. The mixed fixture once again
+requires peer-observed QUIC closure (the earlier failure is retained as the
+motivation for this fix, not normalized away). Dissociate teardown uses one
+worker per connection, a 32-entry queue and a one-second per-send deadline;
+overflow and expired notifications are deliberately best-effort drops. This
+bounded teardown policy is Rust-specific, not a claim of identical Go timing.
+New regression cases cover a blocked expansion while an old slot becomes free
+and expired Dissociate after stream credit returns. Local Darwin arm64 checks
+passed: six `udp_lifecycle` tests, two `tuic_mixed_udp_cancel` tests (including
+peer-observed shutdown), `cargo fmt --all --check`, and workspace/all-target/
+all-feature Clippy with `-D warnings`. Full workspace / Go differential reruns
+and native CI remain pending; no mutation-test result is claimed.
+
+Final PR #14 UDP follow-up: association IDs are allocated without reuse for the
+life of a QUIC connection, so queued/late Dissociate cannot address a newer
+association. Exhaustion excludes that connection from new allocations without
+closing its active streams; the pool expands instead. This allocation strategy
+is Rust-specific safety policy, not Go random-ID byte parity. Native UDP now
+preserves typed `TooLarge` errors from both initial fragmentation and direct
+sends, and retries using the current DATAGRAM allowance minus the actual first
+fragment header. Regression coverage includes complete ID-space exhaustion and
+reassembly of a large IPv6-addressed UDP payload under a 1200-byte peer QUIC
+packet limit. Final local Darwin arm64 validation passed: 12 protocol unit tests,
+7 UDP lifecycle tests, 3 runtime unit tests and 2 mixed shutdown tests; formatting,
+workspace/all-target/all-feature Clippy (`-D warnings`), and the existing 6H-B
+Go/Rust UDP differential (native/QUIC, large/empty payload, multi-destination,
+reassociation and API snapshot). Full cross-platform regression is not claimed;
+the PR's earlier CI also contains DNS/core/VLESS failures outside this fix.
+
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ## Overall status

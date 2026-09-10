@@ -2,6 +2,21 @@
 
 Baseline: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`).
 
+TUIC / Darwin arm64 Phase 6H-C follow-up: cold-start pool coordination and
+mixed UDP blocked-send cancellation have focused Rust regression contracts in
+`protocol-tuic/tests/udp_lifecycle.rs` and
+`runtime/tests/tuic_mixed_udp_cancel.rs`. These tests do not expand protocol
+support or replace Go differentials and native three-platform gates; see
+`status.md` for execution evidence.
+The follow-up also covers pool reuse during stalled expansion and peer-observed
+close on runtime shutdown. Bounded, best-effort Dissociate (32 queued IDs,
+one-second send timeout) is an explicitly Rust-specific teardown safety policy;
+it does not expand the Go parity claim.
+TUIC UDP follow-up: per-connection association IDs are never reused (allocation
+exhaustion moves new work to another connection), and native fragmentation
+retries `TooLarge` against the actual peer limit/header size. ID allocation is
+Rust-specific safety policy; final focused validation is recorded in `status.md`.
+
 This is the authority for support claims. A Rust implementation is compatible
 only when the relevant row is marked **Parity** with named test evidence.
 `go-capability-inventory.md` is the exhaustive planning census: future slices

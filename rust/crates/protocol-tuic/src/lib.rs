@@ -24,6 +24,9 @@ use thiserror::Error;
 /// Protocol / dial errors for TUIC v5.
 #[derive(Debug, Error)]
 pub enum TuicProtocolError {
+    /// QUIC datagram failure, preserved for payload-size retry.
+    #[error("TUIC datagram failed: {0}")]
+    Datagram(#[from] quinn::SendDatagramError),
     /// Underlying I/O or QUIC transport failure.
     #[error("TUIC I/O failed: {0}")]
     Io(#[from] std::io::Error),
