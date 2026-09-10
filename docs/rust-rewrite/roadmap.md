@@ -2998,8 +2998,10 @@ cannot inherit its wire-compatibility claim.
 
 TUN is current after SSR and TUIC v5 outbound in this checkout, without waiting
 for 6I/6J or all of Phase 7. The UDP reply-sink refactor and 8A Linux
-parse/runtime wiring have landed; privileged netns traffic remains the 8A
-acceptance gate. Delivery order: **8A → 8B → 8C**,
+parse/runtime wiring have landed; `compat/scripts/phase8a_tun.py` now owns the
+privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate
+(`PHASE8A_NATIVE=1`, fail-closed). That gate is the remaining 8A acceptance
+evidence. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
 OS needs native configuration, listener, routing, process, persistence and
 shutdown evidence; unsupported combinations require explicit rejection evidence

@@ -209,6 +209,7 @@ fn classify_config_error(error: &ConfigError) -> &'static str {
         | ConfigError::InvalidDns(_)
         | ConfigError::InvalidHosts(_)
         | ConfigError::InvalidInbound(_)
+        | ConfigError::InvalidTun(_)
         | ConfigError::UnsupportedRuntime(_) => "other",
     }
 }

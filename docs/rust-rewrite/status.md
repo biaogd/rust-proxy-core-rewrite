@@ -132,8 +132,10 @@ UDP reply-sink reuse, Linux device/stack/session wiring, DNS hijack into the
 existing DNS service, owned auto-route plus loop-avoidance host routes, and
 init-failure/stop cleanup. Unprivileged evidence: config/stack-identity unit
 tests plus `compat/scripts/phase8a_tun.py`. Privileged Linux netns traffic
-(HTTP/DNS/UDP echo, Go/Rust content differential) remains the native 8A
-acceptance gate and is fail-closed (`PHASE8A_NATIVE=1`). TUN is not Parity.
+passed locally on 2026-09-10 (HTTP small/large, DNS hijack + fake-IP reverse
+mapping, UDP echo, Go `system` vs Rust `smoltcp` body match, init-failure
+rollback and stop cleanup) via `PHASE8A_NATIVE=1`; it is fail-closed and not
+Parity until the dedicated CI job reports success. TUN is not Parity.
 Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other Phase 7
 families remain deferred. Canonical numbering is AnyTLS **6G**, Hysteria2
 **HY2**, TUIC **6H**, SSR **7A–7D**. The
@@ -156,7 +158,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 0B exhaustive Go capability census | Complete | Stable CLI/config/inbound/rule/outbound/DNS/runtime/API/service/platform inventory IDs and planned gates |
 | Go reference implementation | Preserved | No existing Go source modified or deleted |
 | Native CI portability hardening | Local gates pass; Windows rerun pending | Windows `.exe`, home/cache isolation, restart child-process cleanup, Winsock error text and cold data-plane boundaries are represented explicitly; the seven directly affected Phase 4C/4E15/4F14/5A1/5C/5D/6E differentials pass locally, with native parity unclaimed until CI |
-| Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged tests + `phase8a_tun.py`; native netns traffic unclaimed |
+| Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged identity + privileged netns harness in `phase8a_tun.py` passed locally on Linux 2026-09-10 (`PHASE8A_NATIVE=1`); native CI pass unclaimed |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |

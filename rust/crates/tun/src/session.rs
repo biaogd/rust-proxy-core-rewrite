@@ -130,10 +130,11 @@ pub fn spawn_session_hub(
                 () = tcp_shutdown.cancelled() => break,
                 accepted = listener.next() => {
                     let Some((stream, local, remote)) = accepted else { break };
-                    // netstack local = destination on the TUN, remote = client.
-                    let metadata = tun_tcp_metadata(remote, local);
+                    // netstack-smoltcp 0.2.4 TcpStream::local_addr is the packet
+                    // source (TUN client); remote_addr is the packet destination.
+                    let metadata = tun_tcp_metadata(local, remote);
                     let session = InboundTcpSession {
-                        stream: TunInboundStream::new(stream, local, remote),
+                        stream: TunInboundStream::new(stream, remote, local),
                         metadata,
                     };
                     if tcp_tx.send(session).await.is_err() {
@@ -152,6 +153,7 @@ pub fn spawn_session_hub(
                 () = udp_shutdown.cancelled() => break,
                 datagram = udp_read.next() => {
                     let Some((payload, local, remote)) = datagram else { break };
+                    // UDP stream items are (payload, src=client, dst=server).
                     let metadata = tun_udp_metadata(local, remote);
                     let packet = InboundUdpDatagram {
                         metadata,
@@ -239,5 +241,17 @@ mod tests {
         assert_eq!(metadata.inbound_name, "DEFAULT-TUN");
         assert_eq!(metadata.source_ip, Some(client.ip()));
         assert_eq!(metadata.destination.port, 443);
+    }
+
+    #[test]
+    fn udp_metadata_uses_packet_destination() {
+        let client = "10.0.0.2:12345".parse().expect("client");
+        let destination = "8.8.8.8:53".parse().expect("dest");
+        let metadata = tun_udp_metadata(client, destination);
+        assert_eq!(metadata.inbound, InboundProtocol::Tun);
+        assert_eq!(metadata.network, Network::Udp);
+        assert_eq!(metadata.destination.port, 53);
+        assert_eq!(metadata.destination_ip, Some(destination.ip()));
+        assert_eq!(metadata.source_ip, Some(client.ip()));
     }
 }
