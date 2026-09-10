@@ -127,7 +127,7 @@ pub(super) async fn run_listener(
                         source,
                         request,
                         UdpSessionContext {
-                            listener: Arc::clone(socket),
+                            reply: UdpReplySink::Socks5(Arc::clone(socket)),
                             config: connection_config,
                             state: Arc::clone(&state),
                             dns_service: Arc::clone(&dns_service),
@@ -161,6 +161,27 @@ pub(super) async fn receive_udp(
     }
 }
 
+#[derive(Clone)]
+pub(super) enum UdpReplySink {
+    Socks5(Arc<UdpSocket>),
+}
+
+impl UdpReplySink {
+    pub(super) async fn send_datagram(
+        &self,
+        session_peer: SocketAddr,
+        remote: SocketAddr,
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Socks5(listener) => {
+                let packet = rewrite_inbound::encode_socks5_udp(remote, payload);
+                listener.send_to(&packet, session_peer).await.map(|_| ())
+            }
+        }
+    }
+}
+
 pub(super) struct UdpSessionPacket {
     metadata: Metadata,
     fake_host: Option<String>,
@@ -169,7 +190,7 @@ pub(super) struct UdpSessionPacket {
 
 #[derive(Clone)]
 pub(super) struct UdpSessionContext {
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -261,7 +282,7 @@ impl UdpSessions {
         self.entries.insert(source, (session_id, sender));
         self.tasks.spawn(async move {
             Box::pin(run_udp_session(
-                context.listener,
+                context.reply,
                 source,
                 request,
                 receiver,
@@ -368,7 +389,7 @@ pub(super) fn prepare_udp_request(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     requests: mpsc::Receiver<UdpSessionPacket>,
@@ -382,13 +403,13 @@ pub(super) async fn run_udp_session(
     match mode {
         UdpSessionMode::Direct => {
             run_direct_udp_session(
-                listener, source, first, requests, config, state, decision, shutdown,
+                reply, source, first, requests, config, state, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Dns => {
             run_dns_udp_session(
-                listener,
+                reply,
                 source,
                 first,
                 requests,
@@ -402,61 +423,61 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::Socks5(proxy) => {
             run_socks5_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Shadowsocks(proxy) => {
             run_shadowsocks_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::ShadowsocksUot(proxy) => {
             run_shadowsocks_uot_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::ShadowsocksR(proxy) => {
             run_ssr_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Vmess(proxy) => {
             Box::pin(run_vmess_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             ))
             .await;
         }
         UdpSessionMode::Vless(proxy) => {
             Box::pin(run_vless_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             ))
             .await;
         }
         UdpSessionMode::Trojan(proxy) => {
             run_trojan_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::AnyTls(proxy) => {
             run_anytls_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Hysteria2(proxy) => {
             run_hysteria2_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Tuic(proxy) => {
             Box::pin(run_tuic_udp_session(
-                listener, source, first, requests, config, state, proxy, decision, shutdown,
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
             ))
             .await;
         }
@@ -465,7 +486,7 @@ pub(super) async fn run_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_trojan_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -560,8 +581,7 @@ pub(super) async fn run_trojan_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -575,7 +595,7 @@ pub(super) async fn run_trojan_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_anytls_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -665,8 +685,7 @@ pub(super) async fn run_anytls_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -680,7 +699,7 @@ pub(super) async fn run_anytls_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_hysteria2_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -747,8 +766,7 @@ pub(super) async fn run_hysteria2_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -762,7 +780,7 @@ pub(super) async fn run_hysteria2_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_tuic_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -833,8 +851,7 @@ pub(super) async fn run_tuic_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -848,7 +865,7 @@ pub(super) async fn run_tuic_udp_session(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_direct_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -923,8 +940,7 @@ pub(super) async fn run_direct_udp_session(
             }
             received = outbound.recv_from(&mut response) => {
                 let Ok((length, remote)) = received else { break };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &response[..length]);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &response[..length]).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(length as u64);
@@ -938,7 +954,7 @@ pub(super) async fn run_direct_udp_session(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_dns_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -968,8 +984,7 @@ pub(super) async fn run_dns_udp_session(
                 .await
             {
                 let remote = dns_adapter_response_addr(&request.metadata);
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &response);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &response).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(response.len() as u64);
@@ -1000,7 +1015,7 @@ pub(super) fn dns_adapter_response_addr(metadata: &Metadata) -> SocketAddr {
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_socks5_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1100,8 +1115,7 @@ pub(super) async fn run_socks5_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1115,7 +1129,7 @@ pub(super) async fn run_socks5_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_shadowsocks_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1198,8 +1212,7 @@ pub(super) async fn run_shadowsocks_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1213,7 +1226,7 @@ pub(super) async fn run_shadowsocks_udp_session(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_ssr_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1304,8 +1317,7 @@ pub(super) async fn run_ssr_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1319,7 +1331,7 @@ pub(super) async fn run_ssr_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_shadowsocks_uot_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1409,8 +1421,7 @@ pub(super) async fn run_shadowsocks_uot_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1424,7 +1435,7 @@ pub(super) async fn run_shadowsocks_uot_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_vmess_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1546,8 +1557,7 @@ pub(super) async fn run_vmess_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1561,7 +1571,7 @@ pub(super) async fn run_vmess_udp_session(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_vless_udp_session(
-    listener: Arc<UdpSocket>,
+    reply: UdpReplySink,
     source: SocketAddr,
     first: UdpSessionPacket,
     mut requests: mpsc::Receiver<UdpSessionPacket>,
@@ -1677,8 +1687,7 @@ pub(super) async fn run_vless_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
-                if listener.send_to(&packet, source).await.is_err() {
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
