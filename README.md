@@ -1,19 +1,38 @@
-# Rust 学习笔记
+# Rust 学习笔记 · TinyRLE
 
-这是一个用于学习 Rust 的练习仓库，主要记录基础语法、所有权、错误处理、泛型、并发和异步编程等内容。
+在这个练习里实现了一个小型 **RLE（游程）压缩器**：
 
-## 运行示例
+- **Rust**：对外 API、错误处理、CLI、参考实现与测试
+- **纯 x86-64 汇编**：`compress` / `decompress` 热路径（System V ABI，`global_asm!`）
+
+非 `x86_64` 目标自动回退到 Rust 参考实现。
+
+## 格式（TinyRLE）
+
+| 记录 | 控制字节 | 后继 |
+|------|----------|------|
+| 字面量 | `0..=127` = `len-1` | `len` 字节原文（1..=128） |
+| 重复串 | `0x80..=0xFF` = `0x80 \| (count-3)` | 1 字节重复值（count 为 3..=130） |
+
+## 运行
 
 ```sh
-cargo run
+cargo run --bin rle-demo
+cargo run --bin rle-demo -- bench
+cargo test
 ```
 
-## 学习方向
+压缩 / 解压文件：
 
-- 所有权、借用与生命周期
-- 枚举、模式匹配和错误处理
-- trait、泛型和迭代器
-- 多线程与异步编程
-- Cargo 项目管理和自动化测试
+```sh
+cargo run --bin rle-demo -- compress  input.bin output.rle
+cargo run --bin rle-demo -- decompress output.rle restored.bin
+```
 
-示例会随着学习进度逐步调整。
+## 布局
+
+- `src/lib.rs` — 公共 API（x86_64 走汇编）
+- `src/asm_x86_64.rs` — 纯汇编实现
+- `src/rle_rust.rs` — Rust 参考实现（测试对照）
+- `src/format.rs` — 格式常量
+- `src/main.rs` — 演示 CLI
