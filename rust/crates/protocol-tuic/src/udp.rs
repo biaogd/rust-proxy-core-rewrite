@@ -107,6 +107,7 @@ impl UdpHub {
             max_packet: max_packet.max(1),
             associations: Mutex::new(HashMap::new()),
         });
+        spawn_close_watcher(Arc::clone(&hub));
         spawn_datagram_loop(Arc::clone(&hub));
         if mode == UdpRelayMode::Quic {
             spawn_uni_loop(Arc::clone(&hub));
@@ -147,6 +148,12 @@ impl UdpHub {
         }
     }
 
+    fn close_all(&self) {
+        if let Ok(mut map) = self.associations.lock() {
+            map.clear();
+        }
+    }
+
     fn unregister(&self, assoc_id: u16) {
         if let Ok(mut map) = self.associations.lock() {
             map.remove(&assoc_id);
@@ -162,11 +169,18 @@ impl UdpHub {
 
     async fn send_quic(&self, packet: &Packet) -> Result<(), TuicProtocolError> {
         let bytes = encode_packet(packet)?;
-        let mut stream = self.connection.open_uni().await?;
-        stream
-            .write_all(&bytes)
-            .await
-            .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+        let mut stream = tokio::select! {
+            stream = self.connection.open_uni() => stream?,
+            error = self.connection.closed() => return Err(error.into()),
+        };
+        tokio::select! {
+            result = stream.write_all(&bytes) => {
+                result.map_err(|error| {
+                    TuicProtocolError::Io(std::io::Error::other(error.to_string()))
+                })?;
+            }
+            error = self.connection.closed() => return Err(error.into()),
+        }
         stream
             .finish()
             .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
@@ -293,16 +307,25 @@ impl UdpSession {
     /// completed packet has no destination address.
     pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), TuicProtocolError> {
         loop {
-            let packet = self.rx.recv().await.ok_or_else(|| {
-                TuicProtocolError::Protocol("TUIC UDP association closed".to_owned())
-            })?;
-            let Some(packet) = self.defrag.feed(packet) else {
-                continue;
-            };
-            let destination = packet.addr.ok_or_else(|| {
-                TuicProtocolError::Protocol("TUIC UDP packet missing address".to_owned())
-            })?;
-            return Ok((destination, packet.data));
+            tokio::select! {
+                packet = self.rx.recv() => {
+                    let Some(packet) = packet else {
+                        return Err(TuicProtocolError::Protocol(
+                            "TUIC UDP association closed".to_owned(),
+                        ));
+                    };
+                    let Some(packet) = self.defrag.feed(packet) else {
+                        continue;
+                    };
+                    let destination = packet.addr.ok_or_else(|| {
+                        TuicProtocolError::Protocol("TUIC UDP packet missing address".to_owned())
+                    })?;
+                    return Ok((destination, packet.data));
+                }
+                error = self.hub.connection.closed() => {
+                    return Err(error.into());
+                }
+            }
         }
     }
 }
@@ -318,6 +341,13 @@ impl Drop for UdpSession {
     }
 }
 
+fn spawn_close_watcher(hub: Arc<UdpHub>) {
+    tokio::spawn(async move {
+        let _ = hub.connection.closed().await;
+        hub.close_all();
+    });
+}
+
 fn spawn_datagram_loop(hub: Arc<UdpHub>) {
     tokio::spawn(async move {
         while let Ok(bytes) = hub.connection.read_datagram().await {
@@ -327,6 +357,7 @@ fn spawn_datagram_loop(hub: Arc<UdpHub>) {
                 hub.dispatch(packet);
             }
         }
+        hub.close_all();
     });
 }
 
@@ -340,6 +371,7 @@ fn spawn_uni_loop(hub: Arc<UdpHub>) {
                 }
             });
         }
+        hub.close_all();
     });
 }
 

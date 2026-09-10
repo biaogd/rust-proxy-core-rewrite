@@ -147,11 +147,8 @@ fn client_options_from_proxy(
             )));
         }
     };
-    let request_timeout = if tuic.request_timeout_ms == 0 {
-        Duration::from_secs(8)
-    } else {
-        Duration::from_millis(tuic.request_timeout_ms)
-    };
+    // Go v5 `ClientOptionV5` has no RequestTimeout (v4 DialContext only).
+    let request_timeout = Duration::ZERO;
     let heartbeat_interval = if tuic.heartbeat_interval_ms == 0 {
         Duration::from_secs(10)
     } else {
@@ -180,6 +177,7 @@ fn client_options_from_proxy(
         tls: TlsOptions {
             server_name,
             skip_certificate_verification: skip,
+            disable_sni: tuic.disable_sni,
             alpn: tuic.alpn.clone(),
             custom_roots: custom_roots.to_vec(),
         },

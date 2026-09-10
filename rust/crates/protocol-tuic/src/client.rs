@@ -25,6 +25,9 @@ const IDLE_POOL_TTL: Duration = Duration::from_mins(30);
 pub struct TlsOptions {
     pub server_name: String,
     pub skip_certificate_verification: bool,
+    /// When set, rustls omits the SNI extension (`enable_sni = false`). Quinn
+    /// still needs a dummy `ServerName` for the connect API.
+    pub disable_sni: bool,
     pub alpn: Vec<String>,
     pub custom_roots: Vec<String>,
 }
@@ -47,6 +50,7 @@ pub struct ClientOptions {
     pub password: String,
     pub tls: TlsOptions,
     pub congestion: CongestionController,
+    /// v4-only in Go. Zero means do not wrap v5 `open_tcp` / `open_udp`.
     pub request_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub max_open_streams: u64,
@@ -66,11 +70,12 @@ impl Default for ClientOptions {
             tls: TlsOptions {
                 server_name: String::new(),
                 skip_certificate_verification: false,
+                disable_sni: false,
                 alpn: vec!["h3".to_owned()],
                 custom_roots: Vec::new(),
             },
             congestion: CongestionController::Cubic,
-            request_timeout: Duration::from_secs(8),
+            request_timeout: Duration::ZERO,
             heartbeat_interval: Duration::from_secs(10),
             max_open_streams: 90,
             stream_receive_window: None,
@@ -187,9 +192,7 @@ impl Client {
             Err(last_error
                 .unwrap_or_else(|| TuicProtocolError::Protocol("TUIC TCP dial failed".to_owned())))
         };
-        tokio::time::timeout(timeout, open)
-            .await
-            .map_err(|_| TuicProtocolError::Protocol("TUIC request timed out".to_owned()))?
+        maybe_timeout(timeout, open).await
     }
 
     /// Opens a UDP association (`ASSOC_ID`) on the shared QUIC connection.
@@ -220,9 +223,7 @@ impl Client {
                 TuicProtocolError::Protocol("TUIC UDP association failed".to_owned())
             }))
         };
-        tokio::time::timeout(timeout, open)
-            .await
-            .map_err(|_| TuicProtocolError::Protocol("TUIC request timed out".to_owned()))?
+        maybe_timeout(timeout, open).await
     }
 
     pub async fn close(&self) {
@@ -281,6 +282,8 @@ impl Client {
         let endpoint = state.endpoint.as_ref().ok_or_else(|| {
             TuicProtocolError::Protocol("TUIC endpoint missing after construction".to_owned())
         })?;
+        // rustls `ServerName` cannot be empty. When SNI is disabled the dummy
+        // name is not written into ClientHello (`TlsOptions.disable_sni`).
         let server_name = if self.options.tls.server_name.is_empty() {
             "localhost".to_owned()
         } else {
@@ -306,6 +309,19 @@ impl Client {
         });
         state.sessions.push(Arc::clone(&session));
         Ok(session)
+    }
+}
+
+async fn maybe_timeout<T>(
+    timeout: Duration,
+    fut: impl std::future::Future<Output = Result<T, TuicProtocolError>>,
+) -> Result<T, TuicProtocolError> {
+    if timeout.is_zero() {
+        fut.await
+    } else {
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| TuicProtocolError::Protocol("TUIC request timed out".to_owned()))?
     }
 }
 

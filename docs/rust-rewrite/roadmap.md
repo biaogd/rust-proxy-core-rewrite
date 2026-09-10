@@ -1332,7 +1332,9 @@ deferred; the declared BBR profile still needs its own release evidence.
 - **6H-B (implemented):** SOCKS/mixed UDP → TUIC v5 UDP relay → local UDP authority. Cover
   native datagram and QUIC-stream relay modes, packet/session IDs, destination
   changes, size/fragmentation boundaries, loss/reorder/duplicate reassembly
-  (unit tests) and association cleanup. Evidence: `compat/scripts/phase6h_tuic_udp.py`.
+  (unit tests) and association cleanup. Evidence: `compat/scripts/phase6h_tuic_udp.py`
+  plus `protocol-tuic` `udp_lifecycle` (blocked QUIC send cancel; recv ends on
+  peer close).
 - **6H-C (implemented):** connection reuse, TUIC Heartbeat datagrams plus QUIC
   keep-alive (`heartbeat-interval`), reconnection after authority restart, cancel
   isolation, `max-open-streams` pooling, congestion *names*, reload, concurrent

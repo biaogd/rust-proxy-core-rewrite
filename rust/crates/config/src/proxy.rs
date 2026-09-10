@@ -634,17 +634,9 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?
         .into_bytes();
     let password = proxy.password.unwrap_or_default();
-    let alpn = proxy
-        .alpn
-        .unwrap_or_else(|| vec!["h3".to_owned()])
-        .into_iter()
-        .filter(|proto| !proto.is_empty())
-        .collect::<Vec<_>>();
-    let alpn = if alpn.is_empty() {
-        vec!["h3".to_owned()]
-    } else {
-        alpn
-    };
+    // Go: `ALPN != nil` (including `alpn: []`) keeps that slice; only a missing
+    // field defaults to `h3`.
+    let alpn = proxy.alpn.unwrap_or_else(|| vec!["h3".to_owned()]);
 
     let congestion_controller = hysteria2_extra_string(&mut proxy.extra, "congestion-controller")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
@@ -674,13 +666,15 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         None | Some(serde_yaml_ng::Value::Null) => false,
         _ => return Err(ConfigError::UnsupportedProxy(name)),
     };
+    // Go `adapter/outbound/tuic.go`: `recv-window-conn` is the stream window
+    // and `recv-window` is the connection window (HY2 mapping is the opposite).
     let stream_receive_window = resolve_hysteria2_window(
         &name,
         hysteria2_extra_u64(&mut proxy.extra, "initial-stream-receive-window")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
         hysteria2_extra_u64(&mut proxy.extra, "max-stream-receive-window")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
-        hysteria2_extra_u64(&mut proxy.extra, "recv-window")
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
     )?;
     let connection_receive_window = resolve_hysteria2_window(
@@ -689,7 +683,7 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
         hysteria2_extra_u64(&mut proxy.extra, "max-connection-receive-window")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
-        hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
+        hysteria2_extra_u64(&mut proxy.extra, "recv-window")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
     )?;
     let max_udp_relay_packet_size =

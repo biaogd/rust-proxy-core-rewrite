@@ -807,16 +807,20 @@ pub(super) async fn run_tuic_udp_session(
     loop {
         if let Some(request) = current.take() {
             let destination = udp_proxy_destination(&request);
-            if association
-                .send(&destination, &request.payload)
-                .await
-                .is_err()
-            {
-                break;
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tracker.cancelled() => break,
+                () = &mut idle => break,
+                result = association.send(&destination, &request.payload) => {
+                    if result.is_err() {
+                        break;
+                    }
+                    uploaded = uploaded.saturating_add(request.payload.len() as u64);
+                    idle.as_mut()
+                        .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+                }
             }
-            uploaded = uploaded.saturating_add(request.payload.len() as u64);
-            idle.as_mut()
-                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            continue;
         }
         tokio::select! {
             () = shutdown.cancelled() => break,

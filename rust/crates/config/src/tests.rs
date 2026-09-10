@@ -344,6 +344,27 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
     assert_eq!(options.max_open_streams, 32);
     assert_eq!(options.max_udp_relay_packet_size, 0);
 
+    let empty_alpn = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-empty-alpn\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    alpn: []\n"
+    ))
+    .expect("explicit empty TUIC ALPN");
+    assert!(
+        empty_alpn.proxies[0]
+            .tuic
+            .as_ref()
+            .expect("empty alpn")
+            .alpn
+            .is_empty()
+    );
+
+    let windows = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-windows\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    recv-window: 1111\n    recv-window-conn: 2222\n"
+    ))
+    .expect("TUIC receive windows");
+    let window_opts = windows.proxies[0].tuic.as_ref().expect("windows");
+    assert_eq!(window_opts.stream_receive_window, Some(2222));
+    assert_eq!(window_opts.connection_receive_window, Some(1111));
+
     let sized = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: tuic-udp\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    udp-relay-mode: quic\n    max-udp-relay-packet-size: 1200\n"
     ))
