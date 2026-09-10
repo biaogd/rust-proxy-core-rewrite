@@ -10,9 +10,10 @@ use rewrite_platform::apply_tun_system_dns;
 #[cfg(target_os = "windows")]
 use rewrite_platform::apply_windows_tun_interface_dns;
 use rewrite_platform::{
-    DnsOwner, OwnedRoute, RouteOwner, current_route_platform, default_auto_route_destinations,
-    install_device_route, protect_host_route, reject_existing_windows_tun_device,
-    validate_tun_device_name,
+    DefaultInterfaceSnapshot, DnsOwner, NETWORK_CHANGE_POLL, OwnedRoute, RouteOwner,
+    current_default_interface, current_route_platform, default_auto_route_destinations,
+    install_device_route, plan_network_change, protect_host_route,
+    reject_existing_windows_tun_device, set_auto_detect_bind_interface, validate_tun_device_name,
 };
 use rewrite_state::RuntimeState;
 use rewrite_tun::{
@@ -25,6 +26,11 @@ use tokio_util::sync::CancellationToken;
 use crate::listener::{UdpReplySink, UdpSessionContext, UdpSessionPacket, UdpSessions};
 use crate::tcp::{apply_host_mapping, relay_dns_tcp, serve_stream_session};
 use crate::types::RuntimeError;
+
+/// Soft cap on concurrent TUN TCP tasks (Phase 8F resource bound).
+const TUN_MAX_TCP_TASKS: usize = 4096;
+/// Soft cap on concurrent TUN UDP sessions (Phase 8F resource bound).
+const TUN_MAX_UDP_SESSIONS: usize = 4096;
 
 struct TunClientStream(TunInboundStream);
 
@@ -128,6 +134,7 @@ struct PreparedTun {
     dns: DnsOwner,
     routes: RouteOwner,
     mtu: u16,
+    device_name: String,
 }
 
 fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, RuntimeError> {
@@ -162,6 +169,7 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
         dns,
         routes,
         mtu: device_config.mtu,
+        device_name,
     })
 }
 
@@ -205,7 +213,14 @@ async fn run_prepared_tun(
         mut dns,
         mut routes,
         mtu,
+        device_name,
     } = prepared;
+    let mut default_interface = current_default_interface(Some(&device_name))
+        .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
+    if tun_config.auto_detect_interface && !cfg!(windows) {
+        set_auto_detect_bind_interface(default_interface.device.as_deref());
+    }
+    let watch_network = tun_config.auto_route || tun_config.auto_detect_interface;
     let handles = build_smoltcp_stack(usize::from(mtu))
         .map_err(|error| RuntimeError::Tun(error.to_string()))?;
     if let Some(runner) = handles.runner {
@@ -242,11 +257,34 @@ async fn run_prepared_tun(
     let tun_config = Arc::new(tun_config);
     let mut connections = JoinSet::new();
     let mut udp_sessions = UdpSessions::default();
+    let mut network_tick = tokio::time::interval(NETWORK_CHANGE_POLL);
+    network_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            _ = network_tick.tick(), if watch_network => {
+                let current_config = Arc::clone(&config.borrow());
+                apply_network_change(
+                    &tun_config,
+                    &current_config,
+                    &state,
+                    &dns_service,
+                    &device_name,
+                    &mut default_interface,
+                    &mut routes,
+                    &mut dns,
+                )
+                .await;
+            }
             session = tcp_rx.recv() => {
                 let Some(session) = session else { break };
+                if !accept_tun_flow(connections.len(), TUN_MAX_TCP_TASKS) {
+                    state.log(
+                        "error",
+                        "TUN TCP session cap reached; refusing unbounded growth",
+                    );
+                    continue;
+                }
                 let connection_config = Arc::clone(&config.borrow());
                 let connection_state = Arc::clone(&state);
                 let connection_dns = Arc::clone(&dns_service);
@@ -293,6 +331,15 @@ async fn run_prepared_tun(
             }
             datagram = udp_rx.recv() => {
                 let Some(datagram) = datagram else { break };
+                if !udp_sessions.contains(&datagram.session_peer)
+                    && !accept_tun_flow(udp_sessions.len(), TUN_MAX_UDP_SESSIONS)
+                {
+                    state.log(
+                        "error",
+                        "TUN UDP session cap reached; refusing unbounded growth",
+                    );
+                    continue;
+                }
                 let connection_config = Arc::clone(&config.borrow());
                 let mut metadata = datagram.metadata;
                 let fake_host = apply_host_mapping(&mut metadata, &connection_config, &state);
@@ -335,6 +382,9 @@ async fn run_prepared_tun(
     }
 
     shutdown.cancel();
+    if tun_config.auto_detect_interface {
+        set_auto_detect_bind_interface(None);
+    }
     let _ = device_task.await;
     while let Some(result) = connections.join_next().await {
         if let Err(join_error) = result {
@@ -352,6 +402,81 @@ async fn run_prepared_tun(
         state.log("error", format!("TUN route cleanup failed: {error}"));
     }
     Ok(())
+}
+
+fn accept_tun_flow(active: usize, cap: usize) -> bool {
+    active < cap
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_network_change(
+    tun_config: &TunConfig,
+    config: &Config,
+    state: &RuntimeState,
+    dns_service: &rewrite_dns::DnsService,
+    device_name: &str,
+    previous: &mut DefaultInterfaceSnapshot,
+    routes: &mut RouteOwner,
+    dns: &mut DnsOwner,
+) {
+    let after = current_default_interface(Some(device_name))
+        .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
+    let Some(plan) = plan_network_change(
+        previous,
+        &after,
+        device_name,
+        tun_config.auto_detect_interface,
+        cfg!(target_os = "macos"),
+    ) else {
+        return;
+    };
+
+    let level = if after.is_lost() { "error" } else { "warning" };
+    eprintln!("{}", plan.log);
+    state.log(level, plan.log);
+
+    if plan.update_detected_interface && !cfg!(windows) {
+        set_auto_detect_bind_interface(after.device.as_deref());
+    }
+
+    if plan.reprotect_hosts {
+        if let Err(error) = routes.revert_host_routes() {
+            state.log(
+                "warning",
+                format!("[TUN] failed to drop stale loop-avoidance routes: {error}"),
+            );
+        }
+        if let Err(error) = protect_loop_avoidance(config, routes) {
+            state.log(
+                "warning",
+                format!("[TUN] failed to re-protect loop-avoidance routes: {error}"),
+            );
+        }
+    }
+
+    if plan.reapply_system_dns {
+        if let Err(error) = dns.restore() {
+            state.log(
+                "warning",
+                format!("[TUN] failed to restore system DNS before re-apply: {error}"),
+            );
+        }
+        match apply_system_dns(tun_config, device_name) {
+            Ok(applied) => *dns = applied,
+            Err(error) => {
+                state.log(
+                    "warning",
+                    format!("[TUN] failed to re-apply system DNS after network change: {error}"),
+                );
+            }
+        }
+    }
+
+    if plan.reset_resolver {
+        dns_service.reset_connections().await;
+    }
+
+    *previous = after;
 }
 
 fn install_auto_routes(
@@ -442,5 +567,20 @@ fn collect_classic(upstream: &rewrite_config::DnsClassicUpstream, hosts: &mut Ve
     match &upstream.endpoint {
         DnsClassicEndpoint::Socket(address) => hosts.push(address.ip()),
         DnsClassicEndpoint::Domain { bootstrap, .. } => hosts.push(bootstrap.address.ip()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TUN_MAX_TCP_TASKS, TUN_MAX_UDP_SESSIONS, accept_tun_flow};
+
+    #[test]
+    fn tun_flow_caps_match_the_8f_budget() {
+        assert_eq!(TUN_MAX_TCP_TASKS, 4096);
+        assert_eq!(TUN_MAX_UDP_SESSIONS, 4096);
+        assert!(accept_tun_flow(0, TUN_MAX_TCP_TASKS));
+        assert!(accept_tun_flow(4095, TUN_MAX_TCP_TASKS));
+        assert!(!accept_tun_flow(4096, TUN_MAX_TCP_TASKS));
+        assert!(!accept_tun_flow(4096, TUN_MAX_UDP_SESSIONS));
     }
 }

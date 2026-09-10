@@ -3009,8 +3009,11 @@ privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate
 `compat/scripts/phase8b_tun.py` owns the privileged utun/scutil DNS/auto-route
 gate (`PHASE8B_NATIVE=1`, fail-closed). 8C Windows x86_64 reuses that data path
 on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
-Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). Those gates
-are the remaining 8A/8B/8C
+Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). 8F polls the
+physical default (excluding TUN), re-protects loop-avoidance host routes,
+re-applies Darwin scutil DNS, and resets resolver connections without flushing
+fake-IP; `compat/scripts/phase8f_tun.py` owns the privileged dual-uplink netns
+flap (`PHASE8F_NATIVE=1`, fail-closed). Those gates are the remaining 8A/8B/8C/8F
 acceptance evidence. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
 OS needs native configuration, listener, routing, process, persistence and
@@ -3058,10 +3061,20 @@ shared UDP session relay without SOCKS write-back.
   and this-adapter metric 1, Linux-style split auto-route, `netsh` DNS on the
   Wintun adapter only, existing named adapters refused without takeover).
   Native Parity waits on `PHASE8C_NATIVE=1` / `phase8c-windows-tun`.
-- **8F — stability / network-change (before 8D/8E):** Wi-Fi↔wired switch,
-  sleep/wake, half-close/RST/backpressure, UDP large/fragment/loss, resource
-  bounds, crash recovery beyond `Drop`. Prioritize **8F** before FreeBSD/Android
-  (**8D**) and extra architecture/build profiles (**8E**).
+- **8F — stability / network-change (before 8D/8E):** Implemented in this
+  checkout as a poll of the physical default route excluding the TUN device
+  (`ip route show default` / `route -n get default` / `Get-NetRoute 0.0.0.0/0`),
+  host-route re-protect, Darwin scutil DNS re-apply, resolver
+  `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, and a
+  Windows `netsh route add` already-exists retry. `auto-detect-interface` fills
+  an empty `interface-name` bind slot except on Windows (unsupported
+  `bind_device`). Sleep/wake is the lost-then-restored default interface on
+  the same path; this gate does not claim native sleep/wake or NIC flap.
+  **Exclude** UDP IP fragment/loss, TUN-specific TCP half-close/RST fixtures,
+  Android netlink, and Darwin NetworkReachability / Windows
+  `NotifyIpInterfaceChange` FFI. Native Parity waits on `PHASE8F_NATIVE=1` /
+  `phase8f-linux-tun`. Prioritize remaining 8F exclusions later; FreeBSD/Android
+  (**8D**) and extra architecture/build profiles (**8E**) stay after 8F.
 
 ### Test layers
 

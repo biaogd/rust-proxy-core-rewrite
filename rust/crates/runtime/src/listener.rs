@@ -366,6 +366,16 @@ impl UdpSessions {
             }
         }
     }
+
+    #[must_use]
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub(super) fn contains(&self, source: &SocketAddr) -> bool {
+        self.entries.contains_key(source)
+    }
 }
 
 pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessionMode> {

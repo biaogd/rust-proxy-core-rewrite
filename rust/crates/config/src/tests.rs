@@ -652,6 +652,7 @@ fn parses_phase_eight_a_tun_smoltcp_defaults() {
     assert!(tun.enable);
     assert_eq!(tun.stack, TunStack::Smoltcp);
     assert!(tun.auto_route);
+    assert!(!tun.auto_detect_interface);
     assert_eq!(tun.dns_hijack, vec!["0.0.0.0:53".to_owned()]);
     assert_eq!(
         tun.inet4_address,
@@ -661,6 +662,18 @@ fn parses_phase_eight_a_tun_smoltcp_defaults() {
         tun.tun_dns_server(),
         Some("198.18.0.2".parse().expect("tun dns"))
     );
+}
+
+#[test]
+fn parses_auto_detect_interface() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-detect-interface: true\n"
+    );
+    let tun = Config::from_yaml(&source)
+        .expect("tun config")
+        .tun
+        .expect("tun present");
+    assert!(tun.auto_detect_interface);
 }
 
 #[test]

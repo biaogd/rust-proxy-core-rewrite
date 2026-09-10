@@ -1,6 +1,7 @@
 //! Small, testable operating-system boundaries used by the Rust rewrite.
 
 mod dhcp;
+mod network;
 mod route;
 mod system_dns;
 
@@ -8,6 +9,12 @@ pub use dhcp::{
     DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
     DhcpRefreshTracker, INTERFACE_TTL, build_dhcp_discover, dhcp_interface_snapshot,
     parse_dhcp_offer, resolve_dns_from_dhcp,
+};
+pub use network::{
+    DefaultInterfaceSnapshot, NETWORK_CHANGE_POLL, NetworkChangePlan, auto_detect_bind_interface,
+    current_default_interface, exclude_tun_device, parse_darwin_default_route,
+    parse_linux_default_routes, parse_windows_default_routes, plan_network_change,
+    resolve_outbound_bind_interface, set_auto_detect_bind_interface,
 };
 pub use route::{
     OwnedRoute, RouteOwner, RoutePlatform, current_route_platform, darwin_route_args,
@@ -269,6 +276,7 @@ fn set_routing_mark(socket: &Socket, routing_mark: i64) -> io::Result<()> {
 }
 
 fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
+    let name = resolve_outbound_bind_interface(name);
     if name.is_empty() {
         return Ok(());
     }

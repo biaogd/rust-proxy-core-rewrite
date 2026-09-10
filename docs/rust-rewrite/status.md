@@ -139,9 +139,12 @@ runtime enablement for linux|macos aarch64. 8C reuses that data path on
 Windows x86_64: Wintun via tun-rs (`delete_driver(false)`, this-adapter
 metric 1, `MIHOMO_WINTUN` / next-to-exe discovery, no vendored DLL), Linux-style
 split auto-route, `netsh` DNS on the Wintun adapter only (never other NICs),
-and refusal to take over an existing named adapter. Unprivileged
+and refusal to take over an existing named adapter. 8F adds a poll of the
+physical default (TUN excluded), loop-avoidance re-protect, Darwin DNS
+re-apply, resolver connection reset without fake-IP flush, and 4096 TCP/UDP
+session caps. Unprivileged
 evidence: config/stack-identity unit tests plus `compat/scripts/phase8a_tun.py`,
-`phase8b_tun.py` and `phase8c_tun.py`. Privileged Linux netns traffic
+`phase8b_tun.py`, `phase8c_tun.py` and `phase8f_tun.py`. Privileged Linux netns traffic
 passed locally on 2026-09-10 (HTTP small/large, DNS hijack + fake-IP reverse
 mapping, UDP echo, Go `system` vs Rust `smoltcp` body match, init-failure
 rollback and stop cleanup) via `PHASE8A_NATIVE=1`; it is fail-closed and not
@@ -149,7 +152,9 @@ Parity until the dedicated CI job reports success. Privileged Darwin arm64
 native (`PHASE8B_NATIVE=1`) is fail-closed and not Parity until
 `phase8b-darwin-tun` reports success. Privileged Windows x86_64 native
 (`PHASE8C_NATIVE=1`) is fail-closed and not Parity until
-`phase8c-windows-tun` reports success. TUN is not Parity.
+`phase8c-windows-tun` reports success. Privileged 8F dual-uplink network-change
+(`PHASE8F_NATIVE=1`) is fail-closed and not Parity until `phase8f-linux-tun`
+reports success. TUN is not Parity.
 Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other Phase 7
 families remain deferred. Canonical numbering is AnyTLS **6G**, Hysteria2
 **HY2**, TUIC **6H**, SSR **7A–7D**. The
@@ -175,6 +180,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged identity + privileged netns harness in `phase8a_tun.py` passed locally on Linux 2026-09-10 (`PHASE8A_NATIVE=1`); native CI pass unclaimed |
 | Phase 8B Darwin arm64 TUN | In progress | Reuses the 8A data path. utun open, Darwin split auto-route, scutil DNS ownership/restore, `tun0`/`utun` rejected without remap. Unprivileged identity in `phase8b_tun.py`; privileged `PHASE8B_NATIVE=1` fail-closed Darwin arm64 harness is not Parity until `phase8b-darwin-tun` reports success |
 | Phase 8C Windows x86_64 TUN | In progress | Reuses the 8A data path. Wintun via tun-rs (`delete_driver(false)`, metric 1 on this adapter, `MIHOMO_WINTUN`/next-to-exe, official 0.14.1 zip hashed in the native gate), Linux-style split auto-route, `netsh` DNS on the Wintun adapter only, existing named adapters refused. Unprivileged identity in `phase8c_tun.py`; privileged `PHASE8C_NATIVE=1` fail-closed Windows x86_64 harness is not Parity until `phase8c-windows-tun` reports success |
+| Phase 8F TUN network-change | In progress | Polls physical default excluding TUN; re-protects host routes; Darwin re-applies scutil DNS; `reset_connections()` only (no fake-IP flush); TCP/UDP caps 4096; Windows route-exists retry. `auto-detect-interface` is not installed on Windows. Unprivileged identity in `phase8f_tun.py`; privileged Linux dual-uplink `PHASE8F_NATIVE=1` is fail-closed and not Parity until `phase8f-linux-tun` reports success. UDP fragment/loss, TUN TCP half-close/RST, Android netlink and Darwin/Windows FFI monitors remain out of this gate |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |

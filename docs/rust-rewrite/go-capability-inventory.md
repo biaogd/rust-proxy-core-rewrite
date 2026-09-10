@@ -222,7 +222,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
-| RUN-08 | Power/network change handling and resolver/connection reset | Not started | 8F |
+| RUN-08 | Power/network change handling and resolver/connection reset | Partial 8F (default-route poll + resolver reset; native CI unclaimed) | 8F |
 | RUN-09 | Bounded queues, backpressure, concurrency limits, cancellation and leak/stress behavior | Partial | Every release/protocol gate |
 
 ## REST controller
@@ -256,7 +256,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | SVC-04 | Geodata/MMDB/MRS loading, matching, download/update, ETag and failure rollback | Not started | 5E4 |
 | SVC-05 | External UI download/update and safe path handling | Not started | 5E5 |
 | SVC-06 | Memory accounting, buffer pools and low-memory behavior | Not started | 8E |
-| SVC-07 | Interface discovery, DHCP, process lookup, power/network events and platform command execution | Not started | 8F |
+| SVC-07 | Interface discovery, DHCP, process lookup, power/network events and platform command execution | Partial 8F network-change poll; DHCP/process lookup/native sleep-wake unclaimed | 8F |
 
 ## Platforms, packaging and build profiles
 

@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""Phase 8F TUN network-change monitor and session-bound identity gate.
+
+Unprivileged: same stack identity as 8A (`smoltcp` only; Go stacks rejected
+without remap), plus `auto-detect-interface: true` accepted by Rust.
+
+Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT, then a default
+uplink switch) requires a privileged Linux runner. Set PHASE8F_NATIVE=1;
+missing capability fails closed instead of skipping green. This gate is
+Rust-only: it does not flap a Go TUN.
+
+Out of this gate: UDP fragment/loss, TUN TCP half-close/RST fixtures,
+Android netlink (8D), Darwin/Windows FFI monitors, native NIC flap on
+Darwin/Windows, and 8D/8E.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any
+
+from phase1 import ROOT, assert_go_oracle_baseline
+from phase5b1a import build_binaries
+from phase8a_tun import (
+    CLEANUP_DEADLINE,
+    FAKE_IP_RANGE,
+    FixtureServers,
+    HTTP_NAME,
+    HTTP_SMALL,
+    MINIMAL,
+    NATIVE_IO_DEADLINE,
+    NATIVE_STARTUP_DEADLINE,
+    SERVICE_IP,
+    TUN_INET4,
+    UDP_NAME,
+    config_identity,
+    expect_accept,
+    http_get,
+    ip_bin,
+    launch_in_ns,
+    maybe_sudo,
+    process_logs,
+    query_hijacked_dns,
+    run_in_ns,
+    run_ip,
+    stop_process,
+    udp_echo,
+    wait_mixed,
+    write_config,
+)
+
+
+FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase8f-tun-diff.json"
+CHANGE_DEADLINE = 10.0
+UDP_LARGE = b"phase8f-udp-echo" * 64  # 1024 bytes; not a fragment/loss claim
+VETH_A_HOST = "10.66.8.1"
+VETH_A_NS = "10.66.8.2"
+VETH_B_HOST = "10.66.9.1"
+VETH_B_NS = "10.66.9.2"
+
+
+def identity_auto_detect(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
+    source = MINIMAL + (
+        "\ntun:\n  enable: true\n  stack: smoltcp\n"
+        "  auto-route: true\n  auto-detect-interface: true\n"
+    )
+    expect_accept(binaries["rust"], source, scratch, "auto-detect-interface")
+    go_source = MINIMAL + (
+        "\ntun:\n  enable: true\n  stack: system\n"
+        "  auto-route: true\n  auto-detect-interface: true\n"
+    )
+    expect_accept(binaries["go"], go_source, scratch, "go auto-detect-interface")
+    return {"rust-auto-detect-interface": True, "go-auto-detect-interface": True}
+
+
+def native_prereq_error() -> str | None:
+    if sys.platform != "linux":
+        return "PHASE8F_NATIVE requires Linux"
+    if not os.path.exists("/dev/net/tun"):
+        return "PHASE8F_NATIVE requires /dev/net/tun; refusing to skip green"
+    if shutil.which("ip") is None and not os.path.exists("/usr/sbin/ip"):
+        return "PHASE8F_NATIVE requires iproute2; refusing to skip green"
+    if os.geteuid() == 0:
+        return None
+    probe = subprocess.run(
+        ["sudo", "-n", "--", ip_bin(), "-V"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        return (
+            "PHASE8F_NATIVE requires root/CAP_NET_ADMIN (passwordless sudo); "
+            "refusing to skip green"
+        )
+    return None
+
+
+def require_native_prereqs() -> None:
+    error = native_prereq_error()
+    if error:
+        raise SystemExit(error)
+
+
+def run_sysctl(key: str, ns: str | None = None) -> None:
+    argv = ["sysctl", "-w", key]
+    if ns is None:
+        subprocess.run(
+            maybe_sudo(argv),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        return
+    run_in_ns(ns, argv, check=False)
+
+
+class DualUplinkNetns:
+    """Two veth uplinks so the physical default can move without a real NIC flap."""
+
+    def __init__(self) -> None:
+        token = f"{os.getpid() % 100000:05d}"
+        self.name = f"p8fs{token}"
+        self.veth_a_host = f"p8fa{token}"
+        self.veth_a_ns = f"p8na{token}"
+        self.veth_b_host = f"p8fb{token}"
+        self.veth_b_ns = f"p8nb{token}"
+        self.tun = f"p8ft{token}"
+        self._owned = False
+
+    def __enter__(self) -> DualUplinkNetns:
+        run_ip("netns", "delete", self.name, check=False)
+        run_ip("link", "delete", self.veth_a_host, check=False)
+        run_ip("link", "delete", self.veth_b_host, check=False)
+        run_ip("netns", "add", self.name)
+        self._owned = True
+        run_ip("link", "add", self.veth_a_host, "type", "veth", "peer", "name", self.veth_a_ns)
+        run_ip("link", "add", self.veth_b_host, "type", "veth", "peer", "name", self.veth_b_ns)
+        run_ip("link", "set", self.veth_a_ns, "netns", self.name)
+        run_ip("link", "set", self.veth_b_ns, "netns", self.name)
+        run_ip("addr", "add", f"{VETH_A_HOST}/24", "dev", self.veth_a_host)
+        run_ip("addr", "add", f"{VETH_B_HOST}/24", "dev", self.veth_b_host)
+        run_ip("addr", "add", f"{SERVICE_IP}/32", "dev", self.veth_a_host)
+        run_ip("addr", "add", f"{SERVICE_IP}/32", "dev", self.veth_b_host, check=False)
+        run_ip("link", "set", self.veth_a_host, "up")
+        run_ip("link", "set", self.veth_b_host, "up")
+        run_ip("link", "set", "lo", "up", ns=self.name)
+        run_ip("addr", "add", f"{VETH_A_NS}/24", "dev", self.veth_a_ns, ns=self.name)
+        run_ip("addr", "add", f"{VETH_B_NS}/24", "dev", self.veth_b_ns, ns=self.name)
+        run_ip("link", "set", self.veth_a_ns, "up", ns=self.name)
+        run_ip("link", "set", self.veth_b_ns, "up", ns=self.name)
+        run_ip(
+            "route",
+            "replace",
+            "default",
+            "via",
+            VETH_A_HOST,
+            "dev",
+            self.veth_a_ns,
+            ns=self.name,
+        )
+        run_ip("route", "replace", f"{SERVICE_IP}/32", "via", VETH_A_HOST, ns=self.name)
+        for key in (
+            "net.ipv4.conf.all.rp_filter=0",
+            "net.ipv4.conf.default.rp_filter=0",
+        ):
+            run_sysctl(key, ns=self.name)
+        for iface in (self.veth_a_host, self.veth_b_host):
+            run_sysctl(f"net.ipv4.conf.{iface}.rp_filter=0")
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        if not self._owned:
+            return
+        run_ip("netns", "delete", self.name, check=False)
+        run_ip("link", "delete", self.veth_a_host, check=False)
+        run_ip("link", "delete", self.veth_b_host, check=False)
+        self._owned = False
+
+    def routes(self) -> str:
+        result = run_ip("route", "show", ns=self.name, check=False)
+        return (result.stdout or "") + (result.stderr or "")
+
+    def links(self) -> str:
+        result = run_ip("link", "show", ns=self.name, check=False)
+        return (result.stdout or "") + (result.stderr or "")
+
+    def has_device(self, name: str) -> bool:
+        return name in self.links()
+
+    def default_device(self) -> str:
+        result = run_ip("route", "show", "default", ns=self.name, check=False)
+        text = result.stdout or ""
+        words = text.split()
+        if "dev" in words:
+            index = words.index("dev")
+            if index + 1 < len(words):
+                return words[index + 1]
+        return ""
+
+
+def tun_config(*, mixed_port: int, dns_listen: int, nameserver: str, device: str) -> str:
+    return f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+dns:
+  enable: true
+  listen: 127.0.0.1:{dns_listen}
+  ipv6: false
+  use-hosts: false
+  use-system-hosts: false
+  enhanced-mode: fake-ip
+  fake-ip-range: {FAKE_IP_RANGE}
+  fake-ip-filter:
+    - 'never-match.phase8f.test'
+  nameserver:
+    - udp://{nameserver}
+tun:
+  enable: true
+  device: {device}
+  stack: smoltcp
+  auto-route: true
+  auto-detect-interface: true
+  inet4-address:
+    - {TUN_INET4}
+  dns-hijack:
+    - 0.0.0.0:53
+  mtu: 1500
+rules:
+  - DOMAIN,{HTTP_NAME},DIRECT
+  - DOMAIN,{UDP_NAME},DIRECT
+  - MATCH,REJECT
+"""
+
+
+def wait_tun_device(
+    ns: DualUplinkNetns, process: subprocess.Popen[bytes], scratch: pathlib.Path
+) -> None:
+    deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited before TUN device appeared: {process.returncode}\n"
+                f"{process_logs(scratch)}"
+            )
+        if ns.has_device(ns.tun):
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"TUN device {ns.tun} did not appear\n{process_logs(scratch)}")
+
+
+def wait_gone(ns: DualUplinkNetns, tun: str) -> None:
+    deadline = time.monotonic() + CLEANUP_DEADLINE
+    while time.monotonic() < deadline:
+        leftover = f"{ns.links()}\n{ns.routes()}"
+        if tun not in leftover and "0.0.0.0/1" not in leftover and "128.0.0.0/1" not in leftover:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"TUN leftovers after stop: links={ns.links()!r} routes={ns.routes()!r}"
+    )
+
+
+def assert_split_defaults(ns: DualUplinkNetns) -> None:
+    text = ns.routes()
+    if "0.0.0.0/1" not in text or "128.0.0.0/1" not in text:
+        raise AssertionError(f"auto-route split defaults missing:\n{text}")
+    if ns.tun not in text:
+        raise AssertionError(f"auto-route does not reference {ns.tun}:\n{text}")
+
+
+def wait_monitor_log(
+    process: subprocess.Popen[bytes],
+    scratch: pathlib.Path,
+    needle: str,
+    expected_iface: str,
+) -> str:
+    deadline = time.monotonic() + CHANGE_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited during network-change wait: {process.returncode}\n"
+                f"{process_logs(scratch)}"
+            )
+        logs = process_logs(scratch)
+        if needle in logs and expected_iface in logs:
+            return logs
+        time.sleep(0.1)
+    raise TimeoutError(
+        f"did not observe `{needle}` for {expected_iface} within {CHANGE_DEADLINE}s\n"
+        f"{process_logs(scratch)}"
+    )
+
+
+def run_uplink_switch(
+    binary: pathlib.Path,
+    ns: DualUplinkNetns,
+    servers: FixtureServers,
+    scratch: pathlib.Path,
+) -> dict[str, Any]:
+    case_dir = scratch / "rust-flap"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    config = write_config(
+        case_dir,
+        "config.yaml",
+        tun_config(
+            mixed_port=17890,
+            dns_listen=15353,
+            nameserver=f"{SERVICE_IP}:{servers.dns_port}",
+            device=ns.tun,
+        ),
+    )
+    process, stdout, stderr = launch_in_ns(ns.name, binary, config, case_dir)
+    observation: dict[str, Any] = {"label": "rust-flap", "stack": "smoltcp"}
+    try:
+        wait_mixed(ns.name, process, 17890, case_dir)
+        wait_tun_device(ns, process, case_dir)
+        assert_split_defaults(ns)
+        if ns.default_device() != ns.veth_a_ns:
+            raise AssertionError(
+                f"expected initial default {ns.veth_a_ns}, got {ns.default_device()!r}\n"
+                f"{ns.routes()}"
+            )
+        fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"pre-flap HTTP mismatch: {body!r}")
+        observation["http-before"] = True
+        observation["fake-ip-http"] = fake_http
+
+        run_ip(
+            "route",
+            "replace",
+            "default",
+            "via",
+            VETH_B_HOST,
+            "dev",
+            ns.veth_b_ns,
+            ns=ns.name,
+        )
+        run_ip("route", "replace", f"{SERVICE_IP}/32", "via", VETH_B_HOST, ns=ns.name)
+        if ns.default_device() != ns.veth_b_ns:
+            raise AssertionError(
+                f"failed to move default to {ns.veth_b_ns}: {ns.default_device()!r}\n"
+                f"{ns.routes()}"
+            )
+        wait_monitor_log(
+            process,
+            case_dir,
+            "default interface changed by monitor",
+            ns.veth_b_ns,
+        )
+        observation["monitor-log"] = True
+        assert_split_defaults(ns)
+        observation["split-defaults-after"] = True
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"post-flap HTTP mismatch: {body!r}")
+        observation["http-after"] = True
+        fake_udp = query_hijacked_dns(ns.name, UDP_NAME)
+        echoed = udp_echo(ns.name, fake_udp, servers.udp_port, UDP_LARGE)
+        if echoed != UDP_LARGE:
+            raise AssertionError(
+                f"post-flap UDP echo length {len(echoed)} != {len(UDP_LARGE)}"
+            )
+        observation["udp-large-after"] = True
+        return observation
+    except Exception:
+        print(process_logs(case_dir), file=sys.stderr)
+        raise
+    finally:
+        stdout.close()
+        stderr.close()
+        stop_process(process, case_dir)
+        wait_gone(ns, ns.tun)
+        observation["stop-cleanup"] = True
+
+
+def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
+    if os.environ.get("PHASE8F_NATIVE") != "1":
+        print(
+            "native netns network-change gate not requested "
+            "(set PHASE8F_NATIVE=1 on a privileged Linux runner)"
+        )
+        return {"requested": False}
+    require_native_prereqs()
+    observations: dict[str, Any] = {"requested": True}
+    with DualUplinkNetns() as ns:
+        with FixtureServers(SERVICE_IP) as servers:
+            observations["rust-flap"] = run_uplink_switch(
+                binaries["rust"], ns, servers, scratch
+            )
+    return observations
+
+
+def main() -> int:
+    assert_go_oracle_baseline()
+    FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="phase8f-tun-") as scratch_dir:
+        scratch = pathlib.Path(scratch_dir)
+        binaries = build_binaries(
+            scratch,
+            cargo_target_variable="PHASE8F_CARGO_TARGET",
+            default_target_name="phase8f",
+            stage_runtime=True,
+        )
+        observations: dict[str, Any] = {
+            "identity": config_identity(binaries, scratch),
+            "auto-detect": identity_auto_detect(binaries, scratch),
+        }
+        native = native_gate(binaries, scratch)
+        observations["native"] = native
+        FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, default=str) + "\n")
+        print("phase8f observations:")
+        print(json.dumps(observations, indent=2, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

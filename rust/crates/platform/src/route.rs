@@ -60,6 +60,30 @@ impl RouteOwner {
         self.routes.push(route);
     }
 
+    /// Removes host /32 and /128 loop-avoidance routes so they can be rebuilt
+    /// after a physical default-interface change.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first failure after attempting all host-route removals.
+    pub fn revert_host_routes(&mut self) -> Result<(), PlatformError> {
+        let routes = std::mem::take(&mut self.routes);
+        let mut first_error = None;
+        for route in routes {
+            if is_host_prefix(route.destination) {
+                if let Err(error) = remove_owned_route(&route) {
+                    first_error.get_or_insert(error);
+                }
+            } else {
+                self.routes.push(route);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// Removes every owned route. Continues after individual failures.
     ///
     /// # Errors
@@ -446,7 +470,27 @@ fn run_windows_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformErr
     if output.status.success() {
         return Ok(());
     }
-    Err(command_error(&format!("netsh route {action}"), &output))
+    let error = command_error(&format!("netsh route {action}"), &output);
+    if action == "add" && looks_like_route_exists(&error.to_string()) {
+        let _ = run_windows_route("delete", route);
+        let retry = Command::new("netsh")
+            .args(&args)
+            .output()
+            .map_err(PlatformError::Io)?;
+        if retry.status.success() {
+            return Ok(());
+        }
+        return Err(command_error("netsh route add", &retry));
+    }
+    Err(error)
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_route_exists(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already exists")
+        || lower.contains("object already exists")
+        || lower.contains("the object exists")
 }
 
 /// Builds `netsh interface ipv4 {add|delete} route` arguments.
@@ -592,6 +636,7 @@ mod tests {
         let mut owner = RouteOwner::new();
         assert!(owner.routes().is_empty());
         owner.revert_all().expect("empty revert");
+        owner.revert_host_routes().expect("empty host revert");
     }
 
     #[test]
