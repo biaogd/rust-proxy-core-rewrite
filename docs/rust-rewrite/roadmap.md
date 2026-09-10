@@ -1303,23 +1303,26 @@ separate exit gates inside these labels.
 
 ### Next-work priority — 2026-09-09
 
-The agreed next-work order is **SSR review/CI closure → TUIC v5 outbound →
+The agreed next-work order was **SSR review/CI closure → TUIC v5 outbound →
 TUN integration**. This supersedes the previous numerical development order.
-Existing-protocol regressions remain release blockers; this schedule does not
-declare Hysteria2, SSR or any other partial implementation production-ready.
-See [status](status.md) for branch-specific evidence versus implementation in
-this checkout, and [compatibility matrix](compatibility-matrix.md) for claims.
+**SSR and TUIC v5 outbound are done in this checkout**; **TUN (Phase 8) is
+current**, starting with Linux **8A**. Existing-protocol regressions remain
+release blockers; this schedule does not declare Hysteria2, SSR or any other
+partial implementation production-ready. See [status](status.md) for
+branch-specific evidence versus implementation in this checkout, and
+[compatibility matrix](compatibility-matrix.md) for claims.
 
-1. **SSR closure (7A–7D, OUT-06):** resolve PR #13 review findings and fixture
-   failures; obtain Linux, macOS arm64 and Windows differential evidence before
-   claiming those platforms. Keep pre-handshake half-close rejection, missing
-   multi-user evidence and outstanding long-soak gates explicit.
-2. **TUIC v5 (6H, OUT-12):** implement outbound only. Defer v4, 0-RTT and server
-   direction; unsupported options must fail explicitly rather than downgrade.
-3. **TUN (Phase 8):** start with the Linux vertical slice, then macOS arm64 and
-   Windows native gates. TUN is packet ingress/platform integration, not another
-   remote proxy protocol. Other remote-protocol inbounds remain deferred;
-   preserve the existing Shadowsocks inbound scope without expanding it.
+1. **SSR closure (7A–7D, OUT-06):** done in this checkout (merged PR #13 path).
+   Keep pre-handshake half-close rejection, missing multi-user evidence and
+   outstanding long-soak gates explicit where still open.
+2. **TUIC v5 (6H, OUT-12):** done in this checkout for outbound 6H-A/B/C.
+   v4, 0-RTT and server direction remain deferred; unsupported options must
+   fail explicitly rather than downgrade.
+3. **TUN (Phase 8) — current:** deliver **8A → 8B → 8C**, then prioritize
+   **8F** before mobile/more arches (**8D/8E** later). TUN is packet
+   ingress/platform integration, not another remote proxy protocol. Other
+   remote-protocol inbounds remain deferred; preserve the existing Shadowsocks
+   inbound scope without expanding it.
 
 WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
 prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
@@ -2993,25 +2996,62 @@ cannot inherit its wire-compatibility claim.
 
 ## Phase 8 — TUN, transparent proxying and platform breadth
 
-TUN is the next priority after the declared TUIC v5 outbound gates, without
-waiting for 6I/6J or all of Phase 7. It is currently unimplemented. The first
-Linux gate must connect YAML → TUN device/IP packets → TCP/UDP stack → existing
-rules/outbound → return packets, and prove route cleanup on stop/failure.
-DNS interception, fake-IP reverse lookup, loop avoidance and privilege/error
-handling need explicit native tests before claiming system-wide operation.
+TUN is current after SSR and TUIC v5 outbound in this checkout, without waiting
+for 6I/6J or all of Phase 7. Implementation begins after this documentation and
+a small UDP prerequisite refactor (below). Delivery order: **8A → 8B → 8C**,
+then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
+OS needs native configuration, listener, routing, process, persistence and
+shutdown evidence; unsupported combinations require explicit rejection evidence
+(never silent remapping). Cross-compilation is only a build claim.
 
-- Linux TUN stacks, routing, TProxy, redir, socket marks and iptables in isolated
-  namespaces first.
-- Darwin, Windows, FreeBSD and Android each receive their own platform gate.
-- Cross-compilation is only a build claim; runtime parity needs native tests.
-- Additional architectures are admitted after dependency/toolchain feasibility
-  and native smoke coverage.
+### Tech choice and stack identity
 
-Track **8A** Linux, **8B** Darwin, **8C** Windows, **8D** FreeBSD/Android,
-**8E** architecture/build profiles and **8F** platform services/network-change
-behavior. Every advertised OS receives native configuration, listener, routing,
-process, persistence and shutdown evidence; unsupported combinations require
-Go-compatible rejection evidence.
+- **Device:** `tun-rs` (Apache-2.0); pin **2.8.9** with the **async** feature.
+- **Stack:** `netstack-smoltcp` (MIT OR Apache-2.0); pin **0.2.4**.
+- Do **not** self-implement a TCP/IP stack or pre-fork either crate.
+- **Config identity:** Rust accepts `stack: smoltcp` only. Go names
+  `system` / `gvisor` / `mixed` must be **rejected explicitly** — never silently
+  remapped. Defaults and exclusions are recorded in the
+  [compatibility matrix](compatibility-matrix.md).
+
+### Crate boundaries
+
+| Crate | Owns |
+| --- | --- |
+| `rust/crates/tun` | Packet/stack path and TCP/UDP sessions |
+| `platform` | Device/iface, route install, permission, restore |
+| `runtime` | Lifecycle, DNS/fake-IP, rules, outbound return |
+| `compat` | Native fixtures and Go/Rust differentials |
+
+### Prerequisite — SOCKS UDP reply framing
+
+Before TUN work: decouple SOCKS UDP reply framing from the shared UDP session
+relay so TUN (and other non-SOCKS) consumers can reuse the relay without
+SOCKS-specific write-back.
+
+### Delivery stages
+
+- **8A — Linux closed loop (first gate):** YAML → `tun-rs` device →
+  `netstack-smoltcp` → existing rules/outbound → return packets; DNS hijack and
+  fake-IP reverse lookup; auto-route plus safe exit/reload/cleanup. **Exclude**
+  from the first gate: TProxy, redir, auto-redirect, UID filters, GSO.
+- **8B — macOS arm64:** reuse the 8A data path; focus utun, permissions, route
+  and DNS restore, and native app-traffic acceptance.
+- **8C — Windows x86_64:** Wintun load/distribution/errors; routes, DNS and
+  priority; privilege/driver failure paths; must not break other VPNs.
+- **8F — stability / network-change (before 8D/8E):** Wi-Fi↔wired switch,
+  sleep/wake, half-close/RST/backpressure, UDP large/fragment/loss, resource
+  bounds, crash recovery beyond `Drop`. Prioritize **8F** before FreeBSD/Android
+  (**8D**) and extra architecture/build profiles (**8E**).
+
+### Test layers
+
+1. **Unprivileged unit** — parse, stack identity rejection, session/relay logic.
+2. **Privileged native** — Linux netns device/route/DNS/reload fixtures.
+3. **Go/Rust differential** — shared scenarios where both sides can run.
+
+CI must **not** green-skip missing privileges; privileged jobs fail closed or
+run only where privileges exist, without marking absent evidence as pass.
 
 ## Phase 9 — release replacement gate
 

@@ -123,12 +123,17 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ### Planning update and checkout scope — 2026-09-09
 
-Next: **TUN (Phase 8)**.
-6H-A/B/C TUIC v5 outbound TCP+UDP+lifecycle are implemented in this checkout (v4/0-RTT/inbound
-deferred). TUN remains unimplemented. Additional remote-protocol
-inbounds, WireGuard/AmneziaWG, SSH and other Phase 7 families are deferred.
-Canonical numbering is AnyTLS **6G**, Hysteria2 **HY2**, TUIC **6H**, SSR
-**7A–7D**. The [roadmap](roadmap.md#next-work-priority--2026-09-09) owns the plan.
+**TUN Phase 8 is in progress, starting with Linux 8A.** SSR and TUIC v5 outbound
+(6H-A/B/C) are done in this checkout (v4/0-RTT/inbound deferred). Device pin:
+`tun-rs` **2.8.9** (+ async). Stack pin: `netstack-smoltcp` **0.2.4**. Rust
+accepts `stack: smoltcp` only; Go `system`/`gvisor`/`mixed` are explicit
+rejects (never silent remap). Implementation begins after Phase 8 docs and the
+SOCKS UDP reply-framing / shared UDP session relay decoupling. TUN is not yet
+Parity. Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other
+Phase 7 families remain deferred. Canonical numbering is AnyTLS **6G**,
+Hysteria2 **HY2**, TUIC **6H**, SSR **7A–7D**. The
+[roadmap](roadmap.md#next-work-priority--2026-09-09) owns the plan
+([Phase 8 stages](roadmap.md#phase-8--tun-transparent-proxying-and-platform-breadth)).
 
 Hysteria2 PR #12 (`311a22dd`) and SSR PR #13 (`13995788`) are now merged into
 `codex/rust-rewrite`. SSR head `d89f7b60` passed 30 crate tests, format checking
