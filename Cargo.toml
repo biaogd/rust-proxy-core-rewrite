@@ -1,7 +1,15 @@
 [package]
 name = "rust-learning-notes"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 publish = false
+
+[lib]
+name = "rle_codec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rle-demo"
+path = "src/main.rs"
 
 [dependencies]
