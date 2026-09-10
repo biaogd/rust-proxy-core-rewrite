@@ -1,10 +1,13 @@
-//! TUIC v5 outbound adapter (6H-A: TCP over QUIC).
+//! TUIC v5 outbound adapter (6H-A TCP, 6H-B UDP).
 
 use std::time::Duration;
 
 use rewrite_config::ProxyConfig;
 use rewrite_model::Destination;
-use rewrite_protocol_tuic::{Client, ClientOptions, CongestionController, TlsOptions};
+use rewrite_protocol_tuic::{
+    Client, ClientOptions, CongestionController, TlsOptions, UdpRelayMode,
+    compute_max_udp_relay_packet_size,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -75,6 +78,48 @@ impl TuicClient {
     }
 }
 
+/// UDP association wrapping a TUIC v5 datagram/uni-stream session.
+pub struct TuicUdpAssociation {
+    session: rewrite_protocol_tuic::UdpSession,
+}
+
+/// Opens a TUIC UDP relay session (Go `ListenPacket`).
+///
+/// # Errors
+///
+/// Returns dial/auth failures or association allocation errors.
+pub async fn associate_tuic_udp(client: &TuicClient) -> Result<TuicUdpAssociation, TuicProxyError> {
+    let session = client.inner.open_udp().await?;
+    Ok(TuicUdpAssociation { session })
+}
+
+impl TuicUdpAssociation {
+    /// Sends `payload` to `destination` through the TUIC UDP relay.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the QUIC datagram or uni-stream send fails.
+    pub async fn send(
+        &self,
+        destination: &Destination,
+        payload: &[u8],
+    ) -> Result<(), TuicProxyError> {
+        self.session
+            .send(destination, payload)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Receives the next reassembled datagram as `(destination, payload)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns once the session or connection is closed.
+    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), TuicProxyError> {
+        self.session.recv().await.map_err(Into::into)
+    }
+}
+
 fn client_options_from_proxy(
     proxy: &ProxyConfig,
     custom_roots: &[String],
@@ -122,6 +167,11 @@ fn client_options_from_proxy(
     }
     max_open_streams = max_open_streams.max(1);
     let skip = proxy.skip_cert_verify || tuic.disable_sni;
+    let udp_relay_mode = if tuic.udp_relay_mode.eq_ignore_ascii_case("quic") {
+        UdpRelayMode::Quic
+    } else {
+        UdpRelayMode::Native
+    };
     Ok(ClientOptions {
         server: proxy.server.clone(),
         port: proxy.port,
@@ -139,5 +189,9 @@ fn client_options_from_proxy(
         max_open_streams,
         stream_receive_window: tuic.stream_receive_window,
         connection_receive_window: tuic.connection_receive_window,
+        udp_relay_mode,
+        max_udp_relay_packet_size: compute_max_udp_relay_packet_size(
+            tuic.max_udp_relay_packet_size,
+        ),
     })
 }

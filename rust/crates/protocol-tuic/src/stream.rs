@@ -7,6 +7,7 @@ use rewrite_model::Destination;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::TuicProtocolError;
+use crate::lease::StreamLease;
 use crate::protocol::encode_connect;
 
 /// Proxied TCP byte stream after the Connect command is written.
@@ -14,27 +15,43 @@ pub struct TuicStream {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     write_closed: bool,
+    _lease: StreamLease,
 }
 
 impl TuicStream {
     pub(crate) async fn open(
         connection: &quinn::Connection,
         destination: &Destination,
+        lease: StreamLease,
     ) -> Result<Self, TuicProtocolError> {
-        let (mut send, recv) = connection.open_bi().await?;
-        let header = encode_connect(destination)?;
-        send.write_all(&header)
-            .await
-            .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
-        send.flush()
-            .await
-            .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
-        Ok(Self {
-            send,
-            recv,
-            write_closed: false,
-        })
+        match open_connect(connection, destination).await {
+            Ok((send, recv)) => Ok(Self {
+                send,
+                recv,
+                write_closed: false,
+                _lease: lease,
+            }),
+            Err(error) => {
+                lease.release_now();
+                Err(error)
+            }
+        }
     }
+}
+
+async fn open_connect(
+    connection: &quinn::Connection,
+    destination: &Destination,
+) -> Result<(quinn::SendStream, quinn::RecvStream), TuicProtocolError> {
+    let (mut send, recv) = connection.open_bi().await?;
+    let header = encode_connect(destination)?;
+    send.write_all(&header)
+        .await
+        .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+    send.flush()
+        .await
+        .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+    Ok((send, recv))
 }
 
 impl AsyncRead for TuicStream {

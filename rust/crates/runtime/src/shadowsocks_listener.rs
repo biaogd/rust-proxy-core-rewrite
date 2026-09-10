@@ -560,6 +560,10 @@ async fn run_shadowsocks_inbound_udp_session(
             "error",
             format!("Hysteria2 UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"),
         ),
+        UdpSessionMode::Tuic(proxy) => state.log(
+            "error",
+            format!("TUIC UDP outbound {proxy} is unsupported from Shadowsocks UDP inbound"),
+        ),
     }
 }
 
@@ -758,6 +762,10 @@ async fn serve_shadowsocks_inbound_uot<S>(
         UdpSessionMode::Hysteria2(proxy) => state.log(
             "error",
             format!("Hysteria2 UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"),
+        ),
+        UdpSessionMode::Tuic(proxy) => state.log(
+            "error",
+            format!("TUIC UDP outbound {proxy} is unsupported from Shadowsocks UoT inbound"),
         ),
     }
 }

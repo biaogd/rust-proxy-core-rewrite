@@ -189,6 +189,7 @@ pub(super) enum UdpSessionMode {
     Trojan(String),
     AnyTls(String),
     Hysteria2(String),
+    Tuic(String),
 }
 
 #[derive(Default)]
@@ -310,6 +311,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Trojan if proxy.udp => Some(UdpSessionMode::Trojan(target.to_owned())),
         ProxyKind::AnyTls if proxy.udp => Some(UdpSessionMode::AnyTls(target.to_owned())),
         ProxyKind::Hysteria2 if proxy.udp => Some(UdpSessionMode::Hysteria2(target.to_owned())),
+        ProxyKind::Tuic if proxy.udp => Some(UdpSessionMode::Tuic(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -448,6 +450,12 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::Hysteria2(proxy) => {
             run_hysteria2_udp_session(
+                listener, source, first, requests, config, state, proxy, decision, shutdown,
+            )
+            .await;
+        }
+        UdpSessionMode::Tuic(proxy) => {
+            run_tuic_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
             )
             .await;
@@ -721,6 +729,89 @@ pub(super) async fn run_hysteria2_udp_session(
         if let Some(request) = current.take() {
             let destination = udp_proxy_destination(&request);
             if association.send(&destination, &request.payload).is_err() {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
+                    continue;
+                };
+                let packet = rewrite_inbound::encode_socks5_udp(remote, &payload);
+                if listener.send_to(&packet, source).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_tuic_udp_session(
+    listener: Arc<UdpSocket>,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name).cloned() else {
+        return;
+    };
+    if proxy.tuic.is_none() {
+        return;
+    }
+    let client = match super::tcp::tuic_client_for_proxy(&proxy, &config, &state).await {
+        Ok(client) => client,
+        Err(error) => {
+            state.log("error", format!("TUIC UDP client failed: {error}"));
+            return;
+        }
+    };
+    let mut association = match rewrite_outbound::associate_tuic_udp(&client).await {
+        Ok(association) => association,
+        Err(error) => {
+            state.log("error", format!("TUIC UDP association failed: {error}"));
+            return;
+        }
+    };
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
                 break;
             }
             uploaded = uploaded.saturating_add(request.payload.len() as u64);

@@ -543,7 +543,6 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         "bbr-profile",
         "disable-mtu-discovery",
         "dialer-proxy",
-        "max-udp-relay-packet-size",
         "max-datagram-frame-size",
         "ip",
     ];
@@ -560,6 +559,7 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         "max-stream-receive-window",
         "initial-connection-receive-window",
         "max-connection-receive-window",
+        "max-udp-relay-packet-size",
     ];
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
@@ -692,6 +692,10 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         hysteria2_extra_u64(&mut proxy.extra, "recv-window-conn")
             .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?,
     )?;
+    let max_udp_relay_packet_size =
+        hysteria2_extra_u64(&mut proxy.extra, "max-udp-relay-packet-size")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+            .unwrap_or(0);
     if !proxy.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -734,6 +738,7 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
             disable_sni,
             stream_receive_window,
             connection_receive_window,
+            max_udp_relay_packet_size,
         }),
         ssr: None,
         headers: BTreeMap::new(),

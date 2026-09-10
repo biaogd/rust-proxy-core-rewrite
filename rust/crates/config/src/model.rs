@@ -254,7 +254,7 @@ pub struct AnyTlsProxyConfig {
     pub carrier: AnyTlsCarrier,
 }
 
-/// Clash `type: tuic` options accepted in 6H-A (v5 TCP outbound).
+/// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).
 ///
 /// v4 `token`, `reduce-rtt` / 0-RTT, ECH, UDP-over-stream, Brutal/`cwnd` /
 /// `bbr-profile`, client certificates and inbound remain rejected.
@@ -271,6 +271,8 @@ pub struct TuicProxyConfig {
     pub disable_sni: bool,
     pub stream_receive_window: Option<u64>,
     pub connection_receive_window: Option<u64>,
+    /// YAML `max-udp-relay-packet-size`; `0` means Go's default 1252 before caps.
+    pub max_udp_relay_packet_size: u64,
 }
 
 /// Clash `type: hysteria2` options accepted in HY2-B (TCP + UDP outbound).

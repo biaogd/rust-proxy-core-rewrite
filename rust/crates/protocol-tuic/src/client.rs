@@ -2,18 +2,23 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::TuicProtocolError;
-use crate::protocol::encode_authenticate;
+use crate::lease::StreamLease;
+use crate::protocol::{compute_max_udp_relay_packet_size, encode_authenticate, encode_heartbeat};
 use crate::stream::TuicStream;
 use crate::tls::build_endpoint;
+use crate::udp::{UdpHub, UdpRelayMode, UdpSession};
+
+const IDLE_POOL_TTL: Duration = Duration::from_mins(30);
 
 /// TLS options for the TUIC QUIC dial.
 #[derive(Clone, Debug)]
@@ -47,6 +52,8 @@ pub struct ClientOptions {
     pub max_open_streams: u64,
     pub stream_receive_window: Option<u64>,
     pub connection_receive_window: Option<u64>,
+    pub udp_relay_mode: UdpRelayMode,
+    pub max_udp_relay_packet_size: usize,
 }
 
 impl Default for ClientOptions {
@@ -68,6 +75,8 @@ impl Default for ClientOptions {
             max_open_streams: 90,
             stream_receive_window: None,
             connection_receive_window: None,
+            udp_relay_mode: UdpRelayMode::Native,
+            max_udp_relay_packet_size: compute_max_udp_relay_packet_size(0),
         }
     }
 }
@@ -75,9 +84,49 @@ impl Default for ClientOptions {
 struct SessionInner {
     connection: quinn::Connection,
     closed: AtomicBool,
+    udp: Arc<UdpHub>,
+    open_streams: Arc<AtomicU64>,
+    last_visited: std::sync::Mutex<Instant>,
 }
 
-/// Long-lived TUIC v5 client with one reusable QUIC connection.
+impl SessionInner {
+    fn live(&self) -> bool {
+        !self.closed.load(Ordering::Acquire) && self.connection.close_reason().is_none()
+    }
+
+    fn touch(&self) {
+        if let Ok(mut visited) = self.last_visited.lock() {
+            *visited = Instant::now();
+        }
+    }
+
+    fn last_visited_at(&self) -> Instant {
+        self.last_visited
+            .lock()
+            .map_or_else(|poisoned| *poisoned.into_inner(), |guard| *guard)
+    }
+
+    /// Go `openStreams.Add(1)` then `>= MaxOpenStreams` rollback.
+    fn try_reserve(&self, max_open_streams: u64) -> Option<StreamLease> {
+        let next = self.open_streams.fetch_add(1, Ordering::AcqRel) + 1;
+        if next >= max_open_streams {
+            self.open_streams.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        self.touch();
+        Some(StreamLease::new(Arc::clone(&self.open_streams)))
+    }
+
+    fn invalidate(&self) {
+        self.closed.store(true, Ordering::Release);
+        if self.connection.close_reason().is_none() {
+            self.connection
+                .close(0xffff_fff0_u32.into(), b"TUIC session reset");
+        }
+    }
+}
+
+/// Long-lived TUIC v5 client with a Go-style pool of QUIC connections.
 pub struct Client {
     options: ClientOptions,
     inner: Mutex<ClientState>,
@@ -85,7 +134,7 @@ pub struct Client {
 
 struct ClientState {
     endpoint: Option<quinn::Endpoint>,
-    session: Option<Arc<SessionInner>>,
+    sessions: Vec<Arc<SessionInner>>,
 }
 
 impl Client {
@@ -107,7 +156,7 @@ impl Client {
             options,
             inner: Mutex::new(ClientState {
                 endpoint: None,
-                session: None,
+                sessions: Vec::new(),
             }),
         })
     }
@@ -122,22 +171,54 @@ impl Client {
         destination: &Destination,
     ) -> Result<BoxedStream, TuicProtocolError> {
         let timeout = self.options.request_timeout;
+        let max_open_streams = self.options.max_open_streams.max(1);
         let open = async {
-            let session = self.session().await?;
-            if session.closed.load(Ordering::Acquire) || session.connection.close_reason().is_some()
-            {
-                self.invalidate().await;
-                let session = self.session().await?;
-                let stream = TuicStream::open(&session.connection, destination).await?;
-                return Ok(Box::new(stream) as BoxedStream);
-            }
-            match TuicStream::open(&session.connection, destination).await {
-                Ok(stream) => Ok(Box::new(stream) as BoxedStream),
-                Err(error) => {
-                    self.invalidate().await;
-                    Err(error)
+            let mut last_error = None;
+            for _ in 0..3_u8 {
+                let (session, lease) = self.reserve_session(max_open_streams).await?;
+                match TuicStream::open(&session.connection, destination, lease).await {
+                    Ok(stream) => return Ok(Box::new(stream) as BoxedStream),
+                    Err(error) => {
+                        session.invalidate();
+                        last_error = Some(error);
+                    }
                 }
             }
+            Err(last_error
+                .unwrap_or_else(|| TuicProtocolError::Protocol("TUIC TCP dial failed".to_owned())))
+        };
+        tokio::time::timeout(timeout, open)
+            .await
+            .map_err(|_| TuicProtocolError::Protocol("TUIC request timed out".to_owned()))?
+    }
+
+    /// Opens a UDP association (`ASSOC_ID`) on the shared QUIC connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns dial, TLS, authentication or association-allocation failures.
+    pub async fn open_udp(&self) -> Result<UdpSession, TuicProtocolError> {
+        let timeout = self.options.request_timeout;
+        let max_open_streams = self.options.max_open_streams.max(1);
+        let open = async {
+            let mut last_error = None;
+            for _ in 0..3_u8 {
+                let (session, lease) = self.reserve_session(max_open_streams).await?;
+                match session.udp.open_session() {
+                    Ok(mut udp) => {
+                        udp.attach_lease(lease);
+                        return Ok(udp);
+                    }
+                    Err(error) => {
+                        lease.release_now();
+                        session.invalidate();
+                        last_error = Some(error);
+                    }
+                }
+            }
+            Err(last_error.unwrap_or_else(|| {
+                TuicProtocolError::Protocol("TUIC UDP association failed".to_owned())
+            }))
         };
         tokio::time::timeout(timeout, open)
             .await
@@ -146,7 +227,7 @@ impl Client {
 
     pub async fn close(&self) {
         let mut state = self.inner.lock().await;
-        if let Some(session) = state.session.take() {
+        for session in state.sessions.drain(..) {
             session.closed.store(true, Ordering::Release);
             session
                 .connection
@@ -157,28 +238,35 @@ impl Client {
         }
     }
 
-    async fn invalidate(&self) {
+    async fn reserve_session(
+        &self,
+        max_open_streams: u64,
+    ) -> Result<(Arc<SessionInner>, StreamLease), TuicProtocolError> {
         let mut state = self.inner.lock().await;
-        if let Some(session) = state.session.take() {
-            session.closed.store(true, Ordering::Release);
-            if session.connection.close_reason().is_none() {
-                session
-                    .connection
-                    .close(0xffff_fff0_u32.into(), b"TUIC session reset");
+        prune_sessions(&mut state.sessions);
+        let mut best: Option<Arc<SessionInner>> = None;
+        for session in &state.sessions {
+            if !session.live() {
+                continue;
+            }
+            let current = session.open_streams.load(Ordering::Acquire);
+            let best_load = best
+                .as_ref()
+                .map_or(u64::MAX, |item| item.open_streams.load(Ordering::Acquire));
+            if current < best_load {
+                best = Some(Arc::clone(session));
             }
         }
-    }
-
-    async fn session(&self) -> Result<Arc<SessionInner>, TuicProtocolError> {
-        let mut state = self.inner.lock().await;
-        if let Some(session) = &state.session
-            && !session.closed.load(Ordering::Acquire)
-            && session.connection.close_reason().is_none()
+        if let Some(session) = best
+            && let Some(lease) = session.try_reserve(max_open_streams)
         {
-            return Ok(Arc::clone(session));
+            return Ok((session, lease));
         }
-        state.session = None;
-        self.dial_locked(&mut state).await
+        let session = self.dial_locked(&mut state).await?;
+        let lease = session
+            .try_reserve(max_open_streams)
+            .ok_or_else(|| TuicProtocolError::Protocol("TUIC too many open streams".to_owned()))?;
+        Ok((session, lease))
     }
 
     async fn dial_locked(
@@ -203,12 +291,20 @@ impl Client {
             .map_err(|error| TuicProtocolError::Quinn(error.to_string()))?;
         let connection = connecting.await?;
         authenticate(&connection, self.options.uuid, &self.options.password).await?;
-        spawn_datagram_drain(connection.clone());
+        let udp = UdpHub::new(
+            connection.clone(),
+            self.options.udp_relay_mode,
+            self.options.max_udp_relay_packet_size,
+        );
+        spawn_heartbeat(connection.clone(), self.options.heartbeat_interval);
         let session = Arc::new(SessionInner {
             connection,
             closed: AtomicBool::new(false),
+            udp,
+            open_streams: Arc::new(AtomicU64::new(0)),
+            last_visited: std::sync::Mutex::new(Instant::now()),
         });
-        state.session = Some(Arc::clone(&session));
+        state.sessions.push(Arc::clone(&session));
         Ok(session)
     }
 }
@@ -233,12 +329,42 @@ async fn authenticate(
     Ok(())
 }
 
-fn spawn_datagram_drain(connection: quinn::Connection) {
+fn spawn_heartbeat(connection: quinn::Connection, interval: Duration) {
+    if interval.is_zero() {
+        return;
+    }
     tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
         loop {
-            if connection.read_datagram().await.is_err() {
+            ticker.tick().await;
+            if connection.close_reason().is_some() {
                 break;
             }
+            if connection
+                .send_datagram(Bytes::from(encode_heartbeat()))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
+fn prune_sessions(sessions: &mut Vec<Arc<SessionInner>>) {
+    let now = Instant::now();
+    sessions.retain(|session| {
+        if !session.live() {
+            return false;
+        }
+        let idle = session.open_streams.load(Ordering::Acquire) == 0
+            && now.saturating_duration_since(session.last_visited_at()) > IDLE_POOL_TTL;
+        if idle {
+            session.invalidate();
+            false
+        } else {
+            true
         }
     });
 }

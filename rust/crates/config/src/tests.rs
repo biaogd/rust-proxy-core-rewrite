@@ -342,6 +342,15 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
     assert_eq!(options.request_timeout_ms, 5000);
     assert_eq!(options.heartbeat_interval_ms, 8000);
     assert_eq!(options.max_open_streams, 32);
+    assert_eq!(options.max_udp_relay_packet_size, 0);
+
+    let sized = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: tuic-udp\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    udp-relay-mode: quic\n    max-udp-relay-packet-size: 1200\n"
+    ))
+    .expect("TUIC UDP options");
+    let sized_opts = sized.proxies[0].tuic.as_ref().expect("sized");
+    assert_eq!(sized_opts.udp_relay_mode, "quic");
+    assert_eq!(sized_opts.max_udp_relay_packet_size, 1200);
 
     let defaults = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: tuic-defaults\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n"
@@ -358,6 +367,7 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
         "cwnd: 32",
         "bbr-profile: aggressive",
         "congestion-controller: brutal",
+        "max-datagram-frame-size: 1400",
         "fingerprint: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         "uuid: not-a-uuid",
     ] {

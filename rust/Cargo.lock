@@ -3071,6 +3071,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "quinn",
+ "rand 0.10.2",
  "rewrite-io",
  "rewrite-model",
  "rustls-native-certs",

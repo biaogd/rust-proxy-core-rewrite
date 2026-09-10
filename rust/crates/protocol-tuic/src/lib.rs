@@ -1,18 +1,23 @@
-//! TUIC v5 client protocol: TLS exporter authentication and TCP Connect
-//! over QUIC streams (Phase 6H-A). UDP relay, v4, 0-RTT and inbound are
+//! TUIC v5 client protocol: TLS exporter authentication, TCP Connect, and
+//! UDP relay over QUIC (Phase 6H-A/B). v4, 0-RTT, inbound and ECH remain
 //! out of scope.
 
 mod client;
+mod lease;
 mod protocol;
 mod stream;
 mod tls;
+mod udp;
 
 pub use client::{Client, ClientOptions, CongestionController, TlsOptions};
 pub use protocol::{
-    ATYP_DOMAIN, ATYP_IPV4, ATYP_IPV6, CMD_AUTHENTICATE, CMD_CONNECT, VERSION, decode_address,
-    encode_authenticate, encode_connect,
+    ATYP_DOMAIN, ATYP_IPV4, ATYP_IPV6, CMD_AUTHENTICATE, CMD_CONNECT, CMD_DISSOCIATE,
+    CMD_HEARTBEAT, CMD_PACKET, MAX_FRAG_SIZE, PACKET_OVERHEAD_GO, Packet, VERSION,
+    compute_max_udp_relay_packet_size, decode_address, decode_packet, encode_authenticate,
+    encode_connect, encode_dissociate, encode_heartbeat, encode_packet,
 };
 pub use stream::TuicStream;
+pub use udp::{UdpRelayMode, UdpSession};
 
 use thiserror::Error;
 

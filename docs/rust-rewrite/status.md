@@ -54,8 +54,21 @@ SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/ne
 uses the TLS 1.3 exporter over UUID bytes and password, then a uni-stream
 Authenticate command. TCP Connect rides a QUIC bidirectional stream. Congestion
 controller *names* `cubic`/`new_reno`/`bbr` are accepted; algorithm identity
-with Go's quic-go Cubic/BBR is not claimed. UDP, v4, 0-RTT, inbound, ECH and
+with Go's quic-go Cubic/BBR is not claimed. v4, 0-RTT, inbound, ECH and
 UDP-over-stream remain rejected or unimplemented.
+
+**Phase 6H-B (2026-09-10):** TUIC v5 outbound UDP is implemented on the same
+QUIC session: native QUIC DATAGRAM (with Go-compatible fragment reassembly) and
+`udp-relay-mode: quic` uni-stream packets, Dissociate on association close, and
+mixed/SOCKS UDP session wiring.
+
+**Phase 6H-C (2026-09-10):** TUIC v5 outbound lifecycle: Go-style QUIC connection
+pool when `max-open-streams` is reached, delayed stream-slot release (5s), TUIC
+Heartbeat datagrams on `heartbeat-interval` in addition to QUIC keep-alive,
+reconnect after peer loss plus controller reload, cancel isolation, cubic /
+new_reno / bbr *names*, concurrent TCP+UDP, and a short TCP+UDP soak. v4, 0-RTT,
+inbound, ECH and UDP-over-stream remain rejected. Algorithm identity with
+quic-go Cubic/BBR is not claimed. Three-platform CI pending.
 
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
@@ -63,8 +76,8 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ### Planning update and checkout scope — 2026-09-09
 
-Next: **TUIC v5 6H-B UDP → 6H-C lifecycle → TUN (Phase 8)**.
-6H-A TUIC v5 outbound TCP is implemented in this checkout (v4/0-RTT/inbound
+Next: **TUN (Phase 8)**.
+6H-A/B/C TUIC v5 outbound TCP+UDP+lifecycle are implemented in this checkout (v4/0-RTT/inbound
 deferred). TUN remains unimplemented. Additional remote-protocol
 inbounds, WireGuard/AmneziaWG, SSH and other Phase 7 families are deferred.
 Canonical numbering is AnyTLS **6G**, Hysteria2 **HY2**, TUIC **6H**, SSR
@@ -260,7 +273,9 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | HY2-A Hysteria2 outbound TCP | Complete in declared client scope | Clash `type: hysteria2` parse (BBR when up/down unset via stock Quinn `BbrConfig`); HTTP/3 auth + custom QUIC TCP streams; TLS verify/skip; session reuse; groups/providers/health/reload; deferred knobs rejected; Go/Rust differential vs Go HY2 inbound (`phase_hy2a_hysteria2_tcp.py`) |
 | HY2-B Hysteria2 UDP/obfs/Brutal/hop | Partial; Brutal experimental and deferred | UDP/Salamander/hop differential exists; current production target uses stock BBR with up/down omitted. Approximate Brutal remains in code/tests but precise pacing/parity and Quinn patch work are deferred by user. See 2026-09-08 readiness update; no production claim. |
 | HY2-C Hysteria2 stress/netem/soak | Production acceptance open | Stress/recovery differential passed locally with native samples. Historical permissive soak on `8a9b0761` is not current acceptance; strict short soak exposed UDP association-churn timeouts in Go and Rust. Strict long release soak and native platform evidence remain open. |
-| Phase 6H-A TUIC v5 outbound TCP | Complete in declared client scope | Clash `type: tuic` v5 UUID/password parse; QUIC/TLS with rustls exporter auth; TCP Connect over bidi streams; rules/groups/providers/health/reload; v4 token, 0-RTT, ECH, UDP-over-stream and Brutal rejected; Go/Rust differential vs Go TUIC inbound (`phase6h_tuic_tcp.py`). UDP relay is 6H-B |
+| Phase 6H-A TUIC v5 outbound TCP | Complete in declared client scope | Clash `type: tuic` v5 UUID/password parse; QUIC/TLS with rustls exporter auth; TCP Connect over bidi streams; rules/groups/providers/health/reload; v4 token, 0-RTT, ECH, UDP-over-stream and Brutal rejected; Go/Rust differential vs Go TUIC inbound (`phase6h_tuic_tcp.py`) |
+| Phase 6H-B TUIC v5 outbound UDP | Complete in declared client scope | Native QUIC DATAGRAM and `udp-relay-mode: quic` uni-stream relay; packet/assoc IDs; native fragmentation + 10s defrag (reorder/duplicate/invalid FRAG_ID); Dissociate on association drop; mixed/SOCKS UDP idle 1m; `max-udp-relay-packet-size` accepted (`max-datagram-frame-size` still rejected). Evidence: `phase6h_tuic_udp.py` plus crate unit tests |
+| Phase 6H-C TUIC v5 outbound lifecycle | Complete locally in declared client scope; three-platform CI pending | Connection pool on `max-open-streams`, 5s delayed slot release, Heartbeat datagrams + QUIC keep-alive, cubic/new_reno/bbr names, cancel/restart/reload, concurrent TCP+UDP, malformed decode unit tests, short soak. Evidence: `phase6h_tuic_lifecycle.py` / `phase6h_tuic_soak.py`. Algorithm identity with quic-go is not claimed |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |

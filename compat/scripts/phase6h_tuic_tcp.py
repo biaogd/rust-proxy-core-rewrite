@@ -67,6 +67,7 @@ def tuic_record(
     password: str = PASSWORD,
     skip_verify: bool = True,
     uuid: str = UUID,
+    extra: str = "",
 ) -> str:
     skip = "true" if skip_verify else "false"
     return f"""  - name: {name}
@@ -78,7 +79,7 @@ def tuic_record(
     sni: {SNI}
     alpn: [h3]
     skip-cert-verify: {skip}
-"""
+{extra}"""
 
 
 def exchange(
