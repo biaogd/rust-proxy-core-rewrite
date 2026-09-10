@@ -1,4 +1,5 @@
-//! Darwin system DNS ownership via `scutil` (no `SystemConfiguration` FFI).
+//! Darwin system DNS ownership via `scutil` (no `SystemConfiguration` FFI)
+//! and Windows TUN-adapter DNS via `netsh` (no IP Helper FFI).
 //!
 //! macOS applications resolve through getaddrinfo / the primary network
 //! service. Packet hijack of `8.8.8.8:53` on the TUN is not enough: the
@@ -6,10 +7,11 @@
 //! pointed at the TUN DNS address (Go: TUN IPv4 next address).
 //!
 //! Linux 8A hijacks DNS at the packet layer and does not rewrite resolv.conf.
-//! Windows DNS ownership is 8C.
+//! Windows 8C sets DNS on the Wintun adapter only and never rewrites other
+//! NICs, so other VPNs keep their own DNS.
 
 use std::net::IpAddr;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
 use crate::PlatformError;
@@ -27,10 +29,30 @@ struct DarwinDnsSnapshot {
     original: Option<DarwinDnsConfig>,
 }
 
-/// Applied Darwin DNS rewrite. Restored on [`DnsOwner::restore`] or drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsDnsSnapshot {
+    interface: String,
+    original: WindowsDnsOrigin,
+}
+
+/// How DNS was configured on a Windows adapter before TUN ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowsDnsOrigin {
+    Dhcp,
+    Static(Vec<IpAddr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+enum DnsSnapshot {
+    Darwin(DarwinDnsSnapshot),
+    Windows(WindowsDnsSnapshot),
+}
+
+/// Applied Darwin/Windows DNS rewrite. Restored on [`DnsOwner::restore`] or drop.
 #[derive(Debug)]
 pub struct DnsOwner {
-    snapshot: Option<DarwinDnsSnapshot>,
+    snapshot: Option<DnsSnapshot>,
 }
 
 impl DnsOwner {
@@ -39,23 +61,38 @@ impl DnsOwner {
         Self { snapshot: None }
     }
 
-    /// Restores the captured primary-service DNS, or no-ops when none was applied.
+    /// Restores captured DNS, or no-ops when none was applied.
     ///
     /// # Errors
     ///
-    /// Returns scutil restore failures after a Darwin rewrite.
+    /// Returns scutil or netsh restore failures.
     pub fn restore(&mut self) -> Result<(), PlatformError> {
         let Some(snapshot) = self.snapshot.take() else {
             return Ok(());
         };
-        #[cfg(target_os = "macos")]
-        {
-            restore_darwin_dns(&snapshot)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = snapshot;
-            Ok(())
+        match snapshot {
+            DnsSnapshot::Darwin(snapshot) => {
+                #[cfg(target_os = "macos")]
+                {
+                    restore_darwin_dns(&snapshot)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = snapshot;
+                    Ok(())
+                }
+            }
+            DnsSnapshot::Windows(snapshot) => {
+                #[cfg(target_os = "windows")]
+                {
+                    restore_windows_dns(&snapshot)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = snapshot;
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -66,12 +103,13 @@ impl Drop for DnsOwner {
     }
 }
 
-/// Linux: no-op. Darwin: rewrite primary service DNS. Windows: fail-closed.
+/// Linux: no-op. Darwin: rewrite primary service DNS. Windows: fail-closed
+/// unless [`apply_windows_tun_interface_dns`] is used.
 ///
 /// # Errors
 ///
 /// Returns when scutil cannot snapshot or rewrite the primary service, or when
-/// the platform is outside the 8A/8B surface.
+/// the platform is outside the 8A/8B/8C surface.
 pub fn apply_tun_system_dns(dns: IpAddr) -> Result<DnsOwner, PlatformError> {
     #[cfg(target_os = "linux")]
     {
@@ -82,7 +120,7 @@ pub fn apply_tun_system_dns(dns: IpAddr) -> Result<DnsOwner, PlatformError> {
     {
         let _ = dns;
         Err(PlatformError::Unsupported(
-            "Windows system DNS ownership is Phase 8C, not 8B".into(),
+            "Windows TUN DNS must target the Wintun adapter via apply_windows_tun_interface_dns; refusing to rewrite other NICs".into(),
         ))
     }
     #[cfg(target_os = "macos")]
@@ -93,14 +131,53 @@ pub fn apply_tun_system_dns(dns: IpAddr) -> Result<DnsOwner, PlatformError> {
             return Err(error);
         }
         Ok(DnsOwner {
-            snapshot: Some(snapshot),
+            snapshot: Some(DnsSnapshot::Darwin(snapshot)),
         })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = dns;
         Err(PlatformError::Unsupported(
-            "system DNS ownership is Darwin-only in Phase 8B".into(),
+            "system DNS ownership is Darwin/Windows-only in Phase 8B/8C".into(),
+        ))
+    }
+}
+
+/// Sets DNS on the named Windows TUN adapter only (never the physical NIC).
+///
+/// # Errors
+///
+/// Returns when `netsh` cannot snapshot or rewrite the adapter, or when the
+/// platform is not Windows.
+pub fn apply_windows_tun_interface_dns(
+    interface: &str,
+    dns: IpAddr,
+) -> Result<DnsOwner, PlatformError> {
+    if interface.is_empty() {
+        return Err(PlatformError::Dns(
+            "Windows TUN DNS requires the Wintun adapter name".into(),
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let original = snapshot_windows_dns(interface)?;
+        let snapshot = WindowsDnsSnapshot {
+            interface: interface.to_owned(),
+            original,
+        };
+        if let Err(error) = apply_windows_dns(interface, dns) {
+            let _ = restore_windows_dns(&snapshot);
+            return Err(error);
+        }
+        Ok(DnsOwner {
+            snapshot: Some(DnsSnapshot::Windows(snapshot)),
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = dns;
+        Err(PlatformError::Unsupported(
+            "Windows TUN adapter DNS is Phase 8C".into(),
         ))
     }
 }
@@ -221,6 +298,147 @@ pub fn build_scutil_remove_script(key: &str) -> String {
     format!("remove {key}\nquit\n")
 }
 
+/// Builds `netsh interface ipv4 set dnsservers` arguments for the TUN adapter.
+#[must_use]
+pub fn windows_set_tun_dns_args(interface: &str, dns: IpAddr) -> Vec<String> {
+    vec![
+        "interface".to_owned(),
+        "ipv4".to_owned(),
+        "set".to_owned(),
+        "dnsservers".to_owned(),
+        format!("name={interface}"),
+        "static".to_owned(),
+        dns.to_string(),
+        "primary".to_owned(),
+        "validate=no".to_owned(),
+    ]
+}
+
+/// Builds `netsh` arguments that restore DHCP DNS on the TUN adapter.
+#[must_use]
+pub fn windows_restore_dhcp_dns_args(interface: &str) -> Vec<String> {
+    vec![
+        "interface".to_owned(),
+        "ipv4".to_owned(),
+        "set".to_owned(),
+        "dnsservers".to_owned(),
+        format!("name={interface}"),
+        "source=dhcp".to_owned(),
+        "validate=no".to_owned(),
+    ]
+}
+
+/// Parses one adapter block from `netsh interface ipv4 show dnsservers`.
+#[must_use]
+pub fn parse_netsh_dnsservers(stdout: &str, interface: &str) -> WindowsDnsOrigin {
+    let needle = format!("Configuration for interface \"{interface}\"");
+    let rest = stdout
+        .split(&needle)
+        .nth(1)
+        .or_else(|| {
+            stdout
+                .split(&format!("Configuration for interface '{interface}'"))
+                .nth(1)
+        })
+        .unwrap_or("");
+    let block = rest
+        .split("Configuration for interface")
+        .next()
+        .unwrap_or(rest);
+    let mut servers = Vec::new();
+    let mut dhcp = false;
+    for line in block.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("configured through dhcp") {
+            dhcp = true;
+        }
+        for token in trimmed.split_whitespace() {
+            if let Ok(address) = token.trim_end_matches(',').parse::<IpAddr>() {
+                servers.push(address);
+            }
+        }
+    }
+    if dhcp || servers.is_empty() {
+        WindowsDnsOrigin::Dhcp
+    } else {
+        WindowsDnsOrigin::Static(servers)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn snapshot_windows_dns(interface: &str) -> Result<WindowsDnsOrigin, PlatformError> {
+    let output = Command::new("netsh")
+        .args(["interface", "ipv4", "show", "dnsservers"])
+        .output()
+        .map_err(PlatformError::Io)?;
+    if !output.status.success() {
+        return Err(PlatformError::Dns(format!(
+            "netsh show dnsservers failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(parse_netsh_dnsservers(
+        &String::from_utf8_lossy(&output.stdout),
+        interface,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_dns(interface: &str, dns: IpAddr) -> Result<(), PlatformError> {
+    let args = windows_set_tun_dns_args(interface, dns);
+    let output = Command::new("netsh")
+        .args(&args)
+        .output()
+        .map_err(PlatformError::Io)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stderr}{stdout}");
+    if looks_like_permission(&combined) {
+        return Err(PlatformError::Dns(format!(
+            "netsh DNS rewrite for `{interface}` requires Administrator; refusing to skip: {combined}"
+        )));
+    }
+    Err(PlatformError::Dns(format!(
+        "netsh DNS rewrite for `{interface}` failed: {combined}"
+    )))
+}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_dns(snapshot: &WindowsDnsSnapshot) -> Result<(), PlatformError> {
+    match &snapshot.original {
+        WindowsDnsOrigin::Dhcp => {
+            let args = windows_restore_dhcp_dns_args(&snapshot.interface);
+            let output = Command::new("netsh")
+                .args(&args)
+                .output()
+                .map_err(PlatformError::Io)?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(PlatformError::Dns(format!(
+                    "netsh DNS restore for `{}` failed: {}{}",
+                    snapshot.interface,
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&output.stdout)
+                )))
+            }
+        }
+        WindowsDnsOrigin::Static(servers) => {
+            let Some(first) = servers.first() else {
+                return restore_windows_dns(&WindowsDnsSnapshot {
+                    interface: snapshot.interface.clone(),
+                    original: WindowsDnsOrigin::Dhcp,
+                });
+            };
+            apply_windows_dns(&snapshot.interface, *first)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DictMode {
     Root,
@@ -255,13 +473,15 @@ fn is_missing_dns_key(error: &PlatformError) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn looks_like_permission(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("permission")
         || lower.contains("operation not permitted")
         || lower.contains("not privileged")
         || lower.contains("must be root")
+        || lower.contains("access is denied")
+        || lower.contains("requires elevation")
 }
 
 #[cfg(target_os = "macos")]
@@ -436,5 +656,45 @@ mod tests {
     fn scutil_remove_script_targets_service_key() {
         let script = build_scutil_remove_script(&darwin_dns_key("ABCD"));
         assert_eq!(script, "remove State:/Network/Service/ABCD/DNS\nquit\n");
+    }
+
+    #[test]
+    fn windows_dns_args_target_named_adapter_only() {
+        assert_eq!(
+            windows_set_tun_dns_args("mihomo", "198.18.0.2".parse().expect("dns")),
+            vec![
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                "name=mihomo",
+                "static",
+                "198.18.0.2",
+                "primary",
+                "validate=no"
+            ]
+        );
+        assert_eq!(windows_restore_dhcp_dns_args("mihomo")[4], "name=mihomo");
+    }
+
+    #[test]
+    fn parses_netsh_dnsservers_dhcp_and_static() {
+        let stdout = r#"
+Configuration for interface "Ethernet"
+    DNS servers configured through DHCP:  192.168.1.1
+    Register with which suffix:           Primary only
+
+Configuration for interface "mihomo"
+    Statically Configured DNS Servers:    198.18.0.2
+    Register with which suffix:           None
+"#;
+        assert_eq!(
+            parse_netsh_dnsservers(stdout, "Ethernet"),
+            WindowsDnsOrigin::Dhcp
+        );
+        assert_eq!(
+            parse_netsh_dnsservers(stdout, "mihomo"),
+            WindowsDnsOrigin::Static(vec!["198.18.0.2".parse().expect("dns")])
+        );
     }
 }

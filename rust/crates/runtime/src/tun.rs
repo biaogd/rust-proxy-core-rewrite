@@ -7,9 +7,12 @@ use rewrite_config::{Config, DnsClassicEndpoint, DnsResolverClient, TunConfig};
 use rewrite_inbound::{BoxedInboundStream, InboundStream};
 #[cfg(target_os = "macos")]
 use rewrite_platform::apply_tun_system_dns;
+#[cfg(target_os = "windows")]
+use rewrite_platform::apply_windows_tun_interface_dns;
 use rewrite_platform::{
     DnsOwner, OwnedRoute, RouteOwner, current_route_platform, default_auto_route_destinations,
-    install_device_route, protect_host_route, validate_tun_device_name,
+    install_device_route, protect_host_route, reject_existing_windows_tun_device,
+    validate_tun_device_name,
 };
 use rewrite_state::RuntimeState;
 use rewrite_tun::{
@@ -69,7 +72,7 @@ impl tokio::io::AsyncWrite for TunClientStream {
     }
 }
 
-/// Runs the Linux/macOS TUN data path until cancelled, then restores DNS and routes.
+/// Runs the Linux/macOS/Windows TUN data path until cancelled, then restores DNS and routes.
 pub(super) async fn run_tun_listener(
     tun_config: TunConfig,
     config: watch::Receiver<Arc<Config>>,
@@ -107,16 +110,16 @@ fn tun_runtime_supported() -> Result<(), RuntimeError> {
                 .to_owned(),
         ));
     }
-    if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
-        return Ok(());
-    }
-    if cfg!(target_os = "windows") {
+    if cfg!(all(target_os = "windows", not(target_arch = "x86_64"))) {
         return Err(RuntimeError::Tun(
-            "Phase 8C TUN runtime is Windows-only; 8B is Darwin arm64".to_owned(),
+            "Phase 8C is Windows x86_64 only; other Windows arches are not in this gate".to_owned(),
         ));
     }
+    if cfg!(target_os = "linux") || cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+        return Ok(());
+    }
     Err(RuntimeError::Tun(
-        "Phase 8A/8B TUN runtime is Linux and macOS only; Windows arrives in 8C".to_owned(),
+        "Phase 8A/8B/8C TUN runtime is Linux, Darwin arm64, and Windows x86_64 only".to_owned(),
     ))
 }
 
@@ -129,6 +132,8 @@ struct PreparedTun {
 
 fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, RuntimeError> {
     validate_tun_device_name(&tun_config.device, current_route_platform())
+        .map_err(|error| RuntimeError::Tun(error.to_string()))?;
+    reject_existing_windows_tun_device(&tun_config.device)
         .map_err(|error| RuntimeError::Tun(error.to_string()))?;
     let device_config = TunDeviceConfig::from_tun_config(tun_config);
     let device =
@@ -145,7 +150,7 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
             return Err(RuntimeError::Tun(error.to_string()));
         }
     }
-    let dns = match apply_system_dns(tun_config) {
+    let dns = match apply_system_dns(tun_config, &device_name) {
         Ok(owner) => owner,
         Err(error) => {
             let _ = routes.revert_all();
@@ -160,19 +165,29 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
     })
 }
 
-#[allow(clippy::unnecessary_wraps)] // Darwin scutil apply can fail; Linux is a no-op.
-fn apply_system_dns(tun_config: &TunConfig) -> Result<DnsOwner, RuntimeError> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = tun_config;
-        Ok(DnsOwner::noop())
-    }
+#[allow(clippy::unnecessary_wraps)] // Darwin/Windows apply can fail; Linux is a no-op.
+fn apply_system_dns(tun_config: &TunConfig, device_name: &str) -> Result<DnsOwner, RuntimeError> {
     #[cfg(target_os = "macos")]
     {
+        let _ = device_name;
         let address = tun_config.tun_dns_server().ok_or_else(|| {
             RuntimeError::Tun("Darwin TUN system DNS requires inet4-address".to_owned())
         })?;
         apply_tun_system_dns(address).map_err(|error| RuntimeError::Tun(error.to_string()))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let address = tun_config.tun_dns_server().ok_or_else(|| {
+            RuntimeError::Tun("Windows TUN adapter DNS requires inet4-address".to_owned())
+        })?;
+        apply_windows_tun_interface_dns(device_name, address)
+            .map_err(|error| RuntimeError::Tun(error.to_string()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = tun_config;
+        let _ = device_name;
+        Ok(DnsOwner::noop())
     }
 }
 

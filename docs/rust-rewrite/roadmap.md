@@ -1306,7 +1306,8 @@ separate exit gates inside these labels.
 The agreed next-work order was **SSR review/CI closure → TUIC v5 outbound →
 TUN integration**. This supersedes the previous numerical development order.
 **SSR and TUIC v5 outbound are done in this checkout**; **TUN (Phase 8) is
-current**, with Linux **8A** implemented and Darwin **8B** in this checkout.
+current**, with Linux **8A**, Darwin **8B**, and Windows **8C** implemented in
+this checkout. Native Parity waits on the privileged CI jobs.
 Existing-protocol regressions remain
 release blockers; this schedule does not declare Hysteria2, SSR or any other
 partial implementation production-ready. See [status](status.md) for
@@ -1320,9 +1321,10 @@ branch-specific evidence versus implementation in this checkout, and
    v4, 0-RTT and server direction remain deferred; unsupported options must
    fail explicitly rather than downgrade.
 3. **TUN (Phase 8) — current:** deliver **8A → 8B → 8C**, then prioritize
-   **8F** before mobile/more arches (**8D/8E** later). 8A Linux parse/runtime
-   and 8B Darwin arm64 utun/route/DNS restore are implemented in this
-   checkout; native Parity waits on the privileged CI jobs. TUN is packet
+   **8F** before mobile/more arches (**8D/8E** later). 8A Linux parse/runtime,
+   8B Darwin arm64 utun/route/DNS restore, and 8C Windows x86_64 Wintun/route/
+   adapter DNS are implemented in this checkout; native Parity waits on the
+   privileged CI jobs. TUN is packet
    ingress/platform integration, not another remote proxy protocol. Other
    remote-protocol inbounds remain deferred; preserve the existing Shadowsocks
    inbound scope without expanding it.
@@ -3005,7 +3007,10 @@ parse/runtime wiring have landed; `compat/scripts/phase8a_tun.py` now owns the
 privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate
 (`PHASE8A_NATIVE=1`, fail-closed). 8B Darwin arm64 reuses that data path;
 `compat/scripts/phase8b_tun.py` owns the privileged utun/scutil DNS/auto-route
-gate (`PHASE8B_NATIVE=1`, fail-closed). Those gates are the remaining 8A/8B
+gate (`PHASE8B_NATIVE=1`, fail-closed). 8C Windows x86_64 reuses that data path
+on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
+Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). Those gates
+are the remaining 8A/8B/8C
 acceptance evidence. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
 OS needs native configuration, listener, routing, process, persistence and
@@ -3049,6 +3054,10 @@ shared UDP session relay without SOCKS write-back.
   on `PHASE8B_NATIVE=1` / `phase8b-darwin-tun`.
 - **8C — Windows x86_64:** Wintun load/distribution/errors; routes, DNS and
   priority; privilege/driver failure paths; must not break other VPNs.
+  Implemented in this checkout (Wintun via tun-rs with `delete_driver(false)`
+  and this-adapter metric 1, Linux-style split auto-route, `netsh` DNS on the
+  Wintun adapter only, existing named adapters refused without takeover).
+  Native Parity waits on `PHASE8C_NATIVE=1` / `phase8c-windows-tun`.
 - **8F — stability / network-change (before 8D/8E):** Wi-Fi↔wired switch,
   sleep/wake, half-close/RST/backpressure, UDP large/fragment/loss, resource
   bounds, crash recovery beyond `Drop`. Prioritize **8F** before FreeBSD/Android

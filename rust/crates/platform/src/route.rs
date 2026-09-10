@@ -12,6 +12,7 @@ use crate::PlatformError;
 pub enum RoutePlatform {
     Linux,
     Darwin,
+    Windows,
     Other,
 }
 
@@ -22,6 +23,8 @@ pub fn current_route_platform() -> RoutePlatform {
         RoutePlatform::Linux
     } else if cfg!(target_os = "macos") {
         RoutePlatform::Darwin
+    } else if cfg!(target_os = "windows") {
+        RoutePlatform::Windows
     } else {
         RoutePlatform::Other
     }
@@ -105,7 +108,9 @@ pub fn default_auto_route_destinations(platform: RoutePlatform) -> Vec<IpNet> {
             "128.0.0.0/1",
         ]
         .as_slice(),
-        RoutePlatform::Linux | RoutePlatform::Other => ["0.0.0.0/1", "128.0.0.0/1"].as_slice(),
+        RoutePlatform::Linux | RoutePlatform::Windows | RoutePlatform::Other => {
+            ["0.0.0.0/1", "128.0.0.0/1"].as_slice()
+        }
     };
     prefixes
         .iter()
@@ -141,6 +146,7 @@ pub fn validate_tun_device_name(name: &str, platform: RoutePlatform) -> Result<(
 /// Installs a destination route via the given device.
 ///
 /// Linux (8A) uses `ip route replace`. Darwin (8B) uses `route -n add`.
+/// Windows (8C) uses `netsh interface ipv4 add route` on this adapter only.
 /// Other platforms return a clear unsupported error.
 ///
 /// # Errors
@@ -155,11 +161,16 @@ pub fn install_device_route(route: &OwnedRoute) -> Result<(), PlatformError> {
     {
         run_darwin_route("add", route)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        run_windows_route("add", route)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = route;
         Err(PlatformError::Unsupported(
-            "TUN auto-route install is only implemented for Linux (8A) and macOS (8B)".to_owned(),
+            "TUN auto-route install is only implemented for Linux (8A), macOS (8B), and Windows (8C)"
+                .to_owned(),
         ))
     }
 }
@@ -193,7 +204,21 @@ fn remove_owned_route(route: &OwnedRoute) -> Result<(), PlatformError> {
             Err(error) => Err(error),
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        match run_windows_route("delete", route) {
+            Ok(()) => Ok(()),
+            Err(PlatformError::Command(message))
+                if message.to_ascii_lowercase().contains("element not found")
+                    || message.to_ascii_lowercase().contains("not found")
+                    || message.to_ascii_lowercase().contains("no matching") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = route;
         Ok(())
@@ -281,7 +306,7 @@ fn is_host_prefix(destination: IpNet) -> bool {
 ///
 /// Returns command failures, missing route, or unsupported-platform errors.
 pub fn protect_host_route(host: IpAddr, owner: &mut RouteOwner) -> Result<(), PlatformError> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let (gateway, device) = current_route_to(host)?;
         let destination = match host {
@@ -299,12 +324,12 @@ pub fn protect_host_route(host: IpAddr, owner: &mut RouteOwner) -> Result<(), Pl
         owner.record(route);
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = host;
         let _ = owner;
         Err(PlatformError::Unsupported(
-            "TUN loop-avoidance host routes are only implemented for Linux (8A) and macOS (8B)"
+            "TUN loop-avoidance host routes are only implemented for Linux (8A), macOS (8B), and Windows (8C)"
                 .to_owned(),
         ))
     }
@@ -393,15 +418,166 @@ pub fn parse_darwin_route_get(stdout: &str) -> Result<(Option<IpAddr>, String), 
     Ok((gateway, device))
 }
 
+#[cfg(target_os = "windows")]
+fn current_route_to(host: IpAddr) -> Result<(Option<IpAddr>, String), PlatformError> {
+    let script = format!(
+        "$rows = @(Find-NetRoute -RemoteIPAddress '{host}' -ErrorAction Stop); \
+         $row = $rows | Where-Object {{ $_.InterfaceAlias }} | Select-Object -First 1; \
+         if (-not $row) {{ $row = $rows | Select-Object -First 1 }}; \
+         @{{ NextHop = $row.NextHop; InterfaceAlias = $row.InterfaceAlias }} | ConvertTo-Json -Compress"
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(PlatformError::Io)?;
+    if !output.status.success() {
+        return Err(command_error("Find-NetRoute", &output));
+    }
+    parse_windows_find_netroute(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformError> {
+    let args = windows_netsh_route_args(action, route);
+    let output = Command::new("netsh")
+        .args(&args)
+        .output()
+        .map_err(PlatformError::Io)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(command_error(&format!("netsh route {action}"), &output))
+}
+
+/// Builds `netsh interface ipv4 {add|delete} route` arguments.
+#[must_use]
+pub fn windows_netsh_route_args(action: &str, route: &OwnedRoute) -> Vec<String> {
+    let mut args = vec![
+        "interface".to_owned(),
+        "ipv4".to_owned(),
+        action.to_owned(),
+        "route".to_owned(),
+        format!("prefix={}", route.destination),
+        format!("interface={}", route.device),
+    ];
+    if action == "add" {
+        if let Some(gateway) = route.gateway {
+            args.push(format!("nexthop={gateway}"));
+        }
+        args.push("store=active".to_owned());
+    }
+    args
+}
+
+/// Parses PowerShell `Find-NetRoute` JSON (`NextHop`, `InterfaceAlias`).
+///
+/// # Errors
+///
+/// Returns when the JSON has no interface alias.
+pub fn parse_windows_find_netroute(json: &str) -> Result<(Option<IpAddr>, String), PlatformError> {
+    let trimmed = json.trim();
+    let body = match (trimmed.find('{'), trimmed.rfind('}')) {
+        (Some(start), Some(end)) if end >= start => &trimmed[start..=end],
+        _ => trimmed,
+    };
+    let next_hop = json_object_string(body, "NextHop");
+    let device = json_object_string(body, "InterfaceAlias").ok_or_else(|| {
+        PlatformError::Command(
+            "Find-NetRoute has no InterfaceAlias; refusing TUN auto-route".to_owned(),
+        )
+    })?;
+    let gateway = match next_hop.as_deref() {
+        None | Some("" | "0.0.0.0" | "::") => None,
+        Some(value) => Some(
+            value
+                .parse::<IpAddr>()
+                .map_err(|error| PlatformError::Command(format!("route gateway: {error}")))?,
+        ),
+    };
+    Ok((gateway, device))
+}
+
+fn json_object_string(body: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let rest = body.split(&needle).nth(1)?;
+    let rest = rest.trim().trim_start_matches(':').trim();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        quoted.split('"').next().map(ToOwned::to_owned)
+    } else {
+        rest.split([',', '}'])
+            .next()
+            .map(|value| value.trim().trim_matches('"').to_owned())
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// Parses `netsh interface show interface` names (last column).
+#[must_use]
+pub fn parse_netsh_interface_names(stdout: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in stdout.lines() {
+        for kind in ["Dedicated", "Internal", "Loopback", "Unbound"] {
+            if let Some((_, rest)) = line.split_once(kind) {
+                let name = rest.trim();
+                if !name.is_empty() && name != "Interface Name" {
+                    names.push(name.to_owned());
+                }
+                break;
+            }
+        }
+    }
+    names
+}
+
+/// Refuses to open a named Windows adapter that already exists (other VPN).
+///
+/// # Errors
+///
+/// Returns when the named adapter is already present, or when `netsh` cannot
+/// list interfaces on Windows.
+pub fn reject_existing_windows_tun_device(name: &str) -> Result<(), PlatformError> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("netsh")
+            .args(["interface", "show", "interface"])
+            .output()
+            .map_err(PlatformError::Io)?;
+        if !output.status.success() {
+            return Err(command_error("netsh interface show interface", &output));
+        }
+        let names = parse_netsh_interface_names(&String::from_utf8_lossy(&output.stdout));
+        if names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            return Err(PlatformError::Unsupported(format!(
+                "tun.device `{name}` already exists; refusing to take over another adapter"
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = name;
+        Ok(())
+    }
+}
+
 fn command_error(operation: &str, output: &Output) -> PlatformError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let trimmed = stderr.trim();
     if trimmed.contains("Operation not permitted")
         || trimmed.contains("Permission denied")
         || trimmed.contains("must be root")
+        || trimmed.contains("Access is denied")
+        || trimmed.contains("requires elevation")
+        || trimmed.contains("The requested operation requires elevation")
     {
         return PlatformError::Command(format!(
-            "{operation} requires root; refusing to skip: {trimmed}"
+            "{operation} requires Administrator/root; refusing to skip: {trimmed}"
         ));
     }
     PlatformError::Command(format!("{operation} failed: {trimmed}"))
@@ -517,5 +693,100 @@ destination: 192.0.2.1
         let (gw, iface) = parse_darwin_route_get(on_link).expect("lo0");
         assert_eq!(gw, None);
         assert_eq!(iface, "lo0");
+    }
+
+    #[test]
+    fn windows_auto_route_matches_linux_split_default() {
+        let windows = default_auto_route_destinations(RoutePlatform::Windows);
+        assert_eq!(
+            windows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["0.0.0.0/1".to_owned(), "128.0.0.0/1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn windows_netsh_route_args_keep_routes_on_named_adapter() {
+        let route = OwnedRoute {
+            destination: "0.0.0.0/1".parse().expect("prefix"),
+            device: "mihomo".to_owned(),
+            gateway: None,
+            table: None,
+        };
+        assert_eq!(
+            windows_netsh_route_args("add", &route),
+            vec![
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                "prefix=0.0.0.0/1",
+                "interface=mihomo",
+                "store=active"
+            ]
+        );
+        let host = OwnedRoute {
+            destination: "8.8.8.8/32".parse().expect("host"),
+            device: "Ethernet".to_owned(),
+            gateway: Some("192.168.1.1".parse().expect("gw")),
+            table: None,
+        };
+        assert_eq!(
+            windows_netsh_route_args("add", &host),
+            vec![
+                "interface",
+                "ipv4",
+                "add",
+                "route",
+                "prefix=8.8.8.8/32",
+                "interface=Ethernet",
+                "nexthop=192.168.1.1",
+                "store=active"
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_windows_find_netroute_json() {
+        let (gateway, device) =
+            parse_windows_find_netroute(r#"{"NextHop":"192.168.1.1","InterfaceAlias":"Ethernet"}"#)
+                .expect("via");
+        assert_eq!(gateway, Some("192.168.1.1".parse().expect("gw")));
+        assert_eq!(device, "Ethernet");
+        let (on_link, loopback) = parse_windows_find_netroute(
+            r#"{"NextHop":"0.0.0.0","InterfaceAlias":"Loopback Pseudo-Interface 1"}"#,
+        )
+        .expect("lo");
+        assert_eq!(on_link, None);
+        assert_eq!(loopback, "Loopback Pseudo-Interface 1");
+        let (noisy_gw, noisy_dev) = parse_windows_find_netroute(
+            "warning\n{\"NextHop\":\"10.0.0.1\",\"InterfaceAlias\":\"Wi-Fi\"}\n",
+        )
+        .expect("noise");
+        assert_eq!(noisy_gw, Some("10.0.0.1".parse().expect("gw")));
+        assert_eq!(noisy_dev, "Wi-Fi");
+    }
+
+    #[test]
+    fn empty_windows_device_name_is_not_takeover() {
+        reject_existing_windows_tun_device("").expect("empty auto name");
+    }
+
+    #[test]
+    fn parses_netsh_interface_names() {
+        let stdout = "\
+Admin State    State          Type             Interface Name
+-------------------------------------------------------------------------
+Enabled        Connected      Dedicated        Ethernet
+Enabled        Connected      Loopback         Loopback Pseudo-Interface 1
+Enabled        Disconnected   Dedicated        WireGuard Tunnel
+";
+        assert_eq!(
+            parse_netsh_interface_names(stdout),
+            vec![
+                "Ethernet".to_owned(),
+                "Loopback Pseudo-Interface 1".to_owned(),
+                "WireGuard Tunnel".to_owned()
+            ]
+        );
     }
 }
