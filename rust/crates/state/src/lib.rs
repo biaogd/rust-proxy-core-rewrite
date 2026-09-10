@@ -81,6 +81,7 @@ pub struct RuntimeState {
     anytls_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::AnyTlsClient>)>>,
     hysteria2_clients:
         AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::Hysteria2Client>)>>,
+    tuic_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::TuicClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
     ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
 }
@@ -116,6 +117,7 @@ impl Default for RuntimeState {
             xhttp_clients: AsyncMutex::new(BTreeMap::new()),
             anytls_clients: AsyncMutex::new(BTreeMap::new()),
             hysteria2_clients: AsyncMutex::new(BTreeMap::new()),
+            tuic_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
             ssr_clients: Mutex::new(BTreeMap::new()),
         }
@@ -287,6 +289,40 @@ impl RuntimeState {
     pub async fn clear_hysteria2_clients(&self) {
         let clients = {
             let mut clients = self.hysteria2_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
+        }
+    }
+
+    pub async fn tuic_client(
+        &self,
+        name: &str,
+        identity: String,
+        client: rewrite_outbound::TuicClient,
+    ) -> Arc<rewrite_outbound::TuicClient> {
+        let previous = {
+            let mut clients = self.tuic_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(client);
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_tuic_clients(&self) {
+        let clients = {
+            let mut clients = self.tuic_clients.lock().await;
             std::mem::take(&mut *clients)
         };
         for (_, client) in clients.into_values() {

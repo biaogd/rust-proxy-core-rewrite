@@ -1,6 +1,6 @@
 # Rust rewrite status
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 
 ### Gun cancellation isolation correction — 2026-09-09
 
@@ -49,14 +49,23 @@ SSR outbound A–D on this branch: TCP protocols/obfs/ciphers + UDP; D stress/ne
 
 **Phase 6D-E2 (2026-09-09):** VMess UDP associations reuse the existing TLS / plaintext WS / WSS / Gun carriers (no protocol rewrite). Config accepts `udp: true` with `network: tcp|ws|grpc` and strips subscription `tags`. `skip-cert-verify: false` without `tls` is ignored so ClashMeta subscription records stay plaintext WS rather than rejected TLS options. Setup is bounded by Go's 5s `DefaultUDPTimeout` and cancels on shutdown (including deferred WS early-data). Gun pool leases use an RAII guard so cancelled response-header waits release `active`. Native `phase6d_vmess_udp_carriers.py` covers ordinary/packet-address/XUDP × TLS/WS/WSS/gRPC plus silent-WS hang/SIGTERM regression (second dial required, exit code 0). Still open: UDP over HTTP/H2/mKCP/Mekya, inbound.
 
+**Phase 6H-A (2026-09-10):** TUIC v5 outbound TCP is implemented in
+`rewrite-protocol-tuic` plus a thin `rewrite-outbound` adapter. Authentication
+uses the TLS 1.3 exporter over UUID bytes and password, then a uni-stream
+Authenticate command. TCP Connect rides a QUIC bidirectional stream. Congestion
+controller *names* `cubic`/`new_reno`/`bbr` are accepted; algorithm identity
+with Go's quic-go Cubic/BBR is not claimed. UDP, v4, 0-RTT, inbound, ECH and
+UDP-over-stream remain rejected or unimplemented.
+
 Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ## Overall status
 
 ### Planning update and checkout scope — 2026-09-09
 
-Next: **SSR CI closure → TUIC v5 outbound (6H-A/B/C) → TUN (Phase 8)**.
-TUIC and TUN remain unimplemented; TUIC v4/0-RTT, additional remote-protocol
+Next: **TUIC v5 6H-B UDP → 6H-C lifecycle → TUN (Phase 8)**.
+6H-A TUIC v5 outbound TCP is implemented in this checkout (v4/0-RTT/inbound
+deferred). TUN remains unimplemented. Additional remote-protocol
 inbounds, WireGuard/AmneziaWG, SSH and other Phase 7 families are deferred.
 Canonical numbering is AnyTLS **6G**, Hysteria2 **HY2**, TUIC **6H**, SSR
 **7A–7D**. The [roadmap](roadmap.md#next-work-priority--2026-09-09) owns the plan.
@@ -251,6 +260,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | HY2-A Hysteria2 outbound TCP | Complete in declared client scope | Clash `type: hysteria2` parse (BBR when up/down unset via stock Quinn `BbrConfig`); HTTP/3 auth + custom QUIC TCP streams; TLS verify/skip; session reuse; groups/providers/health/reload; deferred knobs rejected; Go/Rust differential vs Go HY2 inbound (`phase_hy2a_hysteria2_tcp.py`) |
 | HY2-B Hysteria2 UDP/obfs/Brutal/hop | Partial; Brutal experimental and deferred | UDP/Salamander/hop differential exists; current production target uses stock BBR with up/down omitted. Approximate Brutal remains in code/tests but precise pacing/parity and Quinn patch work are deferred by user. See 2026-09-08 readiness update; no production claim. |
 | HY2-C Hysteria2 stress/netem/soak | Production acceptance open | Stress/recovery differential passed locally with native samples. Historical permissive soak on `8a9b0761` is not current acceptance; strict short soak exposed UDP association-churn timeouts in Go and Rust. Strict long release soak and native platform evidence remain open. |
+| Phase 6H-A TUIC v5 outbound TCP | Complete in declared client scope | Clash `type: tuic` v5 UUID/password parse; QUIC/TLS with rustls exporter auth; TCP Connect over bidi streams; rules/groups/providers/health/reload; v4 token, 0-RTT, ECH, UDP-over-stream and Brutal rejected; Go/Rust differential vs Go TUIC inbound (`phase6h_tuic_tcp.py`). UDP relay is 6H-B |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |

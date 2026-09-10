@@ -1325,12 +1325,10 @@ WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
 prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
 deferred; the declared BBR profile still needs its own release evidence.
 
-### Phase 6H — TUIC v5 outbound acceptance plan (not implemented)
+### Phase 6H — TUIC v5 outbound acceptance plan
 
-- **6H-A:** YAML → mixed HTTP/SOCKS TCP → rules/groups → verified QUIC/TLS →
-  TUIC v5 authentication and TCP relay. Prove UUID/password validation, address
-  types, TLS rejection, concurrent streams, large transfers and close behavior
-  against Go. Reuse QUIC primitives only after checking the required boundary.
+- **6H-A (implemented):** YAML → mixed HTTP/SOCKS TCP → rules/groups → verified QUIC/TLS →
+  TUIC v5 authentication and TCP relay. Evidence: `compat/scripts/phase6h_tuic_tcp.py`.
 - **6H-B:** SOCKS/mixed UDP → TUIC v5 UDP relay → local UDP authority. Cover
   native datagram and QUIC-stream relay modes, packet/session IDs, destination
   changes, size/fragmentation boundaries, loss and association cleanup.
