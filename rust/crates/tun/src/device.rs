@@ -53,7 +53,26 @@ impl TunDevice {
     }
 }
 
-/// Opens a TUN device with the Phase 8A address/MTU settings.
+/// Darwin utun IPv4 destination / DNS address: the next address in the prefix
+/// (Go `Inet4Address[0].Addr().Next()`).
+///
+/// # Errors
+///
+/// Returns when the prefix is not IPv4.
+pub fn ipv4_point_to_point_destination(prefix: &IpNet) -> Result<Ipv4Addr, TunError> {
+    match prefix.addr() {
+        std::net::IpAddr::V4(address) => Ok(Ipv4Addr::from(u32::from(address).wrapping_add(1))),
+        std::net::IpAddr::V6(_) => Err(TunError::Stack(
+            "inet4-address entry must be IPv4".to_owned(),
+        )),
+    }
+}
+
+/// Opens a TUN device with the Phase 8 address/MTU settings.
+///
+/// Darwin: `packet_information(false)` so netstack sees raw IP, and
+/// `associate_route(false)` so [`rewrite_platform::RouteOwner`] owns routes.
+/// Point-to-point destination is the next IPv4 address (TUN DNS).
 ///
 /// # Errors
 ///
@@ -63,13 +82,22 @@ pub fn open_tun_device(config: &TunDeviceConfig) -> Result<TunDevice, TunError> 
     if let Some(name) = &config.name {
         builder = builder.name(name.clone());
     }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.packet_information(false).associate_route(false);
+    }
     if let Some(first) = config.inet4.first() {
         let std::net::IpAddr::V4(address) = first.addr() else {
             return Err(TunError::Stack(
                 "inet4-address entry must be IPv4".to_owned(),
             ));
         };
-        builder = builder.ipv4(address, first.prefix_len(), None::<Ipv4Addr>);
+        let destination = if cfg!(target_os = "macos") {
+            Some(ipv4_point_to_point_destination(first)?)
+        } else {
+            None
+        };
+        builder = builder.ipv4(address, first.prefix_len(), destination);
     }
     if let Some(first) = config.inet6.first() {
         let std::net::IpAddr::V6(address) = first.addr() else {
@@ -84,4 +112,18 @@ pub fn open_tun_device(config: &TunDeviceConfig) -> Result<TunDevice, TunError> 
         .name()
         .unwrap_or_else(|_| config.name.clone().unwrap_or_else(|| "tun".to_owned()));
     Ok(TunDevice { device, name })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn darwin_p2p_destination_is_next_address() {
+        let prefix = "198.18.0.1/30".parse::<IpNet>().expect("prefix");
+        assert_eq!(
+            ipv4_point_to_point_destination(&prefix).expect("v4"),
+            "198.18.0.2".parse::<Ipv4Addr>().expect("dest")
+        );
+    }
 }

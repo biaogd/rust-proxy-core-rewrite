@@ -657,6 +657,22 @@ fn parses_phase_eight_a_tun_smoltcp_defaults() {
         tun.inet4_address,
         vec!["198.18.0.1/30".parse().expect("prefix")]
     );
+    assert_eq!(
+        tun.tun_dns_server(),
+        Some("198.18.0.2".parse().expect("tun dns"))
+    );
+}
+
+#[test]
+fn hijacks_tun_dns_next_address_even_without_wildcard() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  dns-hijack:\n    - 8.8.8.8:53\n"
+    );
+    let config = Config::from_yaml(&source).expect("tun config");
+    let tun = config.tun.expect("tun present");
+    assert!(tun.hijacks_dns("8.8.8.8:53".parse().expect("literal")));
+    assert!(tun.hijacks_dns("198.18.0.2:53".parse().expect("tun dns")));
+    assert!(!tun.hijacks_dns("1.1.1.1:53".parse().expect("other")));
 }
 
 #[test]

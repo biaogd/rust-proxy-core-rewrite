@@ -2,13 +2,23 @@
 
 mod dhcp;
 mod route;
+mod system_dns;
 
 pub use dhcp::{
     DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
     DhcpRefreshTracker, INTERFACE_TTL, build_dhcp_discover, dhcp_interface_snapshot,
     parse_dhcp_offer, resolve_dns_from_dhcp,
 };
-pub use route::{OwnedRoute, RouteOwner, install_device_route, protect_host_route};
+pub use route::{
+    OwnedRoute, RouteOwner, RoutePlatform, current_route_platform, darwin_route_args,
+    default_auto_route_destinations, install_device_route, parse_darwin_route_get,
+    parse_linux_route_get, protect_host_route, validate_tun_device_name,
+};
+pub use system_dns::{
+    DarwinDnsConfig, DnsOwner, apply_tun_system_dns, build_scutil_dns_script,
+    build_scutil_remove_script, darwin_dns_key, parse_scutil_dns_dictionary,
+    parse_scutil_primary_service,
+};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +44,8 @@ pub enum PlatformError {
     Io(#[from] io::Error),
     #[error("{0}")]
     Command(String),
+    #[error("{0}")]
+    Dns(String),
     #[error("{0}")]
     Unsupported(String),
 }

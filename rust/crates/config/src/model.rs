@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -1071,12 +1071,30 @@ impl TunStack {
 }
 
 impl TunConfig {
-    /// Returns true when `destination` matches a configured `dns-hijack` entry.
+    /// Go uses `Inet4Address[0].Addr().Next()` as the TUN DNS / Darwin system DNS.
+    #[must_use]
+    pub fn tun_dns_server(&self) -> Option<IpAddr> {
+        match self.inet4_address.first().map(IpNet::addr)? {
+            IpAddr::V4(address) => Some(IpAddr::V4(Ipv4Addr::from(
+                u32::from(address).wrapping_add(1),
+            ))),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    /// Returns true when `destination` matches a configured `dns-hijack` entry
+    /// or the TUN DNS next address (port 53).
     #[must_use]
     pub fn hijacks_dns(&self, destination: SocketAddr) -> bool {
-        self.dns_hijack
+        if self
+            .dns_hijack
             .iter()
             .any(|entry| dns_hijack_matches(entry, destination))
+        {
+            return true;
+        }
+        self.tun_dns_server()
+            .is_some_and(|dns| destination.ip() == dns && destination.port() == 53)
     }
 }
 

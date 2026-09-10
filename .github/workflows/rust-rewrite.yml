@@ -275,6 +275,7 @@ jobs:
       PHASE5F_TIMEOUT_TEST: "1"
       PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE8A_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE8B_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ABUILTINS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ASIMPLE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6A_DROP_TIMEOUT_TEST: "1"
@@ -403,7 +404,7 @@ jobs:
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
-            local-runtime) SHARD_REGEX='phase(5f_[a-z0-9_]+|8a_tun)\.py$' ;;
+            local-runtime) SHARD_REGEX='phase(5f_[a-z0-9_]+|8a_tun|8b_tun)\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
           esac
@@ -539,6 +540,7 @@ jobs:
             compat/scripts/phase5f_udp_nat.py \
             compat/scripts/phase5f_lan_policy.py \
             compat/scripts/phase8a_tun.py \
+            compat/scripts/phase8b_tun.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
@@ -740,6 +742,63 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: phase8a-linux-tun-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  phase8b-darwin-tun:
+    name: Phase 8B privileged Darwin arm64 TUN
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      PHASE8B_CARGO_TARGET: ${{ github.workspace }}/../mihomo-phase8b-target
+      PHASE8B_NATIVE: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Darwin arm64 runner
+        run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "${RUNNER_ARCH}" = "ARM64"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Run Phase 8B TUN identity and Darwin traffic gate
+        run: |
+          sudo env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "PHASE8B_NATIVE=1" \
+            "PHASE8B_CARGO_TARGET=$PHASE8B_CARGO_TARGET" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            python3 compat/scripts/phase8b_tun.py
+
+      - name: Upload Phase 8B failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase8b-darwin-tun-failure
           path: compat/artifacts/
           if-no-files-found: ignore
           retention-days: 7

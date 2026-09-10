@@ -9,7 +9,7 @@ mod error;
 mod session;
 mod stack;
 
-pub use device::{TunDevice, TunDeviceConfig, open_tun_device};
+pub use device::{TunDevice, TunDeviceConfig, ipv4_point_to_point_destination, open_tun_device};
 pub use error::TunError;
 pub use session::{
     InboundTcpSession, InboundUdpDatagram, TunInboundStream, TunSessionHub, TunUdpReplyTx,

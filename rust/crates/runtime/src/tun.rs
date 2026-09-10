@@ -5,7 +5,12 @@ use futures_util::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use rewrite_config::{Config, DnsClassicEndpoint, DnsResolverClient, TunConfig};
 use rewrite_inbound::{BoxedInboundStream, InboundStream};
-use rewrite_platform::{OwnedRoute, RouteOwner, install_device_route, protect_host_route};
+#[cfg(target_os = "macos")]
+use rewrite_platform::apply_tun_system_dns;
+use rewrite_platform::{
+    DnsOwner, OwnedRoute, RouteOwner, current_route_platform, default_auto_route_destinations,
+    install_device_route, protect_host_route, validate_tun_device_name,
+};
 use rewrite_state::RuntimeState;
 use rewrite_tun::{
     TunDeviceConfig, TunInboundStream, build_smoltcp_stack, open_tun_device, spawn_session_hub,
@@ -64,7 +69,7 @@ impl tokio::io::AsyncWrite for TunClientStream {
     }
 }
 
-/// Runs the Linux TUN data path until cancelled, then reverts owned routes.
+/// Runs the Linux/macOS TUN data path until cancelled, then restores DNS and routes.
 pub(super) async fn run_tun_listener(
     tun_config: TunConfig,
     config: watch::Receiver<Arc<Config>>,
@@ -73,15 +78,9 @@ pub(super) async fn run_tun_listener(
     shutdown: CancellationToken,
     ready: Option<oneshot::Sender<Result<(), RuntimeError>>>,
 ) -> Result<(), RuntimeError> {
-    if !cfg!(target_os = "linux") {
-        let error = RuntimeError::Tun(
-            "Phase 8A TUN runtime is Linux-only; macOS/Windows gates arrive in 8B/8C".to_owned(),
-        );
+    if let Err(error) = tun_runtime_supported() {
         if let Some(ready) = ready {
-            let _ = ready.send(Err(RuntimeError::Tun(
-                "Phase 8A TUN runtime is Linux-only; macOS/Windows gates arrive in 8B/8C"
-                    .to_owned(),
-            )));
+            let _ = ready.send(Err(RuntimeError::Tun(error.to_string())));
         }
         return Err(error);
     }
@@ -101,13 +100,36 @@ pub(super) async fn run_tun_listener(
     run_prepared_tun(prepared, tun_config, config, state, dns_service, shutdown).await
 }
 
+fn tun_runtime_supported() -> Result<(), RuntimeError> {
+    if cfg!(all(target_os = "macos", not(target_arch = "aarch64"))) {
+        return Err(RuntimeError::Tun(
+            "Phase 8B TUN runtime is Darwin arm64 only; other Darwin arches are not in this gate"
+                .to_owned(),
+        ));
+    }
+    if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    if cfg!(target_os = "windows") {
+        return Err(RuntimeError::Tun(
+            "Phase 8C TUN runtime is Windows-only; 8B is Darwin arm64".to_owned(),
+        ));
+    }
+    Err(RuntimeError::Tun(
+        "Phase 8A/8B TUN runtime is Linux and macOS only; Windows arrives in 8C".to_owned(),
+    ))
+}
+
 struct PreparedTun {
     device: rewrite_tun::TunDevice,
+    dns: DnsOwner,
     routes: RouteOwner,
     mtu: u16,
 }
 
 fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, RuntimeError> {
+    validate_tun_device_name(&tun_config.device, current_route_platform())
+        .map_err(|error| RuntimeError::Tun(error.to_string()))?;
     let device_config = TunDeviceConfig::from_tun_config(tun_config);
     let device =
         open_tun_device(&device_config).map_err(|error| RuntimeError::Tun(error.to_string()))?;
@@ -123,11 +145,35 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
             return Err(RuntimeError::Tun(error.to_string()));
         }
     }
+    let dns = match apply_system_dns(tun_config) {
+        Ok(owner) => owner,
+        Err(error) => {
+            let _ = routes.revert_all();
+            return Err(error);
+        }
+    };
     Ok(PreparedTun {
         device,
+        dns,
         routes,
         mtu: device_config.mtu,
     })
+}
+
+#[allow(clippy::unnecessary_wraps)] // Darwin scutil apply can fail; Linux is a no-op.
+fn apply_system_dns(tun_config: &TunConfig) -> Result<DnsOwner, RuntimeError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = tun_config;
+        Ok(DnsOwner::noop())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let address = tun_config.tun_dns_server().ok_or_else(|| {
+            RuntimeError::Tun("Darwin TUN system DNS requires inet4-address".to_owned())
+        })?;
+        apply_tun_system_dns(address).map_err(|error| RuntimeError::Tun(error.to_string()))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -141,6 +187,7 @@ async fn run_prepared_tun(
 ) -> Result<(), RuntimeError> {
     let PreparedTun {
         device,
+        mut dns,
         mut routes,
         mtu,
     } = prepared;
@@ -283,6 +330,9 @@ async fn run_prepared_tun(
         }
     }
     udp_sessions.shutdown(&state).await;
+    if let Err(error) = dns.restore() {
+        state.log("error", format!("TUN DNS restore failed: {error}"));
+    }
     if let Err(error) = routes.revert_all() {
         state.log("error", format!("TUN route cleanup failed: {error}"));
     }
@@ -299,8 +349,7 @@ fn install_auto_routes(
     destinations.extend(tun.inet4_route_address.iter().copied());
     destinations.extend(tun.inet6_route_address.iter().copied());
     if destinations.is_empty() {
-        destinations.push("0.0.0.0/1".parse::<IpNet>().expect("static"));
-        destinations.push("128.0.0.0/1".parse::<IpNet>().expect("static"));
+        destinations.extend(default_auto_route_destinations(current_route_platform()));
     }
     let excludes: Vec<IpNet> = tun
         .route_exclude_address

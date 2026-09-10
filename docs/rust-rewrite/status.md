@@ -123,19 +123,27 @@ Go oracle: `c0e43ebecf3be9b223f1015c1fc38689bb073467` (`Alpha`)
 
 ### Planning update and checkout scope — 2026-09-09
 
-**TUN Phase 8 is in progress, starting with Linux 8A.** SSR and TUIC v5 outbound
+**TUN Phase 8 is in progress: Linux 8A is implemented and Darwin 8B is in
+this checkout.** SSR and TUIC v5 outbound
 (6H-A/B/C) are done in this checkout (v4/0-RTT/inbound deferred). Device pin:
 `tun-rs` **2.8.9** (+ async). Stack pin: `netstack-smoltcp` **0.2.4**. Rust
 accepts `stack: smoltcp` only; Go `system`/`gvisor`/`mixed` are explicit
 rejects (never silent remap). 8A implementation has landed for YAML parse,
 UDP reply-sink reuse, Linux device/stack/session wiring, DNS hijack into the
 existing DNS service, owned auto-route plus loop-avoidance host routes, and
-init-failure/stop cleanup. Unprivileged evidence: config/stack-identity unit
-tests plus `compat/scripts/phase8a_tun.py`. Privileged Linux netns traffic
+init-failure/stop cleanup. 8B reuses that data path on Darwin arm64: utun
+open via tun-rs (`packet_information(false)`, `associate_route(false)`,
+point-to-point dest = inet4 next address), Darwin split auto-route prefixes
+(not `0.0.0.0/1`), `scutil` primary-service DNS ownership/restore, and
+runtime enablement for linux|macos (Windows remains 8C). Unprivileged
+evidence: config/stack-identity unit tests plus `compat/scripts/phase8a_tun.py`
+and `compat/scripts/phase8b_tun.py`. Privileged Linux netns traffic
 passed locally on 2026-09-10 (HTTP small/large, DNS hijack + fake-IP reverse
 mapping, UDP echo, Go `system` vs Rust `smoltcp` body match, init-failure
 rollback and stop cleanup) via `PHASE8A_NATIVE=1`; it is fail-closed and not
-Parity until the dedicated CI job reports success. TUN is not Parity.
+Parity until the dedicated CI job reports success. Privileged Darwin arm64
+native (`PHASE8B_NATIVE=1`) is fail-closed and not Parity until
+`phase8b-darwin-tun` reports success. TUN is not Parity.
 Additional remote-protocol inbounds, WireGuard/AmneziaWG, SSH and other Phase 7
 families remain deferred. Canonical numbering is AnyTLS **6G**, Hysteria2
 **HY2**, TUIC **6H**, SSR **7A–7D**. The
@@ -159,6 +167,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Go reference implementation | Preserved | No existing Go source modified or deleted |
 | Native CI portability hardening | Local gates pass; Windows rerun pending | Windows `.exe`, home/cache isolation, restart child-process cleanup, Winsock error text and cold data-plane boundaries are represented explicitly; the seven directly affected Phase 4C/4E15/4F14/5A1/5C/5D/6E differentials pass locally, with native parity unclaimed until CI |
 | Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged identity + privileged netns harness in `phase8a_tun.py` passed locally on Linux 2026-09-10 (`PHASE8A_NATIVE=1`); native CI pass unclaimed |
+| Phase 8B Darwin arm64 TUN | In progress | Reuses the 8A data path. utun open, Darwin split auto-route, scutil DNS ownership/restore, `tun0`/`utun` rejected without remap. Unprivileged identity in `phase8b_tun.py`; privileged `PHASE8B_NATIVE=1` fail-closed Darwin arm64 harness is not Parity until `phase8b-darwin-tun` reports success |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |
