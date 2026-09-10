@@ -11,9 +11,11 @@ use rewrite_platform::apply_tun_system_dns;
 use rewrite_platform::apply_windows_tun_interface_dns;
 use rewrite_platform::{
     DefaultInterfaceSnapshot, DnsOwner, NETWORK_CHANGE_POLL, OwnedRoute, RouteOwner,
-    current_default_interface, current_route_platform, default_auto_route_destinations,
-    install_device_route, plan_network_change, protect_host_route,
-    reject_existing_windows_tun_device, set_auto_detect_bind_interface, validate_tun_device_name,
+    clear_outbound_bypass, current_default_interface, current_route_platform,
+    default_auto_route_destinations, install_bypass_host_route, install_device_route,
+    install_outbound_bypass, plan_auto_route_prefixes, plan_network_change, protect_host_route,
+    reject_existing_windows_tun_device, set_auto_detect_bind_interface, update_outbound_bypass,
+    validate_tun_device_name,
 };
 use rewrite_state::RuntimeState;
 use rewrite_tun::{
@@ -146,20 +148,28 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
     let device =
         open_tun_device(&device_config).map_err(|error| RuntimeError::Tun(error.to_string()))?;
     let device_name = device.name().to_owned();
+    let physical = current_default_interface(Some(&device_name))
+        .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
     let mut routes = RouteOwner::new();
     if tun_config.auto_route {
-        if let Err(error) = protect_loop_avoidance(config, &mut routes) {
+        if let Err(error) = protect_loop_avoidance(config, &physical, &device_name, &mut routes) {
             let _ = routes.revert_all();
             return Err(RuntimeError::Tun(error.to_string()));
         }
-        if let Err(error) = install_auto_routes(tun_config, &device_name, &mut routes) {
+        if let Err(error) = install_auto_routes(tun_config, &device_name, &physical, &mut routes) {
             let _ = routes.revert_all();
             return Err(RuntimeError::Tun(error.to_string()));
         }
+        install_outbound_bypass(
+            &device_name,
+            &physical,
+            bypass_skip_prefixes(tun_config, config),
+        );
     }
     let dns = match apply_system_dns(tun_config, &device_name) {
         Ok(owner) => owner,
         Err(error) => {
+            clear_outbound_bypass();
             let _ = routes.revert_all();
             return Err(error);
         }
@@ -217,7 +227,8 @@ async fn run_prepared_tun(
     } = prepared;
     let mut default_interface = current_default_interface(Some(&device_name))
         .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
-    if tun_config.auto_detect_interface && !cfg!(windows) {
+    let bind_physical = tun_config.auto_detect_interface || tun_config.auto_route;
+    if bind_physical && !cfg!(windows) {
         set_auto_detect_bind_interface(default_interface.device.as_deref());
     }
     let watch_network = tun_config.auto_route || tun_config.auto_detect_interface;
@@ -382,9 +393,10 @@ async fn run_prepared_tun(
     }
 
     shutdown.cancel();
-    if tun_config.auto_detect_interface {
+    if tun_config.auto_detect_interface || tun_config.auto_route {
         set_auto_detect_bind_interface(None);
     }
+    clear_outbound_bypass();
     let _ = device_task.await;
     while let Some(result) = connections.join_next().await {
         if let Err(join_error) = result {
@@ -435,24 +447,31 @@ async fn apply_network_change(
     eprintln!("{}", plan.log);
     state.log(level, plan.log);
 
-    if plan.update_detected_interface && !cfg!(windows) {
+    if !cfg!(windows) && (plan.update_detected_interface || tun_config.auto_route) {
         set_auto_detect_bind_interface(after.device.as_deref());
     }
 
     if plan.reprotect_hosts {
-        if let Err(error) = routes.revert_host_routes() {
+        if let Err(error) = routes.revert_not_on_device(device_name) {
             state.log(
                 "warning",
-                format!("[TUN] failed to drop stale loop-avoidance routes: {error}"),
+                format!("[TUN] failed to drop stale bypass routes: {error}"),
             );
         }
-        if let Err(error) = protect_loop_avoidance(config, routes) {
+        if let Err(error) = protect_loop_avoidance(config, &after, device_name, routes) {
             state.log(
                 "warning",
                 format!("[TUN] failed to re-protect loop-avoidance routes: {error}"),
             );
         }
+        if let Err(error) = install_physical_exceptions(tun_config, device_name, &after, routes) {
+            state.log(
+                "warning",
+                format!("[TUN] failed to re-install route-exclude exceptions: {error}"),
+            );
+        }
     }
+    update_outbound_bypass(&after);
 
     if plan.reapply_system_dns {
         if let Err(error) = dns.restore() {
@@ -482,6 +501,7 @@ async fn apply_network_change(
 fn install_auto_routes(
     tun: &TunConfig,
     device: &str,
+    physical: &DefaultInterfaceSnapshot,
     owner: &mut RouteOwner,
 ) -> Result<(), rewrite_platform::PlatformError> {
     let mut destinations = Vec::new();
@@ -498,10 +518,8 @@ fn install_auto_routes(
         .chain(tun.inet6_route_exclude_address.iter())
         .copied()
         .collect();
-    for destination in destinations {
-        if excludes.iter().any(|exclude| exclude == &destination) {
-            continue;
-        }
+    let plan = plan_auto_route_prefixes(&destinations, &excludes);
+    for destination in plan.tun {
         let route = OwnedRoute {
             destination,
             device: device.to_owned(),
@@ -511,11 +529,72 @@ fn install_auto_routes(
         install_device_route(&route)?;
         owner.record(route);
     }
+    install_physical_exceptions_plan(&plan.physical_exceptions, device, physical, owner)
+}
+
+fn install_physical_exceptions(
+    tun: &TunConfig,
+    tun_device: &str,
+    physical: &DefaultInterfaceSnapshot,
+    owner: &mut RouteOwner,
+) -> Result<(), rewrite_platform::PlatformError> {
+    let mut destinations = Vec::new();
+    destinations.extend(tun.route_address.iter().copied());
+    destinations.extend(tun.inet4_route_address.iter().copied());
+    destinations.extend(tun.inet6_route_address.iter().copied());
+    if destinations.is_empty() {
+        destinations.extend(default_auto_route_destinations(current_route_platform()));
+    }
+    let excludes: Vec<IpNet> = tun
+        .route_exclude_address
+        .iter()
+        .chain(tun.inet4_route_exclude_address.iter())
+        .chain(tun.inet6_route_exclude_address.iter())
+        .copied()
+        .collect();
+    let plan = plan_auto_route_prefixes(&destinations, &excludes);
+    install_physical_exceptions_plan(&plan.physical_exceptions, tun_device, physical, owner)
+}
+
+fn install_physical_exceptions_plan(
+    exceptions: &[IpNet],
+    tun_device: &str,
+    physical: &DefaultInterfaceSnapshot,
+    owner: &mut RouteOwner,
+) -> Result<(), rewrite_platform::PlatformError> {
+    if exceptions.is_empty() {
+        return Ok(());
+    }
+    let device = physical.device.as_deref().unwrap_or_default();
+    for destination in exceptions {
+        let route = OwnedRoute {
+            destination: *destination,
+            device: device.to_owned(),
+            gateway: physical.gateway,
+            table: None,
+        };
+        install_bypass_host_route(&route, tun_device, owner)?;
+    }
     Ok(())
+}
+
+fn bypass_skip_prefixes(tun: &TunConfig, config: &Config) -> Vec<IpNet> {
+    let mut prefixes = Vec::new();
+    prefixes.extend(tun.inet4_address.iter().copied());
+    prefixes.extend(tun.inet6_address.iter().copied());
+    if let Some(dns) = &config.dns
+        && let Some(fake_ip) = &dns.fake_ip
+    {
+        prefixes.extend(fake_ip.ipv4_range);
+        prefixes.extend(fake_ip.ipv6_range);
+    }
+    prefixes
 }
 
 fn protect_loop_avoidance(
     config: &Config,
+    physical: &DefaultInterfaceSnapshot,
+    tun_device: &str,
     owner: &mut RouteOwner,
 ) -> Result<(), rewrite_platform::PlatformError> {
     let mut hosts = Vec::new();
@@ -535,8 +614,9 @@ fn protect_loop_avoidance(
     }
     hosts.sort_unstable();
     hosts.dedup();
+    let device = physical.device.as_deref().unwrap_or_default();
     for host in hosts {
-        protect_host_route(host, owner)?;
+        protect_host_route(host, device, physical.gateway, tun_device, owner)?;
     }
     Ok(())
 }

@@ -16,13 +16,17 @@ Darwin/Windows, and 8D/8E.
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import pathlib
+import select
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -34,6 +38,7 @@ from phase8a_tun import (
     FixtureServers,
     HTTP_NAME,
     HTTP_SMALL,
+    HttpHandler,
     MINIMAL,
     NATIVE_IO_DEADLINE,
     NATIVE_STARTUP_DEADLINE,
@@ -64,6 +69,16 @@ VETH_A_HOST = "10.66.8.1"
 VETH_A_NS = "10.66.8.2"
 VETH_B_HOST = "10.66.9.1"
 VETH_B_NS = "10.66.9.2"
+DIRECT_IP = "192.0.2.8"
+PROXY_IP = "192.0.2.9"
+PROXY_NAME = "proxy.phase8f.test"
+
+
+def rewrite_connect_target(host: str, port: int) -> tuple[str, int]:
+    """Map TUN fake-IP / fixture hostnames onto the host-side HTTP server."""
+    if host in {HTTP_NAME, UDP_NAME} or host.startswith(("198.18.", "198.19.")):
+        return SERVICE_IP, port
+    return host, port
 
 
 def identity_auto_detect(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
@@ -151,6 +166,10 @@ class DualUplinkNetns:
         run_ip("addr", "add", f"{VETH_B_HOST}/24", "dev", self.veth_b_host)
         run_ip("addr", "add", f"{SERVICE_IP}/32", "dev", self.veth_a_host)
         run_ip("addr", "add", f"{SERVICE_IP}/32", "dev", self.veth_b_host, check=False)
+        run_ip("addr", "add", f"{DIRECT_IP}/32", "dev", self.veth_a_host)
+        run_ip("addr", "add", f"{DIRECT_IP}/32", "dev", self.veth_b_host, check=False)
+        run_ip("addr", "add", f"{PROXY_IP}/32", "dev", self.veth_a_host)
+        run_ip("addr", "add", f"{PROXY_IP}/32", "dev", self.veth_b_host, check=False)
         run_ip("link", "set", self.veth_a_host, "up")
         run_ip("link", "set", self.veth_b_host, "up")
         run_ip("link", "set", "lo", "up", ns=self.name)
@@ -208,7 +227,15 @@ class DualUplinkNetns:
         return ""
 
 
-def tun_config(*, mixed_port: int, dns_listen: int, nameserver: str, device: str) -> str:
+def tun_config(
+    *,
+    mixed_port: int,
+    dns_listen: int,
+    nameserver: str,
+    device: str,
+    extra: str = "",
+    http_outbound: str = "DIRECT",
+) -> str:
     return f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
@@ -217,15 +244,16 @@ dns:
   enable: true
   listen: 127.0.0.1:{dns_listen}
   ipv6: false
-  use-hosts: false
+  use-hosts: true
   use-system-hosts: false
   enhanced-mode: fake-ip
   fake-ip-range: {FAKE_IP_RANGE}
   fake-ip-filter:
     - 'never-match.phase8f.test'
+    - '{PROXY_NAME}'
   nameserver:
     - udp://{nameserver}
-tun:
+{extra}tun:
   enable: true
   device: {device}
   stack: smoltcp
@@ -237,10 +265,81 @@ tun:
     - 0.0.0.0:53
   mtu: 1500
 rules:
-  - DOMAIN,{HTTP_NAME},DIRECT
+  - IP-CIDR,{DIRECT_IP}/32,DIRECT
+  - DOMAIN,{HTTP_NAME},{http_outbound}
   - DOMAIN,{UDP_NAME},DIRECT
   - MATCH,REJECT
 """
+
+
+class ConnectHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_CONNECT(self) -> None:
+        host, _, port = self.path.rpartition(":")
+        target_host, target_port = rewrite_connect_target(host, int(port))
+        try:
+            remote = socket.create_connection((target_host, target_port), timeout=NATIVE_IO_DEADLINE)
+        except OSError:
+            self.send_error(502)
+            return
+        self.send_response(200, "Connection Established")
+        self.end_headers()
+        client = self.connection
+        try:
+            while True:
+                readable, _, _ = select.select([client, remote], [], [], NATIVE_IO_DEADLINE)
+                if not readable:
+                    break
+                for sock in readable:
+                    other = remote if sock is client else client
+                    data = sock.recv(65536)
+                    if not data:
+                        return
+                    other.sendall(data)
+        finally:
+            remote.close()
+
+
+class ExtraServers:
+    def __init__(self) -> None:
+        self.direct: http.server.ThreadingHTTPServer | None = None
+        self.proxy: http.server.ThreadingHTTPServer | None = None
+        self.direct_port = 0
+        self.proxy_port = 0
+        self.threads: list[threading.Thread] = []
+
+    def __enter__(self) -> ExtraServers:
+        self.direct = http.server.ThreadingHTTPServer((DIRECT_IP, 0), HttpHandler)
+        self.direct_port = int(self.direct.server_address[1])
+        direct_thread = threading.Thread(target=self.direct.serve_forever, daemon=True)
+        direct_thread.start()
+        self.threads.append(direct_thread)
+        self.proxy = http.server.ThreadingHTTPServer((PROXY_IP, 0), ConnectHandler)
+        self.proxy_port = int(self.proxy.server_address[1])
+        proxy_thread = threading.Thread(target=self.proxy.serve_forever, daemon=True)
+        proxy_thread.start()
+        self.threads.append(proxy_thread)
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        for server in (self.direct, self.proxy):
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+
+
+def route_get(ns: DualUplinkNetns, destination: str) -> str:
+    result = run_ip("route", "get", destination, ns=ns.name, check=False)
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def assert_not_via_tun(ns: DualUplinkNetns, destination: str) -> None:
+    text = route_get(ns, destination)
+    if ns.tun in text.split():
+        raise AssertionError(f"{destination} is routed via TUN {ns.tun}:\n{text}\n{ns.routes()}")
+
 
 
 def wait_tun_device(
@@ -306,10 +405,19 @@ def run_uplink_switch(
     binary: pathlib.Path,
     ns: DualUplinkNetns,
     servers: FixtureServers,
+    extra: ExtraServers,
     scratch: pathlib.Path,
 ) -> dict[str, Any]:
     case_dir = scratch / "rust-flap"
     case_dir.mkdir(parents=True, exist_ok=True)
+    extra_yaml = f"""hosts:
+  {PROXY_NAME}: {PROXY_IP}
+proxies:
+  - name: p8f-http
+    type: http
+    server: {PROXY_NAME}
+    port: {extra.proxy_port}
+"""
     config = write_config(
         case_dir,
         "config.yaml",
@@ -318,6 +426,8 @@ def run_uplink_switch(
             dns_listen=15353,
             nameserver=f"{SERVICE_IP}:{servers.dns_port}",
             device=ns.tun,
+            extra=extra_yaml,
+            http_outbound="p8f-http",
         ),
     )
     process, stdout, stderr = launch_in_ns(ns.name, binary, config, case_dir)
@@ -331,12 +441,19 @@ def run_uplink_switch(
                 f"expected initial default {ns.veth_a_ns}, got {ns.default_device()!r}\n"
                 f"{ns.routes()}"
             )
+        assert_not_via_tun(ns, SERVICE_IP)
+        body = http_get(ns.name, DIRECT_IP, extra.direct_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"public DIRECT mismatch: {body!r}")
+        observation["public-direct"] = True
         fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
         if body != HTTP_SMALL:
-            raise AssertionError(f"pre-flap HTTP mismatch: {body!r}")
-        observation["http-before"] = True
+            raise AssertionError(f"domain-proxy HTTP mismatch: {body!r}")
+        observation["domain-proxy"] = True
         observation["fake-ip-http"] = fake_http
+        assert_not_via_tun(ns, DIRECT_IP)
+        assert_not_via_tun(ns, PROXY_IP)
 
         run_ip(
             "route",
@@ -363,10 +480,17 @@ def run_uplink_switch(
         observation["monitor-log"] = True
         assert_split_defaults(ns)
         observation["split-defaults-after"] = True
+        assert_not_via_tun(ns, SERVICE_IP)
+        assert_not_via_tun(ns, PROXY_IP)
+        observation["protect-not-via-tun-after"] = True
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
         if body != HTTP_SMALL:
             raise AssertionError(f"post-flap HTTP mismatch: {body!r}")
         observation["http-after"] = True
+        body = http_get(ns.name, DIRECT_IP, extra.direct_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"post-flap public DIRECT mismatch: {body!r}")
+        observation["public-direct-after"] = True
         fake_udp = query_hijacked_dns(ns.name, UDP_NAME)
         echoed = udp_echo(ns.name, fake_udp, servers.udp_port, UDP_LARGE)
         if echoed != UDP_LARGE:
@@ -386,6 +510,69 @@ def run_uplink_switch(
         observation["stop-cleanup"] = True
 
 
+def run_route_conflict(
+    binary: pathlib.Path,
+    ns: DualUplinkNetns,
+    scratch: pathlib.Path,
+) -> dict[str, Any]:
+    case_dir = scratch / "route-conflict"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    run_ip(
+        "route",
+        "replace",
+        "0.0.0.0/1",
+        "via",
+        VETH_A_HOST,
+        "dev",
+        ns.veth_a_ns,
+        ns=ns.name,
+    )
+    before = ns.routes()
+    if "0.0.0.0/1" not in before or ns.veth_a_ns not in before:
+        raise AssertionError(f"failed to preinstall foreign 0.0.0.0/1:\n{before}")
+    config = write_config(
+        case_dir,
+        "config.yaml",
+        tun_config(
+            mixed_port=17891,
+            dns_listen=15354,
+            nameserver="8.8.8.8:53",
+            device=ns.tun,
+        ),
+    )
+    process, stdout, stderr = launch_in_ns(ns.name, binary, config, case_dir)
+    try:
+        deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        code = process.poll()
+        logs = process_logs(case_dir)
+        if code is None:
+            stop_process(process, case_dir)
+            raise AssertionError(f"conflict process stayed up over a foreign 0.0.0.0/1\n{logs}")
+        if code == 0:
+            raise AssertionError(f"conflict process exited 0 over a foreign route\n{logs}")
+        if "refusing to replace existing route" not in logs:
+            raise AssertionError(f"conflict missing refuse-to-replace:\n{logs}")
+        after = ns.routes()
+        if "0.0.0.0/1" not in after or ns.veth_a_ns not in after:
+            raise AssertionError(f"foreign 0.0.0.0/1 was overwritten:\n{after}")
+        if ns.tun in after:
+            raise AssertionError(f"TUN leftover after conflict:\n{after}\n{ns.links()}")
+        return {
+            "exited": True,
+            "nonzero-exit": True,
+            "refused-foreign-route": True,
+            "foreign-route-kept": True,
+        }
+    finally:
+        stdout.close()
+        stderr.close()
+        if process.poll() is None:
+            stop_process(process, case_dir)
+        run_ip("route", "del", "0.0.0.0/1", ns=ns.name, check=False)
+
+
 def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
     if os.environ.get("PHASE8F_NATIVE") != "1":
         print(
@@ -397,9 +584,11 @@ def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dic
     observations: dict[str, Any] = {"requested": True}
     with DualUplinkNetns() as ns:
         with FixtureServers(SERVICE_IP) as servers:
-            observations["rust-flap"] = run_uplink_switch(
-                binaries["rust"], ns, servers, scratch
-            )
+            with ExtraServers() as extra:
+                observations["rust-flap"] = run_uplink_switch(
+                    binaries["rust"], ns, servers, extra, scratch
+                )
+        observations["route-conflict"] = run_route_conflict(binaries["rust"], ns, scratch)
     return observations
 
 

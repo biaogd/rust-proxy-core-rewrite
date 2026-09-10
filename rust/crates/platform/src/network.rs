@@ -12,13 +12,29 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ipnet::IpNet;
+
 use crate::PlatformError;
-use crate::route::parse_darwin_route_get;
+use crate::route::{
+    RouteOwner, bypass_host_route, install_bypass_host_route, parse_darwin_route_get,
+};
 
 /// How often TUN polls the physical default route.
 pub const NETWORK_CHANGE_POLL: Duration = Duration::from_millis(500);
 
 static AUTO_DETECT_BIND: Mutex<Option<String>> = Mutex::new(None);
+const DYNAMIC_BYPASS_CAP: usize = 1024;
+
+struct OutboundBypass {
+    tun_device: String,
+    device: String,
+    gateway: Option<IpAddr>,
+    skip: Vec<IpNet>,
+    hosts: Vec<IpAddr>,
+    owner: RouteOwner,
+}
+
+static OUTBOUND_BYPASS: Mutex<Option<OutboundBypass>> = Mutex::new(None);
 
 /// Physical default route used for loop-avoidance refresh and auto-detect bind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -129,6 +145,102 @@ pub fn resolve_outbound_bind_interface(explicit: &str) -> String {
         return explicit.to_owned();
     }
     auto_detect_bind_interface().unwrap_or_default()
+}
+
+/// Starts per-destination physical bypass used when TUN auto-route is on.
+pub fn install_outbound_bypass(
+    tun_device: &str,
+    physical: &DefaultInterfaceSnapshot,
+    skip: Vec<IpNet>,
+) {
+    let mut slot = OUTBOUND_BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(current) = slot.as_mut() {
+        let _ = current.owner.revert_all();
+    }
+    *slot = Some(OutboundBypass {
+        tun_device: tun_device.to_owned(),
+        device: physical.device.clone().unwrap_or_default(),
+        gateway: physical.gateway,
+        skip,
+        hosts: Vec::new(),
+        owner: RouteOwner::new(),
+    });
+}
+
+/// Rebuilds dynamic bypass after the physical default changes.
+pub fn update_outbound_bypass(physical: &DefaultInterfaceSnapshot) {
+    let mut slot = OUTBOUND_BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(current) = slot.as_mut() else {
+        return;
+    };
+    let _ = current.owner.revert_all();
+    current.device = physical.device.clone().unwrap_or_default();
+    current.gateway = physical.gateway;
+    let hosts = current.hosts.clone();
+    for host in hosts {
+        let Ok(route) =
+            bypass_host_route(host, &current.device, current.gateway, &current.tun_device)
+        else {
+            continue;
+        };
+        let _ = install_bypass_host_route(&route, &current.tun_device, &mut current.owner);
+    }
+}
+
+/// Drops dynamic bypass host routes on TUN stop.
+pub fn clear_outbound_bypass() {
+    let mut slot = OUTBOUND_BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(mut current) = slot.take() {
+        let _ = current.owner.revert_all();
+    }
+}
+
+/// Installs a physical host route for a dialed DIRECT/proxy address.
+///
+/// Fake-IP / TUN prefixes in `skip` are ignored. Missing bypass state is a
+/// no-op so non-TUN dials stay unchanged.
+///
+/// # Errors
+///
+/// Returns when the physical default is the TUN device or route install fails.
+pub fn protect_outbound_destination(host: IpAddr) -> Result<(), PlatformError> {
+    if host.is_loopback() || host.is_unspecified() || host.is_multicast() {
+        return Ok(());
+    }
+    let mut slot = OUTBOUND_BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(current) = slot.as_mut() else {
+        return Ok(());
+    };
+    if current.skip.iter().any(|prefix| prefix.contains(&host)) {
+        return Ok(());
+    }
+    let tracked = current.hosts.contains(&host);
+    if tracked
+        && current
+            .owner
+            .routes()
+            .iter()
+            .any(|route| route.destination.addr() == host)
+    {
+        return Ok(());
+    }
+    if !tracked && current.hosts.len() >= DYNAMIC_BYPASS_CAP {
+        return Ok(());
+    }
+    let route = bypass_host_route(host, &current.device, current.gateway, &current.tun_device)?;
+    install_bypass_host_route(&route, &current.tun_device, &mut current.owner)?;
+    if !tracked {
+        current.hosts.push(host);
+    }
+    Ok(())
 }
 
 /// Parses `ip route show default` and keeps the lowest-metric non-TUN row.

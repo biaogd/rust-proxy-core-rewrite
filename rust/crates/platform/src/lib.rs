@@ -12,16 +12,19 @@ pub use dhcp::{
 };
 pub use network::{
     DefaultInterfaceSnapshot, NETWORK_CHANGE_POLL, NetworkChangePlan, auto_detect_bind_interface,
-    current_default_interface, exclude_tun_device, parse_darwin_default_route,
-    parse_linux_default_routes, parse_windows_default_routes, plan_network_change,
-    resolve_outbound_bind_interface, set_auto_detect_bind_interface,
+    clear_outbound_bypass, current_default_interface, exclude_tun_device, install_outbound_bypass,
+    parse_darwin_default_route, parse_linux_default_routes, parse_windows_default_routes,
+    plan_network_change, protect_outbound_destination, resolve_outbound_bind_interface,
+    set_auto_detect_bind_interface, update_outbound_bypass,
 };
 pub use route::{
-    OwnedRoute, RouteOwner, RoutePlatform, current_route_platform, darwin_route_args,
-    default_auto_route_destinations, install_device_route, parse_darwin_route_get,
-    parse_linux_route_get, parse_netsh_interface_names, parse_windows_find_netroute,
-    protect_host_route, reject_existing_windows_tun_device, validate_tun_device_name,
-    windows_netsh_route_args,
+    AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
+    current_route_platform, darwin_route_args, default_auto_route_destinations, host_route_prefix,
+    install_bypass_host_route, install_device_route, parse_darwin_exact_route,
+    parse_darwin_route_get, parse_linux_exact_route, parse_linux_route_get,
+    parse_netsh_interface_names, parse_windows_exact_route, parse_windows_find_netroute,
+    plan_auto_route_prefixes, protect_host_route, reject_existing_windows_tun_device,
+    validate_tun_device_name, windows_netsh_route_args,
 };
 pub use system_dns::{
     DarwinDnsConfig, DnsOwner, WindowsDnsOrigin, apply_tun_system_dns,
@@ -192,6 +195,8 @@ pub async fn connect_tcp(
     address: SocketAddr,
     options: OutboundTcpOptions<'_>,
 ) -> io::Result<tokio::net::TcpStream> {
+    protect_outbound_destination(address.ip())
+        .map_err(|error| io::Error::other(error.to_string()))?;
     let domain = if address.is_ipv4() {
         Domain::IPV4
     } else {

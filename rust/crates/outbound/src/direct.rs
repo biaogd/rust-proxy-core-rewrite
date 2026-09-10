@@ -150,6 +150,10 @@ pub async fn connect_udp_with_options(
                     continue;
                 }
             };
+            if let Err(error) = rewrite_platform::protect_outbound_destination(address.ip()) {
+                last_error = Some(std::io::Error::other(error.to_string()));
+                continue;
+            }
             let socket = UdpSocket::from_std(socket).map_err(DirectError::Io)?;
             match socket.connect(address).await {
                 Ok(()) => return Ok(socket),

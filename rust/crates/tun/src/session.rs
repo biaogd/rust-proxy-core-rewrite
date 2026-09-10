@@ -84,7 +84,9 @@ pub struct InboundUdpDatagram {
 }
 
 /// Sender used by the runtime UDP reply sink to emit datagrams back into the stack.
-pub type TunUdpReplyTx = mpsc::UnboundedSender<UdpMsg>;
+pub type TunUdpReplyTx = mpsc::Sender<UdpMsg>;
+/// Bounded TUN UDP write-back queue. Full replies are dropped (congestion).
+pub const TUN_UDP_REPLY_CAP: usize = 1024;
 
 pub struct TunSessionHub {
     tcp_rx: mpsc::Receiver<InboundTcpSession>,
@@ -119,7 +121,7 @@ pub fn spawn_session_hub(
 ) -> TunSessionHub {
     let (tcp_tx, tcp_rx) = mpsc::channel(256);
     let (udp_tx, udp_rx) = mpsc::channel(512);
-    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<UdpMsg>();
+    let (reply_tx, mut reply_rx) = mpsc::channel::<UdpMsg>(TUN_UDP_REPLY_CAP);
     let (mut udp_read, mut udp_write) = udp_socket.split();
 
     let tcp_shutdown = shutdown.clone();
@@ -230,6 +232,11 @@ fn tun_udp_metadata(client: SocketAddr, destination: SocketAddr) -> Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_reply_queue_is_bounded() {
+        assert_eq!(TUN_UDP_REPLY_CAP, 1024);
+    }
 
     #[test]
     fn tcp_metadata_marks_tun_inbound() {

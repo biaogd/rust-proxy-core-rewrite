@@ -1,6 +1,6 @@
 //! Owned route bookkeeping for TUN auto-route.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::process::{Command, Output};
 
 use ipnet::IpNet;
@@ -76,6 +76,28 @@ impl RouteOwner {
                 }
             } else {
                 self.routes.push(route);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Removes owned routes whose device is not `device`, keeping TUN
+    /// split-defaults in place across a physical-default change.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first failure after attempting all non-matching removals.
+    pub fn revert_not_on_device(&mut self, device: &str) -> Result<(), PlatformError> {
+        let routes = std::mem::take(&mut self.routes);
+        let mut first_error = None;
+        for route in routes {
+            if !device.is_empty() && route.device.eq_ignore_ascii_case(device) {
+                self.routes.push(route);
+            } else if let Err(error) = remove_owned_route(&route) {
+                first_error.get_or_insert(error);
             }
         }
         match first_error {
@@ -167,27 +189,125 @@ pub fn validate_tun_device_name(name: &str, platform: RoutePlatform) -> Result<(
     Ok(())
 }
 
-/// Installs a destination route via the given device.
+/// Planned auto-route prefixes after applying `route-exclude-address`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AutoRoutePlan {
+    /// Prefixes installed on the TUN device.
+    pub tun: Vec<IpNet>,
+    /// More-specific prefixes installed on the physical default (exceptions).
+    pub physical_exceptions: Vec<IpNet>,
+}
+
+/// Splits include prefixes against excludes.
 ///
-/// Linux (8A) uses `ip route replace`. Darwin (8B) uses `route -n add`.
-/// Windows (8C) uses `netsh interface ipv4 add route` on this adapter only.
-/// Other platforms return a clear unsupported error.
+/// An exclude that fully covers an include drops that TUN prefix. An exclude
+/// contained in a remaining TUN prefix becomes a physical exception route, so
+/// `route-exclude-address: 8.8.8.0/24` works against the default `/1` pair.
+#[must_use]
+pub fn plan_auto_route_prefixes(includes: &[IpNet], excludes: &[IpNet]) -> AutoRoutePlan {
+    let mut tun = Vec::new();
+    for include in includes {
+        if excludes
+            .iter()
+            .any(|exclude| prefix_contains(*exclude, *include))
+        {
+            continue;
+        }
+        tun.push(*include);
+    }
+    let mut physical_exceptions = Vec::new();
+    for exclude in excludes {
+        if tun
+            .iter()
+            .any(|include| prefix_contains(*include, *exclude) && include != exclude)
+        {
+            physical_exceptions.push(*exclude);
+        }
+    }
+    AutoRoutePlan {
+        tun,
+        physical_exceptions,
+    }
+}
+
+fn prefix_contains(outer: IpNet, inner: IpNet) -> bool {
+    outer.addr().is_ipv4() == inner.addr().is_ipv4()
+        && outer.prefix_len() <= inner.prefix_len()
+        && outer.contains(&inner.addr())
+}
+
+/// Host `/32` or `/128` for `host`.
 ///
 /// # Errors
 ///
-/// Returns command failures or unsupported-platform errors.
+/// Returns when `IpNet::new` rejects the prefix length.
+pub fn host_route_prefix(host: IpAddr) -> Result<IpNet, PlatformError> {
+    let prefix = if host.is_ipv4() { 32 } else { 128 };
+    IpNet::new(host, prefix)
+        .map_err(|error| PlatformError::Command(format!("host route prefix: {error}")))
+}
+
+/// Installs a destination route via the given device.
+///
+/// Linux uses `ip route add` (not `replace`). Existing exact prefixes on a
+/// different device are refused so other VPNs are not overwritten. A leftover
+/// on this TUN device is treated as already owned (crash recovery).
+///
+/// # Errors
+///
+/// Returns command failures, unsupported-platform errors, or a foreign-route
+/// conflict.
 pub fn install_device_route(route: &OwnedRoute) -> Result<(), PlatformError> {
+    match lookup_exact_route(route.destination)? {
+        Some(existing) if same_route_device(&existing, &route.device) => Ok(()),
+        Some(existing) => Err(foreign_route_conflict(&existing)),
+        None => add_device_route_allowing_ours(route),
+    }
+}
+
+fn same_route_device(route: &OwnedRoute, device: &str) -> bool {
+    !device.is_empty() && route.device.eq_ignore_ascii_case(device)
+}
+
+fn foreign_route_conflict(existing: &OwnedRoute) -> PlatformError {
+    PlatformError::Command(format!(
+        "refusing to replace existing route {} via {}; TUN does not overwrite foreign routes",
+        existing.destination, existing.device
+    ))
+}
+
+fn add_device_route(route: &OwnedRoute) -> Result<(), PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        run_ip_route("replace", route)
+        run_ip_route("add", route)
     }
     #[cfg(target_os = "macos")]
     {
-        run_darwin_route("add", route)
+        match run_darwin_route("add", route) {
+            Ok(()) => Ok(()),
+            Err(error) if looks_like_route_exists(&error.to_string()) => {
+                match lookup_exact_route(route.destination)? {
+                    Some(existing) if same_route_device(&existing, &route.device) => Ok(()),
+                    Some(existing) => Err(foreign_route_conflict(&existing)),
+                    None => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
     #[cfg(target_os = "windows")]
     {
-        run_windows_route("add", route)
+        match run_windows_route("add", route) {
+            Ok(()) => Ok(()),
+            Err(error) if looks_like_route_exists(&error.to_string()) => {
+                match lookup_exact_route(route.destination)? {
+                    Some(existing) if same_route_device(&existing, &route.device) => Ok(()),
+                    Some(existing) => Err(foreign_route_conflict(&existing)),
+                    None => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -277,17 +397,6 @@ fn run_darwin_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformErro
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if action == "add" && stderr.contains("File exists") {
-        let _ = run_darwin_route("delete", route);
-        let mut retry = Command::new("route");
-        retry.args(&args);
-        let retry_output = retry.output().map_err(PlatformError::Io)?;
-        if retry_output.status.success() {
-            return Ok(());
-        }
-        return Err(command_error("route add", &retry_output));
-    }
     Err(command_error(&format!("route {action}"), &output))
 }
 
@@ -323,65 +432,246 @@ fn is_host_prefix(destination: IpNet) -> bool {
     }
 }
 
-/// Installs a host route via the currently used path so TUN auto-route cannot
-/// capture DIRECT, DNS upstream, or proxy-server packets.
-///
-/// # Errors
-///
-/// Returns command failures, missing route, or unsupported-platform errors.
-pub fn protect_host_route(host: IpAddr, owner: &mut RouteOwner) -> Result<(), PlatformError> {
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn looks_like_route_exists(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("file exists")
+        || lower.contains("already exists")
+        || lower.contains("object already exists")
+        || lower.contains("the object exists")
+}
+
+fn lookup_exact_route(destination: IpNet) -> Result<Option<OwnedRoute>, PlatformError> {
+    #[cfg(target_os = "linux")]
     {
-        let (gateway, device) = current_route_to(host)?;
-        let destination = match host {
-            IpAddr::V4(_) => IpNet::new(host, 32),
-            IpAddr::V6(_) => IpNet::new(host, 128),
+        let output = Command::new("ip")
+            .args(["route", "show", "exact", &destination.to_string()])
+            .output()
+            .map_err(PlatformError::Io)?;
+        if !output.status.success() {
+            return Ok(None);
         }
-        .map_err(|error| PlatformError::Command(format!("host route prefix: {error}")))?;
-        let route = OwnedRoute {
+        Ok(parse_linux_exact_route(
+            &String::from_utf8_lossy(&output.stdout),
+            destination,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let family = if destination.addr().is_ipv6() {
+            "-inet6"
+        } else {
+            "-inet"
+        };
+        let output = Command::new("route")
+            .args(["-n", "get", family, &destination.addr().to_string()])
+            .output()
+            .map_err(PlatformError::Io)?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(parse_darwin_exact_route(
+            &String::from_utf8_lossy(&output.stdout),
+            destination,
+        ))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "@(Get-NetRoute -DestinationPrefix '{destination}' -ErrorAction SilentlyContinue | \
+              Select-Object DestinationPrefix, NextHop, InterfaceAlias) | ConvertTo-Json -Compress"
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .map_err(PlatformError::Io)?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(parse_windows_exact_route(
+            &String::from_utf8_lossy(&output.stdout),
+            destination,
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = destination;
+        Ok(None)
+    }
+}
+
+/// Parses `ip route show exact` stdout.
+#[must_use]
+pub fn parse_linux_exact_route(stdout: &str, destination: IpNet) -> Option<OwnedRoute> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let Some(dest) = words.next() else {
+            continue;
+        };
+        let Some(parsed) = parse_linux_route_destination(dest) else {
+            continue;
+        };
+        if parsed != destination {
+            continue;
+        }
+        let mut via = None;
+        let mut device = None;
+        while let Some(word) = words.next() {
+            match word {
+                "via" => via = words.next(),
+                "dev" => device = words.next(),
+                _ => {}
+            }
+        }
+        let device = device?;
+        return Some(OwnedRoute {
+            destination,
+            device: device.to_owned(),
+            gateway: via.and_then(|value| value.parse().ok()),
+            table: None,
+        });
+    }
+    None
+}
+
+fn parse_linux_route_destination(token: &str) -> Option<IpNet> {
+    if token == "default" {
+        return "0.0.0.0/0".parse().ok();
+    }
+    if let Ok(prefix) = token.parse::<IpNet>() {
+        return Some(prefix);
+    }
+    token
+        .parse::<IpAddr>()
+        .ok()
+        .and_then(|addr| host_route_prefix(addr).ok())
+}
+
+/// Parses `Get-NetRoute -DestinationPrefix` JSON.
+#[must_use]
+pub fn parse_windows_exact_route(json: &str, destination: IpNet) -> Option<OwnedRoute> {
+    for chunk in json.split('{').skip(1) {
+        let body = format!("{{{chunk}");
+        let prefix = json_object_string(&body, "DestinationPrefix");
+        if prefix
+            .as_deref()
+            .is_none_or(|value| value.parse::<IpNet>().ok() != Some(destination))
+        {
+            continue;
+        }
+        let device = json_object_string(&body, "InterfaceAlias").filter(|name| !name.is_empty())?;
+        let next_hop = json_object_string(&body, "NextHop");
+        let gateway = match next_hop.as_deref() {
+            None | Some("" | "0.0.0.0" | "::") => None,
+            Some(value) => value.parse().ok(),
+        };
+        return Some(OwnedRoute {
             destination,
             device,
             gateway,
             table: None,
-        };
-        install_device_route(&route)?;
-        owner.record(route);
-        Ok(())
+        });
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = host;
-        let _ = owner;
-        Err(PlatformError::Unsupported(
-            "TUN loop-avoidance host routes are only implemented for Linux (8A), macOS (8B), and Windows (8C)"
-                .to_owned(),
-        ))
+    None
+}
+
+fn add_device_route_allowing_ours(route: &OwnedRoute) -> Result<(), PlatformError> {
+    match add_device_route(route) {
+        Ok(()) => Ok(()),
+        Err(error) if looks_like_route_exists(&error.to_string()) => {
+            match lookup_exact_route(route.destination)? {
+                Some(existing) if same_route_device(&existing, &route.device) => Ok(()),
+                Some(existing) => Err(foreign_route_conflict(&existing)),
+                None => Err(error),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
-#[cfg(target_os = "linux")]
-fn current_route_to(host: IpAddr) -> Result<(Option<IpAddr>, String), PlatformError> {
-    let output = Command::new("ip")
-        .args(["route", "get", &host.to_string()])
-        .output()
-        .map_err(PlatformError::Io)?;
-    if !output.status.success() {
-        return Err(command_error("ip route get", &output));
+/// Installs a host/exception route via the physical default.
+///
+/// Existing routes on `tun_device` are removed and replaced. Existing routes
+/// on any other device are left untouched (already a TUN bypass).
+///
+/// # Errors
+///
+/// Returns when `device` is empty, equals `tun_device`, or install fails.
+pub fn install_bypass_host_route(
+    route: &OwnedRoute,
+    tun_device: &str,
+    owner: &mut RouteOwner,
+) -> Result<(), PlatformError> {
+    if route.device.is_empty() {
+        return Err(PlatformError::Command(
+            "no physical default interface; refusing TUN loop-avoidance route".to_owned(),
+        ));
     }
-    parse_linux_route_get(&String::from_utf8_lossy(&output.stdout))
+    if same_route_device(route, tun_device) {
+        return Err(PlatformError::Command(format!(
+            "refusing to install loop-avoidance route {} via TUN device {tun_device}",
+            route.destination
+        )));
+    }
+    if let Some(existing) = lookup_exact_route(route.destination)? {
+        if same_route_device(&existing, tun_device) {
+            let _ = remove_owned_route(&existing);
+        } else {
+            return Ok(());
+        }
+    }
+    add_device_route_allowing_ours(route)?;
+    owner.record(route.clone());
+    Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn current_route_to(host: IpAddr) -> Result<(Option<IpAddr>, String), PlatformError> {
-    let family = if host.is_ipv6() { "-inet6" } else { "-inet" };
-    let output = Command::new("route")
-        .args(["-n", "get", family, &host.to_string()])
-        .output()
-        .map_err(PlatformError::Io)?;
-    if !output.status.success() {
-        return Err(command_error("route get", &output));
+/// Builds a loop-avoidance host route via the physical default snapshot.
+///
+/// # Errors
+///
+/// Returns when the physical default is missing or is the TUN device.
+pub fn bypass_host_route(
+    host: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
+    tun_device: &str,
+) -> Result<OwnedRoute, PlatformError> {
+    if device.is_empty() {
+        return Err(PlatformError::Command(
+            "no physical default interface; refusing TUN loop-avoidance route".to_owned(),
+        ));
     }
-    parse_darwin_route_get(&String::from_utf8_lossy(&output.stdout))
+    if !tun_device.is_empty() && device.eq_ignore_ascii_case(tun_device) {
+        return Err(PlatformError::Command(format!(
+            "refusing to install loop-avoidance route for {host} via TUN device {tun_device}"
+        )));
+    }
+    Ok(OwnedRoute {
+        destination: host_route_prefix(host)?,
+        device: device.to_owned(),
+        gateway,
+        table: None,
+    })
+}
+
+/// Installs a host route via the physical default so TUN auto-route cannot
+/// capture DIRECT, DNS upstream, or proxy-server packets.
+///
+/// # Errors
+///
+/// Returns command failures or a request to install the host route via TUN.
+pub fn protect_host_route(
+    host: IpAddr,
+    device: &str,
+    gateway: Option<IpAddr>,
+    tun_device: &str,
+    owner: &mut RouteOwner,
+) -> Result<(), PlatformError> {
+    let route = bypass_host_route(host, device, gateway, tun_device)?;
+    install_bypass_host_route(&route, tun_device, owner)
 }
 
 /// Parses `ip route get` stdout.
@@ -442,22 +732,76 @@ pub fn parse_darwin_route_get(stdout: &str) -> Result<(Option<IpAddr>, String), 
     Ok((gateway, device))
 }
 
-#[cfg(target_os = "windows")]
-fn current_route_to(host: IpAddr) -> Result<(Option<IpAddr>, String), PlatformError> {
-    let script = format!(
-        "$rows = @(Find-NetRoute -RemoteIPAddress '{host}' -ErrorAction Stop); \
-         $row = $rows | Where-Object {{ $_.InterfaceAlias }} | Select-Object -First 1; \
-         if (-not $row) {{ $row = $rows | Select-Object -First 1 }}; \
-         @{{ NextHop = $row.NextHop; InterfaceAlias = $row.InterfaceAlias }} | ConvertTo-Json -Compress"
-    );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(PlatformError::Io)?;
-    if !output.status.success() {
-        return Err(command_error("Find-NetRoute", &output));
+/// Parses Darwin `route -n get` and keeps the row only when destination+mask
+/// match `wanted` exactly. Covering defaults or TUN `/1` routes are ignored.
+#[must_use]
+pub fn parse_darwin_exact_route(stdout: &str, wanted: IpNet) -> Option<OwnedRoute> {
+    let mut destination = None;
+    let mut mask = None;
+    let mut gateway = None;
+    let mut device = None;
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("destination:") {
+            destination = Some(value.trim().to_owned());
+        }
+        if let Some(value) = trimmed.strip_prefix("mask:") {
+            mask = Some(value.trim().to_owned());
+        }
+        if let Some(value) = trimmed.strip_prefix("gateway:") {
+            let value = value.trim();
+            if value != "default" && !value.is_empty() {
+                gateway = value.parse().ok();
+            }
+        }
+        if let Some(value) = trimmed.strip_prefix("interface:") {
+            device = Some(value.trim().to_owned());
+        }
     }
-    parse_windows_find_netroute(&String::from_utf8_lossy(&output.stdout))
+    let device = device?;
+    let parsed = parse_darwin_destination_prefix(destination.as_deref(), mask.as_deref())?;
+    if parsed != wanted {
+        return None;
+    }
+    Some(OwnedRoute {
+        destination: wanted,
+        device,
+        gateway,
+        table: None,
+    })
+}
+
+fn parse_darwin_destination_prefix(destination: Option<&str>, mask: Option<&str>) -> Option<IpNet> {
+    let destination = destination.unwrap_or("default");
+    if destination == "default" {
+        return "0.0.0.0/0".parse().ok();
+    }
+    let addr: IpAddr = destination.parse().ok()?;
+    let prefix_len = match (addr, mask) {
+        (_, None | Some("" | "default")) if addr.is_ipv4() => 32,
+        (_, None | Some("" | "default")) => 128,
+        (IpAddr::V4(_), Some(mask)) => ipv4_netmask_prefix_len(mask.parse::<Ipv4Addr>().ok()?)?,
+        (IpAddr::V6(_), Some(mask)) => ipv6_netmask_prefix_len(mask.parse::<Ipv6Addr>().ok()?)?,
+    };
+    IpNet::new(addr, prefix_len).ok()
+}
+
+fn ipv4_netmask_prefix_len(mask: Ipv4Addr) -> Option<u8> {
+    let bits = u32::from(mask);
+    let leading = bits.leading_ones();
+    if leading == 0 {
+        return (bits == 0).then_some(0);
+    }
+    (bits == u32::MAX << (32 - leading)).then_some(u8::try_from(leading).ok()?)
+}
+
+fn ipv6_netmask_prefix_len(mask: Ipv6Addr) -> Option<u8> {
+    let bits = u128::from(mask);
+    let leading = bits.leading_ones();
+    if leading == 0 {
+        return (bits == 0).then_some(0);
+    }
+    (bits == u128::MAX << (128 - leading)).then_some(u8::try_from(leading).ok()?)
 }
 
 #[cfg(target_os = "windows")]
@@ -471,26 +815,7 @@ fn run_windows_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformErr
         return Ok(());
     }
     let error = command_error(&format!("netsh route {action}"), &output);
-    if action == "add" && looks_like_route_exists(&error.to_string()) {
-        let _ = run_windows_route("delete", route);
-        let retry = Command::new("netsh")
-            .args(&args)
-            .output()
-            .map_err(PlatformError::Io)?;
-        if retry.status.success() {
-            return Ok(());
-        }
-        return Err(command_error("netsh route add", &retry));
-    }
     Err(error)
-}
-
-#[cfg(target_os = "windows")]
-fn looks_like_route_exists(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("already exists")
-        || lower.contains("object already exists")
-        || lower.contains("the object exists")
 }
 
 /// Builds `netsh interface ipv4 {add|delete} route` arguments.
@@ -637,6 +962,9 @@ mod tests {
         assert!(owner.routes().is_empty());
         owner.revert_all().expect("empty revert");
         owner.revert_host_routes().expect("empty host revert");
+        owner
+            .revert_not_on_device("tun0")
+            .expect("empty device revert");
     }
 
     #[test]
@@ -833,5 +1161,145 @@ Enabled        Disconnected   Dedicated        WireGuard Tunnel
                 "WireGuard Tunnel".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn exclude_more_specific_than_split_default_becomes_physical_exception() {
+        let includes = default_auto_route_destinations(RoutePlatform::Linux);
+        let excludes = vec!["8.8.8.0/24".parse().expect("exclude")];
+        let plan = plan_auto_route_prefixes(&includes, &excludes);
+        assert_eq!(
+            plan.tun.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["0.0.0.0/1".to_owned(), "128.0.0.0/1".to_owned()]
+        );
+        assert_eq!(
+            plan.physical_exceptions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["8.8.8.0/24".to_owned()]
+        );
+        let equal = plan_auto_route_prefixes(
+            &["0.0.0.0/1".parse().expect("inc")],
+            &["0.0.0.0/1".parse().expect("exc")],
+        );
+        assert!(equal.tun.is_empty());
+        assert!(equal.physical_exceptions.is_empty());
+        let covered = plan_auto_route_prefixes(
+            &["192.0.2.0/24".parse().expect("inc")],
+            &["192.0.2.0/16".parse().expect("exc")],
+        );
+        assert!(covered.tun.is_empty());
+        let v6 = plan_auto_route_prefixes(
+            &["2001:db8::/32".parse().expect("inc6")],
+            &["2001:db8:1::/48".parse().expect("exc6")],
+        );
+        assert_eq!(v6.tun.len(), 1);
+        assert_eq!(v6.physical_exceptions[0].to_string(), "2001:db8:1::/48");
+    }
+
+    #[test]
+    fn parse_linux_exact_route_skips_other_prefixes() {
+        let stdout = "\
+0.0.0.0/1 via 10.0.0.1 dev wg0 proto static metric 50
+128.0.0.0/1 dev tun0 scope link
+";
+        let tun = parse_linux_exact_route(stdout, "128.0.0.0/1".parse().expect("tun"));
+        assert_eq!(
+            tun.as_ref().map(|route| route.device.as_str()),
+            Some("tun0")
+        );
+        let foreign = parse_linux_exact_route(stdout, "0.0.0.0/1".parse().expect("wg"));
+        assert_eq!(
+            foreign.as_ref().map(|route| route.device.as_str()),
+            Some("wg0")
+        );
+        assert!(parse_linux_exact_route(stdout, "8.8.8.0/24".parse().expect("miss")).is_none());
+        let host = parse_linux_exact_route(
+            "192.0.2.1 via 10.66.8.1 dev p8na00001 \n",
+            "192.0.2.1/32".parse().expect("host"),
+        );
+        assert_eq!(
+            host.as_ref().map(|route| route.device.as_str()),
+            Some("p8na00001")
+        );
+        assert_eq!(
+            host.as_ref().and_then(|route| route.gateway),
+            Some("10.66.8.1".parse().expect("gw"))
+        );
+    }
+
+    #[test]
+    fn bypass_host_route_refuses_missing_and_tun_device() {
+        let host = "8.8.8.8".parse().expect("host");
+        let missing = bypass_host_route(host, "", None, "tun0").expect_err("empty");
+        assert!(missing.to_string().contains("no physical default"));
+        let via_tun = bypass_host_route(host, "tun0", None, "tun0").expect_err("tun");
+        assert!(via_tun.to_string().contains("via TUN device"));
+        let ok = bypass_host_route(
+            host,
+            "eth0",
+            Some("192.168.1.1".parse().expect("gw")),
+            "tun0",
+        )
+        .expect("physical");
+        assert_eq!(ok.device, "eth0");
+        assert_eq!(ok.destination.to_string(), "8.8.8.8/32");
+    }
+
+    #[test]
+    fn parse_windows_exact_route_matches_prefix() {
+        let json = r#"[{"DestinationPrefix":"0.0.0.0/1","NextHop":"0.0.0.0","InterfaceAlias":"WireGuard"},{"DestinationPrefix":"128.0.0.0/1","NextHop":"0.0.0.0","InterfaceAlias":"p8c"}]"#;
+        let found = parse_windows_exact_route(json, "0.0.0.0/1".parse().expect("split"));
+        assert_eq!(
+            found.as_ref().map(|route| route.device.as_str()),
+            Some("WireGuard")
+        );
+    }
+
+    #[test]
+    fn parse_darwin_exact_route_ignores_covering_tun_and_default() {
+        let covering = "\
+   route to: 8.8.8.8
+destination: 0.0.0.0
+       mask: 128.0.0.0
+    gateway: link#12
+  interface: utun8
+";
+        assert!(parse_darwin_exact_route(covering, "8.8.8.8/32".parse().expect("host")).is_none());
+        let default = "\
+   route to: 1.0.0.0
+destination: default
+       mask: default
+    gateway: 192.168.1.1
+  interface: en0
+";
+        assert!(parse_darwin_exact_route(default, "1.0.0.0/8".parse().expect("net")).is_none());
+        let exact = "\
+   route to: 8.8.8.8
+destination: 8.8.8.8
+       mask: 255.255.255.255
+    gateway: 192.168.1.1
+  interface: en0
+";
+        let found = parse_darwin_exact_route(exact, "8.8.8.8/32".parse().expect("host"))
+            .expect("exact host");
+        assert_eq!(found.device, "en0");
+        assert_eq!(found.gateway, Some("192.168.1.1".parse().expect("gw")));
+        let split = "\
+destination: 0.0.0.0
+       mask: 128.0.0.0
+  interface: utun8
+";
+        let tun = parse_darwin_exact_route(split, "0.0.0.0/1".parse().expect("split")).expect("/1");
+        assert_eq!(tun.device, "utun8");
+        let v6 = "\
+destination: 2001:db8::
+       mask: ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+  interface: en0
+";
+        let host6 =
+            parse_darwin_exact_route(v6, "2001:db8::/128".parse().expect("v6")).expect("v6");
+        assert_eq!(host6.device, "en0");
     }
 }

@@ -179,9 +179,13 @@ impl UdpReplySink {
                 let packet = rewrite_inbound::encode_socks5_udp(remote, payload);
                 listener.send_to(&packet, session_peer).await.map(|_| ())
             }
-            Self::Tun { tx } => tx
-                .send((payload.to_vec(), remote, session_peer))
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
+            Self::Tun { tx } => match tx.try_send((payload.to_vec(), remote, session_peer)) {
+                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "TUN UDP reply channel closed",
+                )),
+            },
         }
     }
 }
@@ -957,12 +961,12 @@ pub(super) async fn run_direct_udp_session(
     } else {
         "0.0.0.0:0".parse().expect("static IPv4 wildcard")
     };
-    let outbound = match rewrite_platform::bind_outbound_udp(
-        family,
-        &config.interface_name,
-        config.routing_mark,
-    )
-    .and_then(UdpSocket::from_std)
+    let outbound = match rewrite_platform::protect_outbound_destination(target.ip())
+        .map_err(|error| std::io::Error::other(error.to_string()))
+        .and_then(|()| {
+            rewrite_platform::bind_outbound_udp(family, &config.interface_name, config.routing_mark)
+        })
+        .and_then(UdpSocket::from_std)
     {
         Ok(socket) => socket,
         Err(error) => {
@@ -1001,6 +1005,9 @@ pub(super) async fn run_direct_udp_session(
                         continue;
                     }
                 };
+                if rewrite_platform::protect_outbound_destination(target.ip()).is_err() {
+                    continue;
+                }
                 if outbound.send_to(&request.payload, target).await.is_ok() {
                     uploaded = uploaded.saturating_add(request.payload.len() as u64);
                     idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
