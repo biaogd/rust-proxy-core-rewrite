@@ -86,6 +86,8 @@ async fn handshake(
     )
 }
 
+/// Timeout around `send()` only proves the future is cancel-safe. Mixed-port
+/// shutdown coverage is `rewrite-runtime` `tuic_mixed_udp_cancel`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quic_udp_send_is_cancellable_when_uni_credit_is_exhausted() {
     let endpoint = bind_server(1);
@@ -133,5 +135,34 @@ async fn udp_recv_returns_promptly_after_quic_peer_close() {
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "recv should observe QUIC close without the mixed-port idle timeout"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_unblocks_authenticate_waiting_for_uni_credit() {
+    let endpoint = bind_server(0);
+    let addr = endpoint.local_addr().expect("addr");
+    let client = Arc::new(client_for(addr, UdpRelayMode::Native));
+    let opening = {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.open_udp().await })
+    };
+    let incoming = tokio::time::timeout(Duration::from_secs(5), endpoint.accept())
+        .await
+        .expect("incoming")
+        .expect("server accepted");
+    let _connection = incoming.await.expect("handshake");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(1), client.close())
+        .await
+        .expect("close must not wait on authenticate");
+    let opened = tokio::time::timeout(Duration::from_secs(1), opening)
+        .await
+        .expect("open_udp must finish after close");
+    assert!(opened.expect("join").is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "retire/close must interrupt a blocked TUIC dial"
     );
 }

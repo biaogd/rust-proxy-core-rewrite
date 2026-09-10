@@ -140,6 +140,8 @@ pub struct Client {
 struct ClientState {
     endpoint: Option<quinn::Endpoint>,
     sessions: Vec<Arc<SessionInner>>,
+    /// Set by `close`; in-flight dials must not insert a new session.
+    closed: bool,
 }
 
 impl Client {
@@ -162,6 +164,7 @@ impl Client {
             inner: Mutex::new(ClientState {
                 endpoint: None,
                 sessions: Vec::new(),
+                closed: false,
             }),
         })
     }
@@ -228,11 +231,9 @@ impl Client {
 
     pub async fn close(&self) {
         let mut state = self.inner.lock().await;
+        state.closed = true;
         for session in state.sessions.drain(..) {
-            session.closed.store(true, Ordering::Release);
-            session
-                .connection
-                .close(0xffff_fff0_u32.into(), b"TUIC client closed");
+            session.invalidate();
         }
         if let Some(endpoint) = state.endpoint.take() {
             endpoint.close(0_u32.into(), b"TUIC client closed");
@@ -243,45 +244,59 @@ impl Client {
         &self,
         max_open_streams: u64,
     ) -> Result<(Arc<SessionInner>, StreamLease), TuicProtocolError> {
-        let mut state = self.inner.lock().await;
-        prune_sessions(&mut state.sessions);
-        let mut best: Option<Arc<SessionInner>> = None;
-        for session in &state.sessions {
-            if !session.live() {
-                continue;
-            }
-            let current = session.open_streams.load(Ordering::Acquire);
-            let best_load = best
-                .as_ref()
-                .map_or(u64::MAX, |item| item.open_streams.load(Ordering::Acquire));
-            if current < best_load {
-                best = Some(Arc::clone(session));
-            }
-        }
-        if let Some(session) = best
-            && let Some(lease) = session.try_reserve(max_open_streams)
         {
-            return Ok((session, lease));
+            let mut state = self.inner.lock().await;
+            if state.closed {
+                return Err(TuicProtocolError::Protocol("TUIC client closed".to_owned()));
+            }
+            prune_sessions(&mut state.sessions);
+            let mut best: Option<Arc<SessionInner>> = None;
+            for session in &state.sessions {
+                if !session.live() {
+                    continue;
+                }
+                let current = session.open_streams.load(Ordering::Acquire);
+                let best_load = best
+                    .as_ref()
+                    .map_or(u64::MAX, |item| item.open_streams.load(Ordering::Acquire));
+                if current < best_load {
+                    best = Some(Arc::clone(session));
+                }
+            }
+            if let Some(session) = best
+                && let Some(lease) = session.try_reserve(max_open_streams)
+            {
+                return Ok((session, lease));
+            }
         }
-        let session = self.dial_locked(&mut state).await?;
+        let session = self.dial().await?;
         let lease = session
             .try_reserve(max_open_streams)
             .ok_or_else(|| TuicProtocolError::Protocol("TUIC too many open streams".to_owned()))?;
         Ok((session, lease))
     }
 
-    async fn dial_locked(
-        &self,
-        state: &mut ClientState,
-    ) -> Result<Arc<SessionInner>, TuicProtocolError> {
+    async fn dial(&self) -> Result<Arc<SessionInner>, TuicProtocolError> {
         let address = resolve_server(&self.options.server, self.options.port).await?;
         let bind = unspecified_bind(address);
-        if state.endpoint.is_none() {
-            state.endpoint = Some(build_endpoint(&self.options, bind)?);
-        }
-        let endpoint = state.endpoint.as_ref().ok_or_else(|| {
-            TuicProtocolError::Protocol("TUIC endpoint missing after construction".to_owned())
-        })?;
+        let endpoint = {
+            let mut state = self.inner.lock().await;
+            if state.closed {
+                return Err(TuicProtocolError::Protocol("TUIC client closed".to_owned()));
+            }
+            if state.endpoint.is_none() {
+                state.endpoint = Some(build_endpoint(&self.options, bind)?);
+            }
+            state
+                .endpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    TuicProtocolError::Protocol(
+                        "TUIC endpoint missing after construction".to_owned(),
+                    )
+                })?
+                .clone()
+        };
         // rustls `ServerName` cannot be empty. When SNI is disabled the dummy
         // name is not written into ClientHello (`TlsOptions.disable_sni`).
         let server_name = if self.options.tls.server_name.is_empty() {
@@ -307,7 +322,14 @@ impl Client {
             open_streams: Arc::new(AtomicU64::new(0)),
             last_visited: std::sync::Mutex::new(Instant::now()),
         });
-        state.sessions.push(Arc::clone(&session));
+        {
+            let mut state = self.inner.lock().await;
+            if state.closed {
+                session.invalidate();
+                return Err(TuicProtocolError::Protocol("TUIC client closed".to_owned()));
+            }
+            state.sessions.push(Arc::clone(&session));
+        }
         Ok(session)
     }
 }
@@ -334,11 +356,19 @@ async fn authenticate(
     connection
         .export_keying_material(&mut token, uuid.as_bytes(), password.as_bytes())
         .map_err(|error| TuicProtocolError::Protocol(format!("TLS exporter failed: {error:?}")))?;
-    let mut stream = connection.open_uni().await?;
-    stream
-        .write_all(&encode_authenticate(*uuid.as_bytes(), token))
-        .await
-        .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;
+    let mut stream = tokio::select! {
+        stream = connection.open_uni() => stream?,
+        error = connection.closed() => return Err(error.into()),
+    };
+    let frame = encode_authenticate(*uuid.as_bytes(), token);
+    tokio::select! {
+        result = stream.write_all(&frame) => {
+            result.map_err(|error| {
+                TuicProtocolError::Io(std::io::Error::other(error.to_string()))
+            })?;
+        }
+        error = connection.closed() => return Err(error.into()),
+    }
     stream
         .finish()
         .map_err(|error| TuicProtocolError::Io(std::io::Error::other(error.to_string())))?;

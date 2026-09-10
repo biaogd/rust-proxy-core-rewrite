@@ -64,9 +64,12 @@ or unimplemented.
 **Phase 6H-B (2026-09-10):** TUIC v5 outbound UDP is implemented on the same
 QUIC session: native QUIC DATAGRAM (with Go-compatible fragment reassembly) and
 `udp-relay-mode: quic` uni-stream packets, Dissociate on association close, and
-mixed/SOCKS UDP session wiring. Uni-stream send is cancellable with shutdown /
-idle / tracker, and association `recv` ends when the QUIC connection closes
-(crate fixtures in `protocol-tuic` `udp_lifecycle`).
+mixed/SOCKS UDP session wiring. UDP setup uses the shared 5s/`shutdown`
+`await_udp_setup` bound (not v4 `request-timeout`); dial does not hold the
+client mutex across `connect`/`authenticate`. Uni-stream send is cancellable
+with shutdown / idle / tracker; `recv` ends when QUIC closes. Evidence:
+`protocol-tuic` `udp_lifecycle` plus `rewrite-runtime` mixed SOCKS cancel
+fixtures.
 
 **Phase 6H-C (2026-09-10):** TUIC v5 outbound lifecycle: Go-style QUIC connection
 pool when `max-open-streams` is reached, delayed stream-slot release (5s), TUIC
@@ -280,7 +283,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | HY2-B Hysteria2 UDP/obfs/Brutal/hop | Partial; Brutal experimental and deferred | UDP/Salamander/hop differential exists; current production target uses stock BBR with up/down omitted. Approximate Brutal remains in code/tests but precise pacing/parity and Quinn patch work are deferred by user. See 2026-09-08 readiness update; no production claim. |
 | HY2-C Hysteria2 stress/netem/soak | Production acceptance open | Stress/recovery differential passed locally with native samples. Historical permissive soak on `8a9b0761` is not current acceptance; strict short soak exposed UDP association-churn timeouts in Go and Rust. Strict long release soak and native platform evidence remain open. |
 | Phase 6H-A TUIC v5 outbound TCP | Complete in declared client scope | Clash `type: tuic` v5 UUID/password parse; QUIC/TLS with rustls exporter auth; TCP Connect over bidi streams; rules/groups/providers/health/reload; `disable-sni` omits SNI; explicit empty ALPN preserved; v5 ignores `request-timeout` for open; Go recv-window mapping; v4 token, 0-RTT, ECH, UDP-over-stream and Brutal rejected; Go/Rust differential vs Go TUIC inbound (`phase6h_tuic_tcp.py`) |
-| Phase 6H-B TUIC v5 outbound UDP | Complete in declared client scope | Native QUIC DATAGRAM and `udp-relay-mode: quic` uni-stream relay; packet/assoc IDs; native fragmentation + 10s defrag (reorder/duplicate/invalid FRAG_ID); Dissociate on association drop; mixed/SOCKS UDP idle 1m; cancellable blocked QUIC send; recv ends on QUIC close (`udp_lifecycle` crate tests); `max-udp-relay-packet-size` accepted (`max-datagram-frame-size` still rejected). Evidence: `phase6h_tuic_udp.py` plus crate unit tests |
+| Phase 6H-B TUIC v5 outbound UDP | Complete in declared client scope | Native QUIC DATAGRAM and `udp-relay-mode: quic` uni-stream relay; packet/assoc IDs; native fragmentation + 10s defrag (reorder/duplicate/invalid FRAG_ID); Dissociate on association drop; mixed/SOCKS UDP idle 1m; setup via `await_udp_setup` (5s + shutdown); blocked QUIC send/auth cancel on mixed shutdown (`tuic_mixed_udp_cancel`); recv ends on QUIC close (`udp_lifecycle`). `max-udp-relay-packet-size` accepted (`max-datagram-frame-size` still rejected). Evidence: `phase6h_tuic_udp.py` plus crate tests |
 | Phase 6H-C TUIC v5 outbound lifecycle | Complete locally in declared client scope; three-platform CI pending | Connection pool on `max-open-streams`, 5s delayed slot release, Heartbeat datagrams + QUIC keep-alive, cubic/new_reno/bbr names, cancel/restart/reload, concurrent TCP+UDP, malformed decode unit tests, short soak. Evidence: `phase6h_tuic_lifecycle.py` / `phase6h_tuic_soak.py`. Algorithm identity with quic-go is not claimed |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |

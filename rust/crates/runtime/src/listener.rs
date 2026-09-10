@@ -455,9 +455,9 @@ pub(super) async fn run_udp_session(
             .await;
         }
         UdpSessionMode::Tuic(proxy) => {
-            run_tuic_udp_session(
+            Box::pin(run_tuic_udp_session(
                 listener, source, first, requests, config, state, proxy, decision, shutdown,
-            )
+            ))
             .await;
         }
     }
@@ -780,17 +780,16 @@ pub(super) async fn run_tuic_udp_session(
     if proxy.tuic.is_none() {
         return;
     }
-    let client = match super::tcp::tuic_client_for_proxy(&proxy, &config, &state).await {
-        Ok(client) => client,
-        Err(error) => {
-            state.log("error", format!("TUIC UDP client failed: {error}"));
-            return;
-        }
+    let setup = async {
+        let client = super::tcp::tuic_client_for_proxy(&proxy, &config, &state).await?;
+        rewrite_outbound::associate_tuic_udp(&client)
+            .await
+            .map_err(|error| format!("TUIC UDP association failed: {error}"))
     };
-    let mut association = match rewrite_outbound::associate_tuic_udp(&client).await {
+    let mut association = match await_udp_setup(&shutdown, setup).await {
         Ok(association) => association,
         Err(error) => {
-            state.log("error", format!("TUIC UDP association failed: {error}"));
+            state.log("error", format!("TUIC UDP setup failed: {error}"));
             return;
         }
     };

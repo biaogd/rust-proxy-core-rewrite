@@ -1334,7 +1334,8 @@ deferred; the declared BBR profile still needs its own release evidence.
   changes, size/fragmentation boundaries, loss/reorder/duplicate reassembly
   (unit tests) and association cleanup. Evidence: `compat/scripts/phase6h_tuic_udp.py`
   plus `protocol-tuic` `udp_lifecycle` (blocked QUIC send cancel; recv ends on
-  peer close).
+  peer close) and `rewrite-runtime` mixed SOCKS shutdown cancel
+  (`tuic_mixed_udp_cancel`).
 - **6H-C (implemented):** connection reuse, TUIC Heartbeat datagrams plus QUIC
   keep-alive (`heartbeat-interval`), reconnection after authority restart, cancel
   isolation, `max-open-streams` pooling, congestion *names*, reload, concurrent
