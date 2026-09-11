@@ -664,7 +664,7 @@ fn quic_client_identity(
     format!(
         "{proxy:?}|dial={dial_server}|roots={:?}|bind={}|mark={}",
         config.trust_certificates,
-        rewrite_platform::resolve_outbound_bind_interface(&config.interface_name),
+        rewrite_platform::resolve_outbound_bind_identity(&config.interface_name),
         config.routing_mark,
     )
 }

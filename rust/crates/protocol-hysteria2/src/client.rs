@@ -1127,6 +1127,37 @@ mod tests {
     #[test]
     fn build_endpoint_binds_plain_salamander_and_hop_through_platform() {
         let missing = "p8f-missing-iface";
+        let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443));
+        let hop = HopConfig {
+            addrs: vec![
+                canonical,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 8443)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let cases: [(&str, Option<HopConfig>); 3] =
+            [("", None), ("salamander-psk", None), ("", Some(hop))];
+        for (obfs, hop_cfg) in cases {
+            let options = ClientOptions {
+                bind_interface: missing.to_owned(),
+                obfs_password: obfs.to_owned(),
+                tls: TlsOptions {
+                    server_name: "test".into(),
+                    skip_certificate_verification: true,
+                    alpn: vec!["h3".into()],
+                    custom_roots: Vec::new(),
+                },
+                ..ClientOptions::default()
+            };
+            build_endpoint(&options, canonical, hop_cfg, None)
+                .expect_err("missing bind interface must fail before Quinn wrap");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_endpoint_skips_missing_interface_for_loopback() {
+        let missing = "p8f-missing-iface";
         let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443));
         let hop = HopConfig {
             addrs: vec![
@@ -1151,7 +1182,7 @@ mod tests {
                 ..ClientOptions::default()
             };
             build_endpoint(&options, canonical, hop_cfg, None)
-                .expect_err("missing bind interface must fail before Quinn wrap");
+                .expect("loopback remote must skip NIC bind before Quinn wrap");
         }
     }
 

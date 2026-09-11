@@ -8,7 +8,7 @@
 //! The TUN device is excluded so split auto-route cannot be mistaken for the
 //! physical default after 8A/8C `0.0.0.0/1` + `128.0.0.0/1`.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -22,7 +22,12 @@ use crate::route::{
 /// How often TUN polls the physical default route.
 pub const NETWORK_CHANGE_POLL: Duration = Duration::from_millis(500);
 
-static AUTO_DETECT_BIND: Mutex<Option<String>> = Mutex::new(None);
+struct AutoDetectBind {
+    inet4: Option<String>,
+    inet6: Option<String>,
+}
+
+static AUTO_DETECT_BIND: Mutex<Option<AutoDetectBind>> = Mutex::new(None);
 const DYNAMIC_BYPASS_CAP: usize = 1024;
 
 struct OutboundBypass {
@@ -54,7 +59,18 @@ impl DefaultInterfaceSnapshot {
 
     #[must_use]
     pub fn is_lost(&self) -> bool {
-        self.device.is_none()
+        self.device.is_none() && self.inet6_device.is_none()
+    }
+
+    /// IPv4 device, IPv6 device, or `v4/v6` when they differ.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match (self.device.as_deref(), self.inet6_device.as_deref()) {
+            (Some(v4), Some(v6)) if v4 != v6 => format!("{v4}/{v6}"),
+            (Some(v4), _) => v4.to_owned(),
+            (_, Some(v6)) => v6.to_owned(),
+            _ => "unknown".to_owned(),
+        }
     }
 
     /// Device and gateway for `host`'s address family.
@@ -149,7 +165,7 @@ pub fn plan_network_change(
             log: "[TUN] default interface lost by monitor".to_owned(),
         });
     }
-    let name = after.device.as_deref().unwrap_or("unknown");
+    let name = after.display_name();
     Some(NetworkChangePlan {
         reprotect_hosts: true,
         reapply_system_dns: dns_follows_primary,
@@ -188,33 +204,68 @@ pub fn exclude_tun_device(
     snapshot
 }
 
-/// Stores the auto-detect bind target used when `interface-name` is empty.
-pub fn set_auto_detect_bind_interface(name: Option<&str>) {
+/// Stores per-family auto-detect bind targets used when `interface-name` is empty.
+pub fn set_auto_detect_bind_interface(physical: Option<&DefaultInterfaceSnapshot>) {
     let mut slot = AUTO_DETECT_BIND
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *slot = name
-        .map(str::trim)
+    *slot = physical.and_then(|snapshot| {
+        let inet4 = nonempty_iface(snapshot.device.as_deref());
+        let inet6 = nonempty_iface(snapshot.inet6_device.as_deref());
+        if inet4.is_none() && inet6.is_none() {
+            None
+        } else {
+            Some(AutoDetectBind { inet4, inet6 })
+        }
+    });
+}
+
+fn nonempty_iface(name: Option<&str>) -> Option<String> {
+    name.map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
 }
 
-/// Returns the auto-detect bind target, if TUN installed one.
+/// Returns the auto-detect bind target for `remote`'s address family.
 #[must_use]
-pub fn auto_detect_bind_interface() -> Option<String> {
-    AUTO_DETECT_BIND
+pub fn auto_detect_bind_interface(remote: SocketAddr) -> Option<String> {
+    let slot = AUTO_DETECT_BIND
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bind = slot.as_ref()?;
+    if remote.is_ipv6() {
+        bind.inet6.clone()
+    } else {
+        bind.inet4.clone()
+    }
 }
 
-/// Explicit `interface-name` wins; otherwise the auto-detect bind target.
+/// Explicit `interface-name` wins; otherwise the auto-detect bind for `remote`.
 #[must_use]
-pub fn resolve_outbound_bind_interface(explicit: &str) -> String {
+pub fn resolve_outbound_bind_interface(explicit: &str, remote: SocketAddr) -> String {
     if !explicit.is_empty() {
         return explicit.to_owned();
     }
-    auto_detect_bind_interface().unwrap_or_default()
+    auto_detect_bind_interface(remote).unwrap_or_default()
+}
+
+/// Cache identity for QUIC clients: explicit name, or `v4|v6` auto-detect slots.
+#[must_use]
+pub fn resolve_outbound_bind_identity(explicit: &str) -> String {
+    if !explicit.is_empty() {
+        return explicit.to_owned();
+    }
+    let slot = AUTO_DETECT_BIND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match slot.as_ref() {
+        None => String::new(),
+        Some(bind) => format!(
+            "{}|{}",
+            bind.inet4.as_deref().unwrap_or(""),
+            bind.inet6.as_deref().unwrap_or("")
+        ),
+    }
 }
 
 /// Starts per-destination physical bypass used when TUN auto-route is on.
@@ -496,7 +547,7 @@ fn windows_default_snapshot(
           Select-Object NextHop, InterfaceAlias, RouteMetric) | ConvertTo-Json -Compress"
     );
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
         .output()
         .map_err(PlatformError::Io)?;
     if !output.status.success() {
@@ -628,11 +679,83 @@ destination: default
 
     #[test]
     fn explicit_interface_name_wins_over_auto_detect() {
-        set_auto_detect_bind_interface(Some("eth0"));
-        assert_eq!(resolve_outbound_bind_interface("wlan0"), "wlan0");
-        assert_eq!(resolve_outbound_bind_interface(""), "eth0");
+        let v4: SocketAddr = "1.1.1.1:53".parse().expect("v4");
+        let v6: SocketAddr = "[2001:db8::1]:53".parse().expect("v6");
+        set_auto_detect_bind_interface(Some(&DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            inet6_device: Some("eth1".to_owned()),
+            ..Default::default()
+        }));
+        assert_eq!(resolve_outbound_bind_interface("wlan0", v4), "wlan0");
+        assert_eq!(resolve_outbound_bind_interface("", v4), "eth0");
+        assert_eq!(resolve_outbound_bind_interface("", v6), "eth1");
+        assert_eq!(resolve_outbound_bind_identity(""), "eth0|eth1");
         set_auto_detect_bind_interface(None);
-        assert_eq!(resolve_outbound_bind_interface(""), "");
+        assert_eq!(resolve_outbound_bind_interface("", v4), "");
+        assert_eq!(resolve_outbound_bind_interface("", v6), "");
+        assert_eq!(resolve_outbound_bind_identity(""), "");
+    }
+
+    #[test]
+    fn auto_detect_bind_follows_remote_family_and_ipv6_only_is_not_lost() {
+        let v4: SocketAddr = "192.0.2.1:443".parse().expect("v4");
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().expect("v6");
+        let v4_only = DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            gateway: Some("192.168.1.1".parse().expect("gw")),
+            ..Default::default()
+        };
+        set_auto_detect_bind_interface(Some(&v4_only));
+        assert_eq!(auto_detect_bind_interface(v4).as_deref(), Some("eth0"));
+        assert_eq!(auto_detect_bind_interface(v6), None);
+        assert!(!v4_only.is_lost());
+
+        let v6_only = DefaultInterfaceSnapshot {
+            inet6_device: Some("eth1".to_owned()),
+            inet6_gateway: Some("fe80::1".parse().expect("ll")),
+            ..Default::default()
+        };
+        assert!(!v6_only.is_lost());
+        assert!(DefaultInterfaceSnapshot::lost().is_lost());
+        set_auto_detect_bind_interface(Some(&v6_only));
+        assert_eq!(auto_detect_bind_interface(v4), None);
+        assert_eq!(auto_detect_bind_interface(v6).as_deref(), Some("eth1"));
+        assert_eq!(resolve_outbound_bind_identity(""), "|eth1");
+
+        let appeared = plan_network_change(
+            &DefaultInterfaceSnapshot::lost(),
+            &v6_only,
+            "tun0",
+            true,
+            false,
+        )
+        .expect("ipv6-only default is a restore, not a loss");
+        assert!(appeared.reprotect_hosts);
+        assert!(appeared.update_detected_interface);
+        assert!(!appeared.log.contains("lost"));
+        assert!(appeared.log.contains("eth1"));
+
+        let dual = DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            gateway: Some("192.168.1.1".parse().expect("gw")),
+            inet6_device: Some("eth1".to_owned()),
+            inet6_gateway: Some("fe80::1".parse().expect("ll")),
+        };
+        set_auto_detect_bind_interface(Some(&dual));
+        assert_eq!(resolve_outbound_bind_interface("", v4), "eth0");
+        assert_eq!(resolve_outbound_bind_interface("", v6), "eth1");
+        assert_eq!(dual.display_name(), "eth0/eth1");
+
+        let tun_v4_physical_v6 = DefaultInterfaceSnapshot {
+            device: Some("tun0".to_owned()),
+            inet6_device: Some("eth1".to_owned()),
+            ..Default::default()
+        };
+        let excluded = exclude_tun_device(&tun_v4_physical_v6, "tun0");
+        assert!(excluded.device.is_none());
+        assert_eq!(excluded.inet6_device.as_deref(), Some("eth1"));
+        assert!(!excluded.is_lost());
+        set_auto_detect_bind_interface(None);
     }
 
     #[test]
@@ -707,6 +830,7 @@ destination: default
         );
         let snapshot = DefaultInterfaceSnapshot::lost().with_inet6(v6);
         assert_eq!(snapshot.device, None);
+        assert!(!snapshot.is_lost());
         assert_eq!(snapshot.inet6_device.as_deref(), Some("eth0"));
         assert_eq!(snapshot.inet6_gateway, Some("fe80::1".parse().expect("ll")));
     }

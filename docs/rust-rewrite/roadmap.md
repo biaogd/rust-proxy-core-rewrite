@@ -3080,11 +3080,12 @@ shared UDP session relay without SOCKS write-back.
   the NIC unicast address at local port 0, TUIC/Hysteria2 QUIC clients are
   retired on NIC change, DIRECT UDP sockets rebound through a network-generation
   watch, `bind_outbound_udp` taking local vs remote so loopback remotes skip NIC
-  bind, `route-exclude-address` physical exceptions, resolver
+  bind, auto-detect bind selecting the matching-family physical NIC (pure IPv6
+  is not treated as a lost default), `route-exclude-address` physical exceptions, resolver
   `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
   TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
-  cap. `auto-detect-interface` or `auto-route` fills an empty `interface-name`
-  bind slot (including Windows). Sleep/wake is the lost-then-restored default
+  cap. `auto-detect-interface` or `auto-route` fills empty `interface-name`
+  bind slots per address family (including Windows). Sleep/wake is the lost-then-restored default
   interface on the same path; this gate does not claim native sleep/wake or NIC
   flap.
   **Exclude** UDP IP fragment/loss, TUN-specific TCP half-close/RST fixtures,

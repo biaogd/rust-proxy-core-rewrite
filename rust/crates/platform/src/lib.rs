@@ -15,8 +15,8 @@ pub use network::{
     auto_route_covers_family, clear_outbound_bypass, current_default_interface, exclude_tun_device,
     install_outbound_bypass, parse_darwin_default_route, parse_linux_default_routes,
     parse_windows_default_routes, plan_network_change, planned_bypass_host_route,
-    protect_outbound_destination, resolve_outbound_bind_interface, set_auto_detect_bind_interface,
-    update_outbound_bypass,
+    protect_outbound_destination, resolve_outbound_bind_identity, resolve_outbound_bind_interface,
+    set_auto_detect_bind_interface, update_outbound_bypass,
 };
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
@@ -260,7 +260,7 @@ pub fn bind_outbound_udp(
     let _ = routing_mark;
     bind_outbound_interface(&socket, local, remote, interface)?;
     #[cfg(target_os = "windows")]
-    let already_bound = !resolve_outbound_bind_interface(interface).is_empty()
+    let already_bound = !resolve_outbound_bind_interface(interface, remote).is_empty()
         && should_bind_outbound_interface(remote);
     #[cfg(not(target_os = "windows"))]
     let already_bound = false;
@@ -294,7 +294,7 @@ fn bind_outbound_interface(
     remote: SocketAddr,
     name: &str,
 ) -> io::Result<()> {
-    let name = resolve_outbound_bind_interface(name);
+    let name = resolve_outbound_bind_interface(name, remote);
     if name.is_empty() || !should_bind_outbound_interface(remote) {
         return Ok(());
     }
@@ -757,6 +757,10 @@ mod tests {
         let public = "1.1.1.1:53".parse().expect("public");
         bind_outbound_udp(local, public, "p8f-missing-iface", 0)
             .expect_err("public remote must try to bind the NIC");
+        let public_v6 = "[2001:db8::1]:53".parse().expect("public v6");
+        let local_v6 = "[::]:0".parse().expect("v6 wildcard");
+        bind_outbound_udp(local_v6, public_v6, "p8f-missing-iface", 0)
+            .expect_err("public IPv6 remote must try to bind the NIC");
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

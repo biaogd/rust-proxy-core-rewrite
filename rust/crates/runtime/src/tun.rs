@@ -234,7 +234,7 @@ async fn run_prepared_tun(
         .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
     let bind_physical = tun_config.auto_detect_interface || tun_config.auto_route;
     if bind_physical {
-        set_auto_detect_bind_interface(default_interface.device.as_deref());
+        set_auto_detect_bind_interface(Some(&default_interface));
     }
     let watch_network = tun_config.auto_route || tun_config.auto_detect_interface;
     let handles = build_smoltcp_stack(usize::from(mtu))
@@ -453,17 +453,14 @@ async fn apply_network_change(
     state.log(level, plan.log);
 
     if plan.update_detected_interface || tun_config.auto_route {
-        set_auto_detect_bind_interface(after.device.as_deref());
+        set_auto_detect_bind_interface(Some(&after));
         // Endpoints stay bound to the NIC they were created on. Drop cached
         // TUIC/Hysteria2 clients and bump the DIRECT UDP generation so the
         // next dial / next datagram rebinds the new uplink.
         state.clear_tuic_clients().await;
         state.clear_hysteria2_clients().await;
         state.bump_network_generation();
-        let rebound = format!(
-            "[TUN] rebound QUIC endpoints onto {}",
-            after.device.as_deref().unwrap_or("none")
-        );
+        let rebound = format!("[TUN] rebound QUIC endpoints onto {}", after.display_name());
         eprintln!("{rebound}");
         state.log("warning", rebound);
     }
