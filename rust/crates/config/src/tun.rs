@@ -246,6 +246,19 @@ fn reject_deferred_fields(raw: &RawTun) -> Result<(), ConfigError> {
         ),
         (raw.recvmsgx == Some(true), "tun.recvmsgx"),
         (raw.sendmsgx == Some(true), "tun.sendmsgx"),
+        (raw.strict_route == Some(true), "tun.strict-route"),
+        (
+            raw.endpoint_independent_nat == Some(true),
+            "tun.endpoint-independent-nat",
+        ),
+        (
+            raw.udp_timeout.is_some_and(|value| value != 0),
+            "tun.udp-timeout",
+        ),
+        (
+            raw.disable_icmp_forwarding == Some(true),
+            "tun.disable-icmp-forwarding",
+        ),
     ];
     if let Some((_, field)) = deferred.into_iter().find(|(active, _)| *active) {
         return Err(ConfigError::UnsupportedRuntime(format!(

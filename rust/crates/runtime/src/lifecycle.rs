@@ -36,7 +36,8 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), Runt
 /// # Errors
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
-/// Later reload errors are logged and leave the current generation unchanged.
+/// Later reload errors are logged and leave the current generation unchanged,
+/// including restoring the previous TUN instance when a replacement TUN fails.
 pub async fn run_with_reload(
     initial: Config,
     reloads: mpsc::Receiver<Config>,
@@ -56,7 +57,8 @@ pub async fn run_with_reload(
 /// # Errors
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
-/// Later reload errors are logged and leave the current generation unchanged.
+/// Later reload errors are logged and leave the current generation unchanged,
+/// including restoring the previous TUN instance when a replacement TUN fails.
 pub async fn run_with_reload_lifecycle(
     initial: Config,
     reloads: mpsc::Receiver<Config>,
@@ -87,7 +89,7 @@ pub(super) async fn run_with_reload_inner(
     let mut listeners = BTreeMap::new();
     let mut controllers = BTreeMap::new();
     let mut dns: Option<(SocketAddr, RuntimeTask)> = None;
-    let mut tun: Option<RuntimeTask> = None;
+    let mut tun: Option<(rewrite_config::TunConfig, RuntimeTask)> = None;
 
     apply_generation(
         initial,
@@ -191,7 +193,7 @@ pub(super) async fn run_with_reload_inner(
     if let Some((_, task)) = dns {
         stop_task(task).await;
     }
-    if let Some(task) = tun {
+    if let Some((_, task)) = tun {
         stop_task(task).await;
     }
     stop_task(health).await;
@@ -220,7 +222,7 @@ pub(super) async fn apply_controller_update(
     listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
-    tun: &mut Option<RuntimeTask>,
+    tun: &mut Option<(rewrite_config::TunConfig, RuntimeTask)>,
 ) -> bool {
     if matches!(&update.kind, rewrite_controller::ConfigUpdateKind::Restart) {
         let _ = update.completion.send(Ok(()));

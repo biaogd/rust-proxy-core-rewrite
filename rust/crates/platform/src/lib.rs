@@ -29,10 +29,11 @@ pub use route::{
     validate_tun_device_name, windows_netsh_route_args,
 };
 pub use system_dns::{
-    DarwinDnsConfig, DnsOwner, WindowsDnsOrigin, apply_tun_system_dns,
-    apply_windows_tun_interface_dns, build_scutil_dns_script, build_scutil_remove_script,
-    darwin_dns_key, parse_netsh_dnsservers, parse_scutil_dns_dictionary,
-    parse_scutil_primary_service, windows_restore_dhcp_dns_args, windows_set_tun_dns_args,
+    DarwinDnsConfig, DarwinDnsValue, DnsOwner, WindowsDnsOrigin, apply_tun_system_dns,
+    apply_windows_tun_interface_dns, build_scutil_dns_script, build_scutil_merge_servers_script,
+    build_scutil_remove_script, build_scutil_restore_dns_script, darwin_dns_key,
+    parse_netsh_dnsservers, parse_scutil_dns_dictionary, parse_scutil_primary_service,
+    windows_restore_dhcp_dns_args, windows_set_tun_dns_args,
 };
 
 use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};

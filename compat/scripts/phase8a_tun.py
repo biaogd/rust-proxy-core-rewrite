@@ -11,6 +11,7 @@ closed instead of skipping green.
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import os
@@ -47,6 +48,7 @@ DNS_HIJACK_TARGET = "8.8.8.8"
 VETH_HOST_IP = "10.66.8.1"
 VETH_NS_IP = "10.66.8.2"
 SERVICE_IP = "192.0.2.1"
+FOREIGN_ROUTE = "203.0.113.1/32"
 
 MINIMAL = """
 mixed-port: 17890
@@ -171,10 +173,26 @@ def config_identity(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) ->
         )
         expect_accept(binaries["go"], source, scratch, f"go {stack}")
 
+    for field, value, needle in (
+        ("strict-route", "true", "strict-route"),
+        ("endpoint-independent-nat", "true", "endpoint-independent-nat"),
+        ("udp-timeout", "60", "udp-timeout"),
+        ("disable-icmp-forwarding", "true", "disable-icmp-forwarding"),
+    ):
+        source = MINIMAL + f"\ntun:\n  enable: true\n  stack: smoltcp\n  {field}: {value}\n"
+        expect_reject(
+            binaries["rust"],
+            source,
+            scratch,
+            f"rust {field}",
+            needle,
+        )
+
     return {
         "rust-smoltcp": True,
         "rust-rejects-go-stacks": True,
         "go-accepts-go-stacks": True,
+        "rust-rejects-unused-tun-knobs": True,
     }
 
 
@@ -405,12 +423,20 @@ def tun_config(
     auto_route: bool,
     stack: str,
     enable: bool = True,
+    controller_port: int | None = None,
+    extra_tun: str = "",
 ) -> str:
+    controller = ""
+    if controller_port is not None:
+        controller = f"external-controller: 127.0.0.1:{controller_port}\n"
+    extra = extra_tun
+    if extra and not extra.endswith("\n"):
+        extra += "\n"
     return f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
 ipv6: false
-dns:
+{controller}dns:
   enable: true
   listen: 127.0.0.1:{dns_listen}
   ipv6: false
@@ -432,7 +458,7 @@ tun:
   dns-hijack:
     - 0.0.0.0:53
   mtu: 1500
-rules:
+{extra}rules:
   - DOMAIN,{HTTP_NAME},DIRECT
   - DOMAIN,{UDP_NAME},DIRECT
   - MATCH,REJECT
@@ -738,6 +764,128 @@ def run_init_failure(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, A
                 stop_process(process, case_dir)
 
 
+def run_failed_reload_keeps_old_traffic(
+    binary: pathlib.Path,
+    ns: Netns,
+    servers: FixtureServers,
+    scratch: pathlib.Path,
+) -> dict[str, Any]:
+    case_dir = scratch / "failed-reload"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    mixed_port = 17893
+    dns_listen = 15356
+    controller_port = 19093
+    nameserver = f"{SERVICE_IP}:{servers.dns_port}"
+    initial = write_config(
+        case_dir,
+        "config.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+        ),
+    )
+    conflict = write_config(
+        case_dir,
+        "conflict.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+            extra_tun=f"  inet4-route-address:\n    - {FOREIGN_ROUTE}\n",
+        ),
+    )
+    process, stdout, stderr = launch_in_ns(ns.name, binary, initial, case_dir)
+    observation: dict[str, Any] = {"label": "failed-reload"}
+    try:
+        wait_mixed(ns.name, process, mixed_port, case_dir)
+        wait_tun_device(ns, process, case_dir)
+        deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
+        last_error = "not attempted"
+        while time.monotonic() < deadline:
+            try:
+                ns_client(ns.name, "wait-tcp", "127.0.0.1", str(controller_port), timeout=1)
+                break
+            except Exception as error:  # noqa: BLE001 — surface last probe error
+                last_error = str(error)
+                time.sleep(0.1)
+        else:
+            raise TimeoutError(
+                f"controller {controller_port} did not become ready: {last_error}\n"
+                f"{process_logs(case_dir)}"
+            )
+        assert_auto_routes(ns, "smoltcp")
+        fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"failed-reload baseline HTTP mismatch: {body!r}")
+        run_ip(
+            "route",
+            "replace",
+            FOREIGN_ROUTE,
+            "via",
+            VETH_HOST_IP,
+            "dev",
+            ns.veth_ns,
+            ns=ns.name,
+        )
+        put = ns_client(
+            ns.name,
+            "put-config",
+            str(controller_port),
+            str(conflict),
+            timeout=NATIVE_STARTUP_DEADLINE,
+        )
+        status = int(put.get("status") or 0)
+        message = str(put.get("body") or "")
+        if 200 <= status < 300:
+            raise AssertionError(f"conflicting TUN reload succeeded: {put}")
+        if "refusing to replace existing route" not in message:
+            raise AssertionError(f"conflicting TUN reload missing foreign-route error: {put}")
+        if "restored previous instance" not in message:
+            raise AssertionError(f"conflicting TUN reload did not restore previous TUN: {put}")
+        if process.poll() is not None:
+            raise AssertionError(
+                f"proxy exited after failed TUN reload: {process.returncode}\n"
+                f"{process_logs(case_dir)}"
+            )
+        if not ns.has_device(ns.tun):
+            raise AssertionError(f"TUN device missing after failed reload\n{ns.links()}")
+        assert_auto_routes(ns, "smoltcp")
+        after_routes = ns.routes()
+        if FOREIGN_ROUTE.split("/", maxsplit=1)[0] not in after_routes and FOREIGN_ROUTE not in after_routes:
+            raise AssertionError(f"foreign {FOREIGN_ROUTE} was dropped:\n{after_routes}")
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"old TUN HTTP failed after rejected reload: {body!r}")
+        observation.update(
+            {
+                "reload-rejected": True,
+                "previous-tun-restored": True,
+                "http-after-failed-reload": True,
+                "foreign-route-kept": True,
+            }
+        )
+        return observation
+    except Exception:
+        print(process_logs(case_dir), file=sys.stderr)
+        raise
+    finally:
+        stdout.close()
+        stderr.close()
+        stop_process(process, case_dir)
+        run_ip("route", "del", FOREIGN_ROUTE, ns=ns.name, check=False)
+        wait_gone(ns, ns.tun)
+
+
 def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
     if os.environ.get("PHASE8A_NATIVE") != "1":
         print(
@@ -794,6 +942,12 @@ def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dic
                 raise AssertionError("Go/Rust fake-IP HTTP addresses missing")
             observations["go-rust-http-body-match"] = True
             observations["go-rust-fake-ip-not-compared"] = True
+            observations["rust-failed-reload"] = run_failed_reload_keeps_old_traffic(
+                binaries["rust"],
+                ns,
+                servers,
+                scratch,
+            )
     observations["rust-init-failure"] = run_init_failure(binaries["rust"], scratch)
     return observations
 
@@ -861,6 +1015,25 @@ def client_main(argv: list[str]) -> int:
         finally:
             sock.close()
         print(json.dumps({"payload_hex": echoed.hex()}))
+        return 0
+    if command == "put-config":
+        port, path = int(rest[0]), rest[1]
+        payload = pathlib.Path(path).read_text()
+        body = json.dumps({"path": "", "payload": payload})
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=NATIVE_STARTUP_DEADLINE)
+        try:
+            connection.request(
+                "PUT",
+                "/configs",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            status = response.status
+            raw = response.read().decode(errors="replace")
+        finally:
+            connection.close()
+        print(json.dumps({"status": status, "body": raw}))
         return 0
     if command == "socks-udp-echo":
         mixed_port = int(rest[0])

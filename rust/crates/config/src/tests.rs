@@ -713,6 +713,39 @@ fn rejects_deferred_tun_knobs() {
 }
 
 #[test]
+fn rejects_unimplemented_tun_runtime_knobs() {
+    for (field, value) in [
+        ("strict-route", "true"),
+        ("endpoint-independent-nat", "true"),
+        ("udp-timeout", "60"),
+        ("disable-icmp-forwarding", "true"),
+    ] {
+        let source =
+            format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  {field}: {value}\n");
+        let error = Config::from_yaml(&source).expect_err("{field} unused");
+        assert!(
+            error.to_string().contains(field),
+            "unexpected error for {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn accepts_default_unimplemented_tun_runtime_knobs() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  strict-route: false\n  endpoint-independent-nat: false\n  udp-timeout: 0\n  disable-icmp-forwarding: false\n"
+    );
+    let tun = Config::from_yaml(&source)
+        .expect("default unused tun knobs")
+        .tun
+        .expect("tun present");
+    assert!(!tun.strict_route);
+    assert!(!tun.endpoint_independent_nat);
+    assert_eq!(tun.udp_timeout, 0);
+    assert!(!tun.disable_icmp_forwarding);
+}
+
+#[test]
 fn rejects_unknown_tun_keys() {
     let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  mystery: true\n");
     let error = Config::from_yaml(&source).expect_err("unknown tun key");

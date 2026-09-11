@@ -3004,8 +3004,7 @@ cannot inherit its wire-compatibility claim.
 TUN is current after SSR and TUIC v5 outbound in this checkout, without waiting
 for 6I/6J or all of Phase 7. The UDP reply-sink refactor and 8A Linux
 parse/runtime wiring have landed; `compat/scripts/phase8a_tun.py` now owns the
-privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate
-(`PHASE8A_NATIVE=1`, fail-closed). 8B Darwin arm64 reuses that data path;
+privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate plus a failed-reload that must restore the previous TUN (`PHASE8A_NATIVE=1`, fail-closed). 8B Darwin arm64 reuses that data path; scutil apply/restore merge `ServerAddresses` without wiping extra DNS keys;
 `compat/scripts/phase8b_tun.py` owns the privileged utun/scutil DNS/auto-route
 gate (`PHASE8B_NATIVE=1`, fail-closed). 8C Windows x86_64 reuses that data path
 on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
@@ -3054,12 +3053,15 @@ shared UDP session relay without SOCKS write-back.
 
 - **8A — Linux closed loop (first gate):** YAML → `tun-rs` device →
   `netstack-smoltcp` → existing rules/outbound → return packets; DNS hijack and
-  fake-IP reverse lookup; auto-route plus safe exit/reload/cleanup. **Exclude**
+  fake-IP reverse lookup; auto-route plus safe exit/reload/cleanup, including
+  restoring the previous TUN when a replacement reload fails. Unimplemented
+  knobs (`strict-route`, `endpoint-independent-nat`, `udp-timeout`,
+  `disable-icmp-forwarding`) reject non-default values. **Exclude**
   from the first gate: TProxy, redir, auto-redirect, UID filters, GSO.
 - **8B — macOS arm64:** reuse the 8A data path; focus utun, permissions, route
   and DNS restore, and native app-traffic acceptance. Implemented in this
   checkout (utun via tun-rs, Darwin split auto-route, scutil DNS
-  ownership/restore, `tun0`/`utun` rejected without remap). Native Parity waits
+  merge of `ServerAddresses` with extra-key snapshot/restore, `tun0`/`utun` rejected without remap). Native Parity waits
   on `PHASE8B_NATIVE=1` / `phase8b-darwin-tun`.
 - **8C — Windows x86_64:** Wintun load/distribution/errors; routes, DNS and
   priority; privilege/driver failure paths; must not break other VPNs.

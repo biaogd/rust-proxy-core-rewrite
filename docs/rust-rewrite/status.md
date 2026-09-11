@@ -2,6 +2,21 @@
 
 Last updated: 2026-09-11
 
+### TUN failed-reload restore and Darwin DNS extras — 2026-09-11
+
+Failed TUN hot-reload no longer leaves the previous instance stopped: the
+replacement is started only after the old device is taken down, and a
+device/route/DNS failure republishes the previous config and restarts the
+previous TUN. The 8A native gate adds a foreign-route reload that must reject
+the request while fake-IP HTTP still succeeds. Darwin scutil apply/restore
+now merge `ServerAddresses` without `d.init`, snapshot extra keys such as
+`SupplementalMatchDomains`, and fill those extras back only when they are
+missing so concurrent DNS updates are not overwritten. Unimplemented TUN
+knobs (`strict-route`, `endpoint-independent-nat`, `udp-timeout`,
+`disable-icmp-forwarding`) reject non-default values instead of parsing into
+dead fields. Still Partial, not Parity; 8B native remains unclaimed; not
+merge-ready.
+
 ### TUN loop-avoidance follow-up — 2026-09-11
 
 Windows TCP interface bind now uses an ephemeral local port (`nic_ip:0`)

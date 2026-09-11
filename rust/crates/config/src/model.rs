@@ -1034,8 +1034,10 @@ pub enum TunStack {
     Smoltcp,
 }
 
-// First-round TUN surface for Phase 8A. Deferred Go-only knobs are rejected in
-// the parser rather than stored and silently ignored.
+// First-round TUN surface for Phase 8A. Deferred Go-only knobs — including
+// `strict-route`, `endpoint-independent-nat`, `udp-timeout`, and
+// `disable-icmp-forwarding` — are rejected at parse time rather than stored
+// and silently ignored. Omitted / false / 0 remain accepted defaults.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TunConfig {

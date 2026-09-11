@@ -31,7 +31,7 @@ pub(super) async fn apply_generation(
     listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
     controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
-    tun: &mut Option<RuntimeTask>,
+    tun: &mut Option<(rewrite_config::TunConfig, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
     hydrate_http_proxy_providers(&mut next, state).await;
     let desired_listeners = next.listener_ports()?;
@@ -156,6 +156,7 @@ pub(super) async fn apply_generation(
     state.clear_ssr_clients();
     state.clear_hysteria2_clients().await;
     state.clear_tuic_clients().await;
+    let previous_published = Arc::clone(&*config_sender.borrow());
     let desired_tun = next.tun.clone();
     config_sender.send_replace(Arc::new(next));
     dns_service.clear_cache().await;
@@ -247,30 +248,73 @@ pub(super) async fn apply_generation(
         }
     }
 
-    apply_tun_task(desired_tun, config_receiver, state, dns_service, tun).await?;
-    Ok(())
+    apply_tun_task(
+        desired_tun,
+        previous_published,
+        config_sender,
+        config_receiver,
+        state,
+        dns_service,
+        tun,
+    )
+    .await
 }
 
 async fn apply_tun_task(
     desired: Option<rewrite_config::TunConfig>,
+    previous_published: Arc<Config>,
+    config_sender: &watch::Sender<Arc<Config>>,
     config_receiver: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
-    tun: &mut Option<RuntimeTask>,
+    tun: &mut Option<(rewrite_config::TunConfig, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
     let enable = desired.as_ref().is_some_and(|config| config.enable);
+    let previous = tun.take();
+    let rollback_config = previous.as_ref().map(|(config, _)| config.clone());
+    if let Some((_, task)) = previous {
+        stop_task(task).await;
+    }
     if !enable {
-        if let Some(task) = tun.take() {
-            stop_task(task).await;
-        }
         return Ok(());
     }
     let Some(tun_config) = desired else {
         return Ok(());
     };
-    if let Some(task) = tun.take() {
-        stop_task(task).await;
+    match start_tun_task(tun_config.clone(), config_receiver, state, dns_service).await {
+        Ok(task) => {
+            *tun = Some((tun_config, task));
+            Ok(())
+        }
+        Err(error) => {
+            config_sender.send_replace(previous_published);
+            if let Some(previous_config) = rollback_config {
+                match start_tun_task(previous_config.clone(), config_receiver, state, dns_service)
+                    .await
+                {
+                    Ok(task) => {
+                        *tun = Some((previous_config, task));
+                        Err(RuntimeError::Tun(format!(
+                            "failed to reload TUN ({error}); restored previous instance"
+                        )))
+                    }
+                    Err(restore_error) => Err(RuntimeError::Tun(format!(
+                        "failed to reload TUN ({error}); failed to restore previous instance ({restore_error})"
+                    ))),
+                }
+            } else {
+                Err(error)
+            }
+        }
     }
+}
+
+async fn start_tun_task(
+    tun_config: rewrite_config::TunConfig,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+) -> Result<RuntimeTask, RuntimeError> {
     let task_config = config_receiver.clone();
     let task_state = Arc::clone(state);
     let task_dns = Arc::clone(dns_service);
@@ -292,13 +336,10 @@ async fn apply_tun_task(
         }
     });
     match ready_rx.await {
-        Ok(Ok(())) => {
-            *tun = Some(RuntimeTask {
-                shutdown: task_shutdown,
-                handle,
-            });
-            Ok(())
-        }
+        Ok(Ok(())) => Ok(RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        }),
         Ok(Err(error)) => {
             task_shutdown.cancel();
             let _ = handle.await;
