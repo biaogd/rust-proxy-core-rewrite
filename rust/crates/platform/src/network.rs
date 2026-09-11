@@ -209,14 +209,9 @@ pub fn set_auto_detect_bind_interface(physical: Option<&DefaultInterfaceSnapshot
     let mut slot = AUTO_DETECT_BIND
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *slot = physical.and_then(|snapshot| {
-        let inet4 = nonempty_iface(snapshot.device.as_deref());
-        let inet6 = nonempty_iface(snapshot.inet6_device.as_deref());
-        if inet4.is_none() && inet6.is_none() {
-            None
-        } else {
-            Some(AutoDetectBind { inet4, inet6 })
-        }
+    *slot = physical.map(|snapshot| AutoDetectBind {
+        inet4: nonempty_iface(snapshot.device.as_deref()),
+        inet6: nonempty_iface(snapshot.inet6_device.as_deref()),
     });
 }
 
@@ -241,12 +236,46 @@ pub fn auto_detect_bind_interface(remote: SocketAddr) -> Option<String> {
 }
 
 /// Explicit `interface-name` wins; otherwise the auto-detect bind for `remote`.
+///
+/// An empty result means “do not pin a NIC” only when auto-detect is off or
+/// the remote family is not captured by TUN. When auto-detect is on and TUN
+/// captured that family, [`missing_physical_egress_for_captured_family`]
+/// is true and callers must refuse the dial.
 #[must_use]
 pub fn resolve_outbound_bind_interface(explicit: &str, remote: SocketAddr) -> String {
     if !explicit.is_empty() {
         return explicit.to_owned();
     }
     auto_detect_bind_interface(remote).unwrap_or_default()
+}
+
+/// True when TUN auto-detect is installed (including a currently empty egress).
+#[must_use]
+pub fn auto_detect_bind_is_enabled() -> bool {
+    AUTO_DETECT_BIND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+/// True when auto-detect is on, `remote`'s family has no physical NIC, and
+/// TUN auto-route captured that family — an unbound socket would re-enter TUN.
+#[must_use]
+pub fn missing_physical_egress_for_captured_family(remote: SocketAddr) -> bool {
+    if !auto_detect_bind_is_enabled() || auto_detect_bind_interface(remote).is_some() {
+        return false;
+    }
+    let slot = OUTBOUND_BYPASS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(current) = slot.as_ref() else {
+        return false;
+    };
+    if remote.is_ipv6() {
+        current.capture_ipv6
+    } else {
+        current.capture_ipv4
+    }
 }
 
 /// Cache identity for QUIC clients: explicit name, or `v4|v6` auto-detect slots.
@@ -601,6 +630,34 @@ pub fn current_default_interface(
 }
 
 #[cfg(test)]
+pub(crate) struct NetworkPolicyTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+static NETWORK_POLICY_TEST: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+impl Drop for NetworkPolicyTestGuard {
+    fn drop(&mut self) {
+        set_auto_detect_bind_interface(None);
+        clear_outbound_bypass();
+    }
+}
+
+/// Serializes tests that mutate process-wide auto-detect / bypass slots.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn lock_network_policy_for_test() -> NetworkPolicyTestGuard {
+    let lock = NETWORK_POLICY_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_auto_detect_bind_interface(None);
+    clear_outbound_bypass();
+    NetworkPolicyTestGuard { _lock: lock }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -679,6 +736,7 @@ destination: default
 
     #[test]
     fn explicit_interface_name_wins_over_auto_detect() {
+        let _guard = lock_network_policy_for_test();
         let v4: SocketAddr = "1.1.1.1:53".parse().expect("v4");
         let v6: SocketAddr = "[2001:db8::1]:53".parse().expect("v6");
         set_auto_detect_bind_interface(Some(&DefaultInterfaceSnapshot {
@@ -691,6 +749,7 @@ destination: default
         assert_eq!(resolve_outbound_bind_interface("", v6), "eth1");
         assert_eq!(resolve_outbound_bind_identity(""), "eth0|eth1");
         set_auto_detect_bind_interface(None);
+        assert!(!auto_detect_bind_is_enabled());
         assert_eq!(resolve_outbound_bind_interface("", v4), "");
         assert_eq!(resolve_outbound_bind_interface("", v6), "");
         assert_eq!(resolve_outbound_bind_identity(""), "");
@@ -698,6 +757,7 @@ destination: default
 
     #[test]
     fn auto_detect_bind_follows_remote_family_and_ipv6_only_is_not_lost() {
+        let _guard = lock_network_policy_for_test();
         let v4: SocketAddr = "192.0.2.1:443".parse().expect("v4");
         let v6: SocketAddr = "[2001:db8::1]:443".parse().expect("v6");
         let v4_only = DefaultInterfaceSnapshot {
@@ -755,11 +815,45 @@ destination: default
         assert!(excluded.device.is_none());
         assert_eq!(excluded.inet6_device.as_deref(), Some("eth1"));
         assert!(!excluded.is_lost());
-        set_auto_detect_bind_interface(None);
+        set_auto_detect_bind_interface(Some(&excluded));
+        assert!(auto_detect_bind_is_enabled());
+        assert_eq!(auto_detect_bind_interface(v4), None);
+        assert_eq!(auto_detect_bind_interface(v6).as_deref(), Some("eth1"));
+    }
+
+    #[test]
+    fn lost_physical_egress_stays_enabled_and_refuses_captured_family() {
+        let _guard = lock_network_policy_for_test();
+        let v4: SocketAddr = "192.0.2.1:443".parse().expect("v4");
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().expect("v6");
+        let lost = DefaultInterfaceSnapshot::lost();
+        set_auto_detect_bind_interface(Some(&lost));
+        assert!(auto_detect_bind_is_enabled());
+        assert_eq!(resolve_outbound_bind_interface("", v4), "");
+        assert_eq!(resolve_outbound_bind_identity(""), "|");
+        assert!(!missing_physical_egress_for_captured_family(v4));
+        assert!(!missing_physical_egress_for_captured_family(v6));
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, false);
+        assert!(missing_physical_egress_for_captured_family(v4));
+        assert!(!missing_physical_egress_for_captured_family(v6));
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, true);
+        assert!(missing_physical_egress_for_captured_family(v4));
+        assert!(missing_physical_egress_for_captured_family(v6));
+
+        let v6_only = DefaultInterfaceSnapshot {
+            inet6_device: Some("eth1".to_owned()),
+            ..Default::default()
+        };
+        set_auto_detect_bind_interface(Some(&v6_only));
+        assert!(missing_physical_egress_for_captured_family(v4));
+        assert!(!missing_physical_egress_for_captured_family(v6));
     }
 
     #[test]
     fn dynamic_bypass_cap_returns_error_instead_of_silent_ok() {
+        let _guard = lock_network_policy_for_test();
         let physical = DefaultInterfaceSnapshot {
             device: Some("eth0".to_owned()),
             gateway: Some("192.168.1.1".parse().expect("gw")),

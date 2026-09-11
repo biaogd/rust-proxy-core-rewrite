@@ -3081,7 +3081,8 @@ shared UDP session relay without SOCKS write-back.
   retired on NIC change, DIRECT UDP sockets rebound through a network-generation
   watch, `bind_outbound_udp` taking local vs remote so loopback remotes skip NIC
   bind, auto-detect bind selecting the matching-family physical NIC (pure IPv6
-  is not treated as a lost default), `route-exclude-address` physical exceptions, resolver
+  is not treated as a lost default; a TUN-captured family with no physical
+  egress refuses the dial instead of leaking into TUN), `route-exclude-address` physical exceptions, resolver
   `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
   TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
   cap. `auto-detect-interface` or `auto-route` fills empty `interface-name`

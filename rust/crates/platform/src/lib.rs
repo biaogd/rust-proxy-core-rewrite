@@ -12,11 +12,12 @@ pub use dhcp::{
 };
 pub use network::{
     DefaultInterfaceSnapshot, NETWORK_CHANGE_POLL, NetworkChangePlan, auto_detect_bind_interface,
-    auto_route_covers_family, clear_outbound_bypass, current_default_interface, exclude_tun_device,
-    install_outbound_bypass, parse_darwin_default_route, parse_linux_default_routes,
-    parse_windows_default_routes, plan_network_change, planned_bypass_host_route,
-    protect_outbound_destination, resolve_outbound_bind_identity, resolve_outbound_bind_interface,
-    set_auto_detect_bind_interface, update_outbound_bypass,
+    auto_detect_bind_is_enabled, auto_route_covers_family, clear_outbound_bypass,
+    current_default_interface, exclude_tun_device, install_outbound_bypass,
+    missing_physical_egress_for_captured_family, parse_darwin_default_route,
+    parse_linux_default_routes, parse_windows_default_routes, plan_network_change,
+    planned_bypass_host_route, protect_outbound_destination, resolve_outbound_bind_identity,
+    resolve_outbound_bind_interface, set_auto_detect_bind_interface, update_outbound_bypass,
 };
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
@@ -294,8 +295,17 @@ fn bind_outbound_interface(
     remote: SocketAddr,
     name: &str,
 ) -> io::Result<()> {
+    if !should_bind_outbound_interface(remote) {
+        return Ok(());
+    }
     let name = resolve_outbound_bind_interface(name, remote);
-    if name.is_empty() || !should_bind_outbound_interface(remote) {
+    if name.is_empty() {
+        if missing_physical_egress_for_captured_family(remote) {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no physical default interface for TUN-captured outbound; refusing to leak into TUN",
+            ));
+        }
         return Ok(());
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -761,6 +771,39 @@ mod tests {
         let local_v6 = "[::]:0".parse().expect("v6 wildcard");
         bind_outbound_udp(local_v6, public_v6, "p8f-missing-iface", 0)
             .expect_err("public IPv6 remote must try to bind the NIC");
+    }
+
+    #[test]
+    fn auto_detect_without_physical_egress_refuses_tun_captured_family() {
+        let _guard = crate::network::lock_network_policy_for_test();
+        let local = "0.0.0.0:0".parse().expect("wildcard");
+        let public: SocketAddr = "192.0.2.1:443".parse().expect("public");
+        let loopback: SocketAddr = "127.0.0.1:9".parse().expect("loopback");
+        let public_v6: SocketAddr = "[2001:db8::1]:53".parse().expect("v6");
+        let local_v6 = "[::]:0".parse().expect("v6 wildcard");
+
+        bind_outbound_udp(local, public, "", 0).expect("auto-detect off must skip NIC bind");
+
+        let lost = DefaultInterfaceSnapshot::lost();
+        set_auto_detect_bind_interface(Some(&lost));
+        bind_outbound_udp(local, public, "", 0)
+            .expect("auto-detect on without TUN capture must skip NIC bind");
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, false);
+        let error = bind_outbound_udp(local, public, "", 0)
+            .expect_err("captured IPv4 without egress must not leak into TUN");
+        assert!(
+            error.to_string().contains("refusing to leak into TUN"),
+            "unexpected error: {error}"
+        );
+        bind_outbound_udp(local, loopback, "", 0)
+            .expect("loopback must still skip NIC bind while IPv4 egress is lost");
+        bind_outbound_udp(local_v6, public_v6, "", 0)
+            .expect("uncaptured IPv6 must skip bind when only IPv4 is captured");
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, true);
+        bind_outbound_udp(local_v6, public_v6, "", 0)
+            .expect_err("captured IPv6 without egress must not leak into TUN");
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]
