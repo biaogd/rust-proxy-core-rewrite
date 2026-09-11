@@ -16,7 +16,7 @@ use ipnet::IpNet;
 
 use crate::PlatformError;
 use crate::route::{
-    RouteOwner, bypass_host_route, install_bypass_host_route, parse_darwin_route_get,
+    OwnedRoute, RouteOwner, bypass_host_route, install_bypass_host_route, parse_darwin_route_get,
 };
 
 /// How often TUN polls the physical default route.
@@ -27,8 +27,9 @@ const DYNAMIC_BYPASS_CAP: usize = 1024;
 
 struct OutboundBypass {
     tun_device: String,
-    device: String,
-    gateway: Option<IpAddr>,
+    physical: DefaultInterfaceSnapshot,
+    capture_ipv4: bool,
+    capture_ipv6: bool,
     skip: Vec<IpNet>,
     hosts: Vec<IpAddr>,
     owner: RouteOwner,
@@ -41,6 +42,8 @@ static OUTBOUND_BYPASS: Mutex<Option<OutboundBypass>> = Mutex::new(None);
 pub struct DefaultInterfaceSnapshot {
     pub device: Option<String>,
     pub gateway: Option<IpAddr>,
+    pub inet6_device: Option<String>,
+    pub inet6_gateway: Option<IpAddr>,
 }
 
 impl DefaultInterfaceSnapshot {
@@ -53,6 +56,63 @@ impl DefaultInterfaceSnapshot {
     pub fn is_lost(&self) -> bool {
         self.device.is_none()
     }
+
+    /// Device and gateway for `host`'s address family.
+    #[must_use]
+    pub fn nexthop(&self, host: IpAddr) -> Option<(&str, Option<IpAddr>)> {
+        if host.is_ipv6() {
+            Some((self.inet6_device.as_deref()?, self.inet6_gateway))
+        } else {
+            Some((self.device.as_deref()?, self.gateway))
+        }
+    }
+
+    /// Copies IPv4 `device`/`gateway` from `other` into the IPv6 slots.
+    #[must_use]
+    pub fn with_inet6(mut self, other: Self) -> Self {
+        self.inet6_device = other.device;
+        self.inet6_gateway = other.gateway;
+        self
+    }
+}
+
+/// True when auto-route destinations include `host`'s address family.
+#[must_use]
+pub fn auto_route_covers_family(destinations: &[IpNet], host: IpAddr) -> bool {
+    destinations
+        .iter()
+        .any(|prefix| prefix.addr().is_ipv4() == host.is_ipv4())
+}
+
+/// Host route via the matching-family physical default, or `None` when that
+/// family is not captured by TUN auto-route.
+///
+/// # Errors
+///
+/// Returns when the family is captured but has no physical default, the
+/// default is the TUN device, or the gateway family does not match `host`.
+pub fn planned_bypass_host_route(
+    host: IpAddr,
+    physical: &DefaultInterfaceSnapshot,
+    tun_device: &str,
+    capture_ipv4: bool,
+    capture_ipv6: bool,
+) -> Result<Option<OwnedRoute>, PlatformError> {
+    let captured = if host.is_ipv6() {
+        capture_ipv6
+    } else {
+        capture_ipv4
+    };
+    if !captured {
+        return Ok(None);
+    }
+    let (device, gateway) = physical.nexthop(host).ok_or_else(|| {
+        PlatformError::Command(format!(
+            "no physical {} default interface; refusing TUN loop-avoidance route",
+            if host.is_ipv6() { "IPv6" } else { "IPv4" }
+        ))
+    })?;
+    Ok(Some(bypass_host_route(host, device, gateway, tun_device)?))
 }
 
 /// Planned TUN reaction to a physical default-interface change.
@@ -108,14 +168,24 @@ pub fn exclude_tun_device(
     if tun_device.is_empty() {
         return snapshot.clone();
     }
+    let mut snapshot = snapshot.clone();
     if snapshot
         .device
         .as_deref()
         .is_some_and(|name| name.eq_ignore_ascii_case(tun_device))
     {
-        return DefaultInterfaceSnapshot::lost();
+        snapshot.device = None;
+        snapshot.gateway = None;
     }
-    snapshot.clone()
+    if snapshot
+        .inet6_device
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case(tun_device))
+    {
+        snapshot.inet6_device = None;
+        snapshot.inet6_gateway = None;
+    }
+    snapshot
 }
 
 /// Stores the auto-detect bind target used when `interface-name` is empty.
@@ -152,6 +222,8 @@ pub fn install_outbound_bypass(
     tun_device: &str,
     physical: &DefaultInterfaceSnapshot,
     skip: Vec<IpNet>,
+    capture_ipv4: bool,
+    capture_ipv6: bool,
 ) {
     let mut slot = OUTBOUND_BYPASS
         .lock()
@@ -161,8 +233,9 @@ pub fn install_outbound_bypass(
     }
     *slot = Some(OutboundBypass {
         tun_device: tun_device.to_owned(),
-        device: physical.device.clone().unwrap_or_default(),
-        gateway: physical.gateway,
+        physical: physical.clone(),
+        capture_ipv4,
+        capture_ipv6,
         skip,
         hosts: Vec::new(),
         owner: RouteOwner::new(),
@@ -178,16 +251,22 @@ pub fn update_outbound_bypass(physical: &DefaultInterfaceSnapshot) {
         return;
     };
     let _ = current.owner.revert_all();
-    current.device = physical.device.clone().unwrap_or_default();
-    current.gateway = physical.gateway;
+    current.physical = physical.clone();
     let hosts = current.hosts.clone();
+    let tun_device = current.tun_device.clone();
+    let capture_ipv4 = current.capture_ipv4;
+    let capture_ipv6 = current.capture_ipv6;
     for host in hosts {
-        let Ok(route) =
-            bypass_host_route(host, &current.device, current.gateway, &current.tun_device)
-        else {
+        let Ok(Some(route)) = planned_bypass_host_route(
+            host,
+            &current.physical,
+            &tun_device,
+            capture_ipv4,
+            capture_ipv6,
+        ) else {
             continue;
         };
-        let _ = install_bypass_host_route(&route, &current.tun_device, &mut current.owner);
+        let _ = install_bypass_host_route(&route, &tun_device, &mut current.owner);
     }
 }
 
@@ -243,7 +322,16 @@ pub fn protect_outbound_destination(host: IpAddr) -> Result<(), PlatformError> {
             "outbound bypass host-route cap ({DYNAMIC_BYPASS_CAP}) exhausted; refusing unprotected dial"
         )));
     }
-    let route = bypass_host_route(host, &current.device, current.gateway, &current.tun_device)?;
+    let Some(route) = planned_bypass_host_route(
+        host,
+        &current.physical,
+        &current.tun_device,
+        current.capture_ipv4,
+        current.capture_ipv6,
+    )?
+    else {
+        return Ok(());
+    };
     install_bypass_host_route(&route, &current.tun_device, &mut current.owner)?;
     if !tracked {
         current.hosts.push(host);
@@ -286,6 +374,7 @@ pub fn parse_linux_default_routes(stdout: &str, exclude: Option<&str>) -> Defaul
         let snapshot = DefaultInterfaceSnapshot {
             device: Some(device.to_owned()),
             gateway: via.and_then(|value| value.parse().ok()),
+            ..Default::default()
         };
         if best
             .as_ref()
@@ -308,6 +397,7 @@ pub fn parse_darwin_default_route(stdout: &str, exclude: Option<&str>) -> Defaul
                 DefaultInterfaceSnapshot {
                     device: Some(device),
                     gateway,
+                    ..Default::default()
                 }
             }
         }
@@ -339,6 +429,7 @@ pub fn parse_windows_default_routes(json: &str, exclude: Option<&str>) -> Defaul
         let snapshot = DefaultInterfaceSnapshot {
             device: Some(device),
             gateway,
+            ..Default::default()
         };
         if best
             .as_ref()
@@ -364,6 +455,59 @@ fn json_string(body: &str, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn ip_route_show_default(args: &[&str]) -> Result<String, PlatformError> {
+    let output = std::process::Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(PlatformError::Io)?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_default_snapshot(
+    args: &[&str],
+    tun_device: Option<&str>,
+) -> Result<DefaultInterfaceSnapshot, PlatformError> {
+    let output = std::process::Command::new("route")
+        .args(args)
+        .output()
+        .map_err(PlatformError::Io)?;
+    if !output.status.success() {
+        return Ok(DefaultInterfaceSnapshot::lost());
+    }
+    Ok(parse_darwin_default_route(
+        &String::from_utf8_lossy(&output.stdout),
+        tun_device,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_default_snapshot(
+    prefix: &str,
+    tun_device: Option<&str>,
+) -> Result<DefaultInterfaceSnapshot, PlatformError> {
+    let family = if prefix.contains(':') { "IPv6" } else { "IPv4" };
+    let script = format!(
+        "@(Get-NetRoute -AddressFamily {family} -DestinationPrefix '{prefix}' -ErrorAction SilentlyContinue | \
+          Select-Object NextHop, InterfaceAlias, RouteMetric) | ConvertTo-Json -Compress"
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(PlatformError::Io)?;
+    if !output.status.success() {
+        return Ok(DefaultInterfaceSnapshot::lost());
+    }
+    Ok(parse_windows_default_routes(
+        &String::from_utf8_lossy(&output.stdout),
+        tun_device,
+    ))
+}
+
 /// Reads the current physical default interface, excluding `tun_device`.
 ///
 /// # Errors
@@ -374,48 +518,27 @@ pub fn current_default_interface(
 ) -> Result<DefaultInterfaceSnapshot, PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        let output = std::process::Command::new("ip")
-            .args(["route", "show", "default"])
-            .output()
-            .map_err(PlatformError::Io)?;
-        if !output.status.success() {
-            return Ok(DefaultInterfaceSnapshot::lost());
-        }
-        Ok(parse_linux_default_routes(
-            &String::from_utf8_lossy(&output.stdout),
+        let v4 = parse_linux_default_routes(
+            &ip_route_show_default(&["route", "show", "default"])?,
             tun_device,
-        ))
+        );
+        let v6 = parse_linux_default_routes(
+            &ip_route_show_default(&["-6", "route", "show", "default"])?,
+            tun_device,
+        );
+        Ok(v4.with_inet6(v6))
     }
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("route")
-            .args(["-n", "get", "default"])
-            .output()
-            .map_err(PlatformError::Io)?;
-        if !output.status.success() {
-            return Ok(DefaultInterfaceSnapshot::lost());
-        }
-        Ok(parse_darwin_default_route(
-            &String::from_utf8_lossy(&output.stdout),
-            tun_device,
-        ))
+        let v4 = darwin_default_snapshot(&["-n", "get", "default"], tun_device)?;
+        let v6 = darwin_default_snapshot(&["-n", "get", "-inet6", "default"], tun_device)?;
+        Ok(v4.with_inet6(v6))
     }
     #[cfg(target_os = "windows")]
     {
-        let script = "\
-@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | \
-  Select-Object NextHop, InterfaceAlias, RouteMetric) | ConvertTo-Json -Compress";
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()
-            .map_err(PlatformError::Io)?;
-        if !output.status.success() {
-            return Ok(DefaultInterfaceSnapshot::lost());
-        }
-        Ok(parse_windows_default_routes(
-            &String::from_utf8_lossy(&output.stdout),
-            tun_device,
-        ))
+        let v4 = windows_default_snapshot("0.0.0.0/0", tun_device)?;
+        let v6 = windows_default_snapshot("::/0", tun_device)?;
+        Ok(v4.with_inet6(v6))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -473,10 +596,12 @@ destination: default
         let wifi = DefaultInterfaceSnapshot {
             device: Some("wlan0".to_owned()),
             gateway: Some("192.168.1.1".parse().expect("gw")),
+            ..Default::default()
         };
         let eth = DefaultInterfaceSnapshot {
             device: Some("eth0".to_owned()),
             gateway: Some("10.0.0.1".parse().expect("gw")),
+            ..Default::default()
         };
         assert!(plan_network_change(&wifi, &wifi, "tun0", true, true).is_none());
         let lost =
@@ -496,6 +621,7 @@ destination: default
         let tun_as_default = DefaultInterfaceSnapshot {
             device: Some("tun0".to_owned()),
             gateway: None,
+            ..Default::default()
         };
         assert!(plan_network_change(&wifi, &tun_as_default, "tun0", true, false).is_some());
     }
@@ -514,8 +640,9 @@ destination: default
         let physical = DefaultInterfaceSnapshot {
             device: Some("eth0".to_owned()),
             gateway: Some("192.168.1.1".parse().expect("gw")),
+            ..Default::default()
         };
-        install_outbound_bypass("tun0", &physical, Vec::new());
+        install_outbound_bypass("tun0", &physical, Vec::new(), true, false);
         {
             let mut slot = OUTBOUND_BYPASS
                 .lock()
@@ -541,5 +668,46 @@ destination: default
         );
         assert!(error.to_string().contains("refusing unprotected dial"));
         clear_outbound_bypass();
+    }
+
+    #[test]
+    fn ipv6_host_is_not_routed_via_ipv4_gateway() {
+        let physical = DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            gateway: Some("192.168.1.1".parse().expect("v4gw")),
+            ..Default::default()
+        };
+        let host = "2001:db8::1".parse().expect("v6");
+        assert!(
+            planned_bypass_host_route(host, &physical, "tun0", true, false)
+                .expect("uncaptured family")
+                .is_none()
+        );
+        let missing = planned_bypass_host_route(host, &physical, "tun0", true, true)
+            .expect_err("captured without v6 default");
+        assert!(missing.to_string().contains("IPv6"));
+        let dual = DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            gateway: Some("192.168.1.1".parse().expect("v4gw")),
+            inet6_device: Some("eth0".to_owned()),
+            inet6_gateway: Some("fe80::1".parse().expect("v6gw")),
+        };
+        let route = planned_bypass_host_route(host, &dual, "tun0", true, true)
+            .expect("v6 nexthop")
+            .expect("installed");
+        assert_eq!(route.gateway, dual.inet6_gateway);
+        assert_eq!(route.destination.to_string(), "2001:db8::1/128");
+    }
+
+    #[test]
+    fn linux_inet6_default_is_parsed_separately() {
+        let v6 = parse_linux_default_routes(
+            "default via fe80::1 dev eth0 proto ra metric 1024 pref medium\n",
+            None,
+        );
+        let snapshot = DefaultInterfaceSnapshot::lost().with_inet6(v6);
+        assert_eq!(snapshot.device, None);
+        assert_eq!(snapshot.inet6_device.as_deref(), Some("eth0"));
+        assert_eq!(snapshot.inet6_gateway, Some("fe80::1".parse().expect("ll")));
     }
 }

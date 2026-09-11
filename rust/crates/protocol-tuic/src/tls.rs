@@ -61,6 +61,7 @@ pub(crate) fn build_rustls_client_config(options: &ClientOptions) -> ClientConfi
 pub(crate) fn build_endpoint(
     options: &ClientOptions,
     bind: SocketAddr,
+    remote: SocketAddr,
 ) -> Result<quinn::Endpoint, TuicProtocolError> {
     let crypto = build_rustls_client_config(options);
     let quic_crypto = QuicClientConfig::try_from(crypto)
@@ -116,9 +117,13 @@ pub(crate) fn build_endpoint(
     }
     client_config.transport_config(Arc::new(transport));
 
-    let socket =
-        rewrite_platform::bind_outbound_udp(bind, &options.bind_interface, options.routing_mark)
-            .map_err(TuicProtocolError::Io)?;
+    let socket = rewrite_platform::bind_outbound_udp(
+        bind,
+        remote,
+        &options.bind_interface,
+        options.routing_mark,
+    )
+    .map_err(TuicProtocolError::Io)?;
     let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
     let mut endpoint = quinn::Endpoint::new(EndpointConfig::default(), None, socket, runtime)?;
     endpoint.set_default_client_config(client_config);
@@ -226,7 +231,7 @@ mod tests {
         options.tls.server_name = "localhost".to_owned();
         options.tls.skip_certificate_verification = true;
         options.tls.alpn = vec!["h3".to_owned()];
-        let client_ep = build_endpoint(&options, "127.0.0.1:0".parse().expect("client bind"))
+        let client_ep = build_endpoint(&options, "127.0.0.1:0".parse().expect("client bind"), addr)
             .expect("client endpoint");
         let connecting = client_ep.connect(addr, "localhost").expect("connect");
         let handshake = async {

@@ -312,7 +312,7 @@ impl Client {
                 return Err(TuicProtocolError::Protocol("TUIC client closed".to_owned()));
             }
             if state.endpoint.is_none() {
-                state.endpoint = Some(build_endpoint(&self.options, bind)?);
+                state.endpoint = Some(build_endpoint(&self.options, bind, address)?);
             }
             state
                 .endpoint

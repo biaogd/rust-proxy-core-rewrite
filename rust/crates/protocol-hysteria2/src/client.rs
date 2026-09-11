@@ -929,6 +929,7 @@ fn bind_hysteria2_socket(
     };
     let std_sock = rewrite_platform::bind_outbound_udp(
         bind_addr,
+        canonical,
         &options.bind_interface,
         options.routing_mark,
     )

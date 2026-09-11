@@ -956,24 +956,14 @@ pub(super) async fn run_direct_udp_session(
                 return;
             }
         };
-    let family: SocketAddr = if target.is_ipv6() {
-        "[::]:0".parse().expect("static IPv6 wildcard")
-    } else {
-        "0.0.0.0:0".parse().expect("static IPv4 wildcard")
-    };
-    let outbound = match rewrite_platform::bind_outbound_udp(
-        family,
-        &config.interface_name,
-        config.routing_mark,
-    )
-    .and_then(UdpSocket::from_std)
-    {
+    let mut outbound = match bind_direct_udp_socket(target, &config) {
         Ok(socket) => socket,
         Err(error) => {
             state.log("error", format!("DIRECT UDP bind failed: {error}"));
             return;
         }
     };
+    let mut generation = state.subscribe_network_generation();
     let tracker = state.register(
         &first.metadata,
         &decision.target,
@@ -992,6 +982,19 @@ pub(super) async fn run_direct_udp_session(
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
+            changed = generation.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                match bind_direct_udp_socket(target, &config) {
+                    Ok(socket) => outbound = socket,
+                    Err(error) => {
+                        state.log("error", format!("DIRECT UDP rebind failed: {error}"));
+                        break;
+                    }
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 let target = match resolve_udp_target(
@@ -1022,6 +1025,16 @@ pub(super) async fn run_direct_udp_session(
         }
     }
     tracker.finish(uploaded, downloaded);
+}
+
+fn bind_direct_udp_socket(target: SocketAddr, config: &Config) -> std::io::Result<UdpSocket> {
+    let family: SocketAddr = if target.is_ipv6() {
+        "[::]:0".parse().expect("static IPv6 wildcard")
+    } else {
+        "0.0.0.0:0".parse().expect("static IPv4 wildcard")
+    };
+    rewrite_platform::bind_outbound_udp(family, target, &config.interface_name, config.routing_mark)
+        .and_then(UdpSocket::from_std)
 }
 
 #[allow(clippy::too_many_arguments)]

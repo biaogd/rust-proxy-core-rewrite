@@ -6,8 +6,10 @@ without remap), plus `auto-detect-interface: true` accepted by Rust.
 
 Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT / domain TUIC, then a
 default uplink switch that also takes the old veth down) requires a privileged
-Linux runner. Set PHASE8F_NATIVE=1; missing capability fails closed instead of
-skipping green. This gate is Rust-only: it does not flap a Go TUN.
+Linux runner. The flap keeps one client UDP socket across the switch and, with
+TUN up, sends mixed/SOCKS UDP to localhost. Set PHASE8F_NATIVE=1; missing
+capability fails closed instead of skipping green. This gate is Rust-only: it
+does not flap a Go TUN.
 
 Out of this gate: UDP fragment/loss, TUN TCP half-close/RST fixtures,
 Android netlink (8D), Darwin/Windows FFI monitors, native NIC flap on
@@ -20,6 +22,7 @@ import http.server
 import json
 import os
 import pathlib
+import select
 import shutil
 import socket
 import subprocess
@@ -54,6 +57,7 @@ from phase8a_tun import (
     ip_bin,
     launch_in_ns,
     maybe_sudo,
+    ns_client,
     process_logs,
     query_hijacked_dns,
     run_in_ns,
@@ -223,6 +227,88 @@ class DualUplinkNetns:
         return ""
 
 
+class PersistentNsUdp:
+    """One UDP client socket in the netns so flap recovery is not a new session."""
+
+    def __init__(self, ns: str, host: str, port: int) -> None:
+        script = r"""
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(8)
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    payload = bytes.fromhex(line.strip())
+    sock.sendto(payload, (host, port))
+    data, _ = sock.recvfrom(65536)
+    sys.stdout.write(data.hex() + "\n")
+    sys.stdout.flush()
+"""
+        self.proc = subprocess.Popen(
+            maybe_sudo(
+                [ip_bin(), "netns", "exec", ns, sys.executable, "-c", script, host, str(port)]
+            ),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def echo(self, payload: bytes) -> bytes:
+        if self.proc.stdin is None or self.proc.stdout is None:
+            raise RuntimeError("persistent UDP process has no pipes")
+        self.proc.stdin.write(payload.hex().encode() + b"\n")
+        self.proc.stdin.flush()
+        ready, _, _ = select.select([self.proc.stdout], [], [], NATIVE_IO_DEADLINE + 2)
+        if not ready:
+            raise AssertionError("persistent UDP echo timed out on the same client socket")
+        line = self.proc.stdout.readline()
+        if not line:
+            err = b""
+            if self.proc.poll() is not None and self.proc.stderr is not None:
+                err = self.proc.stderr.read()
+            raise AssertionError(f"persistent UDP client exited: {err!r}")
+        return bytes.fromhex(line.decode().strip())
+
+    def close(self) -> None:
+        if self.proc.stdin is not None:
+            self.proc.stdin.close()
+        self.proc.kill()
+        self.proc.wait(timeout=5)
+
+
+class NetnsLoopbackUdpEcho:
+    def __init__(self, ns: str) -> None:
+        script = r"""
+import socket, sys
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.1", 0))
+sys.stdout.write(str(sock.getsockname()[1]) + "\n")
+sys.stdout.flush()
+while True:
+    data, addr = sock.recvfrom(65536)
+    sock.sendto(data, addr)
+"""
+        self.proc = subprocess.Popen(
+            maybe_sudo([ip_bin(), "netns", "exec", ns, sys.executable, "-c", script]),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if self.proc.stdout is None:
+            raise RuntimeError("loopback UDP echo has no stdout")
+        line = self.proc.stdout.readline()
+        if not line:
+            err = self.proc.stderr.read() if self.proc.stderr else b""
+            raise AssertionError(f"loopback UDP echo failed to bind: {err!r}")
+        self.port = int(line.decode().strip())
+
+    def close(self) -> None:
+        self.proc.kill()
+        self.proc.wait(timeout=5)
+
+
 def tun_config(
     *,
     mixed_port: int,
@@ -294,6 +380,21 @@ class ExtraServers:
             if server is not None:
                 server.shutdown()
                 server.server_close()
+
+
+def socks_udp_echo(
+    ns: str, mixed_port: int, host: str, port: int, payload: bytes
+) -> bytes:
+    result = ns_client(
+        ns,
+        "socks-udp-echo",
+        str(mixed_port),
+        host,
+        str(port),
+        payload.hex(),
+        timeout=NATIVE_IO_DEADLINE,
+    )
+    return bytes.fromhex(str(result["payload_hex"]))
 
 
 def route_get(ns: DualUplinkNetns, destination: str) -> str:
@@ -488,6 +589,7 @@ proxies:
     extra_rules = (
         f"  - DST-PORT,{extra.direct_port},DIRECT\n"
         f"  - IP-CIDR,{DIRECT_IP}/32,REJECT\n"
+        "  - IP-CIDR,127.0.0.1/32,DIRECT\n"
     )
     config = write_config(
         case_dir,
@@ -504,6 +606,8 @@ proxies:
     )
     process, stdout, stderr = launch_in_ns(ns.name, rust_binary, config, case_dir)
     observation: dict[str, Any] = {"label": "rust-flap", "stack": "smoltcp"}
+    persistent_udp: PersistentNsUdp | None = None
+    loopback_echo: NetnsLoopbackUdpEcho | None = None
     try:
         wait_mixed(ns.name, process, 17890, case_dir)
         wait_tun_device(ns, process, case_dir)
@@ -530,6 +634,21 @@ proxies:
         observation["fake-ip-http"] = fake_http
         assert_via_tun(ns, PROXY_IP)
         observation["tuic-server-stays-in-tun-table"] = True
+        fake_udp = query_hijacked_dns(ns.name, UDP_NAME)
+        persistent_udp = PersistentNsUdp(ns.name, fake_udp, servers.udp_port)
+        before = b"phase8f-udp-before"
+        echoed = persistent_udp.echo(before)
+        if echoed != before:
+            raise AssertionError(f"persistent UDP before flap: {echoed!r}")
+        observation["udp-persistent-before"] = True
+        loopback_echo = NetnsLoopbackUdpEcho(ns.name)
+        loopback_payload = b"phase8f-socks-loopback"
+        echoed = socks_udp_echo(
+            ns.name, 17890, "127.0.0.1", loopback_echo.port, loopback_payload
+        )
+        if echoed != loopback_payload:
+            raise AssertionError(f"SOCKS UDP localhost with TUN up: {echoed!r}")
+        observation["socks-udp-loopback"] = True
 
         run_ip(
             "route",
@@ -582,7 +701,13 @@ proxies:
         observation["public-direct-after"] = True
         http_get_must_fail(ns.name, DIRECT_IP, extra.reject_port, "/small")
         observation["same-ip-reject-after"] = True
-        fake_udp = query_hijacked_dns(ns.name, UDP_NAME)
+        if persistent_udp is None:
+            raise AssertionError("persistent UDP client was not started before flap")
+        after = b"phase8f-udp-after"
+        echoed = persistent_udp.echo(after)
+        if echoed != after:
+            raise AssertionError(f"persistent UDP after flap: {echoed!r}")
+        observation["udp-persistent-after"] = True
         echoed = udp_echo(ns.name, fake_udp, servers.udp_port, UDP_LARGE)
         if echoed != UDP_LARGE:
             raise AssertionError(
@@ -595,6 +720,10 @@ proxies:
         print(process_logs(scratch / "tuic-authority"), file=sys.stderr)
         raise
     finally:
+        if persistent_udp is not None:
+            persistent_udp.close()
+        if loopback_echo is not None:
+            loopback_echo.close()
         stdout.close()
         stderr.close()
         stop_process(process, case_dir)

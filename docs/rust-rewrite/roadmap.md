@@ -3069,13 +3069,18 @@ shared UDP session relay without SOCKS write-back.
   Native Parity waits on `PHASE8C_NATIVE=1` / `phase8c-windows-tun`.
 - **8F — stability / network-change (before 8D/8E):** Implemented in this
   checkout as a poll of the physical default route excluding the TUN device
-  (`ip route show default` / `route -n get default` / `Get-NetRoute 0.0.0.0/0`),
-  host-route re-protect **via that snapshot** for DNS/literal proxy IPs (never
-  `route get` after split default), refusal to overwrite foreign exact-prefix
+  (`ip route show default` plus `ip -6 route show default` / `route -n get
+  default` plus `-inet6` / `Get-NetRoute` `0.0.0.0/0` and `::/0`),
+  host-route re-protect **via that snapshot** for DNS/literal proxy IPs of a
+  captured address family (never `route get` after split default; IPv6 DNS
+  or proxy literals are skipped when auto-route is IPv4-only, not installed
+  via an IPv4 gateway), refusal to overwrite foreign exact-prefix
   routes, **socket-level** DIRECT/TUIC bypass (bind the physical interface;
   ordinary DIRECT destinations do not get a system host route), Windows TCP binds
   the NIC unicast address at local port 0, TUIC/Hysteria2 QUIC clients are
-  retired on NIC change, `route-exclude-address` physical exceptions, resolver
+  retired on NIC change, DIRECT UDP sockets rebound through a network-generation
+  watch, `bind_outbound_udp` taking local vs remote so loopback remotes skip NIC
+  bind, `route-exclude-address` physical exceptions, resolver
   `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
   TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
   cap. `auto-detect-interface` or `auto-route` fills an empty `interface-name`

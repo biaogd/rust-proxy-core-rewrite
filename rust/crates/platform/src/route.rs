@@ -372,6 +372,9 @@ fn remove_owned_route(route: &OwnedRoute) -> Result<(), PlatformError> {
 #[cfg(target_os = "linux")]
 fn run_ip_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformError> {
     let mut command = Command::new("ip");
+    if route.destination.addr().is_ipv6() {
+        command.arg("-6");
+    }
     command.arg("route").arg(action);
     command.arg(route.destination.to_string());
     if let Some(gateway) = route.gateway {
@@ -443,7 +446,11 @@ fn looks_like_route_exists(message: &str) -> bool {
 fn lookup_exact_route(destination: IpNet) -> Result<Option<OwnedRoute>, PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("ip")
+        let mut command = Command::new("ip");
+        if destination.addr().is_ipv6() {
+            command.arg("-6");
+        }
+        let output = command
             .args(["route", "show", "exact", &destination.to_string()])
             .output()
             .map_err(PlatformError::Io)?;
@@ -649,6 +656,13 @@ pub fn bypass_host_route(
             "refusing to install loop-avoidance route for {host} via TUN device {tun_device}"
         )));
     }
+    if let Some(gateway) = gateway
+        && gateway.is_ipv4() != host.is_ipv4()
+    {
+        return Err(PlatformError::Command(format!(
+            "refusing {host} loop-avoidance route via {gateway} (address family mismatch)"
+        )));
+    }
     Ok(OwnedRoute {
         destination: host_route_prefix(host)?,
         device: device.to_owned(),
@@ -823,7 +837,11 @@ fn run_windows_route(action: &str, route: &OwnedRoute) -> Result<(), PlatformErr
 pub fn windows_netsh_route_args(action: &str, route: &OwnedRoute) -> Vec<String> {
     let mut args = vec![
         "interface".to_owned(),
-        "ipv4".to_owned(),
+        if route.destination.addr().is_ipv6() {
+            "ipv6".to_owned()
+        } else {
+            "ipv4".to_owned()
+        },
         action.to_owned(),
         "route".to_owned(),
         format!("prefix={}", route.destination),
@@ -1116,6 +1134,25 @@ destination: 192.0.2.1
                 "store=active"
             ]
         );
+        let inet6 = OwnedRoute {
+            destination: "2001:db8::1/128".parse().expect("v6"),
+            device: "Ethernet".to_owned(),
+            gateway: Some("fe80::1".parse().expect("v6gw")),
+            table: None,
+        };
+        assert_eq!(
+            windows_netsh_route_args("add", &inet6),
+            vec![
+                "interface",
+                "ipv6",
+                "add",
+                "route",
+                "prefix=2001:db8::1/128",
+                "interface=Ethernet",
+                "nexthop=fe80::1",
+                "store=active"
+            ]
+        );
     }
 
     #[test]
@@ -1245,6 +1282,14 @@ Enabled        Disconnected   Dedicated        WireGuard Tunnel
         .expect("physical");
         assert_eq!(ok.device, "eth0");
         assert_eq!(ok.destination.to_string(), "8.8.8.8/32");
+        let crossed = bypass_host_route(
+            "2001:db8::1".parse().expect("v6"),
+            "eth0",
+            Some("192.168.1.1".parse().expect("v4gw")),
+            "tun0",
+        )
+        .expect_err("crossed family");
+        assert!(crossed.to_string().contains("address family mismatch"));
     }
 
     #[test]

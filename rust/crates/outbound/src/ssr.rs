@@ -122,8 +122,12 @@ pub async fn associate_ssr_udp_with_options(
     } else {
         SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
     };
-    let socket =
-        rewrite_platform::bind_outbound_udp(bind_address, options.interface, options.routing_mark)?;
+    let socket = rewrite_platform::bind_outbound_udp(
+        bind_address,
+        server_address,
+        options.interface,
+        options.routing_mark,
+    )?;
     let socket = tokio::net::UdpSocket::from_std(socket)?;
     socket.connect(server_address).await?;
     let client = ssr_client_options(

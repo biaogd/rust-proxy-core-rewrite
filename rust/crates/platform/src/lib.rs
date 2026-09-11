@@ -12,10 +12,11 @@ pub use dhcp::{
 };
 pub use network::{
     DefaultInterfaceSnapshot, NETWORK_CHANGE_POLL, NetworkChangePlan, auto_detect_bind_interface,
-    clear_outbound_bypass, current_default_interface, exclude_tun_device, install_outbound_bypass,
-    parse_darwin_default_route, parse_linux_default_routes, parse_windows_default_routes,
-    plan_network_change, protect_outbound_destination, resolve_outbound_bind_interface,
-    set_auto_detect_bind_interface, update_outbound_bypass,
+    auto_route_covers_family, clear_outbound_bypass, current_default_interface, exclude_tun_device,
+    install_outbound_bypass, parse_darwin_default_route, parse_linux_default_routes,
+    parse_windows_default_routes, plan_network_change, planned_bypass_host_route,
+    protect_outbound_destination, resolve_outbound_bind_interface, set_auto_detect_bind_interface,
+    update_outbound_bypass,
 };
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
@@ -214,7 +215,7 @@ pub async fn connect_tcp(
     apply_routing_mark(&socket, address.ip(), options.routing_mark)?;
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = options.routing_mark;
-    bind_outbound_interface(&socket, address, options.interface)?;
+    bind_outbound_interface(&socket, address, address, options.interface)?;
     socket.set_nonblocking(true)?;
     if let Err(error) = socket.connect(&SockAddr::from(address))
         && error.kind() != io::ErrorKind::WouldBlock
@@ -233,17 +234,19 @@ pub async fn connect_tcp(
 }
 
 /// Binds a nonblocking outbound UDP socket with global interface and routing
-/// mark policy.
+/// mark policy. `local` is the bind address (typically `:0`); `remote` decides
+/// whether the physical NIC is pinned (loopback/multicast remotes skip it).
 ///
 /// # Errors
 ///
 /// Returns interface discovery, socket-option or bind errors.
 pub fn bind_outbound_udp(
-    address: SocketAddr,
+    local: SocketAddr,
+    remote: SocketAddr,
     interface: &str,
     routing_mark: i64,
 ) -> io::Result<std::net::UdpSocket> {
-    let domain = if address.is_ipv4() {
+    let domain = if local.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
@@ -255,14 +258,14 @@ pub fn bind_outbound_udp(
     }
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = routing_mark;
-    bind_outbound_interface(&socket, address, interface)?;
+    bind_outbound_interface(&socket, local, remote, interface)?;
     #[cfg(target_os = "windows")]
     let already_bound = !resolve_outbound_bind_interface(interface).is_empty()
-        && should_bind_outbound_interface(address);
+        && should_bind_outbound_interface(remote);
     #[cfg(not(target_os = "windows"))]
     let already_bound = false;
     if !already_bound {
-        socket.bind(&SockAddr::from(address))?;
+        socket.bind(&SockAddr::from(local))?;
     }
     socket.set_nonblocking(true)?;
     Ok(socket.into())
@@ -285,13 +288,19 @@ fn set_routing_mark(socket: &Socket, routing_mark: i64) -> io::Result<()> {
     )
 }
 
-fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
+fn bind_outbound_interface(
+    socket: &Socket,
+    family: SocketAddr,
+    remote: SocketAddr,
+    name: &str,
+) -> io::Result<()> {
     let name = resolve_outbound_bind_interface(name);
-    if name.is_empty() || !should_bind_outbound_interface(address) {
+    if name.is_empty() || !should_bind_outbound_interface(remote) {
         return Ok(());
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
+        let _ = family;
         socket.bind_device(Some(name.as_bytes()))
     }
     #[cfg(any(
@@ -311,7 +320,7 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         let index = NonZeroU32::new(interface.index).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "interface index is zero")
         })?;
-        if address.is_ipv4() {
+        if family.is_ipv4() {
             socket.bind_device_by_index_v4(Some(index))
         } else {
             socket.bind_device_by_index_v6(Some(index))
@@ -319,10 +328,10 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
     }
     #[cfg(target_os = "windows")]
     {
-        let local = windows_interface_bind_addr(&name, address)?;
-        // TCP `connect_tcp` passes the remote address; UDP already passes a
-        // local `:0`. Pin the NIC by unicast IP and always use an ephemeral
-        // local port so connecting to `:443` does not bind local `:443`.
+        let local = windows_interface_bind_addr(&name, family)?;
+        // TCP `connect_tcp` passes the remote address as `family`; UDP already
+        // passes a local `:0`. Pin the NIC by unicast IP and always use an
+        // ephemeral local port so connecting to `:443` does not bind local `:443`.
         socket.bind(&SockAddr::from(local))
     }
     #[cfg(not(any(
@@ -336,7 +345,7 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         target_os = "windows"
     )))]
     {
-        let _ = (socket, address);
+        let _ = (socket, family);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "interface binding is not supported on this platform",
@@ -737,6 +746,17 @@ mod tests {
         )
         .expect("the test must run with permission to set SO_MARK");
         assert_eq!(socket.mark().expect("SO_MARK read-back"), 2158);
+    }
+
+    #[test]
+    fn udp_loopback_remote_skips_missing_interface_bind() {
+        let local = "0.0.0.0:0".parse().expect("wildcard");
+        let remote = "127.0.0.1:9".parse().expect("loopback");
+        bind_outbound_udp(local, remote, "p8f-missing-iface", 0)
+            .expect("loopback remote must not require a physical NIC");
+        let public = "1.1.1.1:53".parse().expect("public");
+        bind_outbound_udp(local, public, "p8f-missing-iface", 0)
+            .expect_err("public remote must try to bind the NIC");
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

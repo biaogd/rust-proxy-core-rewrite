@@ -862,6 +862,47 @@ def client_main(argv: list[str]) -> int:
             sock.close()
         print(json.dumps({"payload_hex": echoed.hex()}))
         return 0
+    if command == "socks-udp-echo":
+        mixed_port = int(rest[0])
+        dest_host, dest_port, payload_hex = rest[1], int(rest[2]), rest[3]
+        payload = bytes.fromhex(payload_hex)
+        control = socket.create_connection(("127.0.0.1", mixed_port), timeout=NATIVE_IO_DEADLINE)
+        control.settimeout(NATIVE_IO_DEADLINE)
+        datagram = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        datagram.settimeout(NATIVE_IO_DEADLINE)
+        try:
+            control.sendall(b"\x05\x01\x00")
+            if control.recv(2) != b"\x05\x00":
+                raise SystemExit("SOCKS method negotiation failed")
+            control.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+            head = control.recv(4)
+            if len(head) != 4 or head[0:2] != b"\x05\x00":
+                raise SystemExit(f"SOCKS UDP associate failed: {head!r}")
+            atyp = head[3]
+            if atyp == 1:
+                control.recv(4)
+            elif atyp == 4:
+                control.recv(16)
+            elif atyp == 3:
+                nlen = control.recv(1)
+                control.recv(nlen[0])
+            control.recv(2)
+            packet = (
+                b"\x00\x00\x00\x01"
+                + socket.inet_aton(dest_host)
+                + dest_port.to_bytes(2, "big")
+                + payload
+            )
+            datagram.sendto(packet, ("127.0.0.1", mixed_port))
+            reply, _ = datagram.recvfrom(65536)
+            if len(reply) < 10 or reply[:4] != b"\x00\x00\x00\x01":
+                raise SystemExit(f"unexpected SOCKS UDP reply: {reply!r}")
+            echoed = reply[10:]
+        finally:
+            datagram.close()
+            control.close()
+        print(json.dumps({"payload_hex": echoed.hex()}))
+        return 0
     raise SystemExit(f"unknown client command: {command}")
 
 

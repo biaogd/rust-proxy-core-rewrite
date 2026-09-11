@@ -57,6 +57,17 @@ fn controller_storage_replaces_and_deletes_exact_bytes() {
 }
 
 #[test]
+fn network_generation_notifies_subscribers() {
+    let state = RuntimeState::default();
+    let mut generation = state.subscribe_network_generation();
+    assert_eq!(state.network_generation(), 0);
+    state.bump_network_generation();
+    assert_eq!(state.network_generation(), 1);
+    assert!(generation.has_changed().expect("watch"));
+    assert_eq!(*generation.borrow_and_update(), 1);
+}
+
+#[test]
 fn controller_proxy_selection_and_health_share_runtime_state() {
     let state = RuntimeState::default();
     assert_eq!(state.global_proxy(), "DIRECT");
