@@ -407,10 +407,24 @@ async fn drop_during_refresh_stops_reactor() {
     let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
     let endpoint = listen.local_addr().expect("wg addr");
     spawn_responder(listen, server_priv, client_pub, 2);
-    let hook = PeerResolveHook::new(move |_host, _port| async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        Some(endpoint)
-    });
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+    let hook = {
+        let started_tx = Arc::clone(&started_tx);
+        PeerResolveHook::new(move |_host, _port| {
+            let started = started_tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            async move {
+                if let Some(started) = started {
+                    let _ = started.send(());
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Some(endpoint)
+            }
+        })
+    };
     let client = Client::new(ClientOptions {
         server: "wg-drop-during-refresh.test".to_owned(),
         port: endpoint.port(),
@@ -424,7 +438,10 @@ async fn drop_during_refresh_stops_reactor() {
     .await
     .expect("client");
     let socket = client.open_udp().await.expect("udp");
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::timeout(Duration::from_secs(2), started_rx)
+        .await
+        .expect("refresh hook should start")
+        .expect("refresh started signal");
     let recv = tokio::spawn(async move { socket.recv().await });
     drop(client);
     let result = tokio::time::timeout(Duration::from_secs(1), recv)
