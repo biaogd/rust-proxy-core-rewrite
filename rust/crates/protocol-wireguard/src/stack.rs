@@ -204,7 +204,7 @@ impl IpStack {
                     let socket = self.sockets.get::<TcpSocket>(handle);
                     (
                         socket.can_recv() || !socket.may_recv(),
-                        socket.can_send() || !socket.may_send(),
+                        socket.can_send() || !socket.may_send() || socket.send_queue() == 0,
                     )
                 }
                 SocketKind::Udp => {
@@ -332,7 +332,7 @@ impl IpStack {
         self.live.get(&handle).map(|(kind, _)| *kind)
     }
 
-    fn ensure_active(&self) -> io::Result<()> {
+    pub(crate) fn ensure_active(&self) -> io::Result<()> {
         if self.terminated {
             Err(retired())
         } else {
@@ -386,6 +386,31 @@ impl IpStack {
             return;
         }
         self.sockets.get_mut::<TcpSocket>(handle).close();
+    }
+
+    /// Enqueues a socket for reap without sending RST. Used after a graceful
+    /// TCP close so FIN / `TimeWait` can finish on the reactor.
+    pub(crate) fn release(&mut self, handle: SocketHandle) {
+        if self.kind(handle).is_none() {
+            return;
+        }
+        if let Some(wakers) = self.wakers.get_mut(&handle) {
+            if let Some(waker) = wakers.read.take() {
+                waker.wake();
+            }
+            if let Some(waker) = wakers.write.take() {
+                waker.wake();
+            }
+        }
+        if !self.releasing.contains(&handle) {
+            self.releasing.push(handle);
+        }
+    }
+
+    pub(crate) fn tcp_send_queue(&self, handle: SocketHandle) -> usize {
+        matches!(self.kind(handle), Some(SocketKind::Tcp))
+            .then(|| self.sockets.get::<TcpSocket>(handle).send_queue())
+            .unwrap_or(0)
     }
 
     pub(crate) fn state(&self, handle: SocketHandle) -> Option<State> {
@@ -549,6 +574,8 @@ pub struct WgTcpStream {
     handle: SocketHandle,
     stack: Arc<Mutex<IpStack>>,
     notify: Arc<Notify>,
+    /// Set by `poll_shutdown`: Drop must not RST, so queued data and FIN can finish.
+    closing: bool,
 }
 
 impl WgTcpStream {
@@ -561,6 +588,7 @@ impl WgTcpStream {
             handle,
             stack,
             notify,
+            closing: false,
         }
     }
 
@@ -573,7 +601,14 @@ impl WgTcpStream {
 
 impl Drop for WgTcpStream {
     fn drop(&mut self) {
-        self.lock().abort(self.handle);
+        let mut stack = self.lock();
+        if self.closing {
+            stack.close_write(self.handle);
+            stack.release(self.handle);
+        } else {
+            stack.abort(self.handle);
+        }
+        drop(stack);
         self.notify.notify_one();
     }
 }
@@ -639,15 +674,42 @@ impl AsyncWrite for WgTcpStream {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        self.notify.notify_one();
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        let this = self.get_mut();
+        let mut stack = this.lock();
+        if let Err(error) = stack.ensure_active() {
+            return Poll::Ready(Err(error));
+        }
+        if stack.tcp_send_queue(this.handle) == 0 {
+            drop(stack);
+            this.notify.notify_one();
+            Poll::Ready(Ok(()))
+        } else {
+            stack.register_write(this.handle, cx.waker().clone());
+            drop(stack);
+            this.notify.notify_one();
+            Poll::Pending
+        }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        self.lock().close_write(self.handle);
-        self.notify.notify_one();
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        let this = self.get_mut();
+        this.closing = true;
+        let mut stack = this.lock();
+        if let Err(error) = stack.ensure_active() {
+            return Poll::Ready(Err(error));
+        }
+        stack.close_write(this.handle);
+        if stack.tcp_send_queue(this.handle) == 0 {
+            drop(stack);
+            this.notify.notify_one();
+            Poll::Ready(Ok(()))
+        } else {
+            stack.register_write(this.handle, cx.waker().clone());
+            drop(stack);
+            this.notify.notify_one();
+            Poll::Pending
+        }
     }
 }
 

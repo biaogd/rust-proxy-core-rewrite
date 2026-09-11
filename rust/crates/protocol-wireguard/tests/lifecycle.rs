@@ -69,6 +69,42 @@ async fn spawn_echo() -> u16 {
     port
 }
 
+async fn spawn_udp_echo() -> u16 {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.expect("udp echo bind");
+    let port = echo.local_addr().expect("udp echo addr").port();
+    tokio::spawn(async move {
+        let mut buf = vec![0_u8; 65_535];
+        loop {
+            let Ok((n, from)) = echo.recv_from(&mut buf).await else {
+                break;
+            };
+            if echo.send_to(&buf[..n], from).await.is_err() {
+                break;
+            }
+        }
+    });
+    port
+}
+
+async fn spawn_delayed_reader() -> (u16, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("delayed reader bind");
+    let port = listener.local_addr().expect("delayed reader addr").port();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut buf = Vec::new();
+        if stream.read_to_end(&mut buf).await.is_ok() {
+            let _ = tx.send(buf);
+        }
+    });
+    (port, rx)
+}
+
 async fn tcp_echo(client: &Client, port: u16, payload: &[u8]) {
     let mut stream = client
         .open_tcp(&echo_destination(port))
@@ -131,6 +167,141 @@ async fn tcp_retries_handshake_after_peer_restart() {
     );
 
     tcp_echo(&client, echo_port, b"after-restart").await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn graceful_tcp_shutdown_delivers_bytes_to_delayed_reader() {
+    let (port, received) = spawn_delayed_reader().await;
+    let (client_priv, client_pub) = pair(73);
+    let (server_priv, server_pub) = pair(75);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let payload: Vec<u8> = (0_u8..=250).cycle().take(4096).collect();
+    let mut stream = client
+        .open_tcp(&echo_destination(port))
+        .await
+        .expect("open tcp");
+    stream.write_all(&payload).await.expect("write");
+    stream.shutdown().await.expect("shutdown");
+    drop(stream);
+    let got = tokio::time::timeout(Duration::from_secs(5), received)
+        .await
+        .expect("delayed reader should finish")
+        .expect("reader channel");
+    assert_eq!(got, payload, "graceful close must not drop queued bytes");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn refused_tcp_dials_do_not_reset_shared_session() {
+    let echo_port = spawn_echo().await;
+    let udp_port = spawn_udp_echo().await;
+    let (client_priv, client_pub) = pair(77);
+    let (server_priv, server_pub) = pair(79);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+
+    let mut live_tcp = client
+        .open_tcp(&echo_destination(echo_port))
+        .await
+        .expect("live tcp");
+    live_tcp.write_all(b"pin").await.expect("pin write");
+    let mut pin = [0_u8; 3];
+    live_tcp.read_exact(&mut pin).await.expect("pin read");
+    assert_eq!(&pin, b"pin");
+
+    let udp = client.open_udp().await.expect("udp");
+    let udp_dest = SocketAddr::from((Ipv4Addr::LOCALHOST, udp_port));
+    udp.send(udp_dest, b"keep-udp").await.expect("udp pin");
+    let (_, udp_pin) = tokio::time::timeout(Duration::from_secs(5), udp.recv())
+        .await
+        .expect("udp pin timeout")
+        .expect("udp pin recv");
+    assert_eq!(udp_pin, b"keep-udp");
+
+    let unused = TcpListener::bind("127.0.0.1:0").await.expect("unused bind");
+    let closed_port = unused.local_addr().expect("unused addr").port();
+    drop(unused);
+
+    let mut refused = Vec::new();
+    for _ in 0..8 {
+        let client = client.clone();
+        refused.push(tokio::spawn(async move {
+            client.open_tcp(&echo_destination(closed_port)).await
+        }));
+    }
+    for index in 0..8_u8 {
+        live_tcp.write_all(&[index]).await.expect("live write");
+        let mut byte = [0_u8; 1];
+        live_tcp.read_exact(&mut byte).await.expect("live read");
+        assert_eq!(
+            byte[0], index,
+            "live TCP must keep echoing during refused dials"
+        );
+        udp.send(udp_dest, &[index]).await.expect("live udp send");
+        let (_, got) = tokio::time::timeout(Duration::from_secs(5), udp.recv())
+            .await
+            .expect("live udp timeout")
+            .expect("live udp recv");
+        assert_eq!(
+            got,
+            [index],
+            "live UDP must keep echoing during refused dials"
+        );
+    }
+    for task in refused {
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("refused dial should finish")
+            .expect("join");
+        assert!(result.is_err(), "closed port should fail");
+    }
+    tcp_echo(&client, echo_port, b"after-refused").await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn failed_endpoint_update_keeps_previous_peer() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(81);
+    let (server_priv, server_pub) = pair(83);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    tcp_echo(&client, echo_port, b"before-bad-endpoint").await;
+    let bad = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 1));
+    client
+        .replace_endpoint(bad)
+        .await
+        .expect_err("unspecified endpoint must not commit");
+    tcp_echo(&client, echo_port, b"after-bad-endpoint").await;
     client.close().await;
 }
 

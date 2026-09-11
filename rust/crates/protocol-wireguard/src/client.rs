@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use rand::RngExt as _;
@@ -13,7 +13,7 @@ use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
 use smoltcp::iface::SocketHandle;
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::stack::{IpStack, WgTcpStream, WgUdpSocket, lock_stack};
@@ -22,6 +22,10 @@ use crate::{DEFAULT_MTU, HANDSHAKE_TIMEOUT, WireGuardProtocolError};
 
 const PEER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+/// Tunnel is treated as dead only when no inner IP has arrived for this long.
+/// Destination TCP timeouts shorter than this (or with concurrent live flows)
+/// must not reset the shared Noise session.
+const TUNNEL_STALE_AFTER: Duration = Duration::from_secs(2);
 
 /// Construction options for a single-peer `WireGuard` outbound.
 #[derive(Clone, Debug)]
@@ -96,7 +100,8 @@ impl Default for ClientOptions {
 struct ClientInner {
     tunnel: NoiseTunnel,
     stack: Arc<Mutex<IpStack>>,
-    udp: UdpSocket,
+    udp: RwLock<Arc<UdpSocket>>,
+    udp_changed: Notify,
     endpoint: Mutex<SocketAddr>,
     server: String,
     port: u16,
@@ -111,8 +116,12 @@ struct ClientInner {
     resolve_peer: Option<PeerResolveHook>,
     notify: Arc<Notify>,
     shutdown: CancellationToken,
+    handshake: AsyncMutex<()>,
     established: AtomicBool,
+    last_recv_ip: Mutex<Instant>,
     datagrams_sent: AtomicU64,
+    bind_interface: String,
+    routing_mark: i64,
     has_v4: bool,
     has_v6: bool,
     /// `Client` clones only. Reactor and refresh tasks hold `Arc` but do not
@@ -188,7 +197,7 @@ impl Client {
             options.routing_mark,
         )?;
         std_socket.set_nonblocking(true)?;
-        let udp = UdpSocket::from_std(std_socket)?;
+        let udp = Arc::new(UdpSocket::from_std(std_socket)?);
         let index = rand::rng().random::<u32>();
         let tunnel = NoiseTunnel::new(
             options.private_key,
@@ -208,7 +217,8 @@ impl Client {
         let inner = Arc::new(ClientInner {
             tunnel,
             stack,
-            udp,
+            udp: RwLock::new(udp),
+            udp_changed: Notify::new(),
             endpoint: Mutex::new(endpoint),
             server: options.server,
             port: options.port,
@@ -223,8 +233,12 @@ impl Client {
             resolve_peer: options.resolve_peer,
             notify,
             shutdown,
+            handshake: AsyncMutex::new(()),
             established: AtomicBool::new(false),
+            last_recv_ip: Mutex::new(Instant::now()),
             datagrams_sent: AtomicU64::new(0),
+            bind_interface: options.bind_interface,
+            routing_mark: options.routing_mark,
             has_v4: options.local_v4.is_some(),
             has_v6: options.local_v6.is_some(),
             client_handles: AtomicUsize::new(1),
@@ -238,8 +252,10 @@ impl Client {
 
     /// Opens a TCP stream to `destination` through the tunnel.
     ///
-    /// Times out once, then forces a handshake retry so a restarted peer can
-    /// recover without waiting for boringtun `REKEY_AFTER_TIME`.
+    /// Destination TCP failures do not reset the shared Noise session. A
+    /// handshake retry happens only when the tunnel itself looks stale (no
+    /// inner IP received recently), so a restarted peer can recover without
+    /// disrupting other live TCP/UDP flows.
     ///
     /// # Errors
     ///
@@ -251,7 +267,7 @@ impl Client {
         schedule_endpoint_refresh(&self.inner);
         match self.open_tcp_once(destination).await {
             Ok(stream) => Ok(stream),
-            Err(error) if tcp_retryable(&error) => {
+            Err(error) if tcp_retryable(&error) && tunnel_is_stale(&self.inner) => {
                 self.force_rehandshake().await?;
                 self.open_tcp_once(destination).await
             }
@@ -281,10 +297,13 @@ impl Client {
 
     /// Replaces the peer UDP endpoint (Go `updateServerAddr`).
     ///
+    /// Socket bind/connect is prepared first; the previous endpoint is kept if
+    /// the new socket cannot be used (including address-family changes).
+    ///
     /// # Errors
     ///
     /// Returns when TUN loop-avoidance cannot install a host route for a
-    /// non-loopback destination.
+    /// non-loopback destination, or when the UDP socket cannot be updated.
     pub async fn replace_endpoint(
         &self,
         endpoint: SocketAddr,
@@ -380,12 +399,24 @@ impl Client {
     }
 
     async fn force_rehandshake(&self) -> Result<(), WireGuardProtocolError> {
+        let _guard = self.inner.handshake.lock().await;
+        if self.inner.established.load(Ordering::Acquire) && !tunnel_is_stale(&self.inner) {
+            return Ok(());
+        }
         reset_session(&self.inner);
         self.inner.notify.notify_waiters();
-        self.ensure_handshake().await
+        self.complete_handshake().await
     }
 
     async fn ensure_handshake(&self) -> Result<(), WireGuardProtocolError> {
+        if self.inner.established.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.inner.handshake.lock().await;
+        self.complete_handshake().await
+    }
+
+    async fn complete_handshake(&self) -> Result<(), WireGuardProtocolError> {
         if self.inner.established.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -451,12 +482,16 @@ async fn run_reactor(inner: Arc<ClientInner>) {
         let delay = lock_stack(&inner.stack)
             .poll_delay()
             .unwrap_or(Duration::from_millis(100));
+        let udp_changed = inner.udp_changed.notified();
+        tokio::pin!(udp_changed);
+        let udp = clone_udp(&inner);
         tokio::select! {
             () = inner.shutdown.cancelled() => break,
-            result = inner.udp.recv_from(&mut buf) => {
+            result = udp.recv_from(&mut buf) => {
                 let Ok((n, from)) = result else { break };
                 handle_incoming(&inner, Some(from), &buf[..n]).await;
             }
+            () = udp_changed => {}
             () = inner.notify.notified() => {
                 pump_stack(&inner).await;
             }
@@ -493,7 +528,7 @@ async fn handle_incoming(inner: &ClientInner, from: Option<SocketAddr>, datagram
                 packet = &[];
             }
             TunnelAction::RecvIp(ip) => {
-                inner.established.store(true, Ordering::Release);
+                mark_recv_ip(inner);
                 lock_stack(&inner.stack).ingest_ip(ip);
                 inner.notify.notify_waiters();
                 packet = &[];
@@ -529,7 +564,7 @@ async fn pump_stack(inner: &ClientInner) {
                     let _ = send_udp(inner, &extra).await;
                 }
                 TunnelAction::RecvIp(ip) => {
-                    inner.established.store(true, Ordering::Release);
+                    mark_recv_ip(inner);
                     lock_stack(&inner.stack).ingest_ip(ip);
                     inner.notify.notify_waiters();
                 }
@@ -608,11 +643,18 @@ fn reset_session(inner: &ClientInner) {
 }
 
 async fn send_udp(inner: &ClientInner, datagram: &[u8]) -> Result<(), WireGuardProtocolError> {
-    let endpoint = *inner
-        .endpoint
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    inner.udp.send_to(datagram, endpoint).await?;
+    let (udp, endpoint) = {
+        let udp = inner
+            .udp
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let endpoint = *inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (Arc::clone(&udp), endpoint)
+    };
+    udp.send_to(datagram, endpoint).await?;
     inner.datagrams_sent.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -622,11 +664,30 @@ async fn apply_endpoint(
     endpoint: SocketAddr,
 ) -> Result<(), WireGuardProtocolError> {
     protect_peer_endpoint(endpoint)?;
+    let current = *inner
+        .endpoint
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if current == endpoint {
+        *inner
+            .next_refresh_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Instant::now() + inner.refresh_server_ip_interval;
+        inner.refresh_backoff_ms.store(0, Ordering::Relaxed);
+        return Ok(());
+    }
+    let udp = bind_peer_udp(inner, endpoint).await?;
     {
+        let mut socket = inner
+            .udp
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut slot = inner
             .endpoint
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *socket = Arc::new(udp);
         *slot = endpoint;
     }
     *inner
@@ -635,8 +696,58 @@ async fn apply_endpoint(
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
         Instant::now() + inner.refresh_server_ip_interval;
     inner.refresh_backoff_ms.store(0, Ordering::Relaxed);
-    let _ = inner.udp.connect(endpoint).await;
+    inner.udp_changed.notify_waiters();
+    inner.notify.notify_waiters();
     Ok(())
+}
+
+async fn bind_peer_udp(
+    inner: &ClientInner,
+    endpoint: SocketAddr,
+) -> Result<UdpSocket, WireGuardProtocolError> {
+    let local = SocketAddr::new(
+        match endpoint.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        0,
+    );
+    let std_socket = rewrite_platform::bind_outbound_udp(
+        local,
+        endpoint,
+        &inner.bind_interface,
+        inner.routing_mark,
+    )?;
+    std_socket.set_nonblocking(true)?;
+    let udp = UdpSocket::from_std(std_socket)?;
+    udp.connect(endpoint).await?;
+    Ok(udp)
+}
+
+fn clone_udp(inner: &ClientInner) -> Arc<UdpSocket> {
+    Arc::clone(
+        &inner
+            .udp
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+fn mark_recv_ip(inner: &ClientInner) {
+    inner.established.store(true, Ordering::Release);
+    *inner
+        .last_recv_ip
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+}
+
+fn tunnel_is_stale(inner: &ClientInner) -> bool {
+    inner
+        .last_recv_ip
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .elapsed()
+        >= TUNNEL_STALE_AFTER
 }
 
 fn protect_peer_endpoint(endpoint: SocketAddr) -> Result<(), WireGuardProtocolError> {
