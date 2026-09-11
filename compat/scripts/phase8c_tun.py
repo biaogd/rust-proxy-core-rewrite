@@ -11,9 +11,11 @@ capability or missing wintun.dll fails closed instead of skipping green.
 
 Wintun is not vendored. The native gate downloads the official 0.14.1 zip,
 verifies SHA-256, and keeps the extracted `wintun/bin/amd64/wintun.dll` in the
-scratch directory for Rust via `MIHOMO_WINTUN`. Go still gets a next-to-exe
-copy when that destination is writable; a sharing violation (WinError 32) on
-an already-loaded file is skipped rather than failing fixture setup.
+scratch directory for Rust via `MIHOMO_WINTUN`. Go gets a next-to-exe copy of
+that verified DLL only when the destination is missing, writable, or already
+the same digest. A sharing violation (WinError 32) may reuse a matching file,
+but a locked mismatched DLL is never accepted: the Go binary and the verified
+DLL are copied into an isolated scratch directory instead.
 `delete_driver` stays false so other Wintun/WireGuard VPNs remain.
 DNS is set on this adapter only; other NIC DNS must stay unchanged.
 """
@@ -536,6 +538,10 @@ def download_wintun(scratch: pathlib.Path) -> pathlib.Path:
     return extracted
 
 
+class WintunInUse(Exception):
+    """Destination `wintun.dll` is locked and is not the verified extract."""
+
+
 def file_sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -547,35 +553,131 @@ def is_sharing_violation(error: OSError) -> bool:
     return "being used by another process" in text or "winerror 32" in text
 
 
+def existing_dll_is_verified(target: pathlib.Path, dll: pathlib.Path) -> bool:
+    if not target.exists():
+        return False
+    try:
+        return file_sha256(target) == file_sha256(dll)
+    except OSError:
+        return False
+
+
+def copy_verified_wintun(dll: pathlib.Path, target: pathlib.Path) -> None:
+    shutil.copy2(dll, target)
+    if not existing_dll_is_verified(target, dll):
+        raise AssertionError(
+            f"wintun.dll at {target} does not match the verified 0.14.1 extract"
+        )
+
+
 def copy_wintun_beside(dll: pathlib.Path, binary: pathlib.Path) -> pathlib.Path:
     target = binary.parent / "wintun.dll"
-    if target.exists():
-        try:
-            if file_sha256(target) == file_sha256(dll):
-                return target
-        except OSError:
-            pass
+    if existing_dll_is_verified(target, dll):
+        return target
     try:
-        shutil.copy2(dll, target)
+        copy_verified_wintun(dll, target)
     except OSError as error:
-        if is_sharing_violation(error) and target.exists():
+        if is_sharing_violation(error) and existing_dll_is_verified(target, dll):
             return target
+        if is_sharing_violation(error):
+            raise WintunInUse(
+                f"{target} is in use and does not match the verified 0.14.1 extract"
+            ) from error
         raise AssertionError(f"failed to stage wintun.dll next to {binary}: {error}") from error
     return target
 
 
-def stage_wintun(dll: pathlib.Path, binaries: dict[str, pathlib.Path]) -> pathlib.Path:
-    """Point Rust at the scratch DLL; copy beside Go when the file is not in use.
+def isolate_go_with_wintun(dll: pathlib.Path, go: pathlib.Path, scratch: pathlib.Path) -> pathlib.Path:
+    isolated = scratch / "go-wintun"
+    isolated.mkdir(parents=True, exist_ok=True)
+    isolated_go = isolated / go.name
+    shutil.copy2(go, isolated_go)
+    copy_verified_wintun(dll, isolated / "wintun.dll")
+    return isolated_go
 
-    Rust loads `MIHOMO_WINTUN` first. Copying onto a Cargo target directory that
-    already has a loaded `wintun.dll` hits WinError 32 and never reaches TUN
-    traffic. Keep the hashed extract in scratch for Rust.
+
+def stage_wintun(
+    dll: pathlib.Path,
+    binaries: dict[str, pathlib.Path],
+    scratch: pathlib.Path,
+) -> pathlib.Path:
+    """Point Rust at the scratch DLL; give Go a verified next-to-exe copy.
+
+    Rust loads `MIHOMO_WINTUN` first, so it never needs a copy in the Cargo
+    target directory. Go still looks beside the executable. Reuse that file
+    only when its digest matches the verified extract; a locked mismatch is
+    isolated into scratch instead of accepted.
     """
     go = binaries.get("go")
     if go is not None:
-        copy_wintun_beside(dll, go)
+        try:
+            copy_wintun_beside(dll, go)
+        except WintunInUse:
+            binaries["go"] = isolate_go_with_wintun(dll, go, scratch)
     os.environ["MIHOMO_WINTUN"] = str(dll)
     return dll
+
+
+def wintun_stage_identity(scratch: pathlib.Path) -> dict[str, Any]:
+    """Unprivileged checks that a locked mismatched DLL is not treated as 0.14.1."""
+    dll = scratch / "verified.dll"
+    dll.write_bytes(b"wintun-0.14.1-fixture")
+    go_dir = scratch / "go-bin"
+    go_dir.mkdir(parents=True, exist_ok=True)
+    go = go_dir / "mihomo.exe"
+    go.write_bytes(b"fake-go")
+    target = go_dir / "wintun.dll"
+
+    shutil.copy2(dll, target)
+    if copy_wintun_beside(dll, go) != target:
+        raise AssertionError("matching wintun.dll was not reused")
+
+    original = shutil.copy2
+
+    def locked_copy(*_args: object, **_kwargs: object) -> None:
+        error = OSError("being used by another process")
+        error.winerror = 32  # type: ignore[attr-defined]
+        raise error
+
+    shutil.copy2 = locked_copy  # type: ignore[assignment]
+    try:
+        if copy_wintun_beside(dll, go) != target:
+            raise AssertionError("matching wintun.dll was not reused while locked")
+    finally:
+        shutil.copy2 = original  # type: ignore[assignment]
+
+    target.write_bytes(b"old-wintun")
+    copy_wintun_beside(dll, go)
+    if target.read_bytes() != dll.read_bytes():
+        raise AssertionError("writable mismatched wintun.dll was not replaced")
+
+    target.write_bytes(b"old-wintun")
+    shutil.copy2 = locked_copy  # type: ignore[assignment]
+    try:
+        copy_wintun_beside(dll, go)
+    except WintunInUse:
+        pass
+    else:
+        shutil.copy2 = original  # type: ignore[assignment]
+        raise AssertionError("locked mismatched wintun.dll was accepted")
+    finally:
+        shutil.copy2 = original  # type: ignore[assignment]
+    if existing_dll_is_verified(target, dll):
+        raise AssertionError("locked mismatch path mutated the original file")
+
+    isolated = isolate_go_with_wintun(dll, go, scratch)
+    isolated_dll = isolated.parent / "wintun.dll"
+    if file_sha256(isolated_dll) != file_sha256(dll):
+        raise AssertionError("isolated wintun.dll does not match the verified extract")
+    if isolated.read_bytes() != go.read_bytes():
+        raise AssertionError("isolated Go binary was not copied")
+    return {
+        "reuse-matching": True,
+        "reuse-matching-locked": True,
+        "replace-writable-mismatch": True,
+        "reject-locked-mismatch": True,
+        "isolate-verified": True,
+    }
 
 
 def run_closed_loop(
@@ -795,7 +897,7 @@ def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dic
     require_native_prereqs()
     observations: dict[str, Any] = {"requested": True}
     dll = download_wintun(scratch)
-    wintun = stage_wintun(dll, binaries)
+    wintun = stage_wintun(dll, binaries, scratch)
     observations["wintun-sha256"] = WINTUN_SHA256
     rust_manual = unique_device("p8cm")
     rust_auto = unique_device("p8cr")
@@ -869,6 +971,7 @@ def main() -> int:
         observations: dict[str, Any] = {
             "identity": config_identity(binaries, scratch),
             "device-names": device_name_identity(binaries, scratch),
+            "wintun-stage": wintun_stage_identity(scratch / "wintun-stage"),
         }
         native = native_gate(binaries, scratch)
         observations["native"] = native

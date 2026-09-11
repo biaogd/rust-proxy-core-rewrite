@@ -2,6 +2,16 @@
 
 Last updated: 2026-09-11
 
+### 8C Wintun staging refuses a locked mismatched DLL — 2026-09-11
+
+Go next-to-exe `wintun.dll` is reused only when its SHA-256 matches the
+verified 0.14.1 extract. WinError 32 on a matching file is still a reuse;
+a locked mismatch copies the Go binary and the verified DLL into an isolated
+scratch directory instead of accepting the in-use file. Rust keeps using the
+scratch extract via `MIHOMO_WINTUN`. Unprivileged `wintun-stage` identity in
+`phase8c_tun.py` covers those branches. Still Partial, not Parity; 8C native
+remains unclaimed; not merge-ready.
+
 ### TUN reload rollback drops uncommitted sockets — 2026-09-11
 
 Failed hot-reload now has one cleanup path: drop every uncommitted prepared
@@ -247,7 +257,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Native CI portability hardening | Local gates pass; Windows rerun pending | Windows `.exe`, home/cache isolation, restart child-process cleanup, Winsock error text and cold data-plane boundaries are represented explicitly; the seven directly affected Phase 4C/4E15/4F14/5A1/5C/5D/6E differentials pass locally, with native parity unclaimed until CI |
 | Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Failed reload drops uncommitted sockets before restoring retired listeners (same-port replacement + TUN fail, and bind-fail after stop). Unprivileged identity + privileged netns harness in `phase8a_tun.py` passed locally on Linux 2026-09-10 (`PHASE8A_NATIVE=1`); native CI pass unclaimed |
 | Phase 8B Darwin arm64 TUN | In progress | Reuses the 8A data path. utun open, Darwin split auto-route, scutil DNS ownership/restore, `tun0`/`utun` rejected without remap. Unprivileged identity in `phase8b_tun.py`; privileged `PHASE8B_NATIVE=1` fail-closed Darwin arm64 harness is not Parity until `phase8b-darwin-tun` reports success |
-| Phase 8C Windows x86_64 TUN | In progress | Reuses the 8A data path. Wintun via tun-rs (`delete_driver(false)`, metric 1 on this adapter, `MIHOMO_WINTUN` scratch extract / Go next-to-exe, official 0.14.1 zip hashed in the native gate; WinError 32 on an in-use copy is skipped), Linux-style split auto-route, `netsh` DNS on the Wintun adapter only, existing named adapters refused. Unprivileged identity in `phase8c_tun.py`; privileged `PHASE8C_NATIVE=1` fail-closed Windows x86_64 harness is not Parity until `phase8c-windows-tun` reports success |
+| Phase 8C Windows x86_64 TUN | In progress | Reuses the 8A data path. Wintun via tun-rs (`delete_driver(false)`, metric 1 on this adapter, `MIHOMO_WINTUN` scratch extract / Go next-to-exe of the verified 0.14.1 DLL, official zip hashed in the native gate; WinError 32 reuses only a matching digest, otherwise isolates Go+DLL). Linux-style split auto-route, `netsh` DNS on the Wintun adapter only, existing named adapters refused. Unprivileged identity in `phase8c_tun.py`; privileged `PHASE8C_NATIVE=1` fail-closed Windows x86_64 harness is not Parity until `phase8c-windows-tun` reports success |
 | Phase 8F TUN network-change | In progress | Polls physical default excluding TUN (IPv4 and IPv6 separately); re-protects DNS/literal-proxy host routes via the matching-family snapshot (never TUN; uncaptured families are skipped); refuses to overwrite foreign exact-prefix routes; DIRECT uses socket interface bind (not a system host route) so per-port rules still apply; TUIC and Hysteria2 QUIC UDP bind the same way; Windows TCP bind uses local port 0; NIC change retires cached QUIC clients and rebinds DIRECT UDP; auto-detect bind picks the matching-family NIC (pure IPv6 is not lost; captured family without physical egress is refused); `bind_outbound_udp(local, remote)` skips NIC bind for loopback remotes; `route-exclude-address` installs more-specific physical exceptions; TCP/UDP caps 4096 and bounded UDP reply queue (1024, drop on full); dynamic host-route cap 1024 fails closed. Unprivileged identity in `phase8f_tun.py`; privileged Linux dual-uplink `PHASE8F_NATIVE=1` covers flap (old uplink down), public DIRECT, same-IP REJECT, domain TUIC, same-socket DIRECT UDP, mixed/SOCKS UDP to localhost, foreign-route conflict. Not Parity until `phase8f-linux-tun` reports success |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
