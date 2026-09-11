@@ -475,6 +475,7 @@ jobs:
             compat/scripts/phase6c_shadowsocks_2022.py \
             compat/scripts/phase6c_shadowsocks_2022_eih.py \
             compat/scripts/phase6c_shadowsocks_2022_chacha8.py \
+            compat/scripts/phase6c_shadowsocks_2022_udp.py \
             compat/scripts/phase6c_shadowsocks_ipv6_udp.py \
             compat/scripts/phase6c_shadowsocks_obfs_http.py \
             compat/scripts/phase6c_shadowsocks_obfs_tls.py \

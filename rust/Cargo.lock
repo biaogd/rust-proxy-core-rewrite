@@ -3436,6 +3436,7 @@ name = "rewrite-protocol-shadowsocks"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "rand 0.10.2",
  "rewrite-io",
  "rewrite-model",
  "shadowsocks",
@@ -3639,6 +3640,7 @@ dependencies = [
  "rewrite-dns",
  "rewrite-model",
  "rewrite-outbound",
+ "rewrite-protocol-shadowsocks",
  "rewrite-rules",
  "rustls-pemfile",
  "serde",

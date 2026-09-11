@@ -14,12 +14,16 @@ use shadowsocks::ProxyClientStream;
 use shadowsocks::config::{ServerConfig, ServerType};
 use shadowsocks::context::Context;
 use shadowsocks::crypto::CipherKind;
-use shadowsocks::net::UdpSocket as ShadowUdpSocket;
 use shadowsocks::relay::socks5::Address;
-use shadowsocks::relay::udprelay::ProxySocket;
-use shadowsocks::relay::udprelay::proxy_socket::UdpSocketType;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+mod udp;
+mod udp_session;
+
+pub use shadowsocks::relay::udprelay::options::UdpSocketControlData;
+pub use udp::{ShadowsocksUdpAssociation, aead_2022_cipher};
+pub use udp_session::Aead2022ServerSessions;
 
 #[derive(Debug, Error)]
 pub enum ShadowsocksProtocolError {
@@ -76,66 +80,6 @@ pub fn connect_tcp_on_stream(
         &server,
         destination_address(destination),
     )))
-}
-
-pub struct ShadowsocksUdpAssociation {
-    socket: ProxySocket<ShadowUdpSocket>,
-}
-
-impl ShadowsocksUdpAssociation {
-    /// Wraps a connected UDP socket in the SIP004/SIP022 packet codec.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when server configuration is invalid.
-    pub fn from_connected_socket(
-        socket: tokio::net::UdpSocket,
-        server: &Destination,
-        password: &str,
-        cipher: &str,
-    ) -> Result<Self, ShadowsocksProtocolError> {
-        let server = client_server_config(server, password, cipher)?;
-        let socket = ProxySocket::from_socket(
-            UdpSocketType::Client,
-            Context::new_shared(ServerType::Local),
-            &server,
-            ShadowUdpSocket::from(socket),
-        );
-        Ok(Self { socket })
-    }
-
-    /// Sends one encrypted Shadowsocks datagram.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authentication, framing or socket error.
-    pub async fn send(
-        &self,
-        destination: &Destination,
-        payload: &[u8],
-    ) -> Result<(), ShadowsocksProtocolError> {
-        self.socket
-            .send(&destination_address(destination), payload)
-            .await
-            .map(|_| ())
-            .map_err(|error| ShadowsocksProtocolError::Protocol(error.to_string()))
-    }
-
-    /// Receives one authenticated Shadowsocks datagram.
-    ///
-    /// # Errors
-    ///
-    /// Returns an authentication, framing or socket error.
-    pub async fn recv(&self) -> Result<(Destination, Vec<u8>), ShadowsocksProtocolError> {
-        let mut buffer = vec![0_u8; 65_536];
-        let (length, address, _) = self
-            .socket
-            .recv(&mut buffer)
-            .await
-            .map_err(|error| ShadowsocksProtocolError::Protocol(error.to_string()))?;
-        buffer.truncate(length);
-        Ok((address_destination(address), buffer))
-    }
 }
 
 pub struct ShadowsocksUotAssociation {

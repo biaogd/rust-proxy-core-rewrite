@@ -1243,11 +1243,13 @@ pub(super) async fn run_shadowsocks_udp_session(
             return;
         }
     };
-    let association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
+    let password = proxy.password.clone().unwrap_or_default();
+    let cipher = proxy.cipher.clone().unwrap_or_default();
+    let mut association = match rewrite_outbound::associate_shadowsocks_udp_with_options(
         &server,
         config.ipv6,
-        proxy.password.as_deref().unwrap_or_default(),
-        proxy.cipher.as_deref().unwrap_or_default(),
+        &password,
+        &cipher,
         direct_tcp_options(&config),
     )
     .await
@@ -1261,6 +1263,7 @@ pub(super) async fn run_shadowsocks_udp_session(
             return;
         }
     };
+    let mut generation = state.subscribe_network_generation();
 
     let tracker = state.register(
         &first.metadata,
@@ -1295,6 +1298,30 @@ pub(super) async fn run_shadowsocks_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 current = Some(request);
+            }
+            changed = generation.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                match rewrite_outbound::associate_shadowsocks_udp_with_options(
+                    &server,
+                    config.ipv6,
+                    &password,
+                    &cipher,
+                    direct_tcp_options(&config),
+                )
+                .await
+                {
+                    Ok(next) => association = next,
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!("Shadowsocks UDP rebind failed: {error}"),
+                        );
+                        break;
+                    }
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
             }
             response = association.recv() => {
                 let Ok((remote, payload)) = response else { break };

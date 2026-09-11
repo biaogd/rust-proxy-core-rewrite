@@ -1325,6 +1325,9 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         .filter(|cipher| supported_shadowsocks_cipher(cipher))
         .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
     validate_shadowsocks_key(&name, &cipher, &password, proxy.udp.unwrap_or(false))?;
+    if shadowsocks_2022_cipher(&cipher) && proxy.udp_over_tcp.unwrap_or(false) {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
     let client_fingerprint = proxy.client_fingerprint.filter(|value| !value.is_empty());
     if let Some(ShadowsocksPluginConfig::ShadowTls { version, .. }) = &shadowsocks_plugin {
         validate_shadow_tls_client_fingerprint(&name, client_fingerprint.as_deref(), *version)?;
@@ -2409,10 +2412,17 @@ fn validate_shadowsocks_key(
             return Err(ConfigError::UnsupportedProxy(name.to_owned()));
         }
     }
-    if expected_key_length.is_some() && udp {
+    if expected_key_length.is_some() && udp && !shadowsocks_2022_udp_cipher(cipher) {
         return Err(ConfigError::UnsupportedProxy(name.to_owned()));
     }
     Ok(())
+}
+
+pub(crate) fn shadowsocks_2022_udp_cipher(cipher: &str) -> bool {
+    matches!(
+        cipher,
+        "2022-blake3-aes-128-gcm" | "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305"
+    )
 }
 
 fn parse_shadowsocks_plugin(

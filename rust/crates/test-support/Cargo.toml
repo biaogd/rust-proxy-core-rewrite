@@ -45,6 +45,7 @@ path = "src/shadowsocks_websocket_authority.rs"
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-outbound = { path = "../outbound" }
+rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-rules = { path = "../rules" }
 rewrite-dns = { path = "../dns" }
 serde.workspace = true

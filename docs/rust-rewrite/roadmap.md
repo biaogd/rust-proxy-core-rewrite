@@ -1715,13 +1715,12 @@ acceptance, then runs each method against an independent official-library
 authority. Domain TCP, 128 KiB IPv4 TCP, half-close response delivery and
 process survival must match.
 
-Native 2022 UDP is not enabled. During development, the pinned Go oracle's
-`sing-shadowsocks2` client panicked at `clientPacketConn.readPacket` when it
-received the first AES-2022 UDP response from the official Rust authority due
-to a nil `remoteCipher`. Rust therefore rejects `udp: true` for these methods
-until a deterministic cross-implementation oracle can verify the path. The
-2022-extra methods, EIH, plugins, IPv6 UDP and server direction remain separate
-gates.
+Native 2022 UDP outbound is Phase 6C-O. During the original 6C-I work, the
+pinned Go oracle's `sing-shadowsocks2` client panicked at
+`clientPacketConn.readPacket` when it received the first AES-2022 UDP response
+from the official Rust authority due to a nil `remoteCipher`. That path stayed
+disabled until session control was owned in `protocol-shadowsocks` and the
+authority stopped emitting a zero server session identifier.
 
 ### Phase 6C-J accepted scope
 
@@ -1738,14 +1737,14 @@ Domain TCP, 128 KiB IPv4 TCP, half-close delivery and process survival must
 match.
 
 ChaCha20-2022 EIH and AES chains with more than one identity key remain
-rejected. Multi-hop EIH, native 2022 UDP, 2022-extra methods, plugins, IPv6 UDP
-and server direction remain separate gates.
+rejected. Multi-hop EIH, 2022-extra methods, plugins, IPv6 UDP and server
+direction remain separate gates. Native 2022 UDP outbound is Phase 6C-O.
 
 ### Phase 6C-K accepted scope
 
 The client cipher set adds `2022-blake3-chacha8-poly1305` through the official
 library's 2022-extra feature. Configuration requires one standard-base64
-32-byte PSK and rejects EIH and native UDP. The differential uses an
+32-byte PSK and rejects EIH and ChaCha8 native UDP. The differential uses an
 independent official-library authority and compares domain TCP, 128 KiB IPv4
 TCP, half-close delivery and process survival.
 
@@ -1755,8 +1754,8 @@ The shared pre-2022 UDP path accepts explicit IPv6 destinations when global
 IPv6 is enabled. `compat/scripts/phase6c_shadowsocks_ipv6_udp.py` compares
 mixed and SOCKS5 ingress through representative AEAD, stream and extra-AEAD
 ciphers, preserving the returned IPv6 source address and payload. Domain
-resolution preference, 2022 UDP, plugins and server direction remain separate
-gates.
+resolution preference, plugins and server direction remain separate gates.
+Native 2022 UDP outbound is Phase 6C-O.
 
 ### Phase 6C-M1 accepted scope
 
@@ -1859,8 +1858,9 @@ parity. The Rust path now advertises the complete 16-suite Chrome 133 cipher
 list, but the ShadowTLS wrappers still produce different extension sets.
 Unsupported fingerprint names are rejected instead of silently falling back.
 
-This phase does not claim exact Chrome fingerprint parity, native 2022 UDP,
-multi-hop EIH, inbound/server behavior or other shared security consumers.
+This phase does not claim exact Chrome fingerprint parity, inbound/server
+behavior or other shared security consumers. Native 2022 UDP outbound is
+Phase 6C-O.
 
 ### Phase 6C-N accepted scope — Shadowsocks inbound first server slice
 
@@ -1898,12 +1898,62 @@ pending".
 
 This phase does not claim port lists/ranges, common named-listener `rule`,
 `proxy` or `routing-mark` fields, `mux-option`, UoT v2 connect mode, SS2022
-UDP, the complete inbound cipher matrix, ShadowTLS v1/v2 or advanced SNI
+UDP inbound, the complete inbound cipher matrix, ShadowTLS v1/v2 or advanced SNI
 selection, ResTLS, JLS, KCP-TUN, exact UDP timeout/socket parity, or full
 cross-platform runtime evidence. Those fields are rejected when necessary so
 an unimplemented behavior cannot be accepted silently. The common listener
 `proxy` gap is distinct from the implemented
-`shadow-tls.handshake.proxy` field.
+`shadow-tls.handshake.proxy` field. SS2022 UDP outbound is Phase 6C-O.
+
+### Phase 6C-O accepted scope — SS2022 UDP outbound completion
+
+This slice changes inventory row `OUT-05` and the Shadowsocks client plus
+platform Phase 6C-O matrix rows. `CFG-03` already parses `udp: true`; this
+phase only opens that flag for the declared 2022 ciphers after the data path
+passes.
+
+This phase enables native UDP outbound for the three standard Shadowsocks 2022
+methods shared with the pinned Go oracle and the official Rust library:
+`2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm` and
+`2022-blake3-chacha20-poly1305`, including AES single-hop EIH (`iPSK:uPSK`).
+ChaCha8-2022 UDP remains explicitly rejected until a separate product
+differential exists. Multi-hop EIH, UoT and plugin UDP are unchanged.
+
+The maintained `shadowsocks` crate already implements SIP022 AEAD-2022 packet
+crypto. Protocol state lives in `rewrite-protocol-shadowsocks`: nonzero client
+and server session identifiers, incrementing packet counters, and per-server
+session sliding replay windows (bounded, expired, and never evicted while still
+valid) that accept legitimate reordering and drop duplicates, too-old, cross-session replays and
+authentication-failed datagrams. Outbound wrapping keeps platform NIC bind,
+TUN loop-avoidance and routing-mark policy; mixed/SOCKS5/TUN UDP sessions
+rebuild the association after `bump_network_generation`.
+
+The historical Go `sing-shadowsocks2` `remoteCipher` panic is classified as:
+
+- fixture error: the official-library test authority discarded SIP022 control
+  data and replied with `server_session_id=0`;
+- Go library defect: pinned `sing-shadowsocks2` v0.2.7 treats
+  `remoteSessionId==0` as an already-initialized AES-2022 session and panics
+  on `remoteCipher.Open` instead of deriving the first-packet cipher;
+- rewrite product gap: the outbound association previously used the crate's
+  all-zero default control block.
+
+The original Go baseline is unchanged. `compat/scripts/phase6c_shadowsocks_2022_udp.py`
+runs both oracles against the same fixed authority and the same inputs. It
+covers IPv4/IPv6/domain forwarding, multi-packet and multi-destination reuse,
+each cipher plus AES EIH, wrong-key timeout, concurrent clients, server
+restart, mixed versus SOCKS5 ingress, the native outbound association used by
+TUN, controller `udp: true` / `uot: false`, and process survival. The gate
+asserts those required observations succeed on both oracles; IPv6 is skipped
+when `::1` cannot bind rather than recorded as a false success. Protocol
+unit tests pin replay/session vectors, including A→B→A server-session replay;
+ciphertext is not compared byte-for-byte.
+
+Pinned Go still accepts ChaCha8 UDP and 2022 UoT at configuration time. The
+rewrite rejects those combinations by design and records the surplus instead of
+hiding the oracle or swapping the baseline.
+
+Inbound 2022 UDP stays disabled.
 
 ### Phase 6D-A accepted scope — VMess AEAD native-TCP client
 

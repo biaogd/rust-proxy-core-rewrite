@@ -2648,6 +2648,24 @@ fn parses_phase6c_shadowsocks_2022_scope() {
         assert!(!config.proxies[0].udp);
     }
     for (cipher, password) in [
+        ("2022-blake3-aes-128-gcm", "AAECAwQFBgcICQoLDA0ODw=="),
+        (
+            "2022-blake3-aes-256-gcm",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+        (
+            "2022-blake3-chacha20-poly1305",
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        ),
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: {password}\n    udp: true\n"
+        );
+        let config = Config::from_yaml(&source).expect("Phase 6C Shadowsocks 2022 UDP config");
+        assert!(config.proxies[0].udp);
+        assert!(!config.proxies[0].udp_over_tcp);
+    }
+    for (cipher, password) in [
         ("2022-blake3-aes-128-gcm", "ordinary-password"),
         ("2022-blake3-aes-128-gcm", "AAECAwQFBgcICQoLDA0ODxAR"),
         ("2022-blake3-aes-256-gcm", "AAECAwQFBgcICQoLDA0ODw=="),
@@ -2660,11 +2678,11 @@ fn parses_phase6c_shadowsocks_2022_scope() {
             Err(ConfigError::UnsupportedProxy(_))
         ));
     }
-    let unsupported_udp = format!(
-        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-128-gcm\n    password: AAECAwQFBgcICQoLDA0ODw==\n    udp: true\n"
+    let unsupported_uot = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-aes-128-gcm\n    password: AAECAwQFBgcICQoLDA0ODw==\n    udp: true\n    udp-over-tcp: true\n"
     );
     assert!(matches!(
-        Config::from_yaml(&unsupported_udp),
+        Config::from_yaml(&unsupported_uot),
         Err(ConfigError::UnsupportedProxy(_))
     ));
 }
@@ -2686,6 +2704,11 @@ fn parses_phase6c_shadowsocks_2022_single_hop_eih_scope() {
         );
         let config = Config::from_yaml(&source).expect("Phase 6C Shadowsocks 2022 EIH config");
         assert_eq!(config.proxies[0].password.as_deref(), Some(password));
+        let udp_source = format!(
+            "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: {cipher}\n    password: {password}\n    udp: true\n"
+        );
+        let udp = Config::from_yaml(&udp_source).expect("Phase 6C Shadowsocks 2022 EIH UDP");
+        assert!(udp.proxies[0].udp);
     }
     for (cipher, password) in [
         (
@@ -2729,6 +2752,14 @@ fn parses_phase6c_shadowsocks_2022_chacha8_scope() {
         config.proxies[0].cipher.as_deref(),
         Some("2022-blake3-chacha8-poly1305")
     );
+    assert!(!config.proxies[0].udp);
+    let unsupported_udp = format!(
+        "{MINIMAL}\nproxies:\n  - name: local-ss\n    type: ss\n    server: 127.0.0.1\n    port: 8388\n    cipher: 2022-blake3-chacha8-poly1305\n    password: {key}\n    udp: true\n"
+    );
+    assert!(matches!(
+        Config::from_yaml(&unsupported_udp),
+        Err(ConfigError::UnsupportedProxy(_))
+    ));
     for password in [
         "ordinary-password",
         "AAECAwQFBgcICQoLDA0ODw==",
