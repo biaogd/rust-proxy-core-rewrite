@@ -215,8 +215,8 @@ async fn apply_shadowsocks_plugin(
     }
 }
 
-/// Opens a SIP004 UDP association while preserving the rewrite's platform
-/// interface and routing-mark policy.
+/// Opens a SIP004/SIP022 UDP association while preserving the rewrite's platform
+/// interface, routing-mark and TUN loop-avoidance policy.
 ///
 /// # Errors
 ///

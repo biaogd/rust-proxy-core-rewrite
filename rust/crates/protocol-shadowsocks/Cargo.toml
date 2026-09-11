@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 bytes.workspace = true
+rand.workspace = true
 rewrite-model = { path = "../model" }
 rewrite-io = { path = "../io" }
 shadowsocks.workspace = true
@@ -15,3 +16,6 @@ tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }

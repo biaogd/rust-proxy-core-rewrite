@@ -1,9 +1,10 @@
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rewrite_protocol_shadowsocks::{Aead2022ServerSessions, UdpSocketControlData};
 use shadowsocks::ProxyListener;
 use shadowsocks::config::{ServerConfig, ServerType, ServerUser, ServerUserManager};
 use shadowsocks::context::Context;
@@ -88,13 +89,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let sessions = Arc::new(Mutex::new(Aead2022ServerSessions::default()));
     let mut buffer = vec![0_u8; 65_536];
     loop {
-        let (length, peer, destination, _) = udp.recv_from(&mut buffer).await?;
+        let (length, peer, destination, _, control) = udp.recv_from_with_ctrl(&mut buffer).await?;
         let payload = buffer[..length].to_vec();
+        let reply = sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare_reply(peer, control.as_ref());
         let udp = Arc::clone(&udp);
         tokio::spawn(async move {
-            let result = relay_udp(&udp, peer, &destination, &payload).await;
+            let result = relay_udp(&udp, peer, &destination, &payload, &reply).await;
             if let Err(error) = result {
                 eprintln!("UDP relay failed: {error}");
             }
@@ -223,6 +229,7 @@ async fn relay_udp(
     peer: SocketAddr,
     destination: &Address,
     payload: &[u8],
+    control: &UdpSocketControlData,
 ) -> std::io::Result<()> {
     let destination = resolve_udp_destination(destination).await?;
     let bind = if destination.is_ipv4() {
@@ -238,7 +245,12 @@ async fn relay_udp(
             .await
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
     server
-        .send_to(peer, &Address::SocketAddress(source), &response[..length])
+        .send_to_with_ctrl(
+            peer,
+            &Address::SocketAddress(source),
+            control,
+            &response[..length],
+        )
         .await
         .map_err(std::io::Error::from)?;
     Ok(())
