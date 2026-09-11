@@ -181,19 +181,19 @@ fn spawn_swappable_responder(
             .expect("server tunn"),
     );
     let slot = Arc::new(std::sync::Mutex::new(Arc::clone(&tunnel)));
-    spawn_shared_responder_with_slot(vec![udp], Arc::clone(&slot));
+    spawn_shared_responder_with_slot(vec![udp], &slot);
     slot
 }
 
 fn spawn_shared_responder(sockets: Vec<UdpSocket>, tunnel: Arc<NoiseTunnel>) {
     let slot = Arc::new(std::sync::Mutex::new(tunnel));
-    spawn_shared_responder_with_slot(sockets, slot);
+    spawn_shared_responder_with_slot(sockets, &slot);
 }
 
 #[allow(clippy::too_many_lines)]
 fn spawn_shared_responder_with_slot(
     sockets: Vec<UdpSocket>,
-    tunnel: Arc<std::sync::Mutex<Arc<NoiseTunnel>>>,
+    tunnel: &Arc<std::sync::Mutex<Arc<NoiseTunnel>>>,
 ) {
     let (stack, runner, _udp, tcp) = StackBuilder::default()
         .stack_buffer_size(1024)
@@ -223,7 +223,7 @@ fn spawn_shared_responder_with_slot(
 
     for udp in sockets {
         let recv_udp = Arc::clone(&udp);
-        let recv_tunnel = Arc::clone(&tunnel);
+        let recv_tunnel = Arc::clone(tunnel);
         let recv_peer = Arc::clone(&peer);
         let ip_tx = ip_tx.clone();
         tokio::spawn(async move {
@@ -257,7 +257,7 @@ fn spawn_shared_responder_with_slot(
         });
     }
 
-    let send_tunnel = Arc::clone(&tunnel);
+    let send_tunnel = Arc::clone(tunnel);
     let send_peer = Arc::clone(&peer);
     tokio::spawn(async move {
         while let Some(frame) = stack_stream.next().await {
