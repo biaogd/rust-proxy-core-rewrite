@@ -25,7 +25,6 @@ from phase1 import (
     recv_exact,
     reload_via_controller,
     reserve_port,
-    start_server,
     wait_ready,
 )
 from phase3 import launch, stop
@@ -38,6 +37,33 @@ from phase6e_vless_tcp import rejected_exchange
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6i-wireguard-tcp-diff.json"
 LARGE_PAYLOAD = bytes(range(256)) * 512
 CLIENT_IP = "10.0.0.2"
+
+
+def reachable_ipv4() -> str:
+    """Inner TCP dest for Go mipstack: 127.0.0.0/8 is unreachable through WG."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("1.1.1.1", 80))
+        ip = sock.getsockname()[0]
+    if ip.startswith("127."):
+        raise RuntimeError("WireGuard inner TCP needs a non-loopback IPv4")
+    return ip
+
+
+def listen_ipv4(handler: type[socketserver.BaseRequestHandler]) -> tuple[
+    socketserver.ThreadingTCPServer, threading.Thread, int
+]:
+    server = socketserver.ThreadingTCPServer(("0.0.0.0", 0), handler)
+    server.allow_reuse_address = True
+    port = int(server.server_address[1])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, port
+
+
+def unused_port_on(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
@@ -230,10 +256,10 @@ def start_authority(
     raise TimeoutError("WireGuard authority did not become ready")
 
 
-def cancel_one_keep_other(mixed_port: int, echo_port: int) -> bool:
-    first = connect_domain(mixed_port, "127.0.0.1", echo_port)
+def cancel_one_keep_other(mixed_port: int, host: str, echo_port: int) -> bool:
+    first = connect_domain(mixed_port, host, echo_port)
     first.settimeout(IO_DEADLINE)
-    second = connect_domain(mixed_port, "127.0.0.1", echo_port)
+    second = connect_domain(mixed_port, host, echo_port)
     second.settimeout(IO_DEADLINE)
     try:
         first.sendall(b"cancel-me")
@@ -256,21 +282,19 @@ def exercise(
     server_private: str,
     server_public: str,
 ) -> dict[str, Any]:
-    echo = start_server(EchoHandler)
-    echo_port = echo.port
+    inner_host = reachable_ipv4()
+    echo, echo_thread, echo_port = listen_ipv4(EchoHandler)
+    _ = echo_thread
 
-    health = socketserver.ThreadingTCPServer(("127.0.0.1", 0), HealthHandler)
-    health.allow_reuse_address = True
-    health_port = int(health.server_address[1])
-    health_thread = threading.Thread(target=health.serve_forever, daemon=True)
-    health_thread.start()
+    health, health_thread, health_port = listen_ipv4(HealthHandler)
+    _ = health_thread
 
     mixed_port, controller_port, authority_port = (
         reserve_port(),
         reserve_port(),
         reserve_port(),
     )
-    wrong_rule_port = reserve_port()
+    wrong_rule_port = unused_port_on(inner_host)
     authority_scratch = scratch / "authority"
     wg_process, authority_stdout, authority_stderr = start_authority(
         authority,
@@ -296,7 +320,7 @@ mode: rule
 log-level: info
 ipv6: false
 hosts:
-  echo.wg.test: 127.0.0.1
+  echo.wg.test: {inner_host}
 proxies:
 {wg_record("inline-wg", authority_port, client_private, server_public)}
 {wg_record("wg-wrong-key", authority_port, client_private, client_public)}
@@ -313,7 +337,7 @@ proxy-groups:
   - name: wg-health
     type: url-test
     proxies: [inline-wg]
-    url: http://127.0.0.1:{health_port}/
+    url: http://{inner_host}:{health_port}/
     interval: 3600
     tolerance: 50
 rules:
@@ -333,7 +357,7 @@ rules:
         ipv4_large = False
         for _ in range(5):
             try:
-                ipv4_large = exchange(mixed_port, "127.0.0.1", echo_port, LARGE_PAYLOAD)
+                ipv4_large = exchange(mixed_port, inner_host, echo_port, LARGE_PAYLOAD)
                 if ipv4_large:
                     break
             except (
@@ -350,31 +374,31 @@ rules:
 
         half_close = exchange(
             mixed_port,
-            "127.0.0.1",
+            inner_host,
             echo_port,
             b"wg-half-close",
             half_close=True,
         )
-        reuse_second = exchange(mixed_port, "127.0.0.1", echo_port, b"wg-reuse")
+        reuse_second = exchange(mixed_port, inner_host, echo_port, b"wg-reuse")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
                 pool.submit(
-                    exchange, mixed_port, "127.0.0.1", echo_port, f"c{i}".encode()
+                    exchange, mixed_port, inner_host, echo_port, f"c{i}".encode()
                 )
                 for i in range(4)
             ]
             concurrent_ok = all(future.result(timeout=IO_DEADLINE) for future in futures)
-        cancel_isolated = cancel_one_keep_other(mixed_port, echo_port)
+        cancel_isolated = cancel_one_keep_other(mixed_port, inner_host, echo_port)
 
-        wrong_key = rejected_exchange(mixed_port, "127.0.0.1", wrong_rule_port)
+        wrong_key = rejected_exchange(mixed_port, inner_host, wrong_rule_port)
         survived_wrong_key = process.poll() is None
-        after_auth_fail = exchange(mixed_port, "127.0.0.1", echo_port, b"after-auth-fail")
+        after_auth_fail = exchange(mixed_port, inner_host, echo_port, b"after-auth-fail")
 
-        refused_target = reserve_port()
-        target_refused = rejected_exchange(mixed_port, "127.0.0.1", refused_target)
+        refused_target = unused_port_on(inner_host)
+        target_refused = rejected_exchange(mixed_port, inner_host, refused_target)
         survived_target_refused = process.poll() is None
-        after_refused = exchange(mixed_port, "127.0.0.1", echo_port, b"after-refused")
+        after_refused = exchange(mixed_port, inner_host, echo_port, b"after-refused")
 
         selected = request(
             controller_port,
@@ -385,12 +409,12 @@ rules:
         if selected[0] != 204:
             raise AssertionError(selected)
         provider_route = wait_exchange(
-            process, mixed_port, "127.0.0.1", echo_port, b"provider-route"
+            process, mixed_port, inner_host, echo_port, b"provider-route"
         )
         inline_snapshot = proxy_snapshot(controller_port, "inline-wg")
         provider_snapshot = proxy_snapshot(controller_port, "provider-wg", "local-wg")
 
-        health_query = f"url=http://127.0.0.1:{health_port}/&timeout=5000"
+        health_query = f"url=http://{inner_host}:{health_port}/&timeout=5000"
         health_status, health_body = request(
             controller_port, "GET", f"/group/wg-health/delay?{health_query}"
         )
@@ -432,7 +456,8 @@ rules:
         stop(wg_process)
         authority_stdout.close()
         authority_stderr.close()
-        echo.close()
+        echo.shutdown()
+        echo.server_close()
         health.shutdown()
         health.server_close()
 
