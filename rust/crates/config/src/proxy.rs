@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
@@ -750,9 +750,6 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
     const REJECTED_EXTRA: &[&str] = &[
         "amnezia-wg-option",
         "peers",
-        "ipv6",
-        "remote-dns-resolve",
-        "dns",
         "ip-stack",
         "refresh-server-ip-interval",
         "dialer-proxy",
@@ -761,11 +758,14 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
     const ACCEPTED_EXTRA: &[&str] = &[
         "public-key",
         "ip",
+        "ipv6",
         "pre-shared-key",
         "reserved",
         "persistent-keepalive",
         "allowed-ips",
         "mtu",
+        "remote-dns-resolve",
+        "dns",
     ];
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
@@ -859,9 +859,23 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
     };
     let ip_text = hysteria2_extra_string(&mut proxy.extra, "ip")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
-    let (local_addr, local_prefix_len) = parse_wireguard_local_ip(&ip_text, &name)?;
+        .filter(|value| !value.is_empty());
+    let ipv6_text = hysteria2_extra_string(&mut proxy.extra, "ipv6")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .filter(|value| !value.is_empty());
+    if ip_text.is_none() && ipv6_text.is_none() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let (local_addr, local_prefix_len) = match ip_text {
+        Some(text) => parse_wireguard_local_ip(&text, &name)?,
+        None => (Ipv4Addr::UNSPECIFIED, 0),
+    };
+    let local_ipv6 = match ipv6_text {
+        Some(text) => Some(parse_wireguard_local_ipv6(&text, &name)?),
+        None => None,
+    };
+    let remote_dns_resolve = parse_wireguard_bool(&mut proxy.extra, "remote-dns-resolve", &name)?;
+    let dns_servers = parse_wireguard_dns(&mut proxy.extra, &name)?;
     let mtu = match hysteria2_extra_u64(&mut proxy.extra, "mtu")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
         .unwrap_or(0)
@@ -918,10 +932,13 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
             preshared_key,
             local_addr,
             local_prefix_len,
+            local_ipv6,
             mtu,
             persistent_keepalive,
             reserved,
             allowed_ips,
+            remote_dns_resolve,
+            dns_servers,
         }),
         headers: BTreeMap::new(),
     })
@@ -934,6 +951,55 @@ fn decode_wireguard_key(text: &str, name: &str) -> Result<[u8; 32], ConfigError>
     decoded
         .try_into()
         .map_err(|_: Vec<u8>| ConfigError::UnsupportedProxy(name.to_owned()))
+}
+
+fn parse_wireguard_local_ipv6(text: &str, name: &str) -> Result<(Ipv6Addr, u8), ConfigError> {
+    if text.contains('/') {
+        let network = ipnet::Ipv6Net::from_str(text)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        Ok((network.addr(), network.prefix_len()))
+    } else {
+        let addr =
+            Ipv6Addr::from_str(text).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        Ok((addr, 128))
+    }
+}
+
+fn parse_wireguard_bool(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    key: &str,
+    name: &str,
+) -> Result<bool, ConfigError> {
+    match extra.remove(key) {
+        None | Some(serde_yaml_ng::Value::Null) => Ok(false),
+        Some(serde_yaml_ng::Value::Bool(value)) => Ok(value),
+        Some(serde_yaml_ng::Value::Number(number)) => Ok(number.as_u64() == Some(1)),
+        Some(serde_yaml_ng::Value::String(text)) => match text.trim() {
+            "" | "0" | "false" | "FALSE" | "no" => Ok(false),
+            "1" | "true" | "TRUE" | "yes" => Ok(true),
+            _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+        },
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
+}
+
+fn parse_wireguard_dns(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    name: &str,
+) -> Result<Vec<String>, ConfigError> {
+    match extra.remove("dns") {
+        None | Some(serde_yaml_ng::Value::Null) => Ok(Vec::new()),
+        Some(serde_yaml_ng::Value::String(text)) if !text.is_empty() => Ok(vec![text]),
+        Some(serde_yaml_ng::Value::Sequence(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_yaml_ng::Value::String(text) => Ok(text),
+                serde_yaml_ng::Value::Number(number) => Ok(number.to_string()),
+                _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+            })
+            .collect(),
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
 }
 
 fn parse_wireguard_local_ip(text: &str, name: &str) -> Result<(Ipv4Addr, u8), ConfigError> {

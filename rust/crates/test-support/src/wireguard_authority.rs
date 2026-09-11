@@ -1,12 +1,13 @@
-//! Userspace `WireGuard` TCP relay authority for 6I-A Go/Rust differentials.
+//! Userspace `WireGuard` TCP/UDP relay authority for 6I Go/Rust differentials.
 //!
-//! This is not a Clash inbound. It decrypts a single peer, feeds inner IPv4
-//! into `netstack-smoltcp`, and splices accepted TCP to the packet destination.
+//! This is not a Clash inbound. It decrypts a single peer, feeds inner IP
+//! into `netstack-smoltcp`, and splices accepted TCP/UDP to the packet destination.
 
 use std::error::Error;
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use netstack_smoltcp::StackBuilder;
@@ -42,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .map_err(|error| io::Error::other(error.to_string()))?,
     );
-    let (stack, runner, _udp, tcp) = StackBuilder::default()
+    let (stack, runner, stack_udp, tcp) = StackBuilder::default()
         .stack_buffer_size(1024)
         .tcp_buffer_size(1024)
         .udp_buffer_size(1024)
@@ -56,6 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(runner);
     }
     let tcp = tcp.ok_or("TCP disabled unexpectedly")?;
+    let stack_udp = stack_udp.ok_or("UDP disabled unexpectedly")?;
     let (stack_sink, stack_stream) = stack.split();
     let peer = Arc::new(Mutex::new(None::<SocketAddr>));
     let udp = Arc::new(udp);
@@ -68,6 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     spawn_stack_send(udp, Arc::clone(&tunnel), Arc::clone(&peer), stack_stream);
     spawn_tcp_splice(tcp);
+    spawn_udp_splice(stack_udp);
 
     println!("READY {local}");
     io::stdout().flush()?;
@@ -154,6 +157,42 @@ where
                     return;
                 };
                 let _ = copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+}
+
+fn spawn_udp_splice(udp: netstack_smoltcp::UdpSocket) {
+    let (mut reader, writer) = udp.split();
+    let writer = Arc::new(Mutex::new(writer));
+    tokio::spawn(async move {
+        while let Some((payload, local, remote)) = reader.next().await {
+            if payload.is_empty() {
+                continue;
+            }
+            let writer = Arc::clone(&writer);
+            tokio::spawn(async move {
+                let bind = SocketAddr::new(
+                    match remote {
+                        SocketAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+                        SocketAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+                    },
+                    0,
+                );
+                let Ok(socket) = UdpSocket::bind(bind).await else {
+                    return;
+                };
+                if socket.send_to(&payload, remote).await.is_err() {
+                    return;
+                }
+                let mut buf = vec![0_u8; 65_535];
+                let Ok(Ok((n, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf)).await
+                else {
+                    return;
+                };
+                let mut writer = writer.lock().await;
+                let _ = writer.send((buf[..n].to_vec(), remote, local)).await;
             });
         }
     });

@@ -1303,8 +1303,8 @@ separate exit gates inside these labels.
 
 ### Next-work priority — 2026-09-11
 
-The agreed next-work order after TUN landing is **WireGuard outbound 6I-A**,
-then 6I-B/C, with **AmneziaWG deferred**. This supersedes treating WireGuard as
+The agreed next-work order after TUN landing is **WireGuard outbound 6I-C**,
+with **AmneziaWG deferred**. This supersedes treating WireGuard as
 undifferentiated backlog behind TUN. Existing-protocol regressions remain
 release blockers. See [status](status.md) and
 [compatibility matrix](compatibility-matrix.md) for claims.
@@ -1320,11 +1320,11 @@ release blockers. See [status](status.md) and
    ingress/platform integration and stays independent of WireGuard outbound.
    Other remote-protocol inbounds remain deferred; preserve the existing
    Shadowsocks inbound scope without expanding it.
-4. **WireGuard outbound (6I, OUT-14) — current:** **6I-A** (single-peer
-   IPv4 TCP userspace outbound) is implemented in this checkout. Mixed/SOCKS
-   using WireGuard does not require administrator privileges. There is no
-   WireGuard inbound. Cryptography is `defguard_boringtun`. Next slices are
-   **6I-B** (UDP / dual-stack) then **6I-C** (lifecycle). AmneziaWG stays later.
+4. **WireGuard outbound (6I, OUT-14) — current:** **6I-A/B** (single-peer
+   IPv4/IPv6 TCP+UDP userspace outbound, including `remote-dns-resolve`) are
+   implemented in this checkout. Mixed/SOCKS using WireGuard does not require
+   administrator privileges. There is no WireGuard inbound. Cryptography is
+   `defguard_boringtun`. Next slice is **6I-C** (lifecycle). AmneziaWG stays later.
 
 SSH and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
@@ -1367,16 +1367,19 @@ rejected at parse until a later slice.
   top-level `server`/`port`/`private-key`/`public-key`/`ip`. Default MTU 1408.
   Empty `peers` implies `allowed_ip=0.0.0.0/0` like Go. Evidence:
   `compat/scripts/phase6i_wireguard_tcp.py` plus `protocol-wireguard`
-  `tcp_relay`. UDP, IPv6, multi-peer and AmneziaWG remain rejected or unused.
-- **6I-B (planned):** UDP forwarding, IPv4/IPv6 destinations, MTU, concurrent
-  sessions, and related DNS (`remote-dns-resolve`) behavior.
+  `tcp_relay`.
+- **6I-B (implemented in this checkout):** UDP forwarding, IPv4/IPv6
+  destinations, MTU 1408, concurrent SOCKS UDP sessions, and tunnel DNS
+  (`remote-dns-resolve` + `dns`). Evidence: `compat/scripts/phase6i_wireguard_udp.py`
+  plus `protocol-wireguard` `udp_relay`. AmneziaWG, `peers`, `ip-stack` and
+  inbound remain rejected.
 - **6I-C (planned):** rehandshake, keepalive, network switching, TUN loop
   avoidance, and three-platform Go/Rust differentials. Native Parity is not
-  claimed by 6I-A.
+  claimed by 6I-A/B.
 
 The matrix row is **WireGuard / AmneziaWG** plus applicable configuration,
 groups/providers and native-platform rows. The WireGuard inbound row stays
-unimplemented. 6I-A is an implementation-in-this-checkout claim, not Parity.
+unimplemented. 6I-A/B are implementation-in-this-checkout claims, not Parity.
 
 ### Phase 6A1 accepted scope
 

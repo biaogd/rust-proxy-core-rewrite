@@ -518,7 +518,7 @@ def main() -> int:
                 f"        public-key: {server_public}\n"
                 "        allowed-ips: [0.0.0.0/0]\n",
             )
-            observations["rust-ipv6-rejected"] = not config_validation(
+            observations["rust-ipv6-accepted"] = config_validation(
                 binaries["rust"],
                 root / "rust-validate-ipv6",
                 "proxies:\n"
@@ -552,7 +552,7 @@ def main() -> int:
         go != rust
         or not observations.get("rust-amnezia-rejected", False)
         or not observations.get("rust-peers-rejected", False)
-        or not observations.get("rust-ipv6-rejected", False)
+        or not observations.get("rust-ipv6-accepted", False)
     ):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(
@@ -562,7 +562,7 @@ def main() -> int:
                     "rust": rust,
                     "rust-amnezia-rejected": observations.get("rust-amnezia-rejected"),
                     "rust-peers-rejected": observations.get("rust-peers-rejected"),
-                    "rust-ipv6-rejected": observations.get("rust-ipv6-rejected"),
+                    "rust-ipv6-accepted": observations.get("rust-ipv6-accepted"),
                 },
                 indent=2,
                 sort_keys=True,

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -258,11 +258,11 @@ pub struct AnyTlsProxyConfig {
     pub carrier: AnyTlsCarrier,
 }
 
-/// Clash `type: wireguard` options accepted in 6I-A (single-peer IPv4 TCP).
+/// Clash `type: wireguard` options accepted in 6I-B (single-peer TCP+UDP).
 ///
-/// `AmneziaWG`, `peers`, inner IPv6, remote DNS, `ip-stack`, `dialer-proxy`,
-/// `workers` and `refresh-server-ip-interval` remain rejected. Top-level
-/// `allowed-ips` is stored but the dataplane still uses `0.0.0.0/0` like Go.
+/// `AmneziaWG`, `peers`, `ip-stack`, `dialer-proxy`, `workers` and
+/// `refresh-server-ip-interval` remain rejected. Empty `peers` still implies
+/// `allowed_ip=0.0.0.0/0` and `::/0` from the configured inner families.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireGuardProxyConfig {
     pub private_key: [u8; 32],
@@ -270,11 +270,14 @@ pub struct WireGuardProxyConfig {
     pub preshared_key: Option<[u8; 32]>,
     pub local_addr: Ipv4Addr,
     pub local_prefix_len: u8,
+    pub local_ipv6: Option<(Ipv6Addr, u8)>,
     /// `0` means the Go/Clash default `1408`.
     pub mtu: u16,
     pub persistent_keepalive: Option<u16>,
     pub reserved: [u8; 3],
     pub allowed_ips: Vec<String>,
+    pub remote_dns_resolve: bool,
+    pub dns_servers: Vec<String>,
 }
 
 /// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).

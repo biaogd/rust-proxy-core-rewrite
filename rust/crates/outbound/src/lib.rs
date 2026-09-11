@@ -79,4 +79,7 @@ pub use vmess::{
     associate_vmess_udp_on_stream, associate_vmess_udp_with_options, connect_vmess_on_stream,
     connect_vmess_with_options,
 };
-pub use wireguard::{WireGuardClient, WireGuardProxyError, wireguard_adapter_identity};
+pub use wireguard::{
+    WireGuardClient, WireGuardProxyError, WireGuardUdpAssociation, associate_wireguard_udp,
+    wireguard_adapter_identity,
+};

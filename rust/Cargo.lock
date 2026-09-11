@@ -3401,6 +3401,7 @@ dependencies = [
  "bytes",
  "fast-socks5",
  "futures-util",
+ "hickory-proto",
  "http-body-util",
  "hyper",
  "hyper-util",

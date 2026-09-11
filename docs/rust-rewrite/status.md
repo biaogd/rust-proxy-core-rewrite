@@ -2,14 +2,24 @@
 
 Last updated: 2026-09-11
 
+### 6I-B WireGuard userspace UDP/dual-stack outbound — 2026-09-11
+
+Clash `type: wireguard` single-peer TCP+UDP is implemented without an OS TUN:
+mixed/SOCKS UDP ASSOCIATE, inner IPv4/IPv6 destinations, default MTU 1408, and
+`remote-dns-resolve` queries through the tunnel. Mixed/SOCKS does not need
+administrator privileges. AmneziaWG, `peers`, `ip-stack`, `dialer-proxy` and
+inbound remain rejected. Evidence: `compat/scripts/phase6i_wireguard_udp.py`
+plus `protocol-wireguard` `udp_relay` (and the existing 6I-A TCP differential).
+Not Parity; 6I-C and three-platform CI remain open.
+
 ### 6I-A WireGuard userspace TCP outbound — 2026-09-11
 
 Clash `type: wireguard` single-peer IPv4 TCP is implemented without an OS TUN:
 YAML → mixed/SOCKS → rules → `defguard_boringtun` Noise → smoltcp `Medium::Ip`
-→ TCP target. Mixed/SOCKS does not need administrator privileges. AmneziaWG,
-`peers`, inner IPv6, remote DNS and UDP relay remain rejected or unused.
-Evidence: `compat/scripts/phase6i_wireguard_tcp.py` plus `protocol-wireguard`
-`tcp_relay`. Not Parity; 6I-B/C and three-platform CI remain open.
+→ TCP target. Mixed/SOCKS does not need administrator privileges. AmneziaWG
+and `peers` remain rejected. Evidence: `compat/scripts/phase6i_wireguard_tcp.py`
+plus `protocol-wireguard` `tcp_relay`. Not Parity; 6I-C and three-platform CI
+remain open.
 
 ### 8C Wintun stage mkdir and Darwin system DNS reachability — 2026-09-11
 
@@ -457,7 +467,8 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6H-A TUIC v5 outbound TCP | Complete in declared client scope | Clash `type: tuic` v5 UUID/password parse; QUIC/TLS with rustls exporter auth; TCP Connect over bidi streams; rules/groups/providers/health/reload; `disable-sni` omits SNI; explicit empty ALPN preserved; v5 ignores `request-timeout` for open; Go recv-window mapping; v4 token, 0-RTT, ECH, UDP-over-stream and Brutal rejected; Go/Rust differential vs Go TUIC inbound (`phase6h_tuic_tcp.py`) |
 | Phase 6H-B TUIC v5 outbound UDP | Complete in declared client scope | Native QUIC DATAGRAM and `udp-relay-mode: quic` uni-stream relay; packet/assoc IDs; native fragmentation + 10s defrag (reorder/duplicate/invalid FRAG_ID); Dissociate on association drop; mixed/SOCKS UDP idle 1m; setup via `await_udp_setup` (5s + shutdown); blocked QUIC send/auth cancel on mixed shutdown (`tuic_mixed_udp_cancel`); recv ends on QUIC close (`udp_lifecycle`). `max-udp-relay-packet-size` accepted (`max-datagram-frame-size` still rejected). Evidence: `phase6h_tuic_udp.py` plus crate tests |
 | Phase 6H-C TUIC v5 outbound lifecycle | Complete locally in declared client scope; three-platform CI pending | Connection pool on `max-open-streams`, 5s delayed slot release, Heartbeat datagrams + QUIC keep-alive, cubic/new_reno/bbr names, cancel/restart/reload, concurrent TCP+UDP, malformed decode unit tests, short soak. Evidence: `phase6h_tuic_lifecycle.py` / `phase6h_tuic_soak.py`. Algorithm identity with quic-go is not claimed |
-| Phase 6I-A WireGuard outbound TCP | Implemented in this checkout; not Parity | Clash `type: wireguard` single-peer IPv4 TCP; `defguard_boringtun` Noise + smoltcp `Medium::Ip` userspace stack (no OS TUN); mixed/SOCKS does not need admin; AmneziaWG/`peers`/inner IPv6/remote DNS/`ip-stack` rejected; default MTU 1408; UDP YAML stored, UDP relay deferred to 6I-B. Evidence: `phase6i_wireguard_tcp.py` plus crate `tcp_relay`. Three-platform CI pending |
+| Phase 6I-A WireGuard outbound TCP | Implemented in this checkout; not Parity | Clash `type: wireguard` single-peer IPv4 TCP; `defguard_boringtun` Noise + smoltcp `Medium::Ip` userspace stack (no OS TUN); mixed/SOCKS does not need admin; AmneziaWG/`peers`/`ip-stack` rejected; default MTU 1408. Evidence: `phase6i_wireguard_tcp.py` plus crate `tcp_relay`. Three-platform CI pending |
+| Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. 6I-C lifecycle and three-platform CI pending |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |

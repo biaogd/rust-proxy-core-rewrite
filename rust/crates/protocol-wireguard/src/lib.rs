@@ -13,8 +13,8 @@
 //!   administrator privileges.
 //! - **`AmneziaWG`** is rejected at config parse until a later slice.
 //!
-//! 6I-A is single-peer IPv4 TCP. UDP, IPv6, multi-peer, remote DNS and
-//! keepalive/rehandshake platform evidence belong to 6I-B/C.
+//! 6I-B is single-peer TCP+UDP with optional inner IPv6 and tunnel DNS
+//! (`remote-dns-resolve`). Multi-peer and `AmneziaWG` remain rejected.
 
 mod client;
 mod keys;
@@ -23,7 +23,7 @@ mod tunnel;
 
 pub use client::{Client, ClientOptions};
 pub use keys::{decode_key, encode_key};
-pub use stack::WgTcpStream;
+pub use stack::{WgTcpStream, WgUdpSocket};
 pub use tunnel::{NoiseTunnel, TunnelAction};
 
 use thiserror::Error;
@@ -37,9 +37,9 @@ pub enum WireGuardProtocolError {
     /// Key parse / handshake / boringtun failures.
     #[error("WireGuard protocol failed: {0}")]
     Protocol(String),
-    /// 6I-A only dials IPv4 destinations through the userspace stack.
-    #[error("WireGuard 6I-A requires an IPv4 destination")]
-    Ipv4Only,
+    /// No inner address for this destination family.
+    #[error("WireGuard has no inner address for this family")]
+    UnsupportedFamily,
 }
 
 impl WireGuardProtocolError {

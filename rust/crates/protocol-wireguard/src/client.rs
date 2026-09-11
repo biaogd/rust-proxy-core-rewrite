@@ -1,6 +1,7 @@
-//! Long-lived `WireGuard` client: UDP bind, handshake, smoltcp TCP dials.
+//! Long-lived `WireGuard` client: UDP bind, handshake, smoltcp TCP/UDP dials.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,11 +13,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::stack::{IpStack, WgTcpStream, lock_stack};
+use crate::stack::{IpStack, WgTcpStream, WgUdpSocket, lock_stack};
 use crate::tunnel::{NoiseTunnel, TunnelAction};
 use crate::{DEFAULT_MTU, HANDSHAKE_TIMEOUT, WireGuardProtocolError};
 
-/// Construction options for a single-peer IPv4 `WireGuard` outbound.
+/// Construction options for a single-peer `WireGuard` outbound.
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub server: String,
@@ -24,8 +25,8 @@ pub struct ClientOptions {
     pub private_key: [u8; 32],
     pub peer_public_key: [u8; 32],
     pub preshared_key: Option<[u8; 32]>,
-    pub local_addr: Ipv4Addr,
-    pub local_prefix_len: u8,
+    pub local_v4: Option<(Ipv4Addr, u8)>,
+    pub local_v6: Option<(Ipv6Addr, u8)>,
     pub mtu: u16,
     pub persistent_keepalive: Option<u16>,
     pub reserved: [u8; 3],
@@ -41,8 +42,8 @@ impl Default for ClientOptions {
             private_key: [0; 32],
             peer_public_key: [0; 32],
             preshared_key: None,
-            local_addr: Ipv4Addr::new(10, 0, 0, 2),
-            local_prefix_len: 32,
+            local_v4: Some((Ipv4Addr::new(10, 0, 0, 2), 32)),
+            local_v6: None,
             mtu: DEFAULT_MTU,
             persistent_keepalive: None,
             reserved: [0; 3],
@@ -60,9 +61,11 @@ struct ClientInner {
     notify: Arc<Notify>,
     shutdown: CancellationToken,
     established: AtomicBool,
+    has_v4: bool,
+    has_v6: bool,
 }
 
-/// Userspace `WireGuard` client matching Go `adapter/outbound.WireGuard` for 6I-A TCP.
+/// Userspace `WireGuard` client matching Go `adapter/outbound.WireGuard` for 6I-B TCP+UDP.
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<ClientInner>,
@@ -93,18 +96,24 @@ impl Client {
     ///
     /// Returns UDP bind / endpoint resolution failures.
     pub async fn new(options: ClientOptions) -> Result<Self, WireGuardProtocolError> {
-        let endpoint = resolve_ipv4_endpoint(&options.server, options.port).await?;
+        let endpoint = resolve_peer_endpoint(&options.server, options.port).await?;
         let mtu = if options.mtu == 0 {
             DEFAULT_MTU
         } else {
             options.mtu
         };
-        let local = match endpoint.ip() {
-            IpAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-            IpAddr::V6(_) => {
-                return Err(WireGuardProtocolError::Ipv4Only);
-            }
-        };
+        if options.local_v4.is_none() && options.local_v6.is_none() {
+            return Err(WireGuardProtocolError::protocol(
+                "WireGuard requires ip or ipv6",
+            ));
+        }
+        let local = SocketAddr::new(
+            match endpoint.ip() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            },
+            0,
+        );
         let std_socket = rewrite_platform::bind_outbound_udp(
             local,
             endpoint,
@@ -123,8 +132,8 @@ impl Client {
             index,
         )?;
         let stack = Arc::new(Mutex::new(IpStack::new(
-            options.local_addr,
-            options.local_prefix_len,
+            options.local_v4,
+            options.local_v6,
             usize::from(mtu),
         )));
         let notify = Arc::new(Notify::new());
@@ -137,6 +146,8 @@ impl Client {
             notify,
             shutdown,
             established: AtomicBool::new(false),
+            has_v4: options.local_v4.is_some(),
+            has_v6: options.local_v6.is_some(),
         });
         let reactor = Arc::clone(&inner);
         tokio::spawn(async move {
@@ -154,11 +165,17 @@ impl Client {
         &self,
         destination: &Destination,
     ) -> Result<BoxedStream, WireGuardProtocolError> {
-        let dest = destination_v4(destination)?;
+        let dest = self.destination_addr(destination)?;
         self.ensure_handshake().await?;
         let handle = {
             let mut stack = lock_stack(&self.inner.stack);
-            stack.connect(dest)?
+            stack.connect(dest).map_err(|error| {
+                if error.kind() == ErrorKind::AddrNotAvailable {
+                    WireGuardProtocolError::UnsupportedFamily
+                } else {
+                    error.into()
+                }
+            })?
         };
         self.inner.notify.notify_one();
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
@@ -203,6 +220,35 @@ impl Client {
         }
     }
 
+    /// Opens a connectionless UDP socket through the tunnel (Go `ListenPacketContext`).
+    ///
+    /// # Errors
+    ///
+    /// Returns handshake or stack bind failures.
+    pub async fn open_udp(&self) -> Result<WgUdpSocket, WireGuardProtocolError> {
+        self.ensure_handshake().await?;
+        let handle = {
+            let mut stack = lock_stack(&self.inner.stack);
+            stack.bind_udp()?
+        };
+        self.inner.notify.notify_one();
+        Ok(WgUdpSocket::new(
+            handle,
+            Arc::clone(&self.inner.stack),
+            Arc::clone(&self.inner.notify),
+        ))
+    }
+
+    #[must_use]
+    pub fn has_ipv4(&self) -> bool {
+        self.inner.has_v4
+    }
+
+    #[must_use]
+    pub fn has_ipv6(&self) -> bool {
+        self.inner.has_v6
+    }
+
     /// Stops the packet reactor. Outstanding streams fail subsequent I/O.
     #[allow(clippy::unused_async)] // matches TUIC/Hysteria2 retire/close shape
     pub async fn close(&self) {
@@ -243,6 +289,28 @@ impl Client {
 
     async fn send_action(&self, action: TunnelAction) -> Result<(), WireGuardProtocolError> {
         dispatch_action(&self.inner, action).await
+    }
+
+    fn destination_addr(
+        &self,
+        destination: &Destination,
+    ) -> Result<SocketAddr, WireGuardProtocolError> {
+        match &destination.host {
+            Host::Ip(addr) => {
+                let supported = match addr {
+                    IpAddr::V4(_) => self.inner.has_v4,
+                    IpAddr::V6(_) => self.inner.has_v6,
+                };
+                if supported {
+                    Ok(SocketAddr::new(*addr, destination.port))
+                } else {
+                    Err(WireGuardProtocolError::UnsupportedFamily)
+                }
+            }
+            Host::Domain(_) => Err(WireGuardProtocolError::protocol(
+                "WireGuard destination must be resolved before dial",
+            )),
+        }
     }
 }
 
@@ -376,28 +444,15 @@ async fn send_udp(inner: &ClientInner, datagram: &[u8]) -> Result<(), WireGuardP
     Ok(())
 }
 
-async fn resolve_ipv4_endpoint(
+async fn resolve_peer_endpoint(
     server: &str,
     port: u16,
 ) -> Result<SocketAddr, WireGuardProtocolError> {
     if let Ok(ip) = server.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => Ok(SocketAddr::from((v4, port))),
-            IpAddr::V6(_) => Err(WireGuardProtocolError::Ipv4Only),
-        };
+        return Ok(SocketAddr::new(ip, port));
     }
-    let mut addresses = tokio::net::lookup_host((server, port)).await?;
-    addresses
-        .find(SocketAddr::is_ipv4)
-        .ok_or(WireGuardProtocolError::Ipv4Only)
-}
-
-fn destination_v4(destination: &Destination) -> Result<SocketAddrV4, WireGuardProtocolError> {
-    match destination.host {
-        Host::Ip(IpAddr::V4(addr)) => Ok(SocketAddrV4::new(addr, destination.port)),
-        Host::Ip(IpAddr::V6(_)) => Err(WireGuardProtocolError::Ipv4Only),
-        Host::Domain(_) => Err(WireGuardProtocolError::protocol(
-            "WireGuard destination must be resolved to IPv4 before dial",
-        )),
-    }
+    tokio::net::lookup_host((server, port))
+        .await?
+        .next()
+        .ok_or_else(|| WireGuardProtocolError::protocol("WireGuard server did not resolve"))
 }

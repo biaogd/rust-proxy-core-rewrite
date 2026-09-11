@@ -1,15 +1,14 @@
-//! In-process 6I-A TCP relay: userspace client → `WireGuard` → netstack → echo.
+//! In-process 6I-B UDP relay: userspace client → `WireGuard` → netstack → echo.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use defguard_boringtun::x25519::{PublicKey, StaticSecret};
 use futures_util::{SinkExt, StreamExt};
 use netstack_smoltcp::StackBuilder;
-use rewrite_model::{Destination, Host};
 use rewrite_protocol_wireguard::{Client, ClientOptions, NoiseTunnel, TunnelAction};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 fn pair(seed: u8) -> ([u8; 32], [u8; 32]) {
@@ -19,30 +18,23 @@ fn pair(seed: u8) -> ([u8; 32], [u8; 32]) {
 }
 
 #[tokio::test]
-async fn userspace_tcp_relays_echo() {
-    let echo = TcpListener::bind("127.0.0.1:0").await.expect("echo bind");
+async fn userspace_udp_relays_echo() {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.expect("echo bind");
     let echo_addr = echo.local_addr().expect("echo addr");
     tokio::spawn(async move {
+        let mut buf = vec![0_u8; 65_535];
         loop {
-            let Ok((mut stream, _)) = echo.accept().await else {
+            let Ok((n, from)) = echo.recv_from(&mut buf).await else {
                 break;
             };
-            tokio::spawn(async move {
-                let mut buf = vec![0_u8; 4096];
-                while let Ok(n) = stream.read(&mut buf).await {
-                    if n == 0 {
-                        break;
-                    }
-                    if stream.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            });
+            if echo.send_to(&buf[..n], from).await.is_err() {
+                break;
+            }
         }
     });
 
-    let (client_priv, client_pub) = pair(7);
-    let (server_priv, server_pub) = pair(9);
+    let (client_priv, client_pub) = pair(11);
+    let (server_priv, server_pub) = pair(13);
     let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
     let endpoint = listen.local_addr().expect("wg addr");
     spawn_responder(listen, server_priv, client_pub);
@@ -64,23 +56,32 @@ async fn userspace_tcp_relays_echo() {
     .await
     .expect("client");
 
-    let destination = Destination {
-        host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        port: echo_addr.port(),
-    };
-    let mut stream = client.open_tcp(&destination).await.expect("open tcp");
-    stream.write_all(b"wg-echo").await.expect("write");
-    let mut got = [0_u8; 7];
-    stream.read_exact(&mut got).await.expect("read");
-    assert_eq!(&got, b"wg-echo");
+    let socket = client.open_udp().await.expect("open udp");
+    let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), echo_addr.port());
+    socket.send(dest, b"wg-udp").await.expect("send");
+    let (from, payload) = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+        .await
+        .expect("recv timeout")
+        .expect("recv");
+    assert_eq!(from, dest);
+    assert_eq!(payload, b"wg-udp");
+
+    let large = vec![0x5a_u8; 1024];
+    socket.send(dest, &large).await.expect("large send");
+    let (_, got) = tokio::time::timeout(Duration::from_secs(5), socket.recv())
+        .await
+        .expect("large timeout")
+        .expect("large recv");
+    assert_eq!(got, large);
     client.close().await;
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 32]) {
     let tunnel = Arc::new(
         NoiseTunnel::new(private_key, peer_public_key, None, None, [0; 3], 2).expect("server tunn"),
     );
-    let (stack, runner, _udp, tcp) = StackBuilder::default()
+    let (stack, runner, stack_udp, tcp) = StackBuilder::default()
         .stack_buffer_size(1024)
         .tcp_buffer_size(1024)
         .udp_buffer_size(1024)
@@ -94,6 +95,7 @@ fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 
         tokio::spawn(runner);
     }
     let tcp = tcp.expect("tcp");
+    let stack_udp = stack_udp.expect("udp");
     let (mut stack_sink, mut stack_stream) = stack.split();
     let peer = Arc::new(Mutex::new(None::<SocketAddr>));
     let udp = Arc::new(udp);
@@ -152,6 +154,33 @@ fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 
                     return;
                 };
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+
+    let (mut reader, writer) = stack_udp.split();
+    let writer = Arc::new(Mutex::new(writer));
+    tokio::spawn(async move {
+        while let Some((payload, local, remote)) = reader.next().await {
+            if payload.is_empty() {
+                continue;
+            }
+            let writer = Arc::clone(&writer);
+            tokio::spawn(async move {
+                let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
+                    return;
+                };
+                if socket.send_to(&payload, remote).await.is_err() {
+                    return;
+                }
+                let mut buf = vec![0_u8; 65_535];
+                let Ok(Ok((n, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf)).await
+                else {
+                    return;
+                };
+                let mut writer = writer.lock().await;
+                let _ = writer.send((buf[..n].to_vec(), remote, local)).await;
             });
         }
     });

@@ -296,6 +296,42 @@ pub(super) struct DelayMeasurement {
     satisfied: bool,
 }
 
+async fn wireguard_health_destination(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: Destination,
+) -> Result<Destination, ()> {
+    let wireguard = proxy.wireguard.as_ref().ok_or(())?;
+    let has_v4 =
+        wireguard.local_addr != std::net::Ipv4Addr::UNSPECIFIED || wireguard.local_prefix_len != 0;
+    let has_v6 = wireguard.local_ipv6.is_some();
+    let address = match &destination.host {
+        Host::Ip(address) => *address,
+        Host::Domain(domain) => {
+            let mut addresses = tokio::net::lookup_host((domain.as_str(), destination.port))
+                .await
+                .map_err(|_| ())?;
+            addresses
+                .find(|candidate| {
+                    (has_v4 && candidate.is_ipv4()) || (has_v6 && candidate.is_ipv6())
+                })
+                .map(|candidate| candidate.ip())
+                .ok_or(())?
+        }
+    };
+    let supported = match address {
+        std::net::IpAddr::V4(_) => has_v4,
+        std::net::IpAddr::V6(_) => has_v6,
+    };
+    if supported {
+        Ok(Destination {
+            host: Host::Ip(address),
+            port: destination.port,
+        })
+    } else {
+        Err(())
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn measure_http_delay(
     name: &str,
@@ -862,21 +898,7 @@ pub(super) async fn measure_http_delay(
                             .wireguard_client(&proxy.name, identity, constructed)
                             .await
                     };
-                    let destination = match &destination.host {
-                        Host::Ip(std::net::IpAddr::V4(_)) => destination,
-                        Host::Ip(std::net::IpAddr::V6(_)) => return Err(()),
-                        Host::Domain(domain) => {
-                            let mut addresses =
-                                tokio::net::lookup_host((domain.as_str(), destination.port))
-                                    .await
-                                    .map_err(|_| ())?;
-                            let address = addresses.find(std::net::SocketAddr::is_ipv4).ok_or(())?;
-                            Destination {
-                                host: Host::Ip(address.ip()),
-                                port: destination.port,
-                            }
-                        }
-                    };
+                    let destination = wireguard_health_destination(proxy, destination).await?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::ShadowsocksR => {

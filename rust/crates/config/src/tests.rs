@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use md5::{Digest, Md5};
@@ -425,6 +425,9 @@ fn wireguard_configuration_is_supported_and_scoped() {
     assert_eq!(options.persistent_keepalive, Some(25));
     assert_eq!(options.reserved, [1, 2, 3]);
     assert_eq!(options.allowed_ips, ["10.0.0.0/24"]);
+    assert!(options.local_ipv6.is_none());
+    assert!(!options.remote_dns_resolve);
+    assert!(options.dns_servers.is_empty());
 
     let cidr = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: wg-cidr\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2/24\n"
@@ -436,6 +439,18 @@ fn wireguard_configuration_is_supported_and_scoped() {
     assert!(cidr_opts.preshared_key.is_none());
     assert_eq!(cidr_opts.reserved, [0, 0, 0]);
 
+    let dual = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-v6\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    ipv6: fd00::2/64\n    remote-dns-resolve: true\n    dns: [1.1.1.1, 8.8.8.8:53]\n"
+    ))
+    .expect("WireGuard ipv6 and remote DNS");
+    let dual_opts = dual.proxies[0].wireguard.as_ref().expect("dual");
+    assert_eq!(
+        dual_opts.local_ipv6,
+        Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 64))
+    );
+    assert!(dual_opts.remote_dns_resolve);
+    assert_eq!(dual_opts.dns_servers, ["1.1.1.1", "8.8.8.8:53"]);
+
     let udp = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: wg-udp\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    udp: true\n"
     ))
@@ -445,8 +460,6 @@ fn wireguard_configuration_is_supported_and_scoped() {
     for unsupported in [
         "amnezia-wg-option:\n      jc: 4",
         "peers:\n      - server: 1.1.1.1\n        port: 1\n        public-key: {PUBLIC}\n        allowed-ips: [0.0.0.0/0]",
-        "ipv6: fd00::2",
-        "remote-dns-resolve: true",
         "ip-stack:\n      mode: gvisor",
         "dialer-proxy: other",
         "workers: 2",
