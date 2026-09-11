@@ -35,6 +35,8 @@ pub enum ConfigError {
     InvalidHosts(String),
     #[error("invalid local inbound configuration: {0}")]
     InvalidInbound(String),
+    #[error("invalid TUN configuration: {0}")]
+    InvalidTun(String),
     #[error("configuration is parsed but not executable in the current rewrite runtime: {0}")]
     UnsupportedRuntime(String),
 }

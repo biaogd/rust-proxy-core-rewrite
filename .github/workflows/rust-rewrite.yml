@@ -274,6 +274,10 @@ jobs:
       PHASE5FUDPNAT_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE5F_TIMEOUT_TEST: "1"
       PHASE5FLANPOLICY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE8A_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE8B_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE8C_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE8F_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ABUILTINS_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6ASIMPLE_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6A_DROP_TIMEOUT_TEST: "1"
@@ -402,7 +406,7 @@ jobs:
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
-            local-runtime) SHARD_REGEX='phase5f_[a-z0-9_]+\.py$' ;;
+            local-runtime) SHARD_REGEX='phase(5f_[a-z0-9_]+|8a_tun|8b_tun|8c_tun|8f_tun)\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
           esac
@@ -537,6 +541,10 @@ jobs:
             compat/scripts/phase5e_geo_rules.py \
             compat/scripts/phase5f_udp_nat.py \
             compat/scripts/phase5f_lan_policy.py \
+            compat/scripts/phase8a_tun.py \
+            compat/scripts/phase8b_tun.py \
+            compat/scripts/phase8c_tun.py \
+            compat/scripts/phase8f_tun.py \
             compat/scripts/phase5b_core.py \
             compat/scripts/phase5b_udp.py \
             compat/scripts/phase5b3g.py \
@@ -687,6 +695,221 @@ jobs:
               --all-features \
               tests::privileged_routing_mark_round_trip \
               -- --ignored --exact
+
+  phase8a-linux-tun:
+    name: Phase 8A privileged Linux TUN netns
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PHASE8A_CARGO_TARGET: ${{ github.workspace }}/../mihomo-phase8a-target
+      PHASE8A_NATIVE: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Install iproute2
+        run: sudo apt-get update && sudo apt-get install -y iproute2
+
+      - name: Run Phase 8A TUN identity and netns traffic gate
+        run: |
+          sudo env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "PHASE8A_NATIVE=1" \
+            "PHASE8A_CARGO_TARGET=$PHASE8A_CARGO_TARGET" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            python3 compat/scripts/phase8a_tun.py
+
+      - name: Upload Phase 8A failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase8a-linux-tun-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  phase8b-darwin-tun:
+    name: Phase 8B privileged Darwin arm64 TUN
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      PHASE8B_CARGO_TARGET: ${{ github.workspace }}/../mihomo-phase8b-target
+      PHASE8B_NATIVE: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Darwin arm64 runner
+        run: |
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          test "${RUNNER_ARCH}" = "ARM64"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Run Phase 8B TUN identity and Darwin traffic gate
+        run: |
+          sudo env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "PHASE8B_NATIVE=1" \
+            "PHASE8B_CARGO_TARGET=$PHASE8B_CARGO_TARGET" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            python3 compat/scripts/phase8b_tun.py
+
+      - name: Upload Phase 8B failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase8b-darwin-tun-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  phase8c-windows-tun:
+    name: Phase 8C privileged Windows x86_64 TUN
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PHASE8C_CARGO_TARGET: ${{ github.workspace }}/../mihomo-phase8c-target
+      PHASE8C_NATIVE: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Windows x86_64 runner
+        shell: bash
+        run: |
+          test "${RUNNER_OS}" = "Windows"
+          test "${RUNNER_ARCH}" = "X64"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Run Phase 8C TUN identity and Windows traffic gate
+        # Official Wintun 0.14.1 SHA-256:
+        # 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+        # Downloaded and verified by phase8c_tun.py; not vendored.
+        run: python compat/scripts/phase8c_tun.py
+
+      - name: Upload Phase 8C failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase8c-windows-tun-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  phase8f-linux-tun:
+    name: Phase 8F privileged Linux TUN network-change
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PHASE8F_CARGO_TARGET: ${{ github.workspace }}/../mihomo-phase8f-target
+      PHASE8F_NATIVE: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Install iproute2
+        run: sudo apt-get update && sudo apt-get install -y iproute2
+
+      - name: Run Phase 8F TUN identity and network-change gate
+        run: |
+          sudo env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "PHASE8F_NATIVE=1" \
+            "PHASE8F_CARGO_TARGET=$PHASE8F_CARGO_TARGET" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            python3 compat/scripts/phase8f_tun.py
+
+      - name: Upload Phase 8F failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: phase8f-linux-tun-failure
+          path: compat/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows-controller-pipe:
     name: Windows controller named-pipe differential

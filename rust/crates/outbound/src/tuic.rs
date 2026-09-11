@@ -39,11 +39,12 @@ impl TuicClient {
         proxy: &ProxyConfig,
         custom_roots: &[String],
     ) -> Result<Self, TuicProxyError> {
-        Self::from_proxy_with_dial_server(proxy, &proxy.server, custom_roots)
+        Self::from_proxy_with_dial_server(proxy, &proxy.server, custom_roots, "", 0)
     }
 
     /// Dials `dial_server` (typically a PSN-resolved IP) while TLS SNI still
-    /// uses `proxy.sni` / `proxy.server`.
+    /// uses `proxy.sni` / `proxy.server`. `bind_interface` / `routing_mark`
+    /// apply to the QUIC UDP socket (TUN auto-route loop avoidance).
     ///
     /// # Errors
     ///
@@ -52,9 +53,13 @@ impl TuicClient {
         proxy: &ProxyConfig,
         dial_server: &str,
         custom_roots: &[String],
+        bind_interface: &str,
+        routing_mark: i64,
     ) -> Result<Self, TuicProxyError> {
         let mut options = client_options_from_proxy(proxy, custom_roots)?;
         dial_server.clone_into(&mut options.server);
+        bind_interface.clone_into(&mut options.bind_interface);
+        options.routing_mark = routing_mark;
         let inner = Client::new(options)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),
@@ -191,5 +196,7 @@ fn client_options_from_proxy(
         max_udp_relay_packet_size: compute_max_udp_relay_packet_size(
             tuic.max_udp_relay_packet_size,
         ),
+        bind_interface: String::new(),
+        routing_mark: 0,
     })
 }

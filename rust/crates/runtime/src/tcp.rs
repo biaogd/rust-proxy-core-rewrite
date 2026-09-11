@@ -154,6 +154,18 @@ pub(super) async fn serve_connection(
 #[allow(clippy::too_many_lines)]
 pub(super) async fn serve_shadowsocks_connection(
     client: BoxedInboundStream,
+    metadata: Metadata,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) {
+    serve_stream_session(client, metadata, config, state, dns_service, shutdown).await;
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn serve_stream_session(
+    client: BoxedInboundStream,
     mut metadata: Metadata,
     config: &Config,
     state: &Arc<RuntimeState>,
@@ -168,7 +180,16 @@ pub(super) async fn serve_shadowsocks_connection(
         metadata.inbound_port = local.port();
     }
     if metadata.inbound_name.is_empty() {
-        "DEFAULT-SHADOWSOCKS".clone_into(&mut metadata.inbound_name);
+        let name = match metadata.inbound {
+            InboundProtocol::Shadowsocks => "DEFAULT-SHADOWSOCKS",
+            InboundProtocol::Tun => "DEFAULT-TUN",
+            InboundProtocol::Http
+            | InboundProtocol::Https
+            | InboundProtocol::Socks4
+            | InboundProtocol::Socks5
+            | InboundProtocol::Inner => "DEFAULT-INBOUND",
+        };
+        name.clone_into(&mut metadata.inbound_name);
     }
     let fake_host = apply_host_mapping(&mut metadata, config, state);
     let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
@@ -582,14 +603,13 @@ pub(super) async fn hysteria2_client_for_proxy(
         Host::Ip(address) => address.to_string(),
         Host::Domain(domain) => domain.clone(),
     };
-    let identity = format!(
-        "{proxy:?}|dial={dial_server}|roots={:?}",
-        config.trust_certificates
-    );
+    let identity = quic_client_identity(proxy, &dial_server, config);
     let client = rewrite_outbound::Hysteria2Client::from_proxy_with_dial_server(
         proxy,
         &dial_server,
         &config.trust_certificates,
+        &config.interface_name,
+        config.routing_mark,
     )
     .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
     Ok(state.hysteria2_client(&proxy.name, identity, client).await)
@@ -624,17 +644,29 @@ pub(super) async fn tuic_client_for_proxy(
         Host::Ip(address) => address.to_string(),
         Host::Domain(domain) => domain.clone(),
     };
-    let identity = format!(
-        "{proxy:?}|dial={dial_server}|roots={:?}",
-        config.trust_certificates
-    );
+    let identity = quic_client_identity(proxy, &dial_server, config);
     let client = rewrite_outbound::TuicClient::from_proxy_with_dial_server(
         proxy,
         &dial_server,
         &config.trust_certificates,
+        &config.interface_name,
+        config.routing_mark,
     )
     .map_err(|error| format!("TUIC client failed: {error}"))?;
     Ok(state.tuic_client(&proxy.name, identity, client).await)
+}
+
+fn quic_client_identity(
+    proxy: &rewrite_config::ProxyConfig,
+    dial_server: &str,
+    config: &Config,
+) -> String {
+    format!(
+        "{proxy:?}|dial={dial_server}|roots={:?}|bind={}|mark={}",
+        config.trust_certificates,
+        rewrite_platform::resolve_outbound_bind_identity(&config.interface_name),
+        config.routing_mark,
+    )
 }
 
 async fn connect_anytls_proxy(

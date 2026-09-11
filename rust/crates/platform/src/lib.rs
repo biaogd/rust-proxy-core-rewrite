@@ -1,11 +1,39 @@
 //! Small, testable operating-system boundaries used by the Rust rewrite.
 
 mod dhcp;
+mod network;
+mod route;
+mod system_dns;
 
 pub use dhcp::{
     DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
     DhcpRefreshTracker, INTERFACE_TTL, build_dhcp_discover, dhcp_interface_snapshot,
     parse_dhcp_offer, resolve_dns_from_dhcp,
+};
+pub use network::{
+    DefaultInterfaceSnapshot, NETWORK_CHANGE_POLL, NetworkChangePlan, auto_detect_bind_interface,
+    auto_detect_bind_is_enabled, auto_route_covers_family, clear_outbound_bypass,
+    current_default_interface, exclude_tun_device, install_outbound_bypass,
+    missing_physical_egress_for_captured_family, parse_darwin_default_route,
+    parse_linux_default_routes, parse_windows_default_routes, plan_network_change,
+    planned_bypass_host_route, protect_outbound_destination, resolve_outbound_bind_identity,
+    resolve_outbound_bind_interface, set_auto_detect_bind_interface, update_outbound_bypass,
+};
+pub use route::{
+    AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
+    current_route_platform, darwin_route_args, default_auto_route_destinations, host_route_prefix,
+    install_bypass_host_route, install_device_route, parse_darwin_exact_route,
+    parse_darwin_route_get, parse_linux_exact_route, parse_linux_route_get,
+    parse_netsh_interface_names, parse_windows_exact_route, parse_windows_find_netroute,
+    plan_auto_route_prefixes, protect_host_route, reject_existing_windows_tun_device,
+    validate_tun_device_name, windows_netsh_route_args,
+};
+pub use system_dns::{
+    DarwinDnsConfig, DarwinDnsValue, DnsOwner, WindowsDnsOrigin, apply_tun_system_dns,
+    apply_windows_tun_interface_dns, build_scutil_dns_script, build_scutil_merge_servers_script,
+    build_scutil_remove_script, build_scutil_restore_dns_script, darwin_dns_key,
+    parse_netsh_dnsservers, parse_scutil_dns_dictionary, parse_scutil_primary_service,
+    windows_restore_dhcp_dns_args, windows_set_tun_dns_args,
 };
 
 use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
@@ -21,9 +49,22 @@ use std::net::{IpAddr, SocketAddr};
 ))]
 use std::num::NonZeroU32;
 use std::time::Duration;
+use thiserror::Error;
 
 /// Number of missed refreshes retained by the Go system resolver.
 pub const SYSTEM_DNS_DELETE_TIMES: u32 = 12;
+
+#[derive(Debug, Error)]
+pub enum PlatformError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("{0}")]
+    Command(String),
+    #[error("{0}")]
+    Dns(String),
+    #[error("{0}")]
+    Unsupported(String),
+}
 
 /// Binds a nonblocking TCP listener and applies the Linux/Android socket mark
 /// before bind, matching the controller listen boundary.
@@ -176,7 +217,7 @@ pub async fn connect_tcp(
     apply_routing_mark(&socket, address.ip(), options.routing_mark)?;
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = options.routing_mark;
-    bind_outbound_interface(&socket, address, options.interface)?;
+    bind_outbound_interface(&socket, address, address, options.interface)?;
     socket.set_nonblocking(true)?;
     if let Err(error) = socket.connect(&SockAddr::from(address))
         && error.kind() != io::ErrorKind::WouldBlock
@@ -195,17 +236,19 @@ pub async fn connect_tcp(
 }
 
 /// Binds a nonblocking outbound UDP socket with global interface and routing
-/// mark policy.
+/// mark policy. `local` is the bind address (typically `:0`); `remote` decides
+/// whether the physical NIC is pinned (loopback/multicast remotes skip it).
 ///
 /// # Errors
 ///
 /// Returns interface discovery, socket-option or bind errors.
 pub fn bind_outbound_udp(
-    address: SocketAddr,
+    local: SocketAddr,
+    remote: SocketAddr,
     interface: &str,
     routing_mark: i64,
 ) -> io::Result<std::net::UdpSocket> {
-    let domain = if address.is_ipv4() {
+    let domain = if local.is_ipv4() {
         Domain::IPV4
     } else {
         Domain::IPV6
@@ -217,8 +260,15 @@ pub fn bind_outbound_udp(
     }
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = routing_mark;
-    bind_outbound_interface(&socket, address, interface)?;
-    socket.bind(&SockAddr::from(address))?;
+    bind_outbound_interface(&socket, local, remote, interface)?;
+    #[cfg(target_os = "windows")]
+    let already_bound = !resolve_outbound_bind_interface(interface, remote).is_empty()
+        && should_bind_outbound_interface(remote);
+    #[cfg(not(target_os = "windows"))]
+    let already_bound = false;
+    if !already_bound {
+        socket.bind(&SockAddr::from(local))?;
+    }
     socket.set_nonblocking(true)?;
     Ok(socket.into())
 }
@@ -240,15 +290,28 @@ fn set_routing_mark(socket: &Socket, routing_mark: i64) -> io::Result<()> {
     )
 }
 
-fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
+fn bind_outbound_interface(
+    socket: &Socket,
+    family: SocketAddr,
+    remote: SocketAddr,
+    name: &str,
+) -> io::Result<()> {
+    if !should_bind_outbound_interface(remote) {
+        return Ok(());
+    }
+    let name = resolve_outbound_bind_interface(name, remote);
     if name.is_empty() {
+        if missing_physical_egress_for_captured_family(remote) {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "no physical default interface for TUN-captured outbound; refusing to leak into TUN",
+            ));
+        }
         return Ok(());
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
-        if !is_global_unicast(address.ip()) {
-            return Ok(());
-        }
+        let _ = family;
         socket.bind_device(Some(name.as_bytes()))
     }
     #[cfg(any(
@@ -268,14 +331,19 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         let index = NonZeroU32::new(interface.index).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "interface index is zero")
         })?;
-        if !is_global_unicast(address.ip()) {
-            return Ok(());
-        }
-        if address.is_ipv4() {
+        if family.is_ipv4() {
             socket.bind_device_by_index_v4(Some(index))
         } else {
             socket.bind_device_by_index_v6(Some(index))
         }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = windows_interface_bind_addr(&name, family)?;
+        // TCP `connect_tcp` passes the remote address as `family`; UDP already
+        // passes a local `:0`. Pin the NIC by unicast IP and always use an
+        // ephemeral local port so connecting to `:443` does not bind local `:443`.
+        socket.bind(&SockAddr::from(local))
     }
     #[cfg(not(any(
         target_os = "android",
@@ -284,10 +352,11 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         target_os = "macos",
         target_os = "tvos",
         target_os = "visionos",
-        target_os = "watchos"
+        target_os = "watchos",
+        target_os = "windows"
     )))]
     {
-        let _ = (socket, address);
+        let _ = (socket, family);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "interface binding is not supported on this platform",
@@ -295,15 +364,47 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
     }
 }
 
-#[cfg(any(
-    target_os = "android",
-    target_os = "ios",
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "tvos",
-    target_os = "visionos",
-    target_os = "watchos"
-))]
+fn should_bind_outbound_interface(address: SocketAddr) -> bool {
+    let ip = address.ip();
+    !ip.is_loopback() && !ip.is_multicast()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_interface_bind_addr(name: &str, address: SocketAddr) -> io::Result<SocketAddr> {
+    use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
+    let interface = NetworkInterface::show()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .into_iter()
+        .find(|interface| interface.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface not found"))?;
+    let ip = interface.addr.into_iter().find_map(|addr| match addr {
+        Addr::V4(v4) if address.is_ipv4() && !v4.ip.is_loopback() && !v4.ip.is_link_local() => {
+            Some(IpAddr::V4(v4.ip))
+        }
+        Addr::V6(v6)
+            if address.is_ipv6() && !v6.ip.is_loopback() && !v6.ip.is_unicast_link_local() =>
+        {
+            Some(IpAddr::V6(v6.ip))
+        }
+        _ => None,
+    });
+    let ip = ip.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "interface has no matching unicast address",
+        )
+    })?;
+    Ok(local_unicast_bind_addr(ip))
+}
+
+/// Windows cannot `bind_device`; pin the socket to a NIC unicast IP with an
+/// ephemeral local port. TCP must not reuse the remote port (HTTPS `:443`).
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn local_unicast_bind_addr(ip: IpAddr) -> SocketAddr {
+    SocketAddr::new(ip, 0)
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn is_global_unicast(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
@@ -521,6 +622,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_tcp_interface_bind_uses_ephemeral_local_port() {
+        let remote: SocketAddr = "198.51.100.10:443".parse().expect("remote HTTPS");
+        let local = local_unicast_bind_addr("192.0.2.8".parse().expect("nic"));
+        assert_eq!(local.port(), 0);
+        assert_ne!(local.port(), remote.port());
+        assert_eq!(local.ip(), "192.0.2.8".parse::<IpAddr>().expect("nic"));
+    }
+
+    #[test]
     fn posix_parser_matches_oracle_rules() {
         let parsed = parse_resolv_conf(
             "# comment\n ; indented comment\nnameserver 1.1.1.1 trailing\n\
@@ -647,6 +757,54 @@ mod tests {
         )
         .expect("the test must run with permission to set SO_MARK");
         assert_eq!(socket.mark().expect("SO_MARK read-back"), 2158);
+    }
+
+    #[test]
+    fn udp_loopback_remote_skips_missing_interface_bind() {
+        let local = "0.0.0.0:0".parse().expect("wildcard");
+        let remote = "127.0.0.1:9".parse().expect("loopback");
+        bind_outbound_udp(local, remote, "p8f-missing-iface", 0)
+            .expect("loopback remote must not require a physical NIC");
+        let public = "1.1.1.1:53".parse().expect("public");
+        bind_outbound_udp(local, public, "p8f-missing-iface", 0)
+            .expect_err("public remote must try to bind the NIC");
+        let public_v6 = "[2001:db8::1]:53".parse().expect("public v6");
+        let local_v6 = "[::]:0".parse().expect("v6 wildcard");
+        bind_outbound_udp(local_v6, public_v6, "p8f-missing-iface", 0)
+            .expect_err("public IPv6 remote must try to bind the NIC");
+    }
+
+    #[test]
+    fn auto_detect_without_physical_egress_refuses_tun_captured_family() {
+        let _guard = crate::network::lock_network_policy_for_test();
+        let local = "0.0.0.0:0".parse().expect("wildcard");
+        let public: SocketAddr = "192.0.2.1:443".parse().expect("public");
+        let loopback: SocketAddr = "127.0.0.1:9".parse().expect("loopback");
+        let public_v6: SocketAddr = "[2001:db8::1]:53".parse().expect("v6");
+        let local_v6 = "[::]:0".parse().expect("v6 wildcard");
+
+        bind_outbound_udp(local, public, "", 0).expect("auto-detect off must skip NIC bind");
+
+        let lost = DefaultInterfaceSnapshot::lost();
+        set_auto_detect_bind_interface(Some(&lost));
+        bind_outbound_udp(local, public, "", 0)
+            .expect("auto-detect on without TUN capture must skip NIC bind");
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, false);
+        let error = bind_outbound_udp(local, public, "", 0)
+            .expect_err("captured IPv4 without egress must not leak into TUN");
+        assert!(
+            error.to_string().contains("refusing to leak into TUN"),
+            "unexpected error: {error}"
+        );
+        bind_outbound_udp(local, loopback, "", 0)
+            .expect("loopback must still skip NIC bind while IPv4 egress is lost");
+        bind_outbound_udp(local_v6, public_v6, "", 0)
+            .expect("uncaptured IPv6 must skip bind when only IPv4 is captured");
+
+        install_outbound_bypass("tun0", &lost, Vec::new(), true, true);
+        bind_outbound_udp(local_v6, public_v6, "", 0)
+            .expect_err("captured IPv6 without egress must not leak into TUN");
     }
 
     #[cfg(not(all(target_os = "android", feature = "android-cmfa")))]

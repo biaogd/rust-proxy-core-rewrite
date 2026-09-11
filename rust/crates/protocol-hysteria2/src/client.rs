@@ -78,6 +78,10 @@ pub struct ClientOptions {
     pub stream_receive_window: Option<u64>,
     /// Optional connection receive window override.
     pub connection_receive_window: Option<u64>,
+    /// Physical interface for TUN auto-route socket bind (empty = unbound).
+    pub bind_interface: String,
+    /// Linux/Android `SO_MARK` applied to the QUIC UDP socket.
+    pub routing_mark: i64,
 }
 
 impl Default for ClientOptions {
@@ -103,6 +107,8 @@ impl Default for ClientOptions {
             handshake_timeout: Duration::from_secs(10),
             stream_receive_window: None,
             connection_receive_window: None,
+            bind_interface: String::new(),
+            routing_mark: 0,
         }
     }
 }
@@ -892,6 +898,21 @@ fn build_endpoint(
     }
     client_config.transport_config(Arc::new(transport));
 
+    let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+    let socket = bind_hysteria2_socket(options, canonical, hop, &runtime)?;
+    let mut endpoint =
+        quinn::Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
+            .map_err(Hysteria2ProtocolError::Io)?;
+    endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
+
+fn bind_hysteria2_socket(
+    options: &ClientOptions,
+    canonical: SocketAddr,
+    hop: Option<HopConfig>,
+    runtime: &Arc<dyn Runtime>,
+) -> Result<Arc<dyn AsyncUdpSocket>, Hysteria2ProtocolError> {
     let obfs = if options.obfs_password.is_empty() {
         None
     } else {
@@ -901,28 +922,27 @@ fn build_endpoint(
             })?,
         )
     };
-
     let bind_addr = if canonical.is_ipv6() {
         SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
     } else {
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
     };
-    let std_sock = std::net::UdpSocket::bind(bind_addr).map_err(Hysteria2ProtocolError::Io)?;
-    let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+    let std_sock = rewrite_platform::bind_outbound_udp(
+        bind_addr,
+        canonical,
+        &options.bind_interface,
+        options.routing_mark,
+    )
+    .map_err(Hysteria2ProtocolError::Io)?;
     let inner = runtime
         .wrap_udp_socket(std_sock)
         .map_err(Hysteria2ProtocolError::Io)?;
-    let socket: Arc<dyn AsyncUdpSocket> =
+    Ok(
         match ObfsHopSocket::new(inner.clone(), canonical, obfs, hop) {
             Some(wrapped) => wrapped,
             None => inner,
-        };
-
-    let mut endpoint =
-        quinn::Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
-            .map_err(Hysteria2ProtocolError::Io)?;
-    endpoint.set_default_client_config(client_config);
-    Ok(endpoint)
+        },
+    )
 }
 
 /// Closes a QUIC connection if dropped before the handshake completes.
@@ -1102,6 +1122,68 @@ mod tests {
             EndpointPathKey::new(a, Some(&hop_a)),
             EndpointPathKey::new(b, Some(&hop_b))
         );
+    }
+
+    #[test]
+    fn build_endpoint_binds_plain_salamander_and_hop_through_platform() {
+        let missing = "p8f-missing-iface";
+        let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443));
+        let hop = HopConfig {
+            addrs: vec![
+                canonical,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 8443)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let cases: [(&str, Option<HopConfig>); 3] =
+            [("", None), ("salamander-psk", None), ("", Some(hop))];
+        for (obfs, hop_cfg) in cases {
+            let options = ClientOptions {
+                bind_interface: missing.to_owned(),
+                obfs_password: obfs.to_owned(),
+                tls: TlsOptions {
+                    server_name: "test".into(),
+                    skip_certificate_verification: true,
+                    alpn: vec!["h3".into()],
+                    custom_roots: Vec::new(),
+                },
+                ..ClientOptions::default()
+            };
+            build_endpoint(&options, canonical, hop_cfg, None)
+                .expect_err("missing bind interface must fail before Quinn wrap");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_endpoint_skips_missing_interface_for_loopback() {
+        let missing = "p8f-missing-iface";
+        let canonical = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443));
+        let hop = HopConfig {
+            addrs: vec![
+                canonical,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8443)),
+            ],
+            interval_min: Duration::from_secs(5),
+            interval_max: Duration::from_secs(5),
+        };
+        let cases: [(&str, Option<HopConfig>); 3] =
+            [("", None), ("salamander-psk", None), ("", Some(hop))];
+        for (obfs, hop_cfg) in cases {
+            let options = ClientOptions {
+                bind_interface: missing.to_owned(),
+                obfs_password: obfs.to_owned(),
+                tls: TlsOptions {
+                    server_name: "test".into(),
+                    skip_certificate_verification: true,
+                    alpn: vec!["h3".into()],
+                    custom_roots: Vec::new(),
+                },
+                ..ClientOptions::default()
+            };
+            build_endpoint(&options, canonical, hop_cfg, None)
+                .expect("loopback remote must skip NIC bind before Quinn wrap");
+        }
     }
 
     #[tokio::test]

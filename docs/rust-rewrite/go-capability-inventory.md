@@ -74,7 +74,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-06 | Rules, sub-rules and provider-backed rule construction | Partial | 5B1–5B5 |
 | CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N implements legacy `ss-config` and the declared first named Shadowsocks listener slice with fail-closed unsupported fields | Remaining Shadowsocks fields and one gate per other IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
-| CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Not started | 8A–8D |
+| CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Partial: 8A Linux parse/apply + 8B Darwin utun/route/scutil DNS + 8C Windows Wintun/route/adapter DNS | 8D remaining stacks |
 | CFG-10 | Static TCP/UDP tunnels and validation | Not started | 5B6 |
 | CFG-11 | NTP enable/listen/server/port/interval/dialer-proxy/write-to-system | Not started | 5E1 |
 | CFG-12 | iptables inbound-interface and bypass rules | Not started | 8A |
@@ -98,7 +98,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | Not started | 8A–8C |
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
-| IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Not started | 8A–8D |
+| IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
 | IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N implements the first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 server slice; corrected full differential pending | Remaining Shadowsocks matrix and Snell 6/7 gates |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | 6 protocol gates |
 | IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Not started | 6 protocol gates |
@@ -222,7 +222,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
-| RUN-08 | Power/network change handling and resolver/connection reset | Not started | 8F |
+| RUN-08 | Power/network change handling and resolver/connection reset | Partial 8F (default-route poll + resolver reset; native CI unclaimed) | 8F |
 | RUN-09 | Bounded queues, backpressure, concurrency limits, cancellation and leak/stress behavior | Partial | Every release/protocol gate |
 
 ## REST controller
@@ -256,7 +256,7 @@ the mounted route files below [`hub/route`](../../hub/route).
 | SVC-04 | Geodata/MMDB/MRS loading, matching, download/update, ETag and failure rollback | Not started | 5E4 |
 | SVC-05 | External UI download/update and safe path handling | Not started | 5E5 |
 | SVC-06 | Memory accounting, buffer pools and low-memory behavior | Not started | 8E |
-| SVC-07 | Interface discovery, DHCP, process lookup, power/network events and platform command execution | Not started | 8F |
+| SVC-07 | Interface discovery, DHCP, process lookup, power/network events and platform command execution | Partial 8F network-change poll; DHCP/process lookup/native sleep-wake unclaimed | 8F |
 
 ## Platforms, packaging and build profiles
 
@@ -267,8 +267,8 @@ separate claims.
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | PLAT-01 | Linux 386/amd64/armv5-7/arm64/mips/mips64/riscv64/loong64/s390x/ppc64le builds | Not started beyond limited Linux amd64 evidence | 8A/8E |
-| PLAT-02 | Darwin amd64/arm64 builds and native behavior | Partial Darwin arm64 | 8B |
-| PLAT-03 | Windows 386/amd64/arm32/arm64, named pipes and Windows system integration | Not started | 8C |
+| PLAT-02 | Darwin amd64/arm64 builds and native behavior | Partial Darwin arm64 TUN 8B (utun/route/scutil; native CI unclaimed) | Remaining Darwin amd64 TUN / 8F |
+| PLAT-03 | Windows 386/amd64/arm32/arm64, named pipes and Windows system integration | Partial: 8C Windows x86_64 Wintun TUN (load/routes/adapter DNS; native CI unclaimed); named pipes exist | remaining Windows arches / 8F |
 | PLAT-04 | FreeBSD 386/amd64/arm64 and redirect/TUN behavior | Not started | 8D |
 | PLAT-05 | Android 386/amd64/arm/arm64, NDK, CMFA and package integration | Not started | 8D |
 | PLAT-06 | Default and `with_gvisor` product profiles | Not started as Rust product claims | 8E |

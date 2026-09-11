@@ -1303,23 +1303,31 @@ separate exit gates inside these labels.
 
 ### Next-work priority — 2026-09-09
 
-The agreed next-work order is **SSR review/CI closure → TUIC v5 outbound →
+The agreed next-work order was **SSR review/CI closure → TUIC v5 outbound →
 TUN integration**. This supersedes the previous numerical development order.
-Existing-protocol regressions remain release blockers; this schedule does not
-declare Hysteria2, SSR or any other partial implementation production-ready.
-See [status](status.md) for branch-specific evidence versus implementation in
-this checkout, and [compatibility matrix](compatibility-matrix.md) for claims.
+**SSR and TUIC v5 outbound are done in this checkout**; **TUN (Phase 8) is
+current**, with Linux **8A**, Darwin **8B**, and Windows **8C** implemented in
+this checkout. Native Parity waits on the privileged CI jobs.
+Existing-protocol regressions remain
+release blockers; this schedule does not declare Hysteria2, SSR or any other
+partial implementation production-ready. See [status](status.md) for
+branch-specific evidence versus implementation in this checkout, and
+[compatibility matrix](compatibility-matrix.md) for claims.
 
-1. **SSR closure (7A–7D, OUT-06):** resolve PR #13 review findings and fixture
-   failures; obtain Linux, macOS arm64 and Windows differential evidence before
-   claiming those platforms. Keep pre-handshake half-close rejection, missing
-   multi-user evidence and outstanding long-soak gates explicit.
-2. **TUIC v5 (6H, OUT-12):** implement outbound only. Defer v4, 0-RTT and server
-   direction; unsupported options must fail explicitly rather than downgrade.
-3. **TUN (Phase 8):** start with the Linux vertical slice, then macOS arm64 and
-   Windows native gates. TUN is packet ingress/platform integration, not another
-   remote proxy protocol. Other remote-protocol inbounds remain deferred;
-   preserve the existing Shadowsocks inbound scope without expanding it.
+1. **SSR closure (7A–7D, OUT-06):** done in this checkout (merged PR #13 path).
+   Keep pre-handshake half-close rejection, missing multi-user evidence and
+   outstanding long-soak gates explicit where still open.
+2. **TUIC v5 (6H, OUT-12):** done in this checkout for outbound 6H-A/B/C.
+   v4, 0-RTT and server direction remain deferred; unsupported options must
+   fail explicitly rather than downgrade.
+3. **TUN (Phase 8) — current:** deliver **8A → 8B → 8C**, then prioritize
+   **8F** before mobile/more arches (**8D/8E** later). 8A Linux parse/runtime,
+   8B Darwin arm64 utun/route/DNS restore, and 8C Windows x86_64 Wintun/route/
+   adapter DNS are implemented in this checkout; native Parity waits on the
+   privileged CI jobs. TUN is packet
+   ingress/platform integration, not another remote proxy protocol. Other
+   remote-protocol inbounds remain deferred; preserve the existing Shadowsocks
+   inbound scope without expanding it.
 
 WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
 prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
@@ -2993,25 +3001,112 @@ cannot inherit its wire-compatibility claim.
 
 ## Phase 8 — TUN, transparent proxying and platform breadth
 
-TUN is the next priority after the declared TUIC v5 outbound gates, without
-waiting for 6I/6J or all of Phase 7. It is currently unimplemented. The first
-Linux gate must connect YAML → TUN device/IP packets → TCP/UDP stack → existing
-rules/outbound → return packets, and prove route cleanup on stop/failure.
-DNS interception, fake-IP reverse lookup, loop avoidance and privilege/error
-handling need explicit native tests before claiming system-wide operation.
+TUN is current after SSR and TUIC v5 outbound in this checkout, without waiting
+for 6I/6J or all of Phase 7. The UDP reply-sink refactor and 8A Linux
+parse/runtime wiring have landed; `compat/scripts/phase8a_tun.py` now owns the
+privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate plus a failed-reload that must restore the previous TUN (`PHASE8A_NATIVE=1`, fail-closed). 8B Darwin arm64 reuses that data path; scutil apply/restore merge `ServerAddresses` without wiping extra DNS keys;
+`compat/scripts/phase8b_tun.py` owns the privileged utun/scutil DNS/auto-route
+gate (`PHASE8B_NATIVE=1`, fail-closed). 8C Windows x86_64 reuses that data path
+on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
+Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). 8F polls the
+physical default (excluding TUN), re-protects DNS/literal-proxy host routes via
+that snapshot (never TUN), refuses to overwrite foreign exact-prefix routes,
+binds DIRECT, TUIC, and Hysteria2 QUIC sockets to the physical interface (no host route for
+ordinary DIRECT destinations; Windows TCP uses local port 0), retires those
+QUIC clients when the uplink changes, applies
+`route-exclude-address` as more-specific physical exceptions, re-applies Darwin
+scutil DNS, and resets resolver connections without flushing fake-IP;
+`compat/scripts/phase8f_tun.py` owns the privileged dual-uplink netns
+flap (old uplink taken down) plus public DIRECT, same-IP REJECT, domain TUIC, and foreign-route conflict
+(`PHASE8F_NATIVE=1`, fail-closed). Those gates are the remaining 8A/8B/8C/8F
+acceptance evidence. Delivery order: **8A → 8B → 8C**,
+then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
+OS needs native configuration, listener, routing, process, persistence and
+shutdown evidence; unsupported combinations require explicit rejection evidence
+(never silent remapping). Cross-compilation is only a build claim.
 
-- Linux TUN stacks, routing, TProxy, redir, socket marks and iptables in isolated
-  namespaces first.
-- Darwin, Windows, FreeBSD and Android each receive their own platform gate.
-- Cross-compilation is only a build claim; runtime parity needs native tests.
-- Additional architectures are admitted after dependency/toolchain feasibility
-  and native smoke coverage.
+### Tech choice and stack identity
 
-Track **8A** Linux, **8B** Darwin, **8C** Windows, **8D** FreeBSD/Android,
-**8E** architecture/build profiles and **8F** platform services/network-change
-behavior. Every advertised OS receives native configuration, listener, routing,
-process, persistence and shutdown evidence; unsupported combinations require
-Go-compatible rejection evidence.
+- **Device:** `tun-rs` (Apache-2.0); pin **2.8.9** with the **async** feature.
+- **Stack:** `netstack-smoltcp` (MIT OR Apache-2.0); pin **0.2.4**.
+- Do **not** self-implement a TCP/IP stack or pre-fork either crate.
+- **Config identity:** Rust accepts `stack: smoltcp` only. Go names
+  `system` / `gvisor` / `mixed` must be **rejected explicitly** — never silently
+  remapped. Defaults and exclusions are recorded in the
+  [compatibility matrix](compatibility-matrix.md).
+
+### Crate boundaries
+
+| Crate | Owns |
+| --- | --- |
+| `rust/crates/tun` | Packet/stack path and TCP/UDP sessions |
+| `platform` | Device/iface, route install, permission, restore |
+| `runtime` | Lifecycle, DNS/fake-IP, rules, outbound return |
+| `compat` | Native fixtures and Go/Rust differentials |
+
+### Prerequisite — SOCKS UDP reply framing
+
+Done: SOCKS UDP reply framing is an inbound-edge `UdpReplySink`; TUN reuses the
+shared UDP session relay without SOCKS write-back.
+
+### Delivery stages
+
+- **8A — Linux closed loop (first gate):** YAML → `tun-rs` device →
+  `netstack-smoltcp` → existing rules/outbound → return packets; DNS hijack and
+  fake-IP reverse lookup; auto-route plus safe exit/reload/cleanup, including
+  restoring the previous generation (listeners, controllers, DNS, TUN) when a replacement reload fails, including dropping uncommitted sockets before restore so same-port replacement and prepare-phase bind failures recover the old port. Unimplemented
+  knobs (`strict-route`, `endpoint-independent-nat`, `udp-timeout`,
+  `disable-icmp-forwarding`) reject non-default values. **Exclude**
+  from the first gate: TProxy, redir, auto-redirect, UID filters, GSO.
+- **8B — macOS arm64:** reuse the 8A data path; focus utun, permissions, route
+  and DNS restore, and native app-traffic acceptance. Implemented in this
+  checkout (utun via tun-rs, Darwin split auto-route, scutil DNS
+  merge of `ServerAddresses` with extra-key snapshot/restore, owned TUN-DNS `/32`
+  on utun because `associate_route(false)` does not install the p-t-p route,
+  `tun0`/`utun` rejected without remap). Native Parity waits
+  on `PHASE8B_NATIVE=1` / `phase8b-darwin-tun`.
+- **8C — Windows x86_64:** Wintun load/distribution/errors; routes, DNS and
+  priority; privilege/driver failure paths; must not break other VPNs.
+  Implemented in this checkout (Wintun via tun-rs with `delete_driver(false)`
+  and this-adapter metric 1, Linux-style split auto-route, `netsh` DNS on the
+  Wintun adapter only, existing named adapters refused without takeover).
+  Native Parity waits on `PHASE8C_NATIVE=1` / `phase8c-windows-tun`.
+- **8F — stability / network-change (before 8D/8E):** Implemented in this
+  checkout as a poll of the physical default route excluding the TUN device
+  (`ip route show default` plus `ip -6 route show default` / `route -n get
+  default` plus `-inet6` / `Get-NetRoute` `0.0.0.0/0` and `::/0`),
+  host-route re-protect **via that snapshot** for DNS/literal proxy IPs of a
+  captured address family (never `route get` after split default; IPv6 DNS
+  or proxy literals are skipped when auto-route is IPv4-only, not installed
+  via an IPv4 gateway), refusal to overwrite foreign exact-prefix
+  routes, **socket-level** DIRECT/TUIC bypass (bind the physical interface;
+  ordinary DIRECT destinations do not get a system host route), Windows TCP binds
+  the NIC unicast address at local port 0, TUIC/Hysteria2 QUIC clients are
+  retired on NIC change, DIRECT UDP sockets rebound through a network-generation
+  watch, `bind_outbound_udp` taking local vs remote so loopback remotes skip NIC
+  bind, auto-detect bind selecting the matching-family physical NIC (pure IPv6
+  is not treated as a lost default; a TUN-captured family with no physical
+  egress refuses the dial instead of leaking into TUN), `route-exclude-address` physical exceptions, resolver
+  `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
+  TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
+  cap. `auto-detect-interface` or `auto-route` fills empty `interface-name`
+  bind slots per address family (including Windows). Sleep/wake is the lost-then-restored default
+  interface on the same path; this gate does not claim native sleep/wake or NIC
+  flap.
+  **Exclude** UDP IP fragment/loss, TUN-specific TCP half-close/RST fixtures,
+  Android netlink, and Darwin NetworkReachability / Windows
+  `NotifyIpInterfaceChange` FFI. Native Parity waits on `PHASE8F_NATIVE=1` /
+  `phase8f-linux-tun`. Prioritize remaining 8F exclusions later; FreeBSD/Android
+  (**8D**) and extra architecture/build profiles (**8E**) stay after 8F.
+
+### Test layers
+
+1. **Unprivileged unit** — parse, stack identity rejection, session/relay logic.
+2. **Privileged native** — Linux netns device/route/DNS/reload fixtures.
+3. **Go/Rust differential** — shared scenarios where both sides can run.
+
+CI must **not** green-skip missing privileges; privileged jobs fail closed or
+run only where privileges exist, without marking absent evidence as pass.
 
 ## Phase 9 — release replacement gate
 

@@ -141,6 +141,7 @@ pub async fn connect_udp_with_options(
             };
             let socket = match rewrite_platform::bind_outbound_udp(
                 bind,
+                address,
                 options.interface,
                 options.routing_mark,
             ) {

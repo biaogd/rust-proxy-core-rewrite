@@ -200,6 +200,17 @@ fn matches_inner_inbound_type_for_internal_routing() {
 }
 
 #[test]
+fn matches_tun_inbound_type() {
+    let rules = vec!["IN-TYPE,TUN,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("tun.test", 443);
+    input.inbound = InboundProtocol::Tun;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+    input.inbound = InboundProtocol::Socks5;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+}
+
+#[test]
 fn matches_inbound_users_exactly() {
     let rules = vec![
         "IN-USER,alice/socks4,REJECT".to_owned(),

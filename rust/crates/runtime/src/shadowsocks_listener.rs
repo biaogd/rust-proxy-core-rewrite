@@ -1341,18 +1341,7 @@ async fn run_shadowsocks_direct_udp_session(
                 return;
             }
         };
-    let bind_address = if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let outbound = match rewrite_platform::bind_outbound_udp(
-        bind_address.parse().expect("static UDP bind address"),
-        &config.interface_name,
-        config.routing_mark,
-    )
-    .and_then(UdpSocket::from_std)
-    {
+    let mut outbound = match bind_shadowsocks_direct_udp(target, &config) {
         Ok(socket) => socket,
         Err(error) => {
             state.log(
@@ -1362,6 +1351,7 @@ async fn run_shadowsocks_direct_udp_session(
             return;
         }
     };
+    let mut generation = state.subscribe_network_generation();
     let tracker = state.register(
         &first.metadata,
         &decision.target,
@@ -1381,6 +1371,22 @@ async fn run_shadowsocks_direct_udp_session(
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
+            changed = generation.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                match bind_shadowsocks_direct_udp(target, &config) {
+                    Ok(socket) => outbound = socket,
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!("shadowsocks inbound UDP rebind failed: {error}"),
+                        );
+                        break;
+                    }
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 let target = match resolve_udp_target(
@@ -1414,6 +1420,24 @@ async fn run_shadowsocks_direct_udp_session(
         }
     }
     tracker.finish(uploaded, downloaded);
+}
+
+fn bind_shadowsocks_direct_udp(
+    target: SocketAddr,
+    config: &Arc<Config>,
+) -> std::io::Result<UdpSocket> {
+    let bind_address = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
+    rewrite_platform::bind_outbound_udp(
+        bind_address.parse().expect("static UDP bind address"),
+        target,
+        &config.interface_name,
+        config.routing_mark,
+    )
+    .and_then(UdpSocket::from_std)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -636,12 +636,144 @@ rules:
 
 #[test]
 fn refuses_undeclared_features() {
-    let source = format!("{MINIMAL}\ntun:\n  enable: true\n");
+    let source = format!("{MINIMAL}\nsniffer:\n  enable: true\n");
     let spec = ConfigSpec::from_yaml(&source).expect("spec preserves unknown keys");
     assert!(matches!(
         spec.validate_declared_surface(),
-        Err(ConfigError::UnsupportedKey(key)) if key == "tun"
+        Err(ConfigError::UnsupportedKey(key)) if key == "sniffer"
     ));
+}
+
+#[test]
+fn parses_phase_eight_a_tun_smoltcp_defaults() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-route: true\n");
+    let config = Config::from_yaml(&source).expect("tun config");
+    let tun = config.tun.expect("tun present");
+    assert!(tun.enable);
+    assert_eq!(tun.stack, TunStack::Smoltcp);
+    assert!(tun.auto_route);
+    assert!(!tun.auto_detect_interface);
+    assert_eq!(tun.dns_hijack, vec!["0.0.0.0:53".to_owned()]);
+    assert_eq!(
+        tun.inet4_address,
+        vec!["198.18.0.1/30".parse().expect("prefix")]
+    );
+    assert_eq!(
+        tun.tun_dns_server(),
+        Some("198.18.0.2".parse().expect("tun dns"))
+    );
+}
+
+#[test]
+fn parses_auto_detect_interface() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-detect-interface: true\n"
+    );
+    let tun = Config::from_yaml(&source)
+        .expect("tun config")
+        .tun
+        .expect("tun present");
+    assert!(tun.auto_detect_interface);
+}
+
+#[test]
+fn hijacks_tun_dns_next_address_even_without_wildcard() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  dns-hijack:\n    - 8.8.8.8:53\n"
+    );
+    let config = Config::from_yaml(&source).expect("tun config");
+    let tun = config.tun.expect("tun present");
+    assert!(tun.hijacks_dns("8.8.8.8:53".parse().expect("literal")));
+    assert!(tun.hijacks_dns("198.18.0.2:53".parse().expect("tun dns")));
+    assert!(!tun.hijacks_dns("1.1.1.1:53".parse().expect("other")));
+}
+
+#[test]
+fn rejects_go_tun_stack_names_without_remapping() {
+    for stack in ["system", "gvisor", "mixed", "System", "gVisor", "Mixed"] {
+        let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: {stack}\n");
+        let error = Config::from_yaml(&source).expect_err("go stack names must fail");
+        assert!(
+            error.to_string().contains("smoltcp"),
+            "unexpected error for {stack}: {error}"
+        );
+        assert!(
+            error.to_string().contains("does not remap"),
+            "unexpected error for {stack}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_deferred_tun_knobs() {
+    let source =
+        format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  auto-redirect: true\n");
+    let error = Config::from_yaml(&source).expect_err("auto-redirect deferred");
+    assert!(error.to_string().contains("auto-redirect"));
+}
+
+#[test]
+fn rejects_unimplemented_tun_runtime_knobs() {
+    for (field, value) in [
+        ("strict-route", "true"),
+        ("endpoint-independent-nat", "true"),
+        ("udp-timeout", "60"),
+        ("disable-icmp-forwarding", "true"),
+    ] {
+        let source =
+            format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  {field}: {value}\n");
+        let error = Config::from_yaml(&source).expect_err("{field} unused");
+        assert!(
+            error.to_string().contains(field),
+            "unexpected error for {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn accepts_default_unimplemented_tun_runtime_knobs() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  strict-route: false\n  endpoint-independent-nat: false\n  udp-timeout: 0\n  disable-icmp-forwarding: false\n"
+    );
+    let tun = Config::from_yaml(&source)
+        .expect("default unused tun knobs")
+        .tun
+        .expect("tun present");
+    assert!(!tun.strict_route);
+    assert!(!tun.endpoint_independent_nat);
+    assert_eq!(tun.udp_timeout, 0);
+    assert!(!tun.disable_icmp_forwarding);
+}
+
+#[test]
+fn rejects_unknown_tun_keys() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  mystery: true\n");
+    let error = Config::from_yaml(&source).expect_err("unknown tun key");
+    assert!(error.to_string().contains("tun.mystery"));
+}
+
+#[test]
+fn rejects_inet6_when_ipv6_disabled() {
+    let source = format!(
+        "{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n  inet6-address:\n    - fdfe:dcba:9876::1/64\n"
+    );
+    let error = Config::from_yaml(&source).expect_err("ipv6 leak");
+    let message = error.to_string();
+    assert!(
+        message.contains("inet6-address") || message.contains("IPv6"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn hijacks_wildcard_dns_entries() {
+    let source = format!("{MINIMAL}\ntun:\n  enable: true\n  stack: smoltcp\n");
+    let tun = Config::from_yaml(&source)
+        .expect("tun")
+        .tun
+        .expect("present");
+    assert!(tun.hijacks_dns("1.1.1.1:53".parse().expect("dns")));
+    assert!(!tun.hijacks_dns("1.1.1.1:5353".parse().expect("not dns")));
 }
 
 #[test]

@@ -103,9 +103,10 @@ pub async fn associate_socks5_udp_with_options(
     } else {
         std::net::SocketAddr::from(([0_u16; 8], 0))
     };
-    let socket = rewrite_platform::bind_outbound_udp(bind, options.interface, options.routing_mark)
-        .and_then(UdpSocket::from_std)
-        .map_err(DirectError::Io)?;
+    let socket =
+        rewrite_platform::bind_outbound_udp(bind, relay, options.interface, options.routing_mark)
+            .and_then(UdpSocket::from_std)
+            .map_err(DirectError::Io)?;
     Ok(Socks5UdpAssociation {
         _control: tokio::sync::Mutex::new(control),
         socket,

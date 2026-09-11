@@ -23,6 +23,7 @@ use crate::proxy::{
     parse_proxy_provider_source, parse_proxy_providers, proxy_member_types,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
+use crate::tun::parse_tun;
 
 impl ConfigSpec {
     /// Parses the Phase 2 specification layer and overlays Go-compatible
@@ -168,6 +169,7 @@ impl ConfigSpec {
             provider_directory.or(config_directory),
             geodata_mode,
         )?;
+        let tun = parse_tun(raw.tun, dns.as_ref(), raw.ipv6.unwrap_or(true))?;
         let external_ui = raw.external_ui.unwrap_or_default();
         let external_ui_name = raw.external_ui_name.unwrap_or_default();
         validate_external_ui(&external_ui, &external_ui_name, provider_directory)?;
@@ -264,6 +266,7 @@ impl ConfigSpec {
             proxy_groups,
             rules,
             shadowsocks_listeners,
+            tun,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
             home_directory: provider_directory.map(Path::to_path_buf),
@@ -425,6 +428,7 @@ impl TryFrom<ConfigSpec> for Config {
             raw_sub_rules: spec.raw_sub_rules,
             rematches: spec.rematches,
             shadowsocks_listeners: spec.shadowsocks_listeners,
+            tun: spec.tun,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
         })

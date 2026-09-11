@@ -27,6 +27,7 @@ members = [
   "crates/state",
   "crates/test-support",
   "crates/transport",
+  "crates/tun",
 ]
 resolver = "2"
 
@@ -102,6 +103,8 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tun-rs = { version = "=2.8.9", features = ["async"] }
+netstack-smoltcp = "=0.2.4"
 tokio-tfo = "0.4.3"
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
 tower = "0.5"

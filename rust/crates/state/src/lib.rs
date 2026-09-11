@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use lru::LruCache;
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
 
 pub use connections::ConnectionGuard;
 pub use model::{
@@ -84,11 +84,13 @@ pub struct RuntimeState {
     tuic_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::TuicClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
     ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
+    network_generation: watch::Sender<u64>,
 }
 
 impl Default for RuntimeState {
     fn default() -> Self {
         let (logs, _) = broadcast::channel(1024);
+        let (network_generation, _) = watch::channel(0);
         Self {
             next_id: AtomicU64::new(1),
             uploaded: AtomicU64::new(0),
@@ -120,6 +122,7 @@ impl Default for RuntimeState {
             tuic_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
             ssr_clients: Mutex::new(BTreeMap::new()),
+            network_generation,
         }
     }
 }
@@ -328,5 +331,21 @@ impl RuntimeState {
         for (_, client) in clients.into_values() {
             client.retire().await;
         }
+    }
+
+    /// Bumps the TUN network-change generation so DIRECT UDP sessions rebind.
+    pub fn bump_network_generation(&self) {
+        let next = self.network_generation.borrow().saturating_add(1);
+        let _ = self.network_generation.send(next);
+    }
+
+    #[must_use]
+    pub fn network_generation(&self) -> u64 {
+        *self.network_generation.borrow()
+    }
+
+    #[must_use]
+    pub fn subscribe_network_generation(&self) -> watch::Receiver<u64> {
+        self.network_generation.subscribe()
     }
 }

@@ -11,6 +11,7 @@ quinn.workspace = true
 rand.workspace = true
 rewrite-io = { path = "../io" }
 rewrite-model = { path = "../model" }
+rewrite-platform = { path = "../platform" }
 rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true
 thiserror.workspace = true

@@ -6,6 +6,7 @@ mod named_listeners;
 mod proxy;
 mod raw;
 mod shadowsocks_inbound;
+mod tun;
 
 pub use error::ConfigError;
 pub use model::*;

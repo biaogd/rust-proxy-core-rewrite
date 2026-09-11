@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -87,6 +87,7 @@ pub struct ConfigSpec {
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
+    pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -150,6 +151,7 @@ pub struct Config {
     pub(crate) raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub(crate) rematches: Vec<RematchSpec>,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
+    pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -1025,6 +1027,106 @@ pub struct NormalizedConfig {
     pub etag_support: bool,
     pub rules: Vec<String>,
     pub sub_rules: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunStack {
+    Smoltcp,
+}
+
+// First-round TUN surface for Phase 8A. Deferred Go-only knobs — including
+// `strict-route`, `endpoint-independent-nat`, `udp-timeout`, and
+// `disable-icmp-forwarding` — are rejected at parse time rather than stored
+// and silently ignored. Omitted / false / 0 remain accepted defaults.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunConfig {
+    pub enable: bool,
+    pub device: String,
+    pub stack: TunStack,
+    pub dns_hijack: Vec<String>,
+    pub auto_route: bool,
+    pub auto_detect_interface: bool,
+    pub mtu: u32,
+    pub inet4_address: Vec<IpNet>,
+    pub inet6_address: Vec<IpNet>,
+    pub route_address: Vec<IpNet>,
+    pub route_exclude_address: Vec<IpNet>,
+    pub inet4_route_address: Vec<IpNet>,
+    pub inet6_route_address: Vec<IpNet>,
+    pub inet4_route_exclude_address: Vec<IpNet>,
+    pub inet6_route_exclude_address: Vec<IpNet>,
+    pub strict_route: bool,
+    pub endpoint_independent_nat: bool,
+    pub udp_timeout: i64,
+    pub file_descriptor: i64,
+    pub disable_icmp_forwarding: bool,
+}
+
+impl TunStack {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoltcp => "smoltcp",
+        }
+    }
+}
+
+impl TunConfig {
+    /// Go uses `Inet4Address[0].Addr().Next()` as the TUN DNS / Darwin system DNS.
+    #[must_use]
+    pub fn tun_dns_server(&self) -> Option<IpAddr> {
+        match self.inet4_address.first().map(IpNet::addr)? {
+            IpAddr::V4(address) => Some(IpAddr::V4(Ipv4Addr::from(
+                u32::from(address).wrapping_add(1),
+            ))),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    /// Returns true when `destination` matches a configured `dns-hijack` entry
+    /// or the TUN DNS next address (port 53).
+    #[must_use]
+    pub fn hijacks_dns(&self, destination: SocketAddr) -> bool {
+        if self
+            .dns_hijack
+            .iter()
+            .any(|entry| dns_hijack_matches(entry, destination))
+        {
+            return true;
+        }
+        self.tun_dns_server()
+            .is_some_and(|dns| destination.ip() == dns && destination.port() == 53)
+    }
+}
+
+fn dns_hijack_matches(entry: &str, destination: SocketAddr) -> bool {
+    let trimmed = entry.trim();
+    if trimmed.eq_ignore_ascii_case("any") {
+        return destination.port() == 53;
+    }
+    if let Ok(address) = trimmed.parse::<std::net::IpAddr>() {
+        return wildcard_or_exact_ip(address, destination.ip()) && destination.port() == 53;
+    }
+    if let Ok(socket) = trimmed.parse::<SocketAddr>() {
+        return wildcard_or_exact_ip(socket.ip(), destination.ip())
+            && socket.port() == destination.port();
+    }
+    if let Some((host, port)) = trimmed.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+        && let Ok(address) = host.parse::<std::net::IpAddr>()
+    {
+        return wildcard_or_exact_ip(address, destination.ip()) && port == destination.port();
+    }
+    false
+}
+
+fn wildcard_or_exact_ip(configured: std::net::IpAddr, actual: std::net::IpAddr) -> bool {
+    match configured {
+        std::net::IpAddr::V4(address) if address.is_unspecified() => actual.is_ipv4(),
+        std::net::IpAddr::V6(address) if address.is_unspecified() => actual.is_ipv6(),
+        other => other == actual,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
