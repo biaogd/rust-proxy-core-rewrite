@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import select
 import socket
 import socketserver
 import subprocess
@@ -18,7 +19,7 @@ import threading
 from typing import Any
 
 from phase1 import IO_DEADLINE, ROOT, cargo_target_path, reserve_port, wait_ready
-from phase3 import UdpEchoHandler, launch, socks_udp_packet, stop
+from phase3 import UdpEchoHandler, decode_socks_udp, launch, socks_udp_packet, stop
 from phase5b1a import build_binaries, debug_files
 from phase6c_shadowsocks import SECRET, start_authority
 from phase6c_shadowsocks_2022 import KEY_128, KEY_256
@@ -181,16 +182,17 @@ def try_ipv6_echo() -> tuple[socketserver.BaseServer, int] | None:
 
 
 class UdpRelay:
-    """Forwards Shadowsocks datagrams and can replay captured server replies."""
+    """Per-client SS UDP NAT with a dedicated upstream socket for each product."""
 
     def __init__(self, backend_port: int) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.settimeout(0.2)
-        self.port = int(self._sock.getsockname()[1])
+        self._listen = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._listen.bind(("127.0.0.1", 0))
+        self._listen.setblocking(False)
+        self.port = int(self._listen.getsockname()[1])
         self._backend = ("127.0.0.1", backend_port)
-        self._product: tuple[str, int] | None = None
-        self.replies: list[bytes] = []
+        self._upstreams: dict[tuple[str, int], socket.socket] = {}
+        self._reply_to: dict[int, tuple[str, int]] = {}
+        self.replies: list[tuple[tuple[str, int], bytes]] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -198,40 +200,63 @@ class UdpRelay:
 
     def replay_oldest_reply(self) -> bool:
         with self._lock:
-            if not self.replies or self._product is None:
+            if not self.replies:
                 return False
-            packet = self.replies[0]
-            dest = self._product
-        self._sock.sendto(packet, dest)
+            product, packet = self.replies[0]
+        self._listen.sendto(packet, product)
         return True
 
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=IO_DEADLINE)
-        self._sock.close()
+        self._listen.close()
+        with self._lock:
+            for upstream in self._upstreams.values():
+                upstream.close()
+            self._upstreams.clear()
+            self._reply_to.clear()
+
+    def _upstream_for(self, product: tuple[str, int]) -> socket.socket:
+        with self._lock:
+            upstream = self._upstreams.get(product)
+            if upstream is not None:
+                return upstream
+            upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            upstream.bind(("127.0.0.1", 0))
+            upstream.setblocking(False)
+            self._upstreams[product] = upstream
+            self._reply_to[upstream.fileno()] = product
+            return upstream
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            with self._lock:
+                sockets: list[socket.socket] = [self._listen, *self._upstreams.values()]
             try:
-                data, addr = self._sock.recvfrom(65_535)
-            except TimeoutError:
-                continue
+                readable, _, _ = select.select(sockets, [], [], 0.2)
             except OSError:
                 break
-            if addr == self._backend:
-                with self._lock:
-                    self.replies.append(data)
-                    product = self._product
-                if product is not None:
+            for sock in readable:
+                try:
+                    data, addr = sock.recvfrom(65_535)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    return
+                if sock is self._listen:
                     try:
-                        self._sock.sendto(data, product)
+                        self._upstream_for(addr).sendto(data, self._backend)
                     except OSError:
                         return
-            else:
+                    continue
                 with self._lock:
-                    self._product = addr
+                    product = self._reply_to.get(sock.fileno())
+                    if product is not None:
+                        self.replies.append((product, data))
+                if product is None:
+                    continue
                 try:
-                    self._sock.sendto(data, self._backend)
+                    self._listen.sendto(data, product)
                 except OSError:
                     return
 
@@ -258,6 +283,33 @@ def drain_datagrams(client: socket.socket) -> None:
         pass
     finally:
         client.settimeout(IO_DEADLINE)
+
+
+def exercise_concurrent_clients(mixed_port: int, echo_port: int) -> bool:
+    clients: list[socket.socket] = []
+    expected: list[bytes] = []
+    try:
+        for index in range(3):
+            client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            client.bind(("127.0.0.1", 0))
+            client.settimeout(IO_DEADLINE)
+            payload = f"ss2022-udp-concurrent-{index}".encode()
+            client.sendto(
+                socks_udp_packet(echo_port, payload), ("127.0.0.1", mixed_port)
+            )
+            clients.append(client)
+            expected.append(payload)
+        for client, payload in zip(reversed(clients), reversed(expected), strict=True):
+            response, _ = client.recvfrom(65_535)
+            address, _, body = decode_socks_udp(response)
+            if address != "127.0.0.1" or body != payload:
+                return False
+        return True
+    except (TimeoutError, OSError, ValueError):
+        return False
+    finally:
+        for client in clients:
+            client.close()
 
 
 def exercise_listener(
@@ -442,23 +494,7 @@ rules:
                 v6_echo.shutdown()
                 v6_echo.server_close()
                 ipv6_server = None
-        concurrent = True
-        clients = []
-        try:
-            for index in range(3):
-                client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                client.bind(("127.0.0.1", 0))
-                client.settimeout(IO_DEADLINE)
-                payload = f"ss2022-udp-concurrent-{index}".encode()
-                if not exchange(
-                    client, mixed_port, socks_udp_packet(echo_port, payload), payload
-                ):
-                    concurrent = False
-                    break
-                clients.append(client)
-        finally:
-            for client in clients:
-                client.close()
+        concurrent = exercise_concurrent_clients(mixed_port, echo_port)
         native = exercise_native_client(
             native_client, authority_port, echo_port, cipher, password
         )

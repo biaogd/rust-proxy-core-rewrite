@@ -151,7 +151,7 @@ impl ClientUdpState {
         if !self.server_replays.contains_key(&session_id)
             && self.server_replays.len() >= CLIENT_SERVER_SESSION_CAP
         {
-            self.evict_oldest_server_replay();
+            return Err(ClientUdpReject::ServerSessionLimit);
         }
         let replay = self
             .server_replays
@@ -173,17 +173,6 @@ impl ClientUdpState {
             now.saturating_duration_since(replay.last_seen) < SERVER_SESSION_TTL
         });
     }
-
-    fn evict_oldest_server_replay(&mut self) {
-        let oldest = self
-            .server_replays
-            .iter()
-            .min_by_key(|(_, replay)| replay.last_seen)
-            .map(|(session_id, _)| *session_id);
-        if let Some(session_id) = oldest {
-            self.server_replays.remove(&session_id);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +180,7 @@ pub(crate) enum ClientUdpReject {
     MissingControl,
     ClientSession,
     ServerSession,
+    ServerSessionLimit,
     Replay,
 }
 
@@ -388,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn client_state_expires_and_bounds_server_replay_windows() {
+    fn client_state_rejects_new_server_session_when_full_without_forgetting() {
         let mut state = ClientUdpState::new(true);
         let client_session_id = state.next_send_control().client_session_id;
         let t0 = Instant::now();
@@ -398,43 +388,63 @@ mod tests {
             assert_eq!(state.accept_recv_at(Some(&reply), at), Ok(()));
         }
         let first = client_reply(client_session_id, 1, 1);
+        let full_at = t0 + Duration::from_millis(CLIENT_SERVER_SESSION_CAP as u64);
         assert_eq!(
-            state.accept_recv_at(
-                Some(&first),
-                t0 + Duration::from_millis(CLIENT_SERVER_SESSION_CAP as u64)
-            ),
+            state.accept_recv_at(Some(&first), full_at),
             Err(ClientUdpReject::Replay)
         );
         let extra = client_reply(client_session_id, CLIENT_SERVER_SESSION_CAP as u64 + 1, 1);
         assert_eq!(
-            state.accept_recv_at(
-                Some(&extra),
-                t0 + Duration::from_millis(CLIENT_SERVER_SESSION_CAP as u64 + 1)
-            ),
-            Ok(())
+            state.accept_recv_at(Some(&extra), full_at),
+            Err(ClientUdpReject::ServerSessionLimit)
         );
         assert_eq!(
-            state.accept_recv_at(
-                Some(&first),
-                t0 + Duration::from_millis(CLIENT_SERVER_SESSION_CAP as u64 + 1)
-            ),
-            Ok(())
+            state.accept_recv_at(Some(&first), full_at),
+            Err(ClientUdpReject::Replay)
         );
+    }
 
-        let mut expired = ClientUdpState::new(true);
-        let client_session_id = expired.next_send_control().client_session_id;
+    #[test]
+    fn client_state_expires_idle_server_replay_window() {
+        let mut state = ClientUdpState::new(true);
+        let client_session_id = state.next_send_control().client_session_id;
+        let t0 = Instant::now();
         let reply = client_reply(client_session_id, 11, 1);
-        assert_eq!(expired.accept_recv_at(Some(&reply), t0), Ok(()));
+        assert_eq!(state.accept_recv_at(Some(&reply), t0), Ok(()));
         assert_eq!(
-            expired.accept_recv_at(Some(&reply), t0 + Duration::from_secs(1)),
+            state.accept_recv_at(Some(&reply), t0 + Duration::from_secs(1)),
             Err(ClientUdpReject::Replay)
         );
         assert_eq!(
-            expired.accept_recv_at(
+            state.accept_recv_at(
                 Some(&reply),
                 t0 + SERVER_SESSION_TTL + Duration::from_secs(1)
             ),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn client_state_reuses_expired_slot_without_dropping_live_windows() {
+        let mut state = ClientUdpState::new(true);
+        let client_session_id = state.next_send_control().client_session_id;
+        let t0 = Instant::now();
+        let first = client_reply(client_session_id, 1, 1);
+        assert_eq!(state.accept_recv_at(Some(&first), t0), Ok(()));
+        for index in 2..=CLIENT_SERVER_SESSION_CAP {
+            let reply = client_reply(client_session_id, index as u64, 1);
+            assert_eq!(
+                state.accept_recv_at(Some(&reply), t0 + SERVER_SESSION_TTL / 2),
+                Ok(())
+            );
+        }
+        let after_first_ttl = t0 + SERVER_SESSION_TTL + Duration::from_millis(1);
+        let extra = client_reply(client_session_id, CLIENT_SERVER_SESSION_CAP as u64 + 1, 1);
+        assert_eq!(state.accept_recv_at(Some(&extra), after_first_ttl), Ok(()));
+        let live = client_reply(client_session_id, 2, 1);
+        assert_eq!(
+            state.accept_recv_at(Some(&live), after_first_ttl),
+            Err(ClientUdpReject::Replay)
         );
     }
 

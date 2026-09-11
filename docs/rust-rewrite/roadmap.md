@@ -1922,8 +1922,8 @@ differential exists. Multi-hop EIH, UoT and plugin UDP are unchanged.
 The maintained `shadowsocks` crate already implements SIP022 AEAD-2022 packet
 crypto. Protocol state lives in `rewrite-protocol-shadowsocks`: nonzero client
 and server session identifiers, incrementing packet counters, and per-server
-session sliding replay windows (bounded and expired) that accept legitimate
-reordering and drop duplicates, too-old, cross-session replays and
+session sliding replay windows (bounded, expired, and never evicted while still
+valid) that accept legitimate reordering and drop duplicates, too-old, cross-session replays and
 authentication-failed datagrams. Outbound wrapping keeps platform NIC bind,
 TUN loop-avoidance and routing-mark policy; mixed/SOCKS5/TUN UDP sessions
 rebuild the association after `bump_network_generation`.

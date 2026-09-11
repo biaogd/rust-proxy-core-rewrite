@@ -5602,8 +5602,10 @@ explicitly rejected.
 The maintained `shadowsocks` crate already encrypts SIP022 packets. Protocol
 state lives in `rewrite-protocol-shadowsocks`: nonzero client and server session
 identifiers, packet counters that start at 1, and per-server-session 128×64-bit
-sliding replay windows (capped and expired) matching `sing-shadowsocks2`'s
-window shape. Switching server sessions no longer clears earlier windows.
+sliding replay windows (capped, expired, and retained while still valid)
+matching `sing-shadowsocks2`'s window shape. A full table rejects additional
+server sessions instead of forgetting live replay state. Switching server
+sessions no longer clears earlier windows.
 Outbound wrapping keeps NIC bind, TUN
 loop-avoidance and routing-mark policy; mixed/SOCKS5/TUN UDP sessions rebuild
 the association after `bump_network_generation`.
