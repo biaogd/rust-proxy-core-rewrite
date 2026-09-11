@@ -22,10 +22,6 @@ use crate::{DEFAULT_MTU, HANDSHAKE_TIMEOUT, WireGuardProtocolError};
 
 const PEER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
-/// Tunnel is treated as dead only when no inner IP has arrived for this long.
-/// Destination TCP timeouts shorter than this (or with concurrent live flows)
-/// must not reset the shared Noise session.
-const TUNNEL_STALE_AFTER: Duration = Duration::from_secs(2);
 
 /// Construction options for a single-peer `WireGuard` outbound.
 #[derive(Clone, Debug)]
@@ -118,7 +114,6 @@ struct ClientInner {
     shutdown: CancellationToken,
     handshake: AsyncMutex<()>,
     established: AtomicBool,
-    last_recv_ip: Mutex<Instant>,
     datagrams_sent: AtomicU64,
     bind_interface: String,
     routing_mark: i64,
@@ -235,7 +230,6 @@ impl Client {
             shutdown,
             handshake: AsyncMutex::new(()),
             established: AtomicBool::new(false),
-            last_recv_ip: Mutex::new(Instant::now()),
             datagrams_sent: AtomicU64::new(0),
             bind_interface: options.bind_interface,
             routing_mark: options.routing_mark,
@@ -252,10 +246,8 @@ impl Client {
 
     /// Opens a TCP stream to `destination` through the tunnel.
     ///
-    /// Destination TCP failures do not reset the shared Noise session. A
-    /// handshake retry happens only when the tunnel itself looks stale (no
-    /// inner IP received recently), so a restarted peer can recover without
-    /// disrupting other live TCP/UDP flows.
+    /// Destination TCP failures never reset the shared Noise session. Recovery
+    /// happens from tunnel events (`ConnectionExpired` / incoming handshake).
     ///
     /// # Errors
     ///
@@ -265,14 +257,7 @@ impl Client {
         destination: &Destination,
     ) -> Result<BoxedStream, WireGuardProtocolError> {
         schedule_endpoint_refresh(&self.inner);
-        match self.open_tcp_once(destination).await {
-            Ok(stream) => Ok(stream),
-            Err(error) if tcp_retryable(&error) && tunnel_is_stale(&self.inner) => {
-                self.force_rehandshake().await?;
-                self.open_tcp_once(destination).await
-            }
-            Err(error) => Err(error),
-        }
+        self.open_tcp_once(destination).await
     }
 
     /// Opens a connectionless UDP socket through the tunnel (Go `ListenPacketContext`).
@@ -398,16 +383,6 @@ impl Client {
         }
     }
 
-    async fn force_rehandshake(&self) -> Result<(), WireGuardProtocolError> {
-        let _guard = self.inner.handshake.lock().await;
-        if self.inner.established.load(Ordering::Acquire) && !tunnel_is_stale(&self.inner) {
-            return Ok(());
-        }
-        reset_session(&self.inner);
-        self.inner.notify.notify_waiters();
-        self.complete_handshake().await
-    }
-
     async fn ensure_handshake(&self) -> Result<(), WireGuardProtocolError> {
         if self.inner.established.load(Ordering::Acquire) {
             return Ok(());
@@ -528,7 +503,7 @@ async fn handle_incoming(inner: &ClientInner, from: Option<SocketAddr>, datagram
                 packet = &[];
             }
             TunnelAction::RecvIp(ip) => {
-                mark_recv_ip(inner);
+                inner.established.store(true, Ordering::Release);
                 lock_stack(&inner.stack).ingest_ip(ip);
                 inner.notify.notify_waiters();
                 packet = &[];
@@ -564,7 +539,7 @@ async fn pump_stack(inner: &ClientInner) {
                     let _ = send_udp(inner, &extra).await;
                 }
                 TunnelAction::RecvIp(ip) => {
-                    mark_recv_ip(inner);
+                    inner.established.store(true, Ordering::Release);
                     lock_stack(&inner.stack).ingest_ip(ip);
                     inner.notify.notify_waiters();
                 }
@@ -733,23 +708,6 @@ fn clone_udp(inner: &ClientInner) -> Arc<UdpSocket> {
     )
 }
 
-fn mark_recv_ip(inner: &ClientInner) {
-    inner.established.store(true, Ordering::Release);
-    *inner
-        .last_recv_ip
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
-}
-
-fn tunnel_is_stale(inner: &ClientInner) -> bool {
-    inner
-        .last_recv_ip
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .elapsed()
-        >= TUNNEL_STALE_AFTER
-}
-
 fn protect_peer_endpoint(endpoint: SocketAddr) -> Result<(), WireGuardProtocolError> {
     rewrite_platform::protect_outbound_destination(endpoint.ip()).map_err(|error| {
         WireGuardProtocolError::protocol(format!("WireGuard loop-avoidance: {error}"))
@@ -841,15 +799,6 @@ impl Drop for ConnectingTcp {
             lock_stack(&self.stack).abort(handle);
             self.notify.notify_one();
         }
-    }
-}
-
-fn tcp_retryable(error: &WireGuardProtocolError) -> bool {
-    match error {
-        WireGuardProtocolError::Protocol(message) => {
-            message.contains("timed out") || message.contains("closed before establish")
-        }
-        _ => false,
     }
 }
 

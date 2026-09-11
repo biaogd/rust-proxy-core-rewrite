@@ -150,7 +150,7 @@ async fn tcp_retries_handshake_after_peer_restart() {
     let (server_priv, server_pub) = pair(27);
     let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
     let endpoint = listen.local_addr().expect("wg addr");
-    let tunnel = spawn_swappable_responder(listen, server_priv, client_pub, 2);
+    let responder = spawn_swappable_responder(listen, server_priv, client_pub, 2);
 
     let client = Client::new(client_options(
         endpoint.port(),
@@ -162,9 +162,10 @@ async fn tcp_retries_handshake_after_peer_restart() {
     .expect("client");
     tcp_echo(&client, echo_port, b"before-restart").await;
 
-    *tunnel.lock().expect("swap") = Arc::new(
+    *responder.tunnel.lock().expect("swap") = Arc::new(
         NoiseTunnel::new(server_priv, client_pub, None, None, [0; 3], 4).expect("new peer"),
     );
+    responder.initiate_handshake().await;
 
     tcp_echo(&client, echo_port, b"after-restart").await;
     client.close().await;
@@ -203,14 +204,157 @@ async fn graceful_tcp_shutdown_delivers_bytes_to_delayed_reader() {
 }
 
 #[tokio::test]
-async fn refused_tcp_dials_do_not_reset_shared_session() {
+async fn tcp_flush_errors_after_rst_with_unacked_data() {
+    let hold = TcpListener::bind("127.0.0.1:0").await.expect("hold bind");
+    let rst_port = hold.local_addr().expect("hold addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = hold.accept().await else {
+            return;
+        };
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(stream);
+    });
+    let (client_priv, client_pub) = pair(85);
+    let (server_priv, server_pub) = pair(87);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder_with_hooks(
+        listen,
+        server_priv,
+        client_pub,
+        2,
+        InnerTcpHooks {
+            data_reset: Some(rst_port),
+            ..InnerTcpHooks::default()
+        },
+    );
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let mut stream = client
+        .open_tcp(&echo_destination(rst_port))
+        .await
+        .expect("open tcp");
+    let payload = vec![0x5a_u8; 64];
+    stream.write_all(&payload).await.expect("write");
+    let flush = tokio::time::timeout(Duration::from_secs(2), stream.flush()).await;
+    assert!(
+        matches!(flush, Ok(Err(_)) | Err(_)),
+        "flush must not hang after RST with unacked data, got {flush:?}"
+    );
+    let shutdown = tokio::time::timeout(Duration::from_secs(2), stream.shutdown()).await;
+    assert!(
+        matches!(shutdown, Ok(Err(_) | Ok(())) | Err(_)),
+        "shutdown after RST must finish, got {shutdown:?}"
+    );
+    client.close().await;
+}
+
+#[tokio::test]
+async fn released_fin_wait_is_reaped_when_peer_holds_close_wait() {
+    let hold = TcpListener::bind("127.0.0.1:0").await.expect("hold bind");
+    let port = hold.local_addr().expect("hold addr").port();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = hold.accept().await else {
+            return;
+        };
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drop(stream);
+    });
+    let (client_priv, client_pub) = pair(89);
+    let (server_priv, server_pub) = pair(91);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let mut stream = client
+        .open_tcp(&echo_destination(port))
+        .await
+        .expect("open tcp");
+    stream.write_all(b"fin-wait").await.expect("write");
+    stream.shutdown().await.expect("shutdown");
+    drop(stream);
+    wait_live_sockets(&client, 0).await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn held_half_close_is_not_reaped_with_released_sockets() {
+    let hold = TcpListener::bind("127.0.0.1:0").await.expect("hold bind");
+    let port = hold.local_addr().expect("hold addr").port();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = hold.accept().await else {
+            return;
+        };
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        drop(stream);
+    });
+    let (client_priv, client_pub) = pair(93);
+    let (server_priv, server_pub) = pair(95);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let mut stream = client
+        .open_tcp(&echo_destination(port))
+        .await
+        .expect("held tcp");
+    stream.write_all(b"keep-half").await.expect("write");
+    stream.shutdown().await.expect("shutdown");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(
+        client.live_socket_count(),
+        1,
+        "application-held half-close must outlive the released-socket reap timer"
+    );
+    drop(stream);
+    wait_live_sockets(&client, 0).await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn idle_tunnel_survives_syn_reset_and_blackhole() {
     let echo_port = spawn_echo().await;
     let udp_port = spawn_udp_echo().await;
+    let syn_reset = 9_u16;
     let (client_priv, client_pub) = pair(77);
     let (server_priv, server_pub) = pair(79);
     let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
     let endpoint = listen.local_addr().expect("wg addr");
-    spawn_responder(listen, server_priv, client_pub, 2);
+    spawn_responder_with_hooks(
+        listen,
+        server_priv,
+        client_pub,
+        2,
+        InnerTcpHooks {
+            syn_reset: Some(syn_reset),
+            blackhole: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            ..InnerTcpHooks::default()
+        },
+    );
     let client = Client::new(client_options(
         endpoint.port(),
         client_priv,
@@ -238,43 +382,44 @@ async fn refused_tcp_dials_do_not_reset_shared_session() {
         .expect("udp pin recv");
     assert_eq!(udp_pin, b"keep-udp");
 
-    let unused = TcpListener::bind("127.0.0.1:0").await.expect("unused bind");
-    let closed_port = unused.local_addr().expect("unused addr").port();
-    drop(unused);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
-    // Closed inner ports still complete the userspace TCP handshake; the
-    // authority then fails the host connect. The probe is that live TCP/UDP
-    // keep transferring while those dials run — not that `open_tcp` returns Err.
-    let mut refused = Vec::new();
     for _ in 0..8 {
-        let client = client.clone();
-        refused.push(tokio::spawn(async move {
-            client.open_tcp(&echo_destination(closed_port)).await
-        }));
-    }
-    for index in 0..8_u8 {
-        live_tcp.write_all(&[index]).await.expect("live write");
-        let mut byte = [0_u8; 1];
-        live_tcp.read_exact(&mut byte).await.expect("live read");
-        assert_eq!(
-            byte[0], index,
-            "live TCP must keep echoing during refused dials"
-        );
-        udp.send(udp_dest, &[index]).await.expect("live udp send");
-        let (_, got) = tokio::time::timeout(Duration::from_secs(5), udp.recv())
-            .await
-            .expect("live udp timeout")
-            .expect("live udp recv");
-        assert_eq!(
-            got,
-            [index],
-            "live UDP must keep echoing during refused dials"
+        let result = client.open_tcp(&echo_destination(syn_reset)).await;
+        assert!(result.is_err(), "SYN RST must fail before establish");
+        let message = result.err().expect("syn rst error").to_string();
+        assert!(
+            message.contains("closed before establish"),
+            "expected SYN reject, got {message}"
         );
     }
-    for task in refused {
-        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
-    }
-    tcp_echo(&client, echo_port, b"after-refused").await;
+    let blackhole = Destination {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        port: 81,
+    };
+    let blackhole_result =
+        tokio::time::timeout(Duration::from_secs(2), client.open_tcp(&blackhole)).await;
+    assert!(
+        matches!(blackhole_result, Err(_) | Ok(Err(_))),
+        "blackhole SYN should not establish"
+    );
+
+    live_tcp.write_all(b"still").await.expect("idle tcp write");
+    let mut still = [0_u8; 5];
+    live_tcp
+        .read_exact(&mut still)
+        .await
+        .expect("idle tcp read");
+    assert_eq!(&still, b"still");
+    udp.send(udp_dest, b"still-udp")
+        .await
+        .expect("idle udp send");
+    let (_, got) = tokio::time::timeout(Duration::from_secs(5), udp.recv())
+        .await
+        .expect("idle udp timeout")
+        .expect("idle udp recv");
+    assert_eq!(got, b"still-udp");
+    tcp_echo(&client, echo_port, b"after-idle-failures").await;
     client.close().await;
 }
 
@@ -342,7 +487,7 @@ async fn traffic_follows_replaced_endpoint() {
 }
 
 async fn wait_live_sockets(client: &Client, expected: usize) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if client.live_socket_count() == expected {
             return;
@@ -703,11 +848,27 @@ async fn failed_configured_refresh_does_not_fall_back_to_system_dns() {
 }
 
 fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 32], index: u32) {
+    spawn_responder_with_hooks(
+        udp,
+        private_key,
+        peer_public_key,
+        index,
+        InnerTcpHooks::default(),
+    );
+}
+
+fn spawn_responder_with_hooks(
+    udp: UdpSocket,
+    private_key: [u8; 32],
+    peer_public_key: [u8; 32],
+    index: u32,
+    hooks: InnerTcpHooks,
+) {
     let tunnel = Arc::new(
         NoiseTunnel::new(private_key, peer_public_key, None, None, [0; 3], index)
             .expect("server tunn"),
     );
-    spawn_shared_responder(vec![udp], tunnel);
+    spawn_shared_responder_with_slot(vec![udp], &Arc::new(std::sync::Mutex::new(tunnel)), hooks);
 }
 
 fn spawn_swappable_responder(
@@ -715,26 +876,60 @@ fn spawn_swappable_responder(
     private_key: [u8; 32],
     peer_public_key: [u8; 32],
     index: u32,
-) -> Arc<std::sync::Mutex<Arc<NoiseTunnel>>> {
+) -> SwappableResponder {
     let tunnel = Arc::new(
         NoiseTunnel::new(private_key, peer_public_key, None, None, [0; 3], index)
             .expect("server tunn"),
     );
     let slot = Arc::new(std::sync::Mutex::new(Arc::clone(&tunnel)));
-    spawn_shared_responder_with_slot(vec![udp], &slot);
-    slot
+    let peer = spawn_shared_responder_with_slot(vec![udp], &slot, InnerTcpHooks::default());
+    SwappableResponder { tunnel: slot, peer }
 }
 
 fn spawn_shared_responder(sockets: Vec<UdpSocket>, tunnel: Arc<NoiseTunnel>) {
     let slot = Arc::new(std::sync::Mutex::new(tunnel));
-    spawn_shared_responder_with_slot(sockets, &slot);
+    spawn_shared_responder_with_slot(sockets, &slot, InnerTcpHooks::default());
+}
+
+type PeerEndpoint = Arc<Mutex<Option<(SocketAddr, Arc<UdpSocket>)>>>;
+
+#[derive(Clone, Copy, Default)]
+struct InnerTcpHooks {
+    syn_reset: Option<u16>,
+    data_reset: Option<u16>,
+    blackhole: Option<Ipv4Addr>,
+}
+
+struct SwappableResponder {
+    tunnel: Arc<std::sync::Mutex<Arc<NoiseTunnel>>>,
+    peer: PeerEndpoint,
+}
+
+impl SwappableResponder {
+    async fn initiate_handshake(&self) {
+        let tunnel = self
+            .tunnel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some((endpoint, udp)) = self.peer.lock().await.clone() else {
+            panic!("peer endpoint unknown");
+        };
+        let TunnelAction::SendUdp(init) = tunnel.format_handshake(true) else {
+            panic!("expected handshake initiation");
+        };
+        udp.send_to(&init, endpoint)
+            .await
+            .expect("send peer handshake");
+    }
 }
 
 #[allow(clippy::too_many_lines)]
 fn spawn_shared_responder_with_slot(
     sockets: Vec<UdpSocket>,
     tunnel: &Arc<std::sync::Mutex<Arc<NoiseTunnel>>>,
-) {
+    hooks: InnerTcpHooks,
+) -> PeerEndpoint {
     let (stack, runner, stack_udp, tcp) = StackBuilder::default()
         .stack_buffer_size(1024)
         .tcp_buffer_size(1024)
@@ -787,8 +982,20 @@ fn spawn_shared_responder_with_slot(
                             packet = &[];
                         }
                         TunnelAction::RecvIp(ip) => {
-                            if ip_tx.send(ip).await.is_err() {
-                                return;
+                            match classify_inner(&ip, &hooks) {
+                                InnerAction::Drop => {}
+                                InnerAction::Reply(rst) => {
+                                    if let TunnelAction::SendUdp(datagram) =
+                                        current.encapsulate(&rst)
+                                    {
+                                        let _ = recv_udp.send_to(&datagram, from).await;
+                                    }
+                                }
+                                InnerAction::Forward => {
+                                    if ip_tx.send(ip).await.is_err() {
+                                        return;
+                                    }
+                                }
                             }
                             packet = &[];
                         }
@@ -856,4 +1063,92 @@ fn spawn_shared_responder_with_slot(
             });
         }
     });
+    peer
+}
+
+enum InnerAction {
+    Forward,
+    Drop,
+    Reply(Vec<u8>),
+}
+
+fn classify_inner(packet: &[u8], hooks: &InnerTcpHooks) -> InnerAction {
+    let Ok(ipv4) = smoltcp::wire::Ipv4Packet::new_checked(packet) else {
+        return InnerAction::Forward;
+    };
+    let dest = Ipv4Addr::from(ipv4.dst_addr().octets());
+    if hooks.blackhole == Some(dest) {
+        return InnerAction::Drop;
+    }
+    if ipv4.next_header() != smoltcp::wire::IpProtocol::Tcp {
+        return InnerAction::Forward;
+    }
+    let Ok(tcp) = smoltcp::wire::TcpPacket::new_checked(ipv4.payload()) else {
+        return InnerAction::Forward;
+    };
+    let dport = tcp.dst_port();
+    let syn_only = tcp.syn() && !tcp.ack();
+    if hooks.syn_reset == Some(dport) && syn_only {
+        return tcp_rst_reply(packet).map_or(InnerAction::Drop, InnerAction::Reply);
+    }
+    if hooks.data_reset == Some(dport) && !syn_only {
+        return tcp_rst_reply(packet).map_or(InnerAction::Drop, InnerAction::Reply);
+    }
+    InnerAction::Forward
+}
+
+fn tcp_rst_reply(packet: &[u8]) -> Option<Vec<u8>> {
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        IpAddress, IpProtocol, Ipv4Packet, Ipv4Repr, TcpControl, TcpPacket, TcpRepr,
+    };
+    let caps = ChecksumCapabilities::ignored();
+    let ipv4 = Ipv4Packet::new_checked(packet).ok()?;
+    let ipv4_repr = Ipv4Repr::parse(&ipv4, &caps).ok()?;
+    if ipv4_repr.next_header != IpProtocol::Tcp {
+        return None;
+    }
+    let tcp = TcpPacket::new_checked(ipv4.payload()).ok()?;
+    let tcp_repr = TcpRepr::parse(
+        &tcp,
+        &IpAddress::Ipv4(ipv4_repr.src_addr),
+        &IpAddress::Ipv4(ipv4_repr.dst_addr),
+        &caps,
+    )
+    .ok()?;
+    let ack = tcp_repr.seq_number + tcp_repr.segment_len();
+    let reply_tcp = TcpRepr {
+        src_port: tcp_repr.dst_port,
+        dst_port: tcp_repr.src_port,
+        control: TcpControl::Rst,
+        seq_number: tcp_repr
+            .ack_number
+            .unwrap_or(smoltcp::wire::TcpSeqNumber(0)),
+        ack_number: Some(ack),
+        window_len: 0,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None, None, None],
+        timestamp: None,
+        payload: &[],
+    };
+    let reply_ipv4 = Ipv4Repr {
+        src_addr: ipv4_repr.dst_addr,
+        dst_addr: ipv4_repr.src_addr,
+        next_header: IpProtocol::Tcp,
+        payload_len: reply_tcp.header_len(),
+        hop_limit: 64,
+    };
+    let emit = ChecksumCapabilities::default();
+    let mut out = vec![0_u8; reply_ipv4.buffer_len() + reply_tcp.header_len()];
+    let mut ipv4_out = Ipv4Packet::new_unchecked(&mut out);
+    reply_ipv4.emit(&mut ipv4_out, &emit);
+    reply_tcp.emit(
+        &mut TcpPacket::new_unchecked(ipv4_out.payload_mut()),
+        &IpAddress::Ipv4(reply_ipv4.src_addr),
+        &IpAddress::Ipv4(reply_ipv4.dst_addr),
+        &emit,
+    );
+    Some(out)
 }
