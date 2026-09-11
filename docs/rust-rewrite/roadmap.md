@@ -3012,12 +3012,13 @@ on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
 Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). 8F polls the
 physical default (excluding TUN), re-protects DNS/literal-proxy host routes via
 that snapshot (never TUN), refuses to overwrite foreign exact-prefix routes,
-binds DIRECT and TUIC QUIC sockets to the physical interface (no host route for
-ordinary DIRECT destinations), applies
+binds DIRECT, TUIC, and Hysteria2 QUIC sockets to the physical interface (no host route for
+ordinary DIRECT destinations; Windows TCP uses local port 0), retires those
+QUIC clients when the uplink changes, applies
 `route-exclude-address` as more-specific physical exceptions, re-applies Darwin
 scutil DNS, and resets resolver connections without flushing fake-IP;
 `compat/scripts/phase8f_tun.py` owns the privileged dual-uplink netns
-flap plus public DIRECT, same-IP REJECT, domain TUIC, and foreign-route conflict
+flap (old uplink taken down) plus public DIRECT, same-IP REJECT, domain TUIC, and foreign-route conflict
 (`PHASE8F_NATIVE=1`, fail-closed). Those gates are the remaining 8A/8B/8C/8F
 acceptance evidence. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
@@ -3072,8 +3073,9 @@ shared UDP session relay without SOCKS write-back.
   host-route re-protect **via that snapshot** for DNS/literal proxy IPs (never
   `route get` after split default), refusal to overwrite foreign exact-prefix
   routes, **socket-level** DIRECT/TUIC bypass (bind the physical interface;
-  ordinary DIRECT destinations do not get a system host route), Windows binds
-  the NIC unicast address, `route-exclude-address` physical exceptions, resolver
+  ordinary DIRECT destinations do not get a system host route), Windows TCP binds
+  the NIC unicast address at local port 0, TUIC/Hysteria2 QUIC clients are
+  retired on NIC change, `route-exclude-address` physical exceptions, resolver
   `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
   TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
   cap. `auto-detect-interface` or `auto-route` fills an empty `interface-name`

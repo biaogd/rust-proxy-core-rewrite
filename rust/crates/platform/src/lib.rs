@@ -320,6 +320,9 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
     #[cfg(target_os = "windows")]
     {
         let local = windows_interface_bind_addr(&name, address)?;
+        // TCP `connect_tcp` passes the remote address; UDP already passes a
+        // local `:0`. Pin the NIC by unicast IP and always use an ephemeral
+        // local port so connecting to `:443` does not bind local `:443`.
         socket.bind(&SockAddr::from(local))
     }
     #[cfg(not(any(
@@ -371,18 +374,17 @@ fn windows_interface_bind_addr(name: &str, address: SocketAddr) -> io::Result<So
             "interface has no matching unicast address",
         )
     })?;
-    Ok(SocketAddr::new(ip, address.port()))
+    Ok(local_unicast_bind_addr(ip))
 }
 
-#[cfg(any(
-    target_os = "android",
-    target_os = "ios",
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "tvos",
-    target_os = "visionos",
-    target_os = "watchos"
-))]
+/// Windows cannot `bind_device`; pin the socket to a NIC unicast IP with an
+/// ephemeral local port. TCP must not reuse the remote port (HTTPS `:443`).
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn local_unicast_bind_addr(ip: IpAddr) -> SocketAddr {
+    SocketAddr::new(ip, 0)
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
 fn is_global_unicast(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
@@ -598,6 +600,15 @@ pub fn update_android_system_dns(servers: Vec<SocketAddr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_tcp_interface_bind_uses_ephemeral_local_port() {
+        let remote: SocketAddr = "198.51.100.10:443".parse().expect("remote HTTPS");
+        let local = local_unicast_bind_addr("192.0.2.8".parse().expect("nic"));
+        assert_eq!(local.port(), 0);
+        assert_ne!(local.port(), remote.port());
+        assert_eq!(local.ip(), "192.0.2.8".parse::<IpAddr>().expect("nic"));
+    }
 
     #[test]
     fn posix_parser_matches_oracle_rules() {

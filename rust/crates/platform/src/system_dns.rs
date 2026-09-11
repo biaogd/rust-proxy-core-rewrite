@@ -43,7 +43,7 @@ pub enum WindowsDnsOrigin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[allow(dead_code)] // Darwin/Windows variants are constructed only on that OS.
 enum DnsSnapshot {
     Darwin(DarwinDnsSnapshot),
     Windows(WindowsDnsSnapshot),

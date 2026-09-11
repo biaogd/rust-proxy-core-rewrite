@@ -812,6 +812,8 @@ pub(super) async fn measure_http_delay(
                         proxy,
                         &dial_server,
                         &config.trust_certificates,
+                        &config.interface_name,
+                        config.routing_mark,
                     )
                     .map_err(|_| ())?;
                     client.create_proxy(&destination).await.map_err(|_| ())?

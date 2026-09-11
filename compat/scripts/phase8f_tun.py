@@ -5,9 +5,9 @@ Unprivileged: same stack identity as 8A (`smoltcp` only; Go stacks rejected
 without remap), plus `auto-detect-interface: true` accepted by Rust.
 
 Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT / domain TUIC, then a
-default uplink switch) requires a privileged Linux runner. Set PHASE8F_NATIVE=1;
-missing capability fails closed instead of skipping green. This gate is
-Rust-only: it does not flap a Go TUN.
+default uplink switch that also takes the old veth down) requires a privileged
+Linux runner. Set PHASE8F_NATIVE=1; missing capability fails closed instead of
+skipping green. This gate is Rust-only: it does not flap a Go TUN.
 
 Out of this gate: UDP fragment/loss, TUN TCP half-close/RST fixtures,
 Android netlink (8D), Darwin/Windows FFI monitors, native NIC flap on
@@ -553,7 +553,20 @@ proxies:
             "default interface changed by monitor",
             ns.veth_b_ns,
         )
+        wait_monitor_log(
+            process,
+            case_dir,
+            "rebound QUIC endpoints onto",
+            ns.veth_b_ns,
+        )
         observation["monitor-log"] = True
+        run_ip("link", "set", ns.veth_a_ns, "down", ns=ns.name)
+        if ns.default_device() != ns.veth_b_ns:
+            raise AssertionError(
+                f"old uplink down left default on {ns.default_device()!r}\n"
+                f"{ns.routes()}\n{ns.links()}"
+            )
+        observation["old-uplink-down"] = True
         assert_split_defaults(ns)
         observation["split-defaults-after"] = True
         assert_not_via_tun(ns, SERVICE_IP)
@@ -589,6 +602,7 @@ proxies:
         tuic_stderr.close()
         stop_go(tuic_process)
         wait_gone(ns, ns.tun)
+        run_ip("link", "set", ns.veth_a_ns, "up", ns=ns.name, check=False)
         observation["stop-cleanup"] = True
 
 

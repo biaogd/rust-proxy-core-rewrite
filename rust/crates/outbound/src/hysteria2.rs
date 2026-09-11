@@ -37,11 +37,13 @@ impl Hysteria2Client {
         proxy: &ProxyConfig,
         custom_roots: &[String],
     ) -> Result<Self, Hysteria2ProxyError> {
-        Self::from_proxy_with_dial_server(proxy, &proxy.server, custom_roots)
+        Self::from_proxy_with_dial_server(proxy, &proxy.server, custom_roots, "", 0)
     }
 
     /// Like [`Self::from_proxy`], but dials `dial_server` (typically a
     /// PSN-resolved IP) while TLS SNI still uses `proxy.sni` / `proxy.server`.
+    /// `bind_interface` / `routing_mark` apply to the QUIC UDP socket (TUN
+    /// auto-route loop avoidance), including Salamander and port-hop paths.
     ///
     /// # Errors
     ///
@@ -50,9 +52,13 @@ impl Hysteria2Client {
         proxy: &ProxyConfig,
         dial_server: &str,
         custom_roots: &[String],
+        bind_interface: &str,
+        routing_mark: i64,
     ) -> Result<Self, Hysteria2ProxyError> {
         let mut options = client_options_from_proxy(proxy, custom_roots)?;
         dial_server.clone_into(&mut options.server);
+        bind_interface.clone_into(&mut options.bind_interface);
+        options.routing_mark = routing_mark;
         let inner = rewrite_protocol_hysteria2::Client::new(options)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),
@@ -167,6 +173,8 @@ fn client_options_from_proxy(
         handshake_timeout,
         stream_receive_window: hysteria2.stream_receive_window,
         connection_receive_window: hysteria2.connection_receive_window,
+        bind_interface: String::new(),
+        routing_mark: 0,
     })
 }
 

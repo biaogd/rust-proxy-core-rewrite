@@ -449,6 +449,16 @@ async fn apply_network_change(
 
     if plan.update_detected_interface || tun_config.auto_route {
         set_auto_detect_bind_interface(after.device.as_deref());
+        // Endpoints stay bound to the NIC they were created on. Drop cached
+        // TUIC/Hysteria2 clients so the next dial rebinds the new uplink.
+        state.clear_tuic_clients().await;
+        state.clear_hysteria2_clients().await;
+        let rebound = format!(
+            "[TUN] rebound QUIC endpoints onto {}",
+            after.device.as_deref().unwrap_or("none")
+        );
+        eprintln!("{rebound}");
+        state.log("warning", rebound);
     }
 
     if plan.reprotect_hosts {

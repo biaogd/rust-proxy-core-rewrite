@@ -603,14 +603,13 @@ pub(super) async fn hysteria2_client_for_proxy(
         Host::Ip(address) => address.to_string(),
         Host::Domain(domain) => domain.clone(),
     };
-    let identity = format!(
-        "{proxy:?}|dial={dial_server}|roots={:?}",
-        config.trust_certificates
-    );
+    let identity = quic_client_identity(proxy, &dial_server, config);
     let client = rewrite_outbound::Hysteria2Client::from_proxy_with_dial_server(
         proxy,
         &dial_server,
         &config.trust_certificates,
+        &config.interface_name,
+        config.routing_mark,
     )
     .map_err(|error| format!("Hysteria2 client failed: {error}"))?;
     Ok(state.hysteria2_client(&proxy.name, identity, client).await)
@@ -645,10 +644,7 @@ pub(super) async fn tuic_client_for_proxy(
         Host::Ip(address) => address.to_string(),
         Host::Domain(domain) => domain.clone(),
     };
-    let identity = format!(
-        "{proxy:?}|dial={dial_server}|roots={:?}",
-        config.trust_certificates
-    );
+    let identity = quic_client_identity(proxy, &dial_server, config);
     let client = rewrite_outbound::TuicClient::from_proxy_with_dial_server(
         proxy,
         &dial_server,
@@ -658,6 +654,19 @@ pub(super) async fn tuic_client_for_proxy(
     )
     .map_err(|error| format!("TUIC client failed: {error}"))?;
     Ok(state.tuic_client(&proxy.name, identity, client).await)
+}
+
+fn quic_client_identity(
+    proxy: &rewrite_config::ProxyConfig,
+    dial_server: &str,
+    config: &Config,
+) -> String {
+    format!(
+        "{proxy:?}|dial={dial_server}|roots={:?}|bind={}|mark={}",
+        config.trust_certificates,
+        rewrite_platform::resolve_outbound_bind_interface(&config.interface_name),
+        config.routing_mark,
+    )
 }
 
 async fn connect_anytls_proxy(

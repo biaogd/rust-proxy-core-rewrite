@@ -3422,6 +3422,7 @@ dependencies = [
  "rand 0.10.2",
  "rewrite-io",
  "rewrite-model",
+ "rewrite-platform",
  "rustls-native-certs",
  "rustls-pemfile",
  "thiserror 2.0.20",
