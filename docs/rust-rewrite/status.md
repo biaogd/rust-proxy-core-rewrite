@@ -5630,7 +5630,8 @@ TUN, controller `udp: true` / `uot: false`, and process survival. The
 differential requires those observations to succeed; IPv6 bind failure is
 skipped rather than treated as a matching false. Protocol unit tests pin
 replay, A→B→A server-session reuse, reorder, wrong session, relay-injected
-tamper/truncate, concurrent clients and bounded server-session eviction.
+tamper/truncate, concurrent clients, full-table rejection of extra server
+sessions, and TTL expiry of idle replay windows.
 Ciphertext is not compared byte-for-byte.
 
 Pinned Go still accepts ChaCha8 UDP and 2022 UoT at `mihomo -t`; the rewrite
