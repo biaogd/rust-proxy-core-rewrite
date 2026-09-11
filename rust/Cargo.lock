@@ -3485,6 +3485,7 @@ dependencies = [
  "rcgen",
  "rewrite-io",
  "rewrite-model",
+ "rewrite-platform",
  "rustls-native-certs",
  "rustls-pemfile",
  "thiserror 2.0.20",

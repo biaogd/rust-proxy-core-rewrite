@@ -653,6 +653,8 @@ pub(super) async fn tuic_client_for_proxy(
         proxy,
         &dial_server,
         &config.trust_certificates,
+        &config.interface_name,
+        config.routing_mark,
     )
     .map_err(|error| format!("TUIC client failed: {error}"))?;
     Ok(state.tuic_client(&proxy.name, identity, client).await)

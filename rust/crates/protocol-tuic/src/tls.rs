@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use quinn::congestion::{BbrConfig, CubicConfig};
 use quinn::crypto::rustls::QuicClientConfig;
+use quinn::{EndpointConfig, Runtime, TokioRuntime};
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
@@ -115,7 +116,11 @@ pub(crate) fn build_endpoint(
     }
     client_config.transport_config(Arc::new(transport));
 
-    let mut endpoint = quinn::Endpoint::client(bind)?;
+    let socket =
+        rewrite_platform::bind_outbound_udp(bind, &options.bind_interface, options.routing_mark)
+            .map_err(TuicProtocolError::Io)?;
+    let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+    let mut endpoint = quinn::Endpoint::new(EndpointConfig::default(), None, socket, runtime)?;
     endpoint.set_default_client_config(client_config);
     Ok(endpoint)
 }

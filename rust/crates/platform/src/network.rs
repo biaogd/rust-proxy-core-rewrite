@@ -201,14 +201,20 @@ pub fn clear_outbound_bypass() {
     }
 }
 
-/// Installs a physical host route for a dialed DIRECT/proxy address.
+/// Installs a physical host route for an infrastructure destination (DNS
+/// upstream or proxy server) when TUN auto-route is on.
+///
+/// Ordinary DIRECT dials must not call this: a host route would make every
+/// later flow to that IP bypass TUN and skip per-port/per-rule matching.
+/// DIRECT and proxy sockets bind the physical interface instead.
 ///
 /// Fake-IP / TUN prefixes in `skip` are ignored. Missing bypass state is a
 /// no-op so non-TUN dials stay unchanged.
 ///
 /// # Errors
 ///
-/// Returns when the physical default is the TUN device or route install fails.
+/// Returns when the physical default is the TUN device, route install fails,
+/// or the 1024-entry dynamic host-route cap is exhausted.
 pub fn protect_outbound_destination(host: IpAddr) -> Result<(), PlatformError> {
     if host.is_loopback() || host.is_unspecified() || host.is_multicast() {
         return Ok(());
@@ -233,7 +239,9 @@ pub fn protect_outbound_destination(host: IpAddr) -> Result<(), PlatformError> {
         return Ok(());
     }
     if !tracked && current.hosts.len() >= DYNAMIC_BYPASS_CAP {
-        return Ok(());
+        return Err(PlatformError::Command(format!(
+            "outbound bypass host-route cap ({DYNAMIC_BYPASS_CAP}) exhausted; refusing unprotected dial"
+        )));
     }
     let route = bypass_host_route(host, &current.device, current.gateway, &current.tun_device)?;
     install_bypass_host_route(&route, &current.tun_device, &mut current.owner)?;
@@ -499,5 +507,39 @@ destination: default
         assert_eq!(resolve_outbound_bind_interface(""), "eth0");
         set_auto_detect_bind_interface(None);
         assert_eq!(resolve_outbound_bind_interface(""), "");
+    }
+
+    #[test]
+    fn dynamic_bypass_cap_returns_error_instead_of_silent_ok() {
+        let physical = DefaultInterfaceSnapshot {
+            device: Some("eth0".to_owned()),
+            gateway: Some("192.168.1.1".parse().expect("gw")),
+        };
+        install_outbound_bypass("tun0", &physical, Vec::new());
+        {
+            let mut slot = OUTBOUND_BYPASS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current = slot.as_mut().expect("bypass");
+            current.hosts = (0..DYNAMIC_BYPASS_CAP)
+                .map(|index| {
+                    std::net::Ipv4Addr::new(
+                        10,
+                        0,
+                        u8::try_from(index / 256).expect("hi"),
+                        u8::try_from(index % 256).expect("lo"),
+                    )
+                    .into()
+                })
+                .collect();
+        }
+        let error =
+            protect_outbound_destination("1.2.3.4".parse().expect("host")).expect_err("cap");
+        assert!(
+            error.to_string().contains("1024"),
+            "unexpected cap error: {error}"
+        );
+        assert!(error.to_string().contains("refusing unprotected dial"));
+        clear_outbound_bypass();
     }
 }

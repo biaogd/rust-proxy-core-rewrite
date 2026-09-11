@@ -961,12 +961,12 @@ pub(super) async fn run_direct_udp_session(
     } else {
         "0.0.0.0:0".parse().expect("static IPv4 wildcard")
     };
-    let outbound = match rewrite_platform::protect_outbound_destination(target.ip())
-        .map_err(|error| std::io::Error::other(error.to_string()))
-        .and_then(|()| {
-            rewrite_platform::bind_outbound_udp(family, &config.interface_name, config.routing_mark)
-        })
-        .and_then(UdpSocket::from_std)
+    let outbound = match rewrite_platform::bind_outbound_udp(
+        family,
+        &config.interface_name,
+        config.routing_mark,
+    )
+    .and_then(UdpSocket::from_std)
     {
         Ok(socket) => socket,
         Err(error) => {
@@ -1005,9 +1005,6 @@ pub(super) async fn run_direct_udp_session(
                         continue;
                     }
                 };
-                if rewrite_platform::protect_outbound_destination(target.ip()).is_err() {
-                    continue;
-                }
                 if outbound.send_to(&request.payload, target).await.is_ok() {
                     uploaded = uploaded.saturating_add(request.payload.len() as u64);
                     idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);

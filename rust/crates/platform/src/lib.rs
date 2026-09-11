@@ -195,8 +195,6 @@ pub async fn connect_tcp(
     address: SocketAddr,
     options: OutboundTcpOptions<'_>,
 ) -> io::Result<tokio::net::TcpStream> {
-    protect_outbound_destination(address.ip())
-        .map_err(|error| io::Error::other(error.to_string()))?;
     let domain = if address.is_ipv4() {
         Domain::IPV4
     } else {
@@ -258,7 +256,14 @@ pub fn bind_outbound_udp(
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let _ = routing_mark;
     bind_outbound_interface(&socket, address, interface)?;
-    socket.bind(&SockAddr::from(address))?;
+    #[cfg(target_os = "windows")]
+    let already_bound = !resolve_outbound_bind_interface(interface).is_empty()
+        && should_bind_outbound_interface(address);
+    #[cfg(not(target_os = "windows"))]
+    let already_bound = false;
+    if !already_bound {
+        socket.bind(&SockAddr::from(address))?;
+    }
     socket.set_nonblocking(true)?;
     Ok(socket.into())
 }
@@ -282,14 +287,11 @@ fn set_routing_mark(socket: &Socket, routing_mark: i64) -> io::Result<()> {
 
 fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> io::Result<()> {
     let name = resolve_outbound_bind_interface(name);
-    if name.is_empty() {
+    if name.is_empty() || !should_bind_outbound_interface(address) {
         return Ok(());
     }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     {
-        if !is_global_unicast(address.ip()) {
-            return Ok(());
-        }
         socket.bind_device(Some(name.as_bytes()))
     }
     #[cfg(any(
@@ -309,14 +311,16 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         let index = NonZeroU32::new(interface.index).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "interface index is zero")
         })?;
-        if !is_global_unicast(address.ip()) {
-            return Ok(());
-        }
         if address.is_ipv4() {
             socket.bind_device_by_index_v4(Some(index))
         } else {
             socket.bind_device_by_index_v6(Some(index))
         }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = windows_interface_bind_addr(&name, address)?;
+        socket.bind(&SockAddr::from(local))
     }
     #[cfg(not(any(
         target_os = "android",
@@ -325,7 +329,8 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
         target_os = "macos",
         target_os = "tvos",
         target_os = "visionos",
-        target_os = "watchos"
+        target_os = "watchos",
+        target_os = "windows"
     )))]
     {
         let _ = (socket, address);
@@ -334,6 +339,39 @@ fn bind_outbound_interface(socket: &Socket, address: SocketAddr, name: &str) -> 
             "interface binding is not supported on this platform",
         ))
     }
+}
+
+fn should_bind_outbound_interface(address: SocketAddr) -> bool {
+    let ip = address.ip();
+    !ip.is_loopback() && !ip.is_multicast()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_interface_bind_addr(name: &str, address: SocketAddr) -> io::Result<SocketAddr> {
+    use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
+    let interface = NetworkInterface::show()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .into_iter()
+        .find(|interface| interface.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "interface not found"))?;
+    let ip = interface.addr.into_iter().find_map(|addr| match addr {
+        Addr::V4(v4) if address.is_ipv4() && !v4.ip.is_loopback() && !v4.ip.is_link_local() => {
+            Some(IpAddr::V4(v4.ip))
+        }
+        Addr::V6(v6)
+            if address.is_ipv6() && !v6.ip.is_loopback() && !v6.ip.is_unicast_link_local() =>
+        {
+            Some(IpAddr::V6(v6.ip))
+        }
+        _ => None,
+    });
+    let ip = ip.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "interface has no matching unicast address",
+        )
+    })?;
+    Ok(SocketAddr::new(ip, address.port()))
 }
 
 #[cfg(any(

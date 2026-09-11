@@ -58,6 +58,10 @@ pub struct ClientOptions {
     pub connection_receive_window: Option<u64>,
     pub udp_relay_mode: UdpRelayMode,
     pub max_udp_relay_packet_size: usize,
+    /// Physical interface for TUN auto-route socket bind (empty = unbound).
+    pub bind_interface: String,
+    /// Linux/Android `SO_MARK` applied to the QUIC UDP socket.
+    pub routing_mark: i64,
 }
 
 impl Default for ClientOptions {
@@ -82,6 +86,8 @@ impl Default for ClientOptions {
             connection_receive_window: None,
             udp_relay_mode: UdpRelayMode::Native,
             max_udp_relay_packet_size: compute_max_udp_relay_packet_size(0),
+            bind_interface: String::new(),
+            routing_mark: 0,
         }
     }
 }

@@ -3010,13 +3010,14 @@ privileged Linux netns HTTP/DNS/UDP/fake-IP/auto-route/cleanup gate
 gate (`PHASE8B_NATIVE=1`, fail-closed). 8C Windows x86_64 reuses that data path
 on Wintun; `compat/scripts/phase8c_tun.py` owns the privileged
 Wintun/route/adapter-DNS gate (`PHASE8C_NATIVE=1`, fail-closed). 8F polls the
-physical default (excluding TUN), re-protects loop-avoidance host routes via that
-snapshot (never TUN), refuses to overwrite foreign exact-prefix routes, installs
-dial-time physical bypass for DIRECT/domain-proxy IPs, applies
+physical default (excluding TUN), re-protects DNS/literal-proxy host routes via
+that snapshot (never TUN), refuses to overwrite foreign exact-prefix routes,
+binds DIRECT and TUIC QUIC sockets to the physical interface (no host route for
+ordinary DIRECT destinations), applies
 `route-exclude-address` as more-specific physical exceptions, re-applies Darwin
 scutil DNS, and resets resolver connections without flushing fake-IP;
 `compat/scripts/phase8f_tun.py` owns the privileged dual-uplink netns
-flap plus public DIRECT, domain-proxy, and foreign-route conflict cases
+flap plus public DIRECT, same-IP REJECT, domain TUIC, and foreign-route conflict
 (`PHASE8F_NATIVE=1`, fail-closed). Those gates are the remaining 8A/8B/8C/8F
 acceptance evidence. Delivery order: **8A → 8B → 8C**,
 then **8F** before mobile/more arches (**8D/8E** remain later). Every advertised
@@ -3068,14 +3069,17 @@ shared UDP session relay without SOCKS write-back.
 - **8F — stability / network-change (before 8D/8E):** Implemented in this
   checkout as a poll of the physical default route excluding the TUN device
   (`ip route show default` / `route -n get default` / `Get-NetRoute 0.0.0.0/0`),
-  host-route re-protect **via that snapshot** (never `route get` after split
-  default), refusal to overwrite foreign exact-prefix routes, dial-time physical
-  bypass for DIRECT and domain-resolved proxy IPs, `route-exclude-address`
-  physical exceptions, resolver `reset_connections()` only (no fake-IP flush),
-  TCP/UDP caps of 4096, and a bounded TUN UDP reply queue (drop on full). `auto-detect-interface` fills
-  an empty `interface-name` bind slot except on Windows (unsupported
-  `bind_device`). Sleep/wake is the lost-then-restored default interface on
-  the same path; this gate does not claim native sleep/wake or NIC flap.
+  host-route re-protect **via that snapshot** for DNS/literal proxy IPs (never
+  `route get` after split default), refusal to overwrite foreign exact-prefix
+  routes, **socket-level** DIRECT/TUIC bypass (bind the physical interface;
+  ordinary DIRECT destinations do not get a system host route), Windows binds
+  the NIC unicast address, `route-exclude-address` physical exceptions, resolver
+  `reset_connections()` only (no fake-IP flush), TCP/UDP caps of 4096, a bounded
+  TUN UDP reply queue (drop on full), and a fail-closed 1024 dynamic host-route
+  cap. `auto-detect-interface` or `auto-route` fills an empty `interface-name`
+  bind slot (including Windows). Sleep/wake is the lost-then-restored default
+  interface on the same path; this gate does not claim native sleep/wake or NIC
+  flap.
   **Exclude** UDP IP fragment/loss, TUN-specific TCP half-close/RST fixtures,
   Android netlink, and Darwin NetworkReachability / Windows
   `NotifyIpInterfaceChange` FFI. Native Parity waits on `PHASE8F_NATIVE=1` /

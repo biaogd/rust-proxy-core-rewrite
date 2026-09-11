@@ -4,8 +4,8 @@
 Unprivileged: same stack identity as 8A (`smoltcp` only; Go stacks rejected
 without remap), plus `auto-detect-interface: true` accepted by Rust.
 
-Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT, then a default
-uplink switch) requires a privileged Linux runner. Set PHASE8F_NATIVE=1;
+Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT / domain TUIC, then a
+default uplink switch) requires a privileged Linux runner. Set PHASE8F_NATIVE=1;
 missing capability fails closed instead of skipping green. This gate is
 Rust-only: it does not flap a Go TUN.
 
@@ -20,18 +20,21 @@ import http.server
 import json
 import os
 import pathlib
-import select
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 from typing import Any
 
 from phase1 import ROOT, assert_go_oracle_baseline
+from phase3 import launch as launch_go, stop as stop_go
+from phase4e2 import SERVER_CERTIFICATE, SERVER_KEY
 from phase5b1a import build_binaries
+from phase6h_tuic_tcp import PASSWORD as TUIC_PASSWORD, SNI as TUIC_SNI, UUID as TUIC_UUID
 from phase8a_tun import (
     CLEANUP_DEADLINE,
     FAKE_IP_RANGE,
@@ -72,13 +75,6 @@ VETH_B_NS = "10.66.9.2"
 DIRECT_IP = "192.0.2.8"
 PROXY_IP = "192.0.2.9"
 PROXY_NAME = "proxy.phase8f.test"
-
-
-def rewrite_connect_target(host: str, port: int) -> tuple[str, int]:
-    """Map TUN fake-IP / fixture hostnames onto the host-side HTTP server."""
-    if host in {HTTP_NAME, UDP_NAME} or host.startswith(("198.18.", "198.19.")):
-        return SERVICE_IP, port
-    return host, port
 
 
 def identity_auto_detect(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
@@ -234,6 +230,7 @@ def tun_config(
     nameserver: str,
     device: str,
     extra: str = "",
+    extra_rules: str = "",
     http_outbound: str = "DIRECT",
 ) -> str:
     return f"""mixed-port: {mixed_port}
@@ -265,49 +262,18 @@ dns:
     - 0.0.0.0:53
   mtu: 1500
 rules:
-  - IP-CIDR,{DIRECT_IP}/32,DIRECT
-  - DOMAIN,{HTTP_NAME},{http_outbound}
+{extra_rules}  - DOMAIN,{HTTP_NAME},{http_outbound}
   - DOMAIN,{UDP_NAME},DIRECT
   - MATCH,REJECT
 """
 
 
-class ConnectHandler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
-        return
-
-    def do_CONNECT(self) -> None:
-        host, _, port = self.path.rpartition(":")
-        target_host, target_port = rewrite_connect_target(host, int(port))
-        try:
-            remote = socket.create_connection((target_host, target_port), timeout=NATIVE_IO_DEADLINE)
-        except OSError:
-            self.send_error(502)
-            return
-        self.send_response(200, "Connection Established")
-        self.end_headers()
-        client = self.connection
-        try:
-            while True:
-                readable, _, _ = select.select([client, remote], [], [], NATIVE_IO_DEADLINE)
-                if not readable:
-                    break
-                for sock in readable:
-                    other = remote if sock is client else client
-                    data = sock.recv(65536)
-                    if not data:
-                        return
-                    other.sendall(data)
-        finally:
-            remote.close()
-
-
 class ExtraServers:
     def __init__(self) -> None:
         self.direct: http.server.ThreadingHTTPServer | None = None
-        self.proxy: http.server.ThreadingHTTPServer | None = None
+        self.reject: http.server.ThreadingHTTPServer | None = None
         self.direct_port = 0
-        self.proxy_port = 0
+        self.reject_port = 0
         self.threads: list[threading.Thread] = []
 
     def __enter__(self) -> ExtraServers:
@@ -316,15 +282,15 @@ class ExtraServers:
         direct_thread = threading.Thread(target=self.direct.serve_forever, daemon=True)
         direct_thread.start()
         self.threads.append(direct_thread)
-        self.proxy = http.server.ThreadingHTTPServer((PROXY_IP, 0), ConnectHandler)
-        self.proxy_port = int(self.proxy.server_address[1])
-        proxy_thread = threading.Thread(target=self.proxy.serve_forever, daemon=True)
-        proxy_thread.start()
-        self.threads.append(proxy_thread)
+        self.reject = http.server.ThreadingHTTPServer((DIRECT_IP, 0), HttpHandler)
+        self.reject_port = int(self.reject.server_address[1])
+        reject_thread = threading.Thread(target=self.reject.serve_forever, daemon=True)
+        reject_thread.start()
+        self.threads.append(reject_thread)
         return self
 
     def __exit__(self, *args: object) -> None:
-        for server in (self.direct, self.proxy):
+        for server in (self.direct, self.reject):
             if server is not None:
                 server.shutdown()
                 server.server_close()
@@ -339,6 +305,23 @@ def assert_not_via_tun(ns: DualUplinkNetns, destination: str) -> None:
     text = route_get(ns, destination)
     if ns.tun in text.split():
         raise AssertionError(f"{destination} is routed via TUN {ns.tun}:\n{text}\n{ns.routes()}")
+
+
+def assert_via_tun(ns: DualUplinkNetns, destination: str) -> None:
+    text = route_get(ns, destination)
+    if ns.tun not in text.split():
+        raise AssertionError(
+            f"{destination} left TUN {ns.tun}; per-port rules would be skipped:\n"
+            f"{text}\n{ns.routes()}"
+        )
+
+
+def http_get_must_fail(ns: str, host: str, port: int, path: str) -> None:
+    try:
+        body = http_get(ns, host, port, path)
+    except Exception:
+        return
+    raise AssertionError(f"{host}:{port} leaked past REJECT: {body!r}")
 
 
 
@@ -401,8 +384,83 @@ def wait_monitor_log(
     )
 
 
+def wait_udp_listen(ip: str, port: int, process: subprocess.Popen[bytes], scratch: pathlib.Path) -> None:
+    deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"TUIC authority exited before listen: {process.returncode}\n"
+                f"{process_logs(scratch)}"
+            )
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.bind((ip, port))
+        except OSError:
+            return
+        finally:
+            probe.close()
+        time.sleep(0.05)
+    raise TimeoutError(f"TUIC authority did not bind {ip}:{port}\n{process_logs(scratch)}")
+
+
+def start_tuic_authority(
+    go_binary: pathlib.Path,
+    listen_ip: str,
+    listen_port: int,
+    scratch: pathlib.Path,
+) -> tuple[subprocess.Popen[bytes], Any, Any]:
+    case = scratch / "tuic-authority"
+    case.mkdir(parents=True, exist_ok=True)
+    cert_pem = textwrap.indent(SERVER_CERTIFICATE.read_text().strip(), "      ")
+    key_pem = textwrap.indent(SERVER_KEY.read_text().strip(), "      ")
+    config = write_config(
+        case,
+        "authority.yaml",
+        f"""mixed-port: 0
+mode: rule
+log-level: warning
+ipv6: false
+hosts:
+  {HTTP_NAME}: {SERVICE_IP}
+listeners:
+  - name: tuic-in
+    type: tuic
+    listen: {listen_ip}
+    port: {listen_port}
+    users:
+      {TUIC_UUID}: {TUIC_PASSWORD}
+    certificate: |-
+{cert_pem}
+    private-key: |-
+{key_pem}
+    alpn:
+      - h3
+rules:
+  - MATCH,DIRECT
+""",
+    )
+    process, stdout, stderr = launch_go(go_binary, config, case)
+    try:
+        wait_udp_listen(listen_ip, listen_port, process, case)
+    except Exception:
+        stdout.close()
+        stderr.close()
+        stop_go(process)
+        raise
+    return process, stdout, stderr
+
+
+def reserve_udp_port(ip: str) -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((ip, 0))
+    port = int(sock.getsockname()[1])
+    sock.close()
+    return port
+
+
 def run_uplink_switch(
-    binary: pathlib.Path,
+    rust_binary: pathlib.Path,
+    go_binary: pathlib.Path,
     ns: DualUplinkNetns,
     servers: FixtureServers,
     extra: ExtraServers,
@@ -410,14 +468,27 @@ def run_uplink_switch(
 ) -> dict[str, Any]:
     case_dir = scratch / "rust-flap"
     case_dir.mkdir(parents=True, exist_ok=True)
+    tuic_port = reserve_udp_port(PROXY_IP)
+    tuic_process, tuic_stdout, tuic_stderr = start_tuic_authority(
+        go_binary, PROXY_IP, tuic_port, scratch
+    )
     extra_yaml = f"""hosts:
   {PROXY_NAME}: {PROXY_IP}
 proxies:
-  - name: p8f-http
-    type: http
+  - name: p8f-tuic
+    type: tuic
     server: {PROXY_NAME}
-    port: {extra.proxy_port}
+    port: {tuic_port}
+    uuid: {TUIC_UUID}
+    password: {TUIC_PASSWORD}
+    sni: {TUIC_SNI}
+    skip-cert-verify: true
+    alpn: [h3]
 """
+    extra_rules = (
+        f"  - DST-PORT,{extra.direct_port},DIRECT\n"
+        f"  - IP-CIDR,{DIRECT_IP}/32,REJECT\n"
+    )
     config = write_config(
         case_dir,
         "config.yaml",
@@ -427,10 +498,11 @@ proxies:
             nameserver=f"{SERVICE_IP}:{servers.dns_port}",
             device=ns.tun,
             extra=extra_yaml,
-            http_outbound="p8f-http",
+            extra_rules=extra_rules,
+            http_outbound="p8f-tuic",
         ),
     )
-    process, stdout, stderr = launch_in_ns(ns.name, binary, config, case_dir)
+    process, stdout, stderr = launch_in_ns(ns.name, rust_binary, config, case_dir)
     observation: dict[str, Any] = {"label": "rust-flap", "stack": "smoltcp"}
     try:
         wait_mixed(ns.name, process, 17890, case_dir)
@@ -446,14 +518,18 @@ proxies:
         if body != HTTP_SMALL:
             raise AssertionError(f"public DIRECT mismatch: {body!r}")
         observation["public-direct"] = True
+        assert_via_tun(ns, DIRECT_IP)
+        observation["direct-stays-in-tun-table"] = True
+        http_get_must_fail(ns.name, DIRECT_IP, extra.reject_port, "/small")
+        observation["same-ip-reject-still-applies"] = True
         fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
         if body != HTTP_SMALL:
-            raise AssertionError(f"domain-proxy HTTP mismatch: {body!r}")
-        observation["domain-proxy"] = True
+            raise AssertionError(f"domain TUIC HTTP mismatch: {body!r}")
+        observation["domain-tuic"] = True
         observation["fake-ip-http"] = fake_http
-        assert_not_via_tun(ns, DIRECT_IP)
-        assert_not_via_tun(ns, PROXY_IP)
+        assert_via_tun(ns, PROXY_IP)
+        observation["tuic-server-stays-in-tun-table"] = True
 
         run_ip(
             "route",
@@ -481,16 +557,18 @@ proxies:
         assert_split_defaults(ns)
         observation["split-defaults-after"] = True
         assert_not_via_tun(ns, SERVICE_IP)
-        assert_not_via_tun(ns, PROXY_IP)
-        observation["protect-not-via-tun-after"] = True
+        assert_via_tun(ns, PROXY_IP)
+        observation["dns-not-via-tun-after"] = True
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
         if body != HTTP_SMALL:
-            raise AssertionError(f"post-flap HTTP mismatch: {body!r}")
+            raise AssertionError(f"post-flap TUIC HTTP mismatch: {body!r}")
         observation["http-after"] = True
         body = http_get(ns.name, DIRECT_IP, extra.direct_port, "/small")
         if body != HTTP_SMALL:
             raise AssertionError(f"post-flap public DIRECT mismatch: {body!r}")
         observation["public-direct-after"] = True
+        http_get_must_fail(ns.name, DIRECT_IP, extra.reject_port, "/small")
+        observation["same-ip-reject-after"] = True
         fake_udp = query_hijacked_dns(ns.name, UDP_NAME)
         echoed = udp_echo(ns.name, fake_udp, servers.udp_port, UDP_LARGE)
         if echoed != UDP_LARGE:
@@ -501,11 +579,15 @@ proxies:
         return observation
     except Exception:
         print(process_logs(case_dir), file=sys.stderr)
+        print(process_logs(scratch / "tuic-authority"), file=sys.stderr)
         raise
     finally:
         stdout.close()
         stderr.close()
         stop_process(process, case_dir)
+        tuic_stdout.close()
+        tuic_stderr.close()
+        stop_go(tuic_process)
         wait_gone(ns, ns.tun)
         observation["stop-cleanup"] = True
 
@@ -586,7 +668,7 @@ def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dic
         with FixtureServers(SERVICE_IP) as servers:
             with ExtraServers() as extra:
                 observations["rust-flap"] = run_uplink_switch(
-                    binaries["rust"], ns, servers, extra, scratch
+                    binaries["rust"], binaries["go"], ns, servers, extra, scratch
                 )
         observations["route-conflict"] = run_route_conflict(binaries["rust"], ns, scratch)
     return observations

@@ -142,8 +142,9 @@ split auto-route, `netsh` DNS on the Wintun adapter only (never other NICs),
 and refusal to take over an existing named adapter. 8F adds a poll of the
 physical default (TUN excluded), loop-avoidance re-protect **via that snapshot**
 (never `route get` after split-default, never via TUN), refusal to overwrite
-foreign exact-prefix routes, dial-time physical bypass for DIRECT and
-domain-resolved proxy IPs, `route-exclude-address` physical exceptions, Darwin DNS
+foreign exact-prefix routes, **socket-level** DIRECT/proxy bypass (no host
+route for ordinary DIRECT destinations), TUIC QUIC sockets bound through
+`bind_outbound_udp`, `route-exclude-address` physical exceptions, Darwin DNS
 re-apply, resolver connection reset without fake-IP flush, 4096 TCP/UDP
 session caps, and a bounded TUN UDP reply queue. Unprivileged
 evidence: config/stack-identity unit tests plus `compat/scripts/phase8a_tun.py`,
@@ -183,7 +184,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 8A Linux TUN | In progress | YAML/`smoltcp` parse, UDP reply sink, tun-rs + netstack-smoltcp wiring, DNS hijack, owned auto-route/loop-avoidance and stop cleanup. Unprivileged identity + privileged netns harness in `phase8a_tun.py` passed locally on Linux 2026-09-10 (`PHASE8A_NATIVE=1`); native CI pass unclaimed |
 | Phase 8B Darwin arm64 TUN | In progress | Reuses the 8A data path. utun open, Darwin split auto-route, scutil DNS ownership/restore, `tun0`/`utun` rejected without remap. Unprivileged identity in `phase8b_tun.py`; privileged `PHASE8B_NATIVE=1` fail-closed Darwin arm64 harness is not Parity until `phase8b-darwin-tun` reports success |
 | Phase 8C Windows x86_64 TUN | In progress | Reuses the 8A data path. Wintun via tun-rs (`delete_driver(false)`, metric 1 on this adapter, `MIHOMO_WINTUN`/next-to-exe, official 0.14.1 zip hashed in the native gate), Linux-style split auto-route, `netsh` DNS on the Wintun adapter only, existing named adapters refused. Unprivileged identity in `phase8c_tun.py`; privileged `PHASE8C_NATIVE=1` fail-closed Windows x86_64 harness is not Parity until `phase8c-windows-tun` reports success |
-| Phase 8F TUN network-change | In progress | Polls physical default excluding TUN; re-protects host routes via that snapshot (never TUN); refuses to overwrite foreign exact-prefix routes; dial-time physical bypass for DIRECT/domain-proxy IPs; `route-exclude-address` installs more-specific physical exceptions; TCP/UDP caps 4096 and bounded UDP reply queue (1024, drop on full). Unprivileged identity in `phase8f_tun.py`; privileged Linux dual-uplink `PHASE8F_NATIVE=1` covers flap, public DIRECT, domain proxy, foreign-route conflict. Not Parity until `phase8f-linux-tun` reports success |
+| Phase 8F TUN network-change | In progress | Polls physical default excluding TUN; re-protects DNS/literal-proxy host routes via that snapshot (never TUN); refuses to overwrite foreign exact-prefix routes; DIRECT uses socket interface bind (not a system host route) so per-port rules still apply; TUIC QUIC UDP is bound the same way; `route-exclude-address` installs more-specific physical exceptions; TCP/UDP caps 4096 and bounded UDP reply queue (1024, drop on full); dynamic host-route cap 1024 fails closed. Unprivileged identity in `phase8f_tun.py`; privileged Linux dual-uplink `PHASE8F_NATIVE=1` covers flap, public DIRECT, same-IP REJECT, domain TUIC, foreign-route conflict. Not Parity until `phase8f-linux-tun` reports success |
 | Phase 1 vertical slice | Complete | Native Darwin arm64 and containerized Linux amd64 differential suites passed |
 | Phase 2 config and pure rule core | Complete | 37 fixed + 96 generated config + 256 generated rule Go/Rust observations passed |
 | Phase 3 local proxy product | Complete in declared scope | Native TCP/auth/controller/reload/SOCKS UDP differential suite passed; controller tracking waits for a confirmed tunnel payload round-trip |

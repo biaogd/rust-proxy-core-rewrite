@@ -228,7 +228,7 @@ async fn run_prepared_tun(
     let mut default_interface = current_default_interface(Some(&device_name))
         .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
     let bind_physical = tun_config.auto_detect_interface || tun_config.auto_route;
-    if bind_physical && !cfg!(windows) {
+    if bind_physical {
         set_auto_detect_bind_interface(default_interface.device.as_deref());
     }
     let watch_network = tun_config.auto_route || tun_config.auto_detect_interface;
@@ -447,7 +447,7 @@ async fn apply_network_change(
     eprintln!("{}", plan.log);
     state.log(level, plan.log);
 
-    if !cfg!(windows) && (plan.update_detected_interface || tun_config.auto_route) {
+    if plan.update_detected_interface || tun_config.auto_route {
         set_auto_detect_bind_interface(after.device.as_deref());
     }
 
