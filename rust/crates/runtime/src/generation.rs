@@ -40,6 +40,8 @@ pub(super) async fn apply_generation(
 
     let mut prepared_listeners = Vec::new();
     let mut prepared_shadowsocks_listeners = Vec::new();
+    let mut retired_listeners = Vec::new();
+    let mut retired_controllers = Vec::new();
     let desired_listener_keys = desired_listeners
         .iter()
         .map(|&(kind, port)| {
@@ -78,6 +80,7 @@ pub(super) async fn apply_generation(
             && let Some(task) = listeners.remove(&conflicting)
         {
             stop_task(task).await;
+            retired_listeners.push(conflicting);
         }
 
         if kind == ListenerKind::Shadowsocks {
@@ -120,13 +123,16 @@ pub(super) async fn apply_generation(
         }
         let replaced = controllers
             .keys()
-            .find(|current| same_controller_kind(current, key))
+            .find(|current| {
+                same_controller_kind(current, key) && same_controller_bind_target(current, key)
+            })
             .cloned();
         if let Some(replaced) = replaced
             && let Some(task) = controllers.remove(&replaced)
         {
             stop_task(task).await;
             cleanup_controller_key(&replaced);
+            retired_controllers.push(replaced);
         }
         match prepare_controller(key.clone(), state.clock()) {
             Ok(prepared) => prepared_controllers.push(prepared),
@@ -162,56 +168,58 @@ pub(super) async fn apply_generation(
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
 
+    if let Err(error) = apply_tun_task(
+        desired_tun,
+        Arc::clone(&previous_published),
+        config_sender,
+        config_receiver,
+        state,
+        dns_service,
+        tun,
+    )
+    .await
+    {
+        sync_selector_state(state, previous_published.as_ref());
+        if let Err(restore_error) = restore_retired_sockets(
+            retired_listeners,
+            retired_controllers,
+            previous_published.as_ref(),
+            config_receiver,
+            state,
+            dns_service,
+            controller_updates,
+            listeners,
+            controllers,
+        )
+        .await
+        {
+            return Err(RuntimeError::Tun(format!(
+                "{error}; failed to restore previous listeners ({restore_error})"
+            )));
+        }
+        return Err(error);
+    }
+
     for (key, listener, udp) in prepared_listeners {
-        let task_shutdown = CancellationToken::new();
-        let child_shutdown = task_shutdown.clone();
-        let task_config = config_receiver.clone();
-        let task_state = Arc::clone(state);
-        let task_dns_service = Arc::clone(dns_service);
-        let kind = key.0;
-        let handle = tokio::spawn(async move {
-            run_listener(
-                kind,
-                listener,
-                udp,
-                task_config,
-                task_state,
-                task_dns_service,
-                child_shutdown,
-            )
-            .await;
-        });
-        listeners.insert(
+        spawn_fixed_listener(
             key,
-            RuntimeTask {
-                shutdown: task_shutdown,
-                handle,
-            },
+            listener,
+            udp,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
         );
     }
 
     for (key, listener) in prepared_shadowsocks_listeners {
-        let task_shutdown = CancellationToken::new();
-        let child_shutdown = task_shutdown.clone();
-        let task_config = config_receiver.clone();
-        let task_state = Arc::clone(state);
-        let task_dns_service = Arc::clone(dns_service);
-        let handle = tokio::spawn(async move {
-            run_shadowsocks_listener(
-                listener,
-                task_config,
-                task_state,
-                task_dns_service,
-                child_shutdown,
-            )
-            .await;
-        });
-        listeners.insert(
+        spawn_shadowsocks_listener(
             key,
-            RuntimeTask {
-                shutdown: task_shutdown,
-                handle,
-            },
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
         );
     }
 
@@ -248,16 +256,170 @@ pub(super) async fn apply_generation(
         }
     }
 
-    apply_tun_task(
-        desired_tun,
-        previous_published,
-        config_sender,
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn restore_retired_sockets(
+    retired_listeners: Vec<ListenerKey>,
+    retired_controllers: Vec<ControllerKey>,
+    previous: &Config,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+    controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
+) -> Result<(), RuntimeError> {
+    for key in retired_listeners {
+        if listeners.contains_key(&key) {
+            continue;
+        }
+        let (kind, port, address, _identity) = key.clone();
+        if kind == ListenerKind::Shadowsocks {
+            let Some(shadowsocks) = previous.shadowsocks_listener_for_port(port) else {
+                continue;
+            };
+            let listener = ShadowsocksListener::bind(shadowsocks).await?;
+            spawn_shadowsocks_listener(
+                key,
+                listener,
+                config_receiver,
+                state,
+                dns_service,
+                listeners,
+            );
+            continue;
+        }
+        let (listener, udp) = bind_fixed_listener(previous, kind, address)?;
+        spawn_fixed_listener(
+            key,
+            listener,
+            udp,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+    let mut prepared_controllers = Vec::new();
+    let mut desired: Vec<_> = controllers.keys().cloned().collect();
+    for key in retired_controllers {
+        if controllers.contains_key(&key) || desired.contains(&key) {
+            continue;
+        }
+        desired.push(key.clone());
+        prepared_controllers.push(prepare_controller(key, state.clock())?);
+    }
+    apply_controller_tasks(
+        prepared_controllers,
+        &desired,
         config_receiver,
         state,
         dns_service,
-        tun,
+        controller_updates,
+        controllers,
     )
-    .await
+    .await;
+    Ok(())
+}
+
+fn bind_fixed_listener(
+    config: &Config,
+    kind: ListenerKind,
+    address: SocketAddr,
+) -> Result<(LocalTcpListener, Option<Arc<UdpSocket>>), RuntimeError> {
+    let dual_stack = config.allow_lan && config.bind_address == "*";
+    let listener = rewrite_platform::bind_local_tcp_listener(
+        address,
+        rewrite_platform::LocalTcpOptions {
+            dual_stack,
+            multipath: config.inbound_mptcp,
+            keep_alive_idle: config.keep_alive_idle,
+            keep_alive_interval: config.keep_alive_interval,
+            disable_keep_alive: config.disable_keep_alive,
+        },
+    )?;
+    let listener = if config.inbound_tfo {
+        LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
+    } else {
+        LocalTcpListener::Plain(TcpListener::from_std(listener)?)
+    };
+    let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
+        let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
+        Some(Arc::new(UdpSocket::from_std(udp)?))
+    } else {
+        None
+    };
+    Ok((listener, udp))
+}
+
+fn spawn_fixed_listener(
+    key: ListenerKey,
+    listener: LocalTcpListener,
+    udp: Option<Arc<UdpSocket>>,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let kind = key.0;
+    let handle = tokio::spawn(async move {
+        run_listener(
+            kind,
+            listener,
+            udp,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_shadowsocks_listener(
+    key: ListenerKey,
+    listener: ShadowsocksListener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_shadowsocks_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
 }
 
 async fn apply_tun_task(
@@ -395,6 +557,18 @@ pub(super) fn same_controller_kind(left: &ControllerKey, right: &ControllerKey) 
         (ControllerKey::Unix(..), ControllerKey::Unix(..)) => true,
         #[cfg(windows)]
         (ControllerKey::Pipe(..), ControllerKey::Pipe(..)) => true,
+        _ => false,
+    }
+}
+
+fn same_controller_bind_target(left: &ControllerKey, right: &ControllerKey) -> bool {
+    match (left, right) {
+        (ControllerKey::Tcp(left, ..), ControllerKey::Tcp(right, ..))
+        | (ControllerKey::Tls(left, ..), ControllerKey::Tls(right, ..)) => left == right,
+        #[cfg(unix)]
+        (ControllerKey::Unix(left, ..), ControllerKey::Unix(right, ..)) => left == right,
+        #[cfg(windows)]
+        (ControllerKey::Pipe(left, ..), ControllerKey::Pipe(right, ..)) => left == right,
         _ => false,
     }
 }

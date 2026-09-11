@@ -569,6 +569,32 @@ def wait_tun_device(ns: Netns, process: subprocess.Popen[bytes], scratch: pathli
     raise TimeoutError(f"TUN device {ns.tun} did not appear\n{process_logs(scratch)}")
 
 
+def wait_port_closed(
+    ns: str,
+    port: int,
+    process: subprocess.Popen[bytes],
+    scratch: pathlib.Path,
+) -> None:
+    deadline = time.monotonic() + CLEANUP_DEADLINE
+    last_error = "not attempted"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited while waiting for port {port} to close: {process.returncode}\n"
+                f"{process_logs(scratch)}"
+            )
+        try:
+            ns_client(ns, "tcp-closed", "127.0.0.1", str(port), timeout=1)
+            return
+        except Exception as error:  # noqa: BLE001 — surface last probe error
+            last_error = str(error)
+            time.sleep(0.05)
+    raise TimeoutError(
+        f"new mixed-port {port} stayed open after failed reload: {last_error}\n"
+        f"{process_logs(scratch)}"
+    )
+
+
 def wait_gone(ns: Netns, tun: str) -> None:
     deadline = time.monotonic() + CLEANUP_DEADLINE
     while time.monotonic() < deadline:
@@ -773,6 +799,7 @@ def run_failed_reload_keeps_old_traffic(
     case_dir = scratch / "failed-reload"
     case_dir.mkdir(parents=True, exist_ok=True)
     mixed_port = 17893
+    new_mixed_port = 17894
     dns_listen = 15356
     controller_port = 19093
     nameserver = f"{SERVICE_IP}:{servers.dns_port}"
@@ -793,7 +820,7 @@ def run_failed_reload_keeps_old_traffic(
         case_dir,
         "conflict.yaml",
         tun_config(
-            mixed_port=mixed_port,
+            mixed_port=new_mixed_port,
             dns_listen=dns_listen,
             nameserver=nameserver,
             device=ns.tun,
@@ -863,6 +890,8 @@ def run_failed_reload_keeps_old_traffic(
         after_routes = ns.routes()
         if FOREIGN_ROUTE.split("/", maxsplit=1)[0] not in after_routes and FOREIGN_ROUTE not in after_routes:
             raise AssertionError(f"foreign {FOREIGN_ROUTE} was dropped:\n{after_routes}")
+        ns_client(ns.name, "wait-tcp", "127.0.0.1", str(mixed_port), timeout=1)
+        wait_port_closed(ns.name, new_mixed_port, process, case_dir)
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
         if body != HTTP_SMALL:
             raise AssertionError(f"old TUN HTTP failed after rejected reload: {body!r}")
@@ -872,6 +901,8 @@ def run_failed_reload_keeps_old_traffic(
                 "previous-tun-restored": True,
                 "http-after-failed-reload": True,
                 "foreign-route-kept": True,
+                "old-mixed-port-kept": True,
+                "new-mixed-port-closed": True,
             }
         )
         return observation
@@ -962,6 +993,14 @@ def client_main(argv: list[str]) -> int:
             pass
         print("{}")
         return 0
+    if command == "tcp-closed":
+        host, port = rest[0], int(rest[1])
+        try:
+            with socket.create_connection((host, port), timeout=0.4):
+                raise SystemExit(f"port {port} is open")
+        except OSError:
+            print("{}")
+            return 0
     if command == "dns-a":
         name, server, port = rest[0], rest[1], int(rest[2])
         query = make_query(name, 1, 0x8A01)

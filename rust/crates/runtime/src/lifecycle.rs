@@ -37,7 +37,8 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), Runt
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
 /// Later reload errors are logged and leave the current generation unchanged,
-/// including restoring the previous TUN instance when a replacement TUN fails.
+/// including restoring previous listeners, controllers, DNS and TUN when a
+/// replacement TUN fails.
 pub async fn run_with_reload(
     initial: Config,
     reloads: mpsc::Receiver<Config>,
@@ -58,7 +59,8 @@ pub async fn run_with_reload(
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
 /// Later reload errors are logged and leave the current generation unchanged,
-/// including restoring the previous TUN instance when a replacement TUN fails.
+/// including restoring previous listeners, controllers, DNS and TUN when a
+/// replacement TUN fails.
 pub async fn run_with_reload_lifecycle(
     initial: Config,
     reloads: mpsc::Receiver<Config>,

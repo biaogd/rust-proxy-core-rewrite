@@ -2,6 +2,21 @@
 
 Last updated: 2026-09-11
 
+### TUN generation rollback and owned Darwin DNS restore — 2026-09-11
+
+Failed TUN reload now rolls back the whole generation: replacement sockets
+are bound but not served until TUN is ready, so a route/DNS failure drops the
+new ports, restores retired listeners/controllers, republishes the previous
+config, and restarts the previous TUN. The 8A native case changes
+`mixed-port` together with a conflicting TUN route and requires the old port
+to stay up and the new port to close. Darwin DNS restore records the
+`ServerAddresses` this instance wrote and only reverts them when the current
+value still matches; a key we created is not deleted if another component
+replaced it. Reading the current dictionary on restore distinguishes missing
+keys from scutil failures and keeps the snapshot when a read fails so restore
+can be retried. Still Partial, not Parity; 8B native remains unclaimed; not
+merge-ready.
+
 ### TUN failed-reload restore and Darwin DNS extras — 2026-09-11
 
 Failed TUN hot-reload no longer leaves the previous instance stopped: the

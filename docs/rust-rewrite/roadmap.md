@@ -3054,7 +3054,7 @@ shared UDP session relay without SOCKS write-back.
 - **8A — Linux closed loop (first gate):** YAML → `tun-rs` device →
   `netstack-smoltcp` → existing rules/outbound → return packets; DNS hijack and
   fake-IP reverse lookup; auto-route plus safe exit/reload/cleanup, including
-  restoring the previous TUN when a replacement reload fails. Unimplemented
+  restoring the previous generation (listeners, controllers, DNS, TUN) when a replacement reload fails. Unimplemented
   knobs (`strict-route`, `endpoint-independent-nat`, `udp-timeout`,
   `disable-icmp-forwarding`) reject non-default values. **Exclude**
   from the first gate: TProxy, redir, auto-redirect, UID filters, GSO.

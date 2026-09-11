@@ -37,6 +37,7 @@ pub struct DarwinDnsConfig {
 struct DarwinDnsSnapshot {
     service_id: String,
     original: Option<DarwinDnsConfig>,
+    applied_servers: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,14 +78,14 @@ impl DnsOwner {
     ///
     /// Returns scutil or netsh restore failures.
     pub fn restore(&mut self) -> Result<(), PlatformError> {
-        let Some(snapshot) = self.snapshot.take() else {
+        let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
         };
-        match snapshot {
+        let result = match snapshot {
             DnsSnapshot::Darwin(snapshot) => {
                 #[cfg(target_os = "macos")]
                 {
-                    restore_darwin_dns(&snapshot)
+                    restore_darwin_dns(snapshot)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -95,7 +96,7 @@ impl DnsOwner {
             DnsSnapshot::Windows(snapshot) => {
                 #[cfg(target_os = "windows")]
                 {
-                    restore_windows_dns(&snapshot)
+                    restore_windows_dns(snapshot)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -103,7 +104,11 @@ impl DnsOwner {
                     Ok(())
                 }
             }
+        };
+        if result.is_ok() {
+            self.snapshot = None;
         }
+        result
     }
 }
 
@@ -138,11 +143,18 @@ pub fn apply_tun_system_dns(dns: IpAddr) -> Result<DnsOwner, PlatformError> {
         let snapshot = snapshot_darwin_dns()?;
         if let Err(error) = apply_darwin_dns(&snapshot.service_id, dns, snapshot.original.is_some())
         {
-            let _ = restore_darwin_dns(&snapshot);
+            let failed = DarwinDnsSnapshot {
+                applied_servers: vec![dns],
+                ..snapshot
+            };
+            let _ = restore_darwin_dns(&failed);
             return Err(error);
         }
         Ok(DnsOwner {
-            snapshot: Some(DnsSnapshot::Darwin(snapshot)),
+            snapshot: Some(DnsSnapshot::Darwin(DarwinDnsSnapshot {
+                applied_servers: vec![dns],
+                ..snapshot
+            })),
         })
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -337,17 +349,28 @@ pub fn build_scutil_merge_servers_script(key: &str, servers: &[IpAddr]) -> Strin
     script
 }
 
-/// Restores owned DNS fields without `d.init`, so extra keys and concurrent
-/// updates to those extras survive. Missing extras from the snapshot are
-/// filled back in; extras already present are left untouched.
+/// Restores `ServerAddresses` only when they still match the value this TUN
+/// instance wrote. Concurrent DHCP/VPN updates are left untouched. A key this
+/// instance created is removed only when it still contains just that write.
 #[must_use]
 pub fn build_scutil_restore_dns_script(
     key: &str,
-    original: &DarwinDnsConfig,
+    original: Option<&DarwinDnsConfig>,
+    applied_servers: &[IpAddr],
     current: Option<&DarwinDnsConfig>,
-) -> String {
-    let Some(current) = current else {
-        return build_scutil_dns_script(key, original);
+) -> Option<String> {
+    let current = current?;
+    if current.servers != applied_servers {
+        return None;
+    }
+    let Some(original) = original else {
+        if dns_dict_is_only_servers(current) {
+            return Some(build_scutil_remove_script(key));
+        }
+        let mut script = format!("get {key}\n");
+        script.push_str("d.remove ServerAddresses\n");
+        finish_scutil_set_script(&mut script, key);
+        return Some(script);
     };
     let mut script = format!("get {key}\n");
     if original.servers.is_empty() {
@@ -355,26 +378,12 @@ pub fn build_scutil_restore_dns_script(
     } else {
         append_server_addresses(&mut script, &original.servers);
     }
-    if current.search_domains.is_empty() && !original.search_domains.is_empty() {
-        append_array_field(&mut script, "SearchDomains", &original.search_domains);
-    }
-    if current.domain_name.is_none()
-        && let Some(domain) = &original.domain_name
-    {
-        append_scalar_field(&mut script, "DomainName", domain);
-    }
-    for (name, value) in &original.extra {
-        if current
-            .extra
-            .iter()
-            .any(|(current_name, _)| current_name == name)
-        {
-            continue;
-        }
-        append_extra_field(&mut script, name, value);
-    }
     finish_scutil_set_script(&mut script, key);
-    script
+    Some(script)
+}
+
+fn dns_dict_is_only_servers(config: &DarwinDnsConfig) -> bool {
+    config.search_domains.is_empty() && config.domain_name.is_none() && config.extra.is_empty()
 }
 
 fn append_dns_fields(script: &mut String, config: &DarwinDnsConfig, include_extras: bool) {
@@ -641,6 +650,7 @@ fn snapshot_darwin_dns() -> Result<DarwinDnsSnapshot, PlatformError> {
     Ok(DarwinDnsSnapshot {
         service_id,
         original,
+        applied_servers: Vec::new(),
     })
 }
 
@@ -676,25 +686,33 @@ fn apply_darwin_dns(
 #[cfg(target_os = "macos")]
 fn restore_darwin_dns(snapshot: &DarwinDnsSnapshot) -> Result<(), PlatformError> {
     let key = darwin_dns_key(&snapshot.service_id);
-    let script = match &snapshot.original {
-        Some(original) => {
-            let current = match scutil_show(&key) {
-                Ok(body) if !body.trim().is_empty() && !is_scutil_no_such_key(&body) => {
-                    Some(parse_scutil_dns_dictionary(&body))
-                }
-                Ok(_) => None,
-                Err(error) if is_missing_dns_key(&error) => None,
-                Err(_) => None,
-            };
-            build_scutil_restore_dns_script(&key, original, current.as_ref())
-        }
-        None => build_scutil_remove_script(&key),
+    let current = read_darwin_dns_dictionary(&key)?;
+    let Some(script) = build_scutil_restore_dns_script(
+        &key,
+        snapshot.original.as_ref(),
+        &snapshot.applied_servers,
+        current.as_ref(),
+    ) else {
+        return Ok(());
     };
     match scutil_script(&script) {
         Ok(()) => Ok(()),
         Err(error) if is_missing_dns_key(&error) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn read_darwin_dns_dictionary(key: &str) -> Result<Option<DarwinDnsConfig>, PlatformError> {
+    let body = match scutil_show(key) {
+        Ok(body) => body,
+        Err(error) if is_missing_dns_key(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if body.trim().is_empty() || is_scutil_no_such_key(&body) {
+        return Ok(None);
+    }
+    Ok(Some(parse_scutil_dns_dictionary(&body)))
 }
 
 #[cfg(target_os = "macos")]
@@ -851,44 +869,92 @@ mod tests {
     }
 
     #[test]
-    fn scutil_restore_script_fills_missing_extras_without_overwriting() {
+    fn scutil_restore_script_reverts_servers_only_while_still_ours() {
         let key = darwin_dns_key("ABCD");
         let original = DarwinDnsConfig {
             servers: vec!["192.168.1.1".parse::<IpAddr>().expect("dns")],
             search_domains: vec!["lan".to_owned()],
             domain_name: Some("home.arpa".to_owned()),
-            extra: vec![
-                (
-                    "SupplementalMatchDomains".to_owned(),
-                    DarwinDnsValue::Array(vec!["corp.example.com".to_owned()]),
-                ),
-                (
-                    "SupplementalMatchDomainsNoSearch".to_owned(),
-                    DarwinDnsValue::Scalar("1".to_owned()),
-                ),
-            ],
-        };
-        let current = DarwinDnsConfig {
-            servers: vec!["198.18.0.2".parse::<IpAddr>().expect("tun dns")],
-            search_domains: vec!["other".to_owned()],
-            domain_name: Some("other.arpa".to_owned()),
             extra: vec![(
-                "SupplementalMatchDomainsNoSearch".to_owned(),
-                DarwinDnsValue::Scalar("0".to_owned()),
+                "SupplementalMatchDomains".to_owned(),
+                DarwinDnsValue::Array(vec!["corp.example.com".to_owned()]),
             )],
         };
-        let script = build_scutil_restore_dns_script(&key, &original, Some(&current));
+        let applied = vec!["198.18.0.2".parse::<IpAddr>().expect("tun dns")];
+        let ours = DarwinDnsConfig {
+            servers: applied.clone(),
+            search_domains: vec!["lan".to_owned()],
+            domain_name: Some("home.arpa".to_owned()),
+            extra: original.extra.clone(),
+        };
+        let script = build_scutil_restore_dns_script(&key, Some(&original), &applied, Some(&ours))
+            .expect("owned restore");
         assert!(!script.contains("d.init"));
         assert!(script.contains("get State:/Network/Service/ABCD/DNS"));
         assert!(script.contains("d.add ServerAddresses * 192.168.1.1"));
-        assert!(script.contains("d.add SupplementalMatchDomains * corp.example.com"));
         assert!(!script.contains("SearchDomains"));
-        assert!(!script.contains("DomainName"));
-        assert!(!script.contains("SupplementalMatchDomainsNoSearch"));
-        let recreated = build_scutil_restore_dns_script(&key, &original, None);
-        assert!(recreated.contains("d.init"));
-        assert!(recreated.contains("d.add SupplementalMatchDomains * corp.example.com"));
-        assert!(recreated.contains("d.add SupplementalMatchDomainsNoSearch 1"));
+        assert!(!script.contains("SupplementalMatchDomains"));
+    }
+
+    #[test]
+    fn scutil_restore_script_skips_foreign_server_updates() {
+        let key = darwin_dns_key("ABCD");
+        let original = DarwinDnsConfig {
+            servers: vec!["192.168.1.1".parse::<IpAddr>().expect("dns")],
+            ..DarwinDnsConfig::default()
+        };
+        let applied = vec!["198.18.0.2".parse::<IpAddr>().expect("tun dns")];
+        let foreign = DarwinDnsConfig {
+            servers: vec!["10.0.0.1".parse::<IpAddr>().expect("dhcp")],
+            ..DarwinDnsConfig::default()
+        };
+        assert_eq!(
+            build_scutil_restore_dns_script(&key, Some(&original), &applied, Some(&foreign)),
+            None
+        );
+        assert_eq!(
+            build_scutil_restore_dns_script(&key, Some(&original), &applied, None),
+            None
+        );
+    }
+
+    #[test]
+    fn scutil_restore_script_does_not_delete_a_key_others_created() {
+        let key = darwin_dns_key("ABCD");
+        let applied = vec!["198.18.0.2".parse::<IpAddr>().expect("tun dns")];
+        let foreign = DarwinDnsConfig {
+            servers: vec!["10.0.0.1".parse::<IpAddr>().expect("dhcp")],
+            extra: vec![(
+                "SupplementalMatchDomains".to_owned(),
+                DarwinDnsValue::Array(vec!["corp.example.com".to_owned()]),
+            )],
+            ..DarwinDnsConfig::default()
+        };
+        assert_eq!(
+            build_scutil_restore_dns_script(&key, None, &applied, Some(&foreign)),
+            None
+        );
+        assert_eq!(
+            build_scutil_restore_dns_script(&key, None, &applied, None),
+            None
+        );
+        let still_ours_with_extras = DarwinDnsConfig {
+            servers: applied.clone(),
+            extra: foreign.extra.clone(),
+            ..DarwinDnsConfig::default()
+        };
+        let script =
+            build_scutil_restore_dns_script(&key, None, &applied, Some(&still_ours_with_extras))
+                .expect("remove owned servers only");
+        assert!(script.contains("d.remove ServerAddresses"));
+        assert!(!script.contains("remove State:"));
+        let only_ours = DarwinDnsConfig {
+            servers: applied.clone(),
+            ..DarwinDnsConfig::default()
+        };
+        let remove = build_scutil_restore_dns_script(&key, None, &applied, Some(&only_ours))
+            .expect("remove created key");
+        assert_eq!(remove, "remove State:/Network/Service/ABCD/DNS\nquit\n");
     }
 
     #[test]
