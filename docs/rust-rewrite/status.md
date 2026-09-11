@@ -2,6 +2,17 @@
 
 Last updated: 2026-09-11
 
+### 6I-C WireGuard outbound lifecycle — 2026-09-11
+
+Userspace WireGuard outbound now recovers a restarted peer with one TCP
+timeout plus forced handshake, sends `persistent-keepalive` while idle,
+re-resolves `refresh-server-ip-interval`, installs TUN loop-avoidance for the
+peer endpoint, and tears down mixed UDP sessions on network-generation bumps.
+Evidence: `compat/scripts/phase6i_wireguard_lifecycle.py` plus
+`protocol-wireguard` `lifecycle`. AmneziaWG, `peers`, `ip-stack` and inbound
+remain rejected. Not Parity; three-platform CI is the existing wireguard
+shard, not a native Parity claim.
+
 ### 6I-B WireGuard userspace UDP/dual-stack outbound — 2026-09-11
 
 Clash `type: wireguard` single-peer TCP+UDP is implemented without an OS TUN:
@@ -10,7 +21,7 @@ mixed/SOCKS UDP ASSOCIATE, inner IPv4/IPv6 destinations, default MTU 1408, and
 administrator privileges. AmneziaWG, `peers`, `ip-stack`, `dialer-proxy` and
 inbound remain rejected. Evidence: `compat/scripts/phase6i_wireguard_udp.py`
 plus `protocol-wireguard` `udp_relay` (and the existing 6I-A TCP differential).
-Not Parity; 6I-C and three-platform CI remain open.
+Not Parity; three-platform CI remains open.
 
 ### 6I-A WireGuard userspace TCP outbound — 2026-09-11
 
@@ -18,8 +29,8 @@ Clash `type: wireguard` single-peer IPv4 TCP is implemented without an OS TUN:
 YAML → mixed/SOCKS → rules → `defguard_boringtun` Noise → smoltcp `Medium::Ip`
 → TCP target. Mixed/SOCKS does not need administrator privileges. AmneziaWG
 and `peers` remain rejected. Evidence: `compat/scripts/phase6i_wireguard_tcp.py`
-plus `protocol-wireguard` `tcp_relay`. Not Parity; 6I-C and three-platform CI
-remain open.
+plus `protocol-wireguard` `tcp_relay`. Not Parity; three-platform CI remains
+open.
 
 ### 8C Wintun stage mkdir and Darwin system DNS reachability — 2026-09-11
 
@@ -263,7 +274,7 @@ native (`PHASE8B_NATIVE=1`) is fail-closed and not Parity until
 (`PHASE8F_NATIVE=1`) is fail-closed and not Parity until `phase8f-linux-tun`
 reports success. TUN is not Parity.
 Additional remote-protocol inbounds, AmneziaWG, SSH and other Phase 7
-families remain deferred. WireGuard outbound 6I-A is implemented in this
+families remain deferred. WireGuard outbound 6I-A/B/C is implemented in this
 checkout (not Parity). Canonical numbering is AnyTLS **6G**, Hysteria2
 **HY2**, TUIC **6H**, WireGuard **6I**, SSR **7A–7D**. The
 [roadmap](roadmap.md#next-work-priority--2026-09-11) owns the plan
@@ -468,7 +479,8 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6H-B TUIC v5 outbound UDP | Complete in declared client scope | Native QUIC DATAGRAM and `udp-relay-mode: quic` uni-stream relay; packet/assoc IDs; native fragmentation + 10s defrag (reorder/duplicate/invalid FRAG_ID); Dissociate on association drop; mixed/SOCKS UDP idle 1m; setup via `await_udp_setup` (5s + shutdown); blocked QUIC send/auth cancel on mixed shutdown (`tuic_mixed_udp_cancel`); recv ends on QUIC close (`udp_lifecycle`). `max-udp-relay-packet-size` accepted (`max-datagram-frame-size` still rejected). Evidence: `phase6h_tuic_udp.py` plus crate tests |
 | Phase 6H-C TUIC v5 outbound lifecycle | Complete locally in declared client scope; three-platform CI pending | Connection pool on `max-open-streams`, 5s delayed slot release, Heartbeat datagrams + QUIC keep-alive, cubic/new_reno/bbr names, cancel/restart/reload, concurrent TCP+UDP, malformed decode unit tests, short soak. Evidence: `phase6h_tuic_lifecycle.py` / `phase6h_tuic_soak.py`. Algorithm identity with quic-go is not claimed |
 | Phase 6I-A WireGuard outbound TCP | Implemented in this checkout; not Parity | Clash `type: wireguard` single-peer IPv4 TCP; `defguard_boringtun` Noise + smoltcp `Medium::Ip` userspace stack (no OS TUN); mixed/SOCKS does not need admin; AmneziaWG/`peers`/`ip-stack` rejected; default MTU 1408. Evidence: `phase6i_wireguard_tcp.py` plus crate `tcp_relay`. Three-platform CI pending |
-| Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. 6I-C lifecycle and three-platform CI pending |
+| Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending |
+| Phase 6I-C WireGuard outbound lifecycle | Implemented in this checkout; not Parity | Rehandshake after peer restart, `persistent-keepalive`, `refresh-server-ip-interval`, TUN `protect_outbound_destination` for the peer IP, mixed UDP session teardown on network-generation change. Evidence: `phase6i_wireguard_lifecycle.py` plus crate `lifecycle`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending; native Parity is not claimed |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |

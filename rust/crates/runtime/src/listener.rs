@@ -983,6 +983,7 @@ pub(super) async fn run_wireguard_udp_session(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
+    let mut generation = state.subscribe_network_generation();
     let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
@@ -1007,6 +1008,7 @@ pub(super) async fn run_wireguard_udp_session(
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = tracker.cancelled() => break,
+                _ = generation.changed() => break,
                 () = &mut idle => break,
                 result = association.send(&destination, &request.payload) => {
                     if result.is_err() {
@@ -1022,6 +1024,7 @@ pub(super) async fn run_wireguard_udp_session(
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
+            _ = generation.changed() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 current = Some(request);

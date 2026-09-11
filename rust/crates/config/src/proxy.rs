@@ -751,7 +751,6 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         "amnezia-wg-option",
         "peers",
         "ip-stack",
-        "refresh-server-ip-interval",
         "dialer-proxy",
         "workers",
     ];
@@ -766,6 +765,7 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         "mtu",
         "remote-dns-resolve",
         "dns",
+        "refresh-server-ip-interval",
     ];
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
@@ -894,6 +894,10 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
     };
     let reserved = parse_wireguard_reserved(&mut proxy.extra, &name)?;
     let allowed_ips = parse_wireguard_allowed_ips(&mut proxy.extra, &name)?;
+    let refresh_server_ip_interval =
+        hysteria2_extra_u64(&mut proxy.extra, "refresh-server-ip-interval")
+            .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+            .unwrap_or(0);
     if !proxy.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -939,6 +943,7 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
             allowed_ips,
             remote_dns_resolve,
             dns_servers,
+            refresh_server_ip_interval,
         }),
         headers: BTreeMap::new(),
     })

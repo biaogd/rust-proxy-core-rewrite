@@ -52,6 +52,7 @@ async fn userspace_udp_relays_echo() {
         reserved: [0; 3],
         bind_interface: String::new(),
         routing_mark: 0,
+        refresh_server_ip_interval: Duration::ZERO,
     })
     .await
     .expect("client");
@@ -113,7 +114,7 @@ fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 
             let mut packet: &[u8] = &buf[..n];
             loop {
                 match recv_tunnel.decapsulate(Some(from), packet) {
-                    TunnelAction::Done => break,
+                    TunnelAction::Done | TunnelAction::Expired => break,
                     TunnelAction::SendUdp(reply) => {
                         let _ = recv_udp.send_to(&reply, from).await;
                         packet = &[];

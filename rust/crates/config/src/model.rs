@@ -258,11 +258,11 @@ pub struct AnyTlsProxyConfig {
     pub carrier: AnyTlsCarrier,
 }
 
-/// Clash `type: wireguard` options accepted in 6I-B (single-peer TCP+UDP).
+/// Clash `type: wireguard` options accepted in 6I-C (single-peer TCP+UDP).
 ///
-/// `AmneziaWG`, `peers`, `ip-stack`, `dialer-proxy`, `workers` and
-/// `refresh-server-ip-interval` remain rejected. Empty `peers` still implies
-/// `allowed_ip=0.0.0.0/0` and `::/0` from the configured inner families.
+/// `AmneziaWG`, `peers`, `ip-stack`, `dialer-proxy` and `workers` remain
+/// rejected. Empty `peers` still implies `allowed_ip=0.0.0.0/0` and `::/0`
+/// from the configured inner families.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WireGuardProxyConfig {
     pub private_key: [u8; 32],
@@ -278,6 +278,8 @@ pub struct WireGuardProxyConfig {
     pub allowed_ips: Vec<String>,
     pub remote_dns_resolve: bool,
     pub dns_servers: Vec<String>,
+    /// Seconds; `0` means resolve the peer hostname only at first connect (Go).
+    pub refresh_server_ip_interval: u64,
 }
 
 /// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).

@@ -13,8 +13,9 @@
 //!   administrator privileges.
 //! - **`AmneziaWG`** is rejected at config parse until a later slice.
 //!
-//! 6I-B is single-peer TCP+UDP with optional inner IPv6 and tunnel DNS
-//! (`remote-dns-resolve`). Multi-peer and `AmneziaWG` remain rejected.
+//! 6I-C is single-peer TCP+UDP plus rehandshake, persistent keepalive,
+//! `refresh-server-ip-interval`, and TUN loop-avoidance for the peer endpoint.
+//! Multi-peer and `AmneziaWG` remain rejected.
 
 mod client;
 mod keys;

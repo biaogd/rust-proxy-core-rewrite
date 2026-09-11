@@ -1,4 +1,4 @@
-//! `WireGuard` userspace outbound adapter (6I-B TCP+UDP).
+//! `WireGuard` userspace outbound adapter (6I-C TCP+UDP+lifecycle).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -222,6 +222,7 @@ fn client_options_from_proxy(proxy: &ProxyConfig) -> Result<ClientOptions, WireG
         reserved: wireguard.reserved,
         bind_interface: String::new(),
         routing_mark: 0,
+        refresh_server_ip_interval: Duration::from_secs(wireguard.refresh_server_ip_interval),
     })
 }
 

@@ -428,6 +428,7 @@ fn wireguard_configuration_is_supported_and_scoped() {
     assert!(options.local_ipv6.is_none());
     assert!(!options.remote_dns_resolve);
     assert!(options.dns_servers.is_empty());
+    assert_eq!(options.refresh_server_ip_interval, 0);
 
     let cidr = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: wg-cidr\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2/24\n"
@@ -457,13 +458,25 @@ fn wireguard_configuration_is_supported_and_scoped() {
     .expect("WireGuard udp flag");
     assert!(udp.proxies[0].udp);
 
+    let refresh = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-refresh\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    refresh-server-ip-interval: 60\n"
+    ))
+    .expect("WireGuard refresh-server-ip-interval");
+    assert_eq!(
+        refresh.proxies[0]
+            .wireguard
+            .as_ref()
+            .expect("refresh")
+            .refresh_server_ip_interval,
+        60
+    );
+
     for unsupported in [
         "amnezia-wg-option:\n      jc: 4",
         "peers:\n      - server: 1.1.1.1\n        port: 1\n        public-key: {PUBLIC}\n        allowed-ips: [0.0.0.0/0]",
         "ip-stack:\n      mode: gvisor",
         "dialer-proxy: other",
         "workers: 2",
-        "refresh-server-ip-interval: 60",
         "sni: example.com",
         "private-key: not-a-key",
     ] {

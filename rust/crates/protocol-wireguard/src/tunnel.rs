@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
+use defguard_boringtun::noise::errors::WireGuardError;
 use defguard_boringtun::noise::{Tunn, TunnResult};
 use defguard_boringtun::x25519::{PublicKey, StaticSecret};
 
@@ -17,6 +18,8 @@ pub enum TunnelAction {
     SendUdp(Vec<u8>),
     /// Decrypted inner IP packet for the userspace stack.
     RecvIp(Vec<u8>),
+    /// Session keys expired; the reactor must clear `established` and handshake.
+    Expired,
 }
 
 /// Single-peer `WireGuard` session (initiator or responder).
@@ -51,6 +54,26 @@ impl NoiseTunnel {
             tunn: Mutex::new(tunn),
             reserved,
         })
+    }
+
+    /// Replaces the boringtun session after `ConnectionExpired`.
+    pub fn reset(
+        &self,
+        private_key: [u8; 32],
+        peer_public_key: [u8; 32],
+        preshared_key: Option<[u8; 32]>,
+        persistent_keepalive: Option<u16>,
+        index: u32,
+    ) {
+        let tunn = Tunn::new(
+            StaticSecret::from(private_key),
+            PublicKey::from(peer_public_key),
+            preshared_key,
+            persistent_keepalive,
+            index,
+            None,
+        );
+        *self.lock() = tunn;
     }
 
     /// Handshake initiation (force retries an in-progress attempt).
@@ -111,6 +134,7 @@ fn owned_udp(packet: &[u8], reserved: [u8; 3]) -> TunnelAction {
 
 fn map_result(result: TunnResult<'_>, reserved: [u8; 3]) -> TunnelAction {
     match result {
+        TunnResult::Err(WireGuardError::ConnectionExpired) => TunnelAction::Expired,
         TunnResult::Done | TunnResult::Err(_) => TunnelAction::Done,
         TunnResult::WriteToNetwork(packet) => {
             let mut datagram = packet.to_vec();

@@ -99,7 +99,7 @@ fn spawn_udp_recv<S>(
             let mut packet: &[u8] = &buf[..n];
             loop {
                 match tunnel.decapsulate(Some(from), packet) {
-                    TunnelAction::Done => break,
+                    TunnelAction::Done | TunnelAction::Expired => break,
                     TunnelAction::SendUdp(reply) => {
                         let _ = udp.send_to(&reply, from).await;
                         packet = &[];
