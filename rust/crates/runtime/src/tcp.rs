@@ -568,6 +568,7 @@ pub(super) async fn connect_configured_proxy(
         }
         ProxyKind::Hysteria2 => connect_hysteria2_proxy(proxy, destination, config, state).await,
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
+        ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
@@ -654,6 +655,91 @@ pub(super) async fn tuic_client_for_proxy(
     )
     .map_err(|error| format!("TUIC client failed: {error}"))?;
     Ok(state.tuic_client(&proxy.name, identity, client).await)
+}
+
+async fn connect_wireguard_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    config: &Config,
+    state: &RuntimeState,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let client = wireguard_client_for_proxy(proxy, config, state).await?;
+    let destination = resolve_wireguard_tcp_destination(destination, config).await?;
+    client
+        .create_proxy(&destination)
+        .await
+        .map_err(|error| format!("WireGuard proxy connection failed: {error}"))
+}
+
+pub(super) async fn wireguard_client_for_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    config: &Config,
+    state: &RuntimeState,
+) -> Result<std::sync::Arc<rewrite_outbound::WireGuardClient>, String> {
+    let dial = resolve_proxy_dial_server(
+        proxy_server(proxy),
+        &config.hosts,
+        config.dns.as_ref(),
+        false,
+    )
+    .await?;
+    let dial_server = match &dial.host {
+        Host::Ip(address) => address.to_string(),
+        Host::Domain(domain) => domain.clone(),
+    };
+    let identity = rewrite_outbound::wireguard_adapter_identity(
+        proxy,
+        &dial_server,
+        &config.interface_name,
+        config.routing_mark,
+    );
+    if let Some(existing) = state.cached_wireguard_client(&proxy.name, &identity).await {
+        return Ok(existing);
+    }
+    let client = rewrite_outbound::WireGuardClient::from_proxy_with_dial_server(
+        proxy,
+        &dial_server,
+        &config.interface_name,
+        config.routing_mark,
+    )
+    .await
+    .map_err(|error| format!("WireGuard client failed: {error}"))?;
+    Ok(state.wireguard_client(&proxy.name, identity, client).await)
+}
+
+async fn resolve_wireguard_tcp_destination(
+    destination: &Destination,
+    config: &Config,
+) -> Result<Destination, String> {
+    match &destination.host {
+        Host::Ip(IpAddr::V4(_)) => Ok(destination.clone()),
+        Host::Ip(IpAddr::V6(_)) => Err("WireGuard 6I-A requires an IPv4 destination".to_owned()),
+        Host::Domain(domain) => {
+            if let Some(dns) = config.dns.as_ref() {
+                let address = rewrite_dns::resolve_direct_domain(dns, domain, false)
+                    .await
+                    .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?;
+                match address {
+                    IpAddr::V4(_) => Ok(Destination {
+                        host: Host::Ip(address),
+                        port: destination.port,
+                    }),
+                    IpAddr::V6(_) => Err("WireGuard 6I-A requires an IPv4 destination".to_owned()),
+                }
+            } else {
+                let mut addresses = tokio::net::lookup_host((domain.as_str(), destination.port))
+                    .await
+                    .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?;
+                addresses
+                    .find(std::net::SocketAddr::is_ipv4)
+                    .map(|address| Destination {
+                        host: Host::Ip(address.ip()),
+                        port: destination.port,
+                    })
+                    .ok_or_else(|| "WireGuard 6I-A requires an IPv4 destination".to_owned())
+            }
+        }
+    }
 }
 
 fn quic_client_identity(

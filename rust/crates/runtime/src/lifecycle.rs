@@ -205,8 +205,9 @@ pub(super) async fn run_with_reload_inner(
     stop_task(ntp).await;
     stop_task(ui_updater).await;
     stop_task(geo_updater).await;
-    // Producers have stopped; now retire pooled QUIC connections and their workers.
+    // Producers have stopped; now retire pooled QUIC/UDP tunnel workers.
     state.clear_tuic_clients().await;
+    state.clear_wireguard_clients().await;
     if restart_requested {
         restart_current_process();
     }

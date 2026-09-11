@@ -172,6 +172,7 @@ pub enum ProxyKind {
     Dns,
     Rematch,
     Tuic,
+    WireGuard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,6 +229,7 @@ pub struct ProxyConfig {
     pub hysteria2: Option<Hysteria2ProxyConfig>,
     pub tuic: Option<TuicProxyConfig>,
     pub ssr: Option<SsrProxyConfig>,
+    pub wireguard: Option<WireGuardProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -254,6 +256,25 @@ pub struct AnyTlsProxyConfig {
     pub disable_reuse: bool,
     /// Outer security carrier replacing native TLS when set (Go-compatible).
     pub carrier: AnyTlsCarrier,
+}
+
+/// Clash `type: wireguard` options accepted in 6I-A (single-peer IPv4 TCP).
+///
+/// `AmneziaWG`, `peers`, inner IPv6, remote DNS, `ip-stack`, `dialer-proxy`,
+/// `workers` and `refresh-server-ip-interval` remain rejected. Top-level
+/// `allowed-ips` is stored but the dataplane still uses `0.0.0.0/0` like Go.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WireGuardProxyConfig {
+    pub private_key: [u8; 32],
+    pub public_key: [u8; 32],
+    pub preshared_key: Option<[u8; 32]>,
+    pub local_addr: Ipv4Addr,
+    pub local_prefix_len: u8,
+    /// `0` means the Go/Clash default `1408`.
+    pub mtu: u16,
+    pub persistent_keepalive: Option<u16>,
+    pub reserved: [u8; 3],
+    pub allowed_ips: Vec<String>,
 }
 
 /// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).

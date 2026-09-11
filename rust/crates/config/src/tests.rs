@@ -403,6 +403,68 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn wireguard_configuration_is_supported_and_scoped() {
+    const PRIVATE: &str = "ERERERERERERERERERERERERERERERERERERERERERE=";
+    const PUBLIC: &str = "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=";
+    const PSK: &str = "ERERERERERERERERERERERERERERERERERERERERERE=";
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: wg\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    pre-shared-key: {PSK}\n    mtu: 1280\n    persistent-keepalive: 25\n    reserved: [1, 2, 3]\n    allowed-ips: [10.0.0.0/24]\n"
+    );
+    let config = Config::from_yaml(&source).expect("6I-A WireGuard config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::WireGuard);
+    assert!(!proxy.udp);
+    assert!(!proxy.tls);
+    let options = proxy.wireguard.as_ref().expect("WireGuard options");
+    assert_eq!(options.private_key, [0x11; 32]);
+    assert_eq!(options.public_key, [0x22; 32]);
+    assert_eq!(options.preshared_key, Some([0x11; 32]));
+    assert_eq!(options.local_addr, Ipv4Addr::new(10, 0, 0, 2));
+    assert_eq!(options.local_prefix_len, 32);
+    assert_eq!(options.mtu, 1280);
+    assert_eq!(options.persistent_keepalive, Some(25));
+    assert_eq!(options.reserved, [1, 2, 3]);
+    assert_eq!(options.allowed_ips, ["10.0.0.0/24"]);
+
+    let cidr = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-cidr\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2/24\n"
+    ))
+    .expect("WireGuard CIDR ip");
+    let cidr_opts = cidr.proxies[0].wireguard.as_ref().expect("cidr");
+    assert_eq!(cidr_opts.local_prefix_len, 24);
+    assert_eq!(cidr_opts.mtu, 0);
+    assert!(cidr_opts.preshared_key.is_none());
+    assert_eq!(cidr_opts.reserved, [0, 0, 0]);
+
+    let udp = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-udp\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    udp: true\n"
+    ))
+    .expect("WireGuard udp flag");
+    assert!(udp.proxies[0].udp);
+
+    for unsupported in [
+        "amnezia-wg-option:\n      jc: 4",
+        "peers:\n      - server: 1.1.1.1\n        port: 1\n        public-key: {PUBLIC}\n        allowed-ips: [0.0.0.0/0]",
+        "ipv6: fd00::2",
+        "remote-dns-resolve: true",
+        "ip-stack:\n      mode: gvisor",
+        "dialer-proxy: other",
+        "workers: 2",
+        "refresh-server-ip-interval: 60",
+        "sni: example.com",
+        "private-key: not-a-key",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
@@ -1854,6 +1916,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 hysteria2: None,
                 tuic: None,
                 ssr: None,
+                wireguard: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1939,6 +2002,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             hysteria2: None,
             tuic: None,
             ssr: None,
+            wireguard: None,
             headers: BTreeMap::new(),
         }],
     };

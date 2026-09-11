@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::SystemTime;
 
 use base64::Engine;
@@ -17,7 +19,7 @@ use crate::model::{
     SsrProxyConfig, TrojanProxyConfig, TrojanTransport, TuicProxyConfig, VlessFlow,
     VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions,
     VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
-    VmessTransport,
+    VmessTransport, WireGuardProxyConfig,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,
@@ -141,6 +143,7 @@ pub(crate) fn parse_proxies(
             Some("anytls") => outbounds.push(parse_anytls_proxy(name, proxy, home_directory)?),
             Some("hysteria2") => outbounds.push(parse_hysteria2_proxy(name, proxy)?),
             Some("tuic") => outbounds.push(parse_tuic_proxy(name, proxy)?),
+            Some("wireguard") => outbounds.push(parse_wireguard_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -298,6 +301,7 @@ fn parse_anytls_proxy(
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -526,6 +530,7 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         }),
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -735,8 +740,261 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
             max_udp_relay_packet_size,
         }),
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    const REJECTED_EXTRA: &[&str] = &[
+        "amnezia-wg-option",
+        "peers",
+        "ipv6",
+        "remote-dns-resolve",
+        "dns",
+        "ip-stack",
+        "refresh-server-ip-interval",
+        "dialer-proxy",
+        "workers",
+    ];
+    const ACCEPTED_EXTRA: &[&str] = &[
+        "public-key",
+        "ip",
+        "pre-shared-key",
+        "reserved",
+        "persistent-keepalive",
+        "allowed-ips",
+        "mtu",
+    ];
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.global_padding.is_some()
+        || proxy.authenticated_length.is_some()
+        || proxy.packet_addr.is_some()
+        || proxy.xudp.is_some()
+        || proxy.packet_encoding.is_some()
+        || proxy.ws_opts.is_some()
+        || proxy.http_opts.is_some()
+        || proxy.h2_opts.is_some()
+        || proxy.grpc_opts.is_some()
+        || proxy.xhttp_opts.is_some()
+        || proxy.mkcp_opts.is_some()
+        || proxy.mekya_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.reality_opts.is_some()
+        || proxy.headers.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.client_metadata.is_some()
+        || proxy.idle_session_check_interval.is_some()
+        || proxy.idle_session_timeout.is_some()
+        || proxy.min_idle_session.is_some()
+        || proxy.shadow_tls_opts.is_some()
+        || proxy.restls_opts.is_some()
+        || proxy.jls_opts.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.name_cert_verify.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.tls.is_some()
+        || proxy.alpn.is_some()
+        || proxy.disable_reuse.is_some()
+        || proxy
+            .extra
+            .keys()
+            .any(|key| REJECTED_EXTRA.contains(&key.as_str()))
+        || proxy
+            .extra
+            .keys()
+            .any(|key| !ACCEPTED_EXTRA.contains(&key.as_str()))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = u16::try_from(
+        proxy
+            .port
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?,
+    )
+    .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
+    if port == 0 {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    let private_key = decode_wireguard_key(
+        proxy
+            .private_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?,
+        &name,
+    )?;
+    let public_key_text = hysteria2_extra_string(&mut proxy.extra, "public-key")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let public_key = decode_wireguard_key(&public_key_text, &name)?;
+    let preshared_key = match hysteria2_extra_string(&mut proxy.extra, "pre-shared-key")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+    {
+        None => None,
+        Some(value) if value.is_empty() => None,
+        Some(value) => Some(decode_wireguard_key(&value, &name)?),
+    };
+    let ip_text = hysteria2_extra_string(&mut proxy.extra, "ip")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let (local_addr, local_prefix_len) = parse_wireguard_local_ip(&ip_text, &name)?;
+    let mtu = match hysteria2_extra_u64(&mut proxy.extra, "mtu")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0)
+    {
+        0 => 0,
+        value => u16::try_from(value).map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?,
+    };
+    let persistent_keepalive = match hysteria2_extra_u64(&mut proxy.extra, "persistent-keepalive")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0)
+    {
+        0 => None,
+        value => {
+            Some(u16::try_from(value).map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?)
+        }
+    };
+    let reserved = parse_wireguard_reserved(&mut proxy.extra, &name)?;
+    let allowed_ips = parse_wireguard_allowed_ips(&mut proxy.extra, &name)?;
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::WireGuard,
+        server,
+        port,
+        username: None,
+        password: None,
+        cipher: None,
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        reality: None,
+        udp: proxy.udp.unwrap_or(false),
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: None,
+        hysteria2: None,
+        tuic: None,
+        ssr: None,
+        wireguard: Some(WireGuardProxyConfig {
+            private_key,
+            public_key,
+            preshared_key,
+            local_addr,
+            local_prefix_len,
+            mtu,
+            persistent_keepalive,
+            reserved,
+            allowed_ips,
+        }),
+        headers: BTreeMap::new(),
+    })
+}
+
+fn decode_wireguard_key(text: &str, name: &str) -> Result<[u8; 32], ConfigError> {
+    let decoded = STANDARD
+        .decode(text.trim())
+        .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+    decoded
+        .try_into()
+        .map_err(|_: Vec<u8>| ConfigError::UnsupportedProxy(name.to_owned()))
+}
+
+fn parse_wireguard_local_ip(text: &str, name: &str) -> Result<(Ipv4Addr, u8), ConfigError> {
+    if text.contains('/') {
+        let network = ipnet::Ipv4Net::from_str(text)
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        Ok((network.addr(), network.prefix_len()))
+    } else {
+        let addr =
+            Ipv4Addr::from_str(text).map_err(|_| ConfigError::UnsupportedProxy(name.to_owned()))?;
+        Ok((addr, 32))
+    }
+}
+
+fn parse_wireguard_reserved(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    name: &str,
+) -> Result<[u8; 3], ConfigError> {
+    match extra.remove("reserved") {
+        None | Some(serde_yaml_ng::Value::Null) => Ok([0, 0, 0]),
+        Some(serde_yaml_ng::Value::Sequence(items)) if items.len() == 3 => {
+            let mut reserved = [0_u8; 3];
+            for (index, item) in items.into_iter().enumerate() {
+                reserved[index] = wireguard_u8(&item, name)?;
+            }
+            Ok(reserved)
+        }
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
+}
+
+fn parse_wireguard_allowed_ips(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    name: &str,
+) -> Result<Vec<String>, ConfigError> {
+    match extra.remove("allowed-ips") {
+        None | Some(serde_yaml_ng::Value::Null) => Ok(Vec::new()),
+        Some(serde_yaml_ng::Value::Sequence(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_yaml_ng::Value::String(text) => Ok(text),
+                serde_yaml_ng::Value::Number(number) => Ok(number.to_string()),
+                _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+            })
+            .collect(),
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
+}
+
+fn wireguard_u8(value: &serde_yaml_ng::Value, name: &str) -> Result<u8, ConfigError> {
+    match value {
+        serde_yaml_ng::Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .ok_or_else(|| ConfigError::UnsupportedProxy(name.to_owned())),
+        serde_yaml_ng::Value::String(text) => text
+            .trim()
+            .parse()
+            .map_err(|_| ConfigError::UnsupportedProxy(name.to_owned())),
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
 }
 
 fn hysteria2_extra_string(
@@ -1162,6 +1420,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1267,6 +1526,7 @@ fn parse_remote_proxy(
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -1365,6 +1625,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1513,10 +1774,12 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
             obfs,
             obfs_param,
         }),
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     strip_ignored_proxy_metadata(&mut proxy.extra);
     let network = proxy.network.as_deref().unwrap_or("tcp");
@@ -1618,6 +1881,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1731,6 +1995,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     })
 }
@@ -2777,6 +3042,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         hysteria2: None,
         tuic: None,
         ssr: None,
+        wireguard: None,
         headers: BTreeMap::new(),
     }
 }
@@ -3146,6 +3412,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Reject => "Reject",
             ProxyKind::Dns => "Dns",
             ProxyKind::Rematch => "Rematch",
+            ProxyKind::WireGuard => "WireGuard",
         };
         types.insert(proxy.name.clone(), kind.to_owned());
     }

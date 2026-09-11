@@ -833,6 +833,52 @@ pub(super) async fn measure_http_delay(
                     .map_err(|_| ())?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::WireGuard => {
+                    let dial_server = match &server.host {
+                        Host::Ip(address) => address.to_string(),
+                        Host::Domain(domain) => domain.clone(),
+                    };
+                    let identity = rewrite_outbound::wireguard_adapter_identity(
+                        proxy,
+                        &dial_server,
+                        &config.interface_name,
+                        config.routing_mark,
+                    );
+                    let client = if let Some(existing) =
+                        state.cached_wireguard_client(&proxy.name, &identity).await
+                    {
+                        existing
+                    } else {
+                        let constructed =
+                            rewrite_outbound::WireGuardClient::from_proxy_with_dial_server(
+                                proxy,
+                                &dial_server,
+                                &config.interface_name,
+                                config.routing_mark,
+                            )
+                            .await
+                            .map_err(|_| ())?;
+                        state
+                            .wireguard_client(&proxy.name, identity, constructed)
+                            .await
+                    };
+                    let destination = match &destination.host {
+                        Host::Ip(std::net::IpAddr::V4(_)) => destination,
+                        Host::Ip(std::net::IpAddr::V6(_)) => return Err(()),
+                        Host::Domain(domain) => {
+                            let mut addresses =
+                                tokio::net::lookup_host((domain.as_str(), destination.port))
+                                    .await
+                                    .map_err(|_| ())?;
+                            let address = addresses.find(std::net::SocketAddr::is_ipv4).ok_or(())?;
+                            Destination {
+                                host: Host::Ip(address.ip()),
+                                port: destination.port,
+                            }
+                        }
+                    };
+                    client.create_proxy(&destination).await.map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::ShadowsocksR => {
                     let ssr = proxy.ssr.as_ref().ok_or(())?;
                     let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
@@ -1091,6 +1137,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Hysteria2 => "Hysteria2",
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
+        rewrite_config::ProxyKind::WireGuard => "WireGuard",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1105,7 +1152,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::AnyTls
         | rewrite_config::ProxyKind::Hysteria2
         | rewrite_config::ProxyKind::Tuic
-        | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+        | rewrite_config::ProxyKind::ShadowsocksR
+        | rewrite_config::ProxyKind::WireGuard => proxy.udp,
         rewrite_config::ProxyKind::Http => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
@@ -1267,7 +1315,8 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::AnyTls
             | rewrite_config::ProxyKind::Hysteria2
             | rewrite_config::ProxyKind::Tuic
-            | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+            | rewrite_config::ProxyKind::ShadowsocksR
+            | rewrite_config::ProxyKind::WireGuard => proxy.udp,
             rewrite_config::ProxyKind::Http => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject

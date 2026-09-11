@@ -10,6 +10,7 @@ mod trojan;
 mod tuic;
 mod vless;
 mod vmess;
+mod wireguard;
 
 pub use anytls::{
     AnyTlsClient, AnyTlsClientOptions, AnyTlsDialOut, AnyTlsProxyError, associate_anytls_udp,
@@ -78,3 +79,4 @@ pub use vmess::{
     associate_vmess_udp_on_stream, associate_vmess_udp_with_options, connect_vmess_on_stream,
     connect_vmess_with_options,
 };
+pub use wireguard::{WireGuardClient, WireGuardProxyError, wireguard_adapter_identity};

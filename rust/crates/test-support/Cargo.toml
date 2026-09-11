@@ -41,11 +41,16 @@ path = "src/shadowsocks_uot_client.rs"
 name = "rewrite-shadowsocks-websocket-authority"
 path = "src/shadowsocks_websocket_authority.rs"
 
+[[bin]]
+name = "rewrite-wireguard-authority"
+path = "src/wireguard_authority.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-wireguard = { path = "../protocol-wireguard" }
 rewrite-rules = { path = "../rules" }
 rewrite-dns = { path = "../dns" }
 serde.workspace = true
@@ -58,6 +63,8 @@ h2.workspace = true
 http.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+netstack-smoltcp.workspace = true
+rand.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
