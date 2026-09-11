@@ -5601,8 +5601,10 @@ explicitly rejected.
 
 The maintained `shadowsocks` crate already encrypts SIP022 packets. Protocol
 state lives in `rewrite-protocol-shadowsocks`: nonzero client and server session
-identifiers, packet counters that start at 1, and a 128×64-bit sliding replay
-window matching `sing-shadowsocks2`. Outbound wrapping keeps NIC bind, TUN
+identifiers, packet counters that start at 1, and per-server-session 128×64-bit
+sliding replay windows (capped and expired) matching `sing-shadowsocks2`'s
+window shape. Switching server sessions no longer clears earlier windows.
+Outbound wrapping keeps NIC bind, TUN
 loop-avoidance and routing-mark policy; mixed/SOCKS5/TUN UDP sessions rebuild
 the association after `bump_network_generation`.
 
@@ -5622,9 +5624,12 @@ the Rust candidate against the same fixed authority. Forwarding results and
 lifecycle match for IPv4/IPv6/domain, multi-packet and multi-destination reuse,
 each standard cipher plus AES EIH, wrong-key timeout, concurrent clients, server
 restart, mixed versus SOCKS5 ingress, the native outbound association used by
-TUN, controller `udp: true` / `uot: false`, and process survival. Protocol unit
-tests pin replay, reorder, wrong session, tamper/truncate, concurrent clients
-and bounded server-session eviction. Ciphertext is not compared byte-for-byte.
+TUN, controller `udp: true` / `uot: false`, and process survival. The
+differential requires those observations to succeed; IPv6 bind failure is
+skipped rather than treated as a matching false. Protocol unit tests pin
+replay, A→B→A server-session reuse, reorder, wrong session, relay-injected
+tamper/truncate, concurrent clients and bounded server-session eviction.
+Ciphertext is not compared byte-for-byte.
 
 Pinned Go still accepts ChaCha8 UDP and 2022 UoT at `mihomo -t`; the rewrite
 rejects those combinations by design and records the oracle surplus instead of

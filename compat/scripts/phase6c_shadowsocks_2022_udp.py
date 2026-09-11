@@ -71,6 +71,22 @@ REWRITE_REJECT_LABELS = (
     "reject-chacha8-udp",
     "reject-2022-uot",
 )
+LISTENER_REQUIRED = (
+    "ipv4",
+    "domain",
+    "same-client-session-reuse",
+    "multi-dest",
+    "large",
+    "burst",
+)
+CIPHER_REQUIRED = (
+    "concurrent-clients",
+    "native-association",
+    "server-restart",
+    "old-session-replay-ignored",
+    "process-alive",
+)
+PARITY_OMIT_CIPHER_KEYS = ("old-session-replay-ignored",)
 
 
 def authority_binary() -> pathlib.Path:
@@ -164,13 +180,93 @@ def try_ipv6_echo() -> tuple[socketserver.BaseServer, int] | None:
     return echo, int(echo.server_address[1])
 
 
+class UdpRelay:
+    """Forwards Shadowsocks datagrams and can replay captured server replies."""
+
+    def __init__(self, backend_port: int) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.settimeout(0.2)
+        self.port = int(self._sock.getsockname()[1])
+        self._backend = ("127.0.0.1", backend_port)
+        self._product: tuple[str, int] | None = None
+        self.replies: list[bytes] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def replay_oldest_reply(self) -> bool:
+        with self._lock:
+            if not self.replies or self._product is None:
+                return False
+            packet = self.replies[0]
+            dest = self._product
+        self._sock.sendto(packet, dest)
+        return True
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=IO_DEADLINE)
+        self._sock.close()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                data, addr = self._sock.recvfrom(65_535)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            if addr == self._backend:
+                with self._lock:
+                    self.replies.append(data)
+                    product = self._product
+                if product is not None:
+                    try:
+                        self._sock.sendto(data, product)
+                    except OSError:
+                        return
+            else:
+                with self._lock:
+                    self._product = addr
+                try:
+                    self._sock.sendto(data, self._backend)
+                except OSError:
+                    return
+
+
+def no_datagram(client: socket.socket, timeout: float = 0.4) -> bool:
+    client.settimeout(timeout)
+    try:
+        client.recvfrom(65_535)
+        return False
+    except TimeoutError:
+        return True
+    except OSError:
+        return True
+    finally:
+        client.settimeout(IO_DEADLINE)
+
+
+def drain_datagrams(client: socket.socket) -> None:
+    client.settimeout(0.05)
+    try:
+        while True:
+            client.recvfrom(65_535)
+    except (TimeoutError, OSError):
+        pass
+    finally:
+        client.settimeout(IO_DEADLINE)
+
+
 def exercise_listener(
     process: Any,
     proxy_port: int,
     echo_port: int,
     second_echo_port: int,
     label: str,
-) -> dict[str, bool]:
+) -> tuple[dict[str, bool], socket.socket]:
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client.bind(("127.0.0.1", 0))
     client.settimeout(IO_DEADLINE)
@@ -179,43 +275,40 @@ def exercise_listener(
     reused = bytes(range(256)) * 8
     second_dest = f"ss2022-udp-{label}-second".encode()
     large = b"L" * 1400
-    try:
-        wait_exchange(
-            process, client, proxy_port, socks_udp_packet(echo_port, first), first
-        )
-        observations = {
-            "ipv4": True,
-            "domain": exchange(
-                client,
-                proxy_port,
-                domain_packet("localhost", echo_port, domain_payload),
-                domain_payload,
-            ),
-            "same-client-session-reuse": exchange(
-                client, proxy_port, socks_udp_packet(echo_port, reused), reused
-            ),
-            "multi-dest": exchange(
-                client,
-                proxy_port,
-                socks_udp_packet(second_echo_port, second_dest),
-                second_dest,
-            ),
-            "large": exchange(
-                client, proxy_port, socks_udp_packet(echo_port, large), large
-            ),
-        }
-        burst = True
-        for index in range(16):
-            payload = f"ss2022-udp-{label}-burst-{index}".encode()
-            if not exchange(
-                client, proxy_port, socks_udp_packet(echo_port, payload), payload
-            ):
-                burst = False
-                break
-        observations["burst"] = burst
-        return observations
-    finally:
-        client.close()
+    wait_exchange(
+        process, client, proxy_port, socks_udp_packet(echo_port, first), first
+    )
+    observations = {
+        "ipv4": True,
+        "domain": exchange(
+            client,
+            proxy_port,
+            domain_packet("localhost", echo_port, domain_payload),
+            domain_payload,
+        ),
+        "same-client-session-reuse": exchange(
+            client, proxy_port, socks_udp_packet(echo_port, reused), reused
+        ),
+        "multi-dest": exchange(
+            client,
+            proxy_port,
+            socks_udp_packet(second_echo_port, second_dest),
+            second_dest,
+        ),
+        "large": exchange(
+            client, proxy_port, socks_udp_packet(echo_port, large), large
+        ),
+    }
+    burst = True
+    for index in range(16):
+        payload = f"ss2022-udp-{label}-burst-{index}".encode()
+        if not exchange(
+            client, proxy_port, socks_udp_packet(echo_port, payload), payload
+        ):
+            burst = False
+            break
+    observations["burst"] = burst
+    return observations, client
 
 
 def exercise_wrong_key(
@@ -293,6 +386,9 @@ def exercise_cipher(
         authority_password or password,
         authority_user_key,
     )
+    relay = UdpRelay(authority_port)
+    mixed_client: socket.socket | None = None
+    socks_client: socket.socket | None = None
     config = scratch / "config.yaml"
     config.write_text(
         f"""mixed-port: {mixed_port}
@@ -306,7 +402,7 @@ proxies:
   - name: local-ss
     type: ss
     server: 127.0.0.1
-    port: {authority_port}
+    port: {relay.port}
     cipher: {cipher}
     password: {password}
     udp: true
@@ -319,9 +415,13 @@ rules:
     try:
         wait_ready(process, mixed_port)
         wait_ready(process, socks_port)
-        mixed = exercise_listener(process, mixed_port, echo_port, second_port, "mixed")
-        socks5 = exercise_listener(process, socks_port, echo_port, second_port, "socks5")
-        ipv6 = False
+        mixed, mixed_client = exercise_listener(
+            process, mixed_port, echo_port, second_port, "mixed"
+        )
+        socks5, socks_client = exercise_listener(
+            process, socks_port, echo_port, second_port, "socks5"
+        )
+        ipv6: bool | str = "skipped"
         if ipv6_server is not None:
             v6_echo, v6_port = ipv6_server
             client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -341,6 +441,7 @@ rules:
                 client.close()
                 v6_echo.shutdown()
                 v6_echo.server_close()
+                ipv6_server = None
         concurrent = True
         clients = []
         try:
@@ -362,6 +463,8 @@ rules:
             native_client, authority_port, echo_port, cipher, password
         )
         stop(authority_process)
+        authority_stdout.close()
+        authority_stderr.close()
         restart_scratch = scratch / "restarted"
         restart_scratch.mkdir()
         authority_process, authority_stdout, authority_stderr = start_authority(
@@ -372,21 +475,29 @@ rules:
             authority_password or password,
             authority_user_key,
         )
-        restart_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        restart_client.bind(("127.0.0.1", 0))
         restarted = False
+        replay_ignored = False
+        if mixed_client is None:
+            raise RuntimeError("mixed UDP client was not established")
         try:
             restarted = wait_exchange(
                 process,
-                restart_client,
+                mixed_client,
                 mixed_port,
                 socks_udp_packet(echo_port, b"ss2022-udp-restart"),
                 b"ss2022-udp-restart",
             )
+            drain_datagrams(mixed_client)
+            replay_ignored = relay.replay_oldest_reply() and no_datagram(mixed_client)
+            replay_ignored = replay_ignored and exchange(
+                mixed_client,
+                mixed_port,
+                socks_udp_packet(echo_port, b"ss2022-udp-after-replay"),
+                b"ss2022-udp-after-replay",
+            )
         except (TimeoutError, RuntimeError, OSError):
             restarted = False
-        finally:
-            restart_client.close()
+            replay_ignored = False
         observations: dict[str, Any] = {
             "mixed": mixed,
             "socks5": socks5,
@@ -394,11 +505,21 @@ rules:
             "concurrent-clients": concurrent,
             "native-association": native,
             "server-restart": restarted,
+            "old-session-replay-ignored": replay_ignored,
             "controller": proxy_snapshot(controller_port),
             "process-alive": process.poll() is None,
         }
         return observations
     finally:
+        if mixed_client is not None:
+            mixed_client.close()
+        if socks_client is not None:
+            socks_client.close()
+        if ipv6_server is not None:
+            v6_echo, _ = ipv6_server
+            v6_echo.shutdown()
+            v6_echo.server_close()
+        relay.close()
         stop(process)
         stop(authority_process)
         stdout.close()
@@ -499,18 +620,64 @@ def exercise(
     return observations
 
 
+def cipher_labels() -> tuple[str, ...]:
+    return tuple(cipher for cipher, _ in CIPHERS) + tuple(
+        f"{cipher}-eih" for cipher, _, _ in EIH_CASES
+    )
+
+
 def parity_observations(obs: dict[str, Any]) -> dict[str, Any]:
     validation = obs["key-validation"]
     view = dict(obs)
     view["key-validation"] = {
         label: validation[label] for label in SHARED_CONFIG_LABELS
     }
+    for label in cipher_labels():
+        cipher_obs = dict(view[label])
+        for key in PARITY_OMIT_CIPHER_KEYS:
+            cipher_obs.pop(key, None)
+        view[label] = cipher_obs
     return view
 
 
-def rewrite_rejects_unsupported_udp(obs: dict[str, Any]) -> bool:
-    validation = obs["key-validation"]
-    return all(not validation[label] for label in REWRITE_REJECT_LABELS)
+def cipher_required_failures(label: str, obs: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    for side in ("mixed", "socks5"):
+        for key in LISTENER_REQUIRED:
+            if obs.get(side, {}).get(key) is not True:
+                failures.append(f"{label}.{side}.{key}")
+    if obs.get("ipv6") not in (True, "skipped"):
+        failures.append(f"{label}.ipv6")
+    for key in CIPHER_REQUIRED:
+        if key in PARITY_OMIT_CIPHER_KEYS:
+            continue
+        if obs.get(key) is not True:
+            failures.append(f"{label}.{key}")
+    controller = obs.get("controller") or {}
+    if controller.get("udp") is not True:
+        failures.append(f"{label}.controller.udp")
+    if controller.get("uot") is not False:
+        failures.append(f"{label}.controller.uot")
+    return failures
+
+
+def required_failures(obs: dict[str, Any], *, rewrite: bool) -> list[str]:
+    failures: list[str] = []
+    validation = obs.get("key-validation") or {}
+    for label in SHARED_CONFIG_LABELS:
+        if validation.get(label) is not True:
+            failures.append(f"key-validation.{label}")
+    if rewrite:
+        for label in REWRITE_REJECT_LABELS:
+            if validation.get(label) is not False:
+                failures.append(f"key-validation.{label}")
+    if obs.get("wrong-key-timeout") is not True:
+        failures.append("wrong-key-timeout")
+    for label in cipher_labels():
+        failures.extend(cipher_required_failures(label, obs.get(label) or {}))
+        if rewrite and obs.get(label, {}).get("old-session-replay-ignored") is not True:
+            failures.append(f"{label}.old-session-replay-ignored")
+    return failures
 
 
 def main() -> int:
@@ -545,11 +712,22 @@ def main() -> int:
             raise
     go = observations["go"]
     rust = observations["rust"]
-    if parity_observations(go) != parity_observations(rust) or not rewrite_rejects_unsupported_udp(
-        rust
-    ):
+    failures = required_failures(go, rewrite=False) + required_failures(
+        rust, rewrite=True
+    )
+    if failures or parity_observations(go) != parity_observations(rust):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-        FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
+        FAILURE_ARTIFACT.write_text(
+            json.dumps(
+                {
+                    "failures": failures,
+                    "observations": observations,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        print("Phase 6C-O required observations failed:", ", ".join(failures) or "parity")
         return 1
     FAILURE_ARTIFACT.unlink(missing_ok=True)
     print("Phase 6C-O Shadowsocks 2022 UDP outbound differential passed")
@@ -559,6 +737,14 @@ def main() -> int:
         f"2022-uot={go['key-validation']['reject-2022-uot']}); "
         "the rewrite rejects both by design."
     )
+    go_replay = [
+        go[label]["old-session-replay-ignored"] for label in cipher_labels()
+    ]
+    if not all(go_replay):
+        print(
+            "Pinned Go did not ignore old-session ciphertext after restart; "
+            "recorded without treating it as rewrite parity."
+        )
     return 0
 
 

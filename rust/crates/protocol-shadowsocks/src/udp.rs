@@ -218,6 +218,86 @@ mod tests {
         .expect("client association")
     }
 
+    struct PacketIntercept {
+        socket: Arc<UdpSocket>,
+        captured: Arc<Mutex<Vec<Vec<u8>>>>,
+        addr: SocketAddr,
+        backend: Arc<Mutex<SocketAddr>>,
+    }
+
+    impl PacketIntercept {
+        async fn spawn(client_addr: SocketAddr, backend: SocketAddr) -> Self {
+            let socket = Arc::new(
+                UdpSocket::bind("127.0.0.1:0")
+                    .await
+                    .expect("intercept bind"),
+            );
+            let addr = socket.local_addr().expect("intercept addr");
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let backend = Arc::new(Mutex::new(backend));
+            let task_socket = Arc::clone(&socket);
+            let task_captured = Arc::clone(&captured);
+            let task_backend = Arc::clone(&backend);
+            tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 65_536];
+                loop {
+                    let Ok((length, from)) = task_socket.recv_from(&mut buffer).await else {
+                        break;
+                    };
+                    if from == client_addr {
+                        let dest = *task_backend.lock().await;
+                        let _ = task_socket.send_to(&buffer[..length], dest).await;
+                    } else {
+                        task_captured.lock().await.push(buffer[..length].to_vec());
+                        let _ = task_socket.send_to(&buffer[..length], client_addr).await;
+                    }
+                }
+            });
+            Self {
+                socket,
+                captured,
+                addr,
+                backend,
+            }
+        }
+
+        async fn last_from_server(&self) -> Vec<u8> {
+            self.captured
+                .lock()
+                .await
+                .last()
+                .cloned()
+                .expect("captured server datagram")
+        }
+
+        async fn inject(&self, packet: &[u8], client_addr: SocketAddr) {
+            self.socket
+                .send_to(packet, client_addr)
+                .await
+                .expect("inject intercepted datagram");
+        }
+
+        async fn retarget(&self, backend: SocketAddr) {
+            *self.backend.lock().await = backend;
+        }
+    }
+
+    async fn associate_through_intercept(
+        client: UdpSocket,
+        client_addr: SocketAddr,
+        server_addr: SocketAddr,
+        password: &str,
+        cipher: &str,
+    ) -> (ShadowsocksUdpAssociation, PacketIntercept) {
+        let intercept = PacketIntercept::spawn(client_addr, server_addr).await;
+        client
+            .connect(intercept.addr)
+            .await
+            .expect("client to intercept");
+        let association = associate(client, intercept.addr, password, cipher);
+        (association, intercept)
+    }
+
     async fn exchange(
         association: &ShadowsocksUdpAssociation,
         payload: &[u8],
@@ -280,28 +360,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_wrong_key_tampered_and_truncated_packets() {
+    async fn rejects_tampered_and_truncated_ciphertext_from_relay() {
         let cipher = "2022-blake3-aes-128-gcm";
         let (client, client_addr, server, server_addr) = bind_pair().await;
         let _echo = spawn_echo(server, server_addr, KEY_128, cipher, None);
-        let raw = UdpSocket::bind("127.0.0.1:0").await.expect("raw");
-        let association = associate(client, server_addr, KEY_128, cipher);
+        let (association, intercept) =
+            associate_through_intercept(client, client_addr, server_addr, KEY_128, cipher).await;
         let (_, payload) = exchange(&association, b"good").await;
         assert_eq!(payload, b"good");
-
-        raw.send_to(&[0_u8; 16], client_addr)
-            .await
-            .expect("truncated");
-        raw.send_to(&[0x55; 80], client_addr)
-            .await
-            .expect("tampered");
-        let wrong_client = UdpSocket::bind("127.0.0.1:0").await.expect("wrong bind");
-        wrong_client
-            .connect(server_addr)
-            .await
-            .expect("wrong connect");
-        let wrong = associate(wrong_client, server_addr, USER_KEY_128, cipher);
-        let _ = wrong.send(&echo_destination(), b"bad-key").await;
+        let captured = intercept.last_from_server().await;
+        assert!(captured.len() > 16, "captured AEAD-2022 datagram");
+        intercept.inject(&captured[..16], client_addr).await;
+        let mut tampered = captured.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x5A;
+        intercept.inject(&tampered, client_addr).await;
         let (_, payload) = exchange(&association, b"after-junk").await;
         assert_eq!(payload, b"after-junk");
     }
@@ -310,58 +383,38 @@ mod tests {
     async fn drops_replayed_server_datagrams() {
         let cipher = "2022-blake3-aes-128-gcm";
         let (client, client_addr, server, server_addr) = bind_pair().await;
-        let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
-        let intercept = Arc::new(
-            UdpSocket::bind("127.0.0.1:0")
-                .await
-                .expect("intercept bind"),
-        );
-        let intercept_addr = intercept.local_addr().expect("intercept addr");
-        let intercept_task = Arc::clone(&intercept);
-        let seen_for_server = Arc::clone(&seen);
-        tokio::spawn(async move {
-            let mut buffer = vec![0_u8; 65_536];
-            loop {
-                let Ok((length, from)) = intercept_task.recv_from(&mut buffer).await else {
-                    break;
-                };
-                if from == server_addr {
-                    seen_for_server.lock().await.push(buffer[..length].to_vec());
-                    let _ = intercept_task.send_to(&buffer[..length], client_addr).await;
-                } else {
-                    let _ = intercept_task.send_to(&buffer[..length], server_addr).await;
-                }
-            }
-        });
         let _echo = spawn_echo(server, server_addr, KEY_128, cipher, None);
-        client
-            .connect(intercept_addr)
-            .await
-            .expect("client to intercept");
-        let association = associate(client, intercept_addr, KEY_128, cipher);
-        association
-            .send(&echo_destination(), b"replay-me")
-            .await
-            .expect("send");
-        let (_, payload) = tokio::time::timeout(Duration::from_secs(2), association.recv())
-            .await
-            .expect("timeout")
-            .expect("first recv");
+        let (association, intercept) =
+            associate_through_intercept(client, client_addr, server_addr, KEY_128, cipher).await;
+        let (_, payload) = exchange(&association, b"replay-me").await;
         assert_eq!(payload, b"replay-me");
-        let captured = seen.lock().await.last().cloned().expect("captured reply");
-        intercept
-            .send_to(&captured, client_addr)
-            .await
-            .expect("replay");
-        association
-            .send(&echo_destination(), b"next")
-            .await
-            .expect("next send");
-        let (_, payload) = tokio::time::timeout(Duration::from_secs(2), association.recv())
-            .await
-            .expect("timeout")
-            .expect("next recv");
+        let captured = intercept.last_from_server().await;
+        intercept.inject(&captured, client_addr).await;
+        let (_, payload) = exchange(&association, b"next").await;
         assert_eq!(payload, b"next");
+    }
+
+    #[tokio::test]
+    async fn drops_old_server_session_after_restart() {
+        let cipher = "2022-blake3-aes-128-gcm";
+        let (client, client_addr, first_server, first_addr) = bind_pair().await;
+        let first_echo = spawn_echo(first_server, first_addr, KEY_128, cipher, None);
+        let (association, intercept) =
+            associate_through_intercept(client, client_addr, first_addr, KEY_128, cipher).await;
+        let (_, payload) = exchange(&association, b"session-a").await;
+        assert_eq!(payload, b"session-a");
+        let packet_a = intercept.last_from_server().await;
+        first_echo.abort();
+
+        let second_server = UdpSocket::bind("127.0.0.1:0").await.expect("second bind");
+        let second_addr = second_server.local_addr().expect("second addr");
+        let _second_echo = spawn_echo(second_server, second_addr, KEY_128, cipher, None);
+        intercept.retarget(second_addr).await;
+        let (_, payload) = exchange(&association, b"session-b").await;
+        assert_eq!(payload, b"session-b");
+        intercept.inject(&packet_a, client_addr).await;
+        let (_, payload) = exchange(&association, b"after-old-session").await;
+        assert_eq!(payload, b"after-old-session");
     }
 
     #[tokio::test]

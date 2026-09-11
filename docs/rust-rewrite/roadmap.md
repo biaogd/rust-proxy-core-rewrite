@@ -1921,9 +1921,10 @@ differential exists. Multi-hop EIH, UoT and plugin UDP are unchanged.
 
 The maintained `shadowsocks` crate already implements SIP022 AEAD-2022 packet
 crypto. Protocol state lives in `rewrite-protocol-shadowsocks`: nonzero client
-and server session identifiers, incrementing packet counters, and a sliding
-replay window that accepts legitimate reordering and drops duplicates, too-old
-and authentication-failed datagrams. Outbound wrapping keeps platform NIC bind,
+and server session identifiers, incrementing packet counters, and per-server
+session sliding replay windows (bounded and expired) that accept legitimate
+reordering and drop duplicates, too-old, cross-session replays and
+authentication-failed datagrams. Outbound wrapping keeps platform NIC bind,
 TUN loop-avoidance and routing-mark policy; mixed/SOCKS5/TUN UDP sessions
 rebuild the association after `bump_network_generation`.
 
@@ -1942,8 +1943,11 @@ runs both oracles against the same fixed authority and the same inputs. It
 covers IPv4/IPv6/domain forwarding, multi-packet and multi-destination reuse,
 each cipher plus AES EIH, wrong-key timeout, concurrent clients, server
 restart, mixed versus SOCKS5 ingress, the native outbound association used by
-TUN, controller `udp: true` / `uot: false`, and process survival. Protocol
-unit tests pin replay/session vectors; ciphertext is not compared byte-for-byte.
+TUN, controller `udp: true` / `uot: false`, and process survival. The gate
+asserts those required observations succeed on both oracles; IPv6 is skipped
+when `::1` cannot bind rather than recorded as a false success. Protocol
+unit tests pin replay/session vectors, including A→B→A server-session replay;
+ciphertext is not compared byte-for-byte.
 
 Pinned Go still accepts ChaCha8 UDP and 2022 UoT at configuration time. The
 rewrite rejects those combinations by design and records the surplus instead of
