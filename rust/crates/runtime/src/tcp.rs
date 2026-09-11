@@ -701,6 +701,7 @@ pub(super) async fn wireguard_client_for_proxy(
         &dial_server,
         &config.interface_name,
         config.routing_mark,
+        Some(rewrite_controller::wireguard_peer_resolve_hook(config)),
     )
     .await
     .map_err(|error| format!("WireGuard client failed: {error}"))?;
@@ -712,26 +713,13 @@ pub(super) async fn resolve_wireguard_destination(
     destination: &Destination,
     config: &Config,
 ) -> Result<Destination, String> {
-    if let (Host::Domain(domain), false) = (&destination.host, client.uses_tunnel_dns())
-        && let Some(dns) = config.dns.as_ref()
-    {
-        let address = rewrite_dns::resolve_direct_domain(dns, domain, client.has_ipv6())
-            .await
-            .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?;
-        let supported = match address {
-            IpAddr::V4(_) => client.has_ipv4(),
-            IpAddr::V6(_) => client.has_ipv6(),
-        };
-        if !supported {
-            return Err("WireGuard has no inner address for this family".to_owned());
-        }
-        return Ok(Destination {
-            host: Host::Ip(address),
-            port: destination.port,
-        });
-    }
     client
-        .resolve_destination(destination)
+        .resolve_destination(destination, |host| {
+            let host = host.to_owned();
+            let dns = config.dns.clone();
+            let allow_ipv6 = client.has_ipv6();
+            async move { rewrite_dns::resolve_direct_or_system(dns.as_ref(), &host, allow_ipv6).await }
+        })
         .await
         .map_err(|error| format!("WireGuard destination DNS failed: {error}"))
 }

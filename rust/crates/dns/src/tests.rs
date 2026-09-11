@@ -229,3 +229,119 @@ fn ranks_static_wildcard_and_suffix_policies_like_the_go_trie() {
     assert!(exact > wildcard);
     assert!(wildcard > suffix);
 }
+
+#[tokio::test]
+async fn proxy_server_resolution_uses_configured_hosts_not_system_dns() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use rewrite_config::Config;
+
+    use crate::resolve_proxy_server_or_system;
+
+    let config = Config::from_yaml(
+        r"
+mixed-port: 7890
+mode: rule
+hosts:
+  localhost: 127.0.0.2
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  use-hosts: true
+  nameserver:
+    - udp://192.0.2.1:53
+rules:
+  - MATCH,DIRECT
+",
+    )
+    .expect("config");
+    let resolved = resolve_proxy_server_or_system(
+        &config.hosts,
+        config.dns.as_ref(),
+        "localhost",
+        51820,
+        false,
+    )
+    .await
+    .expect("configured hosts");
+    let system = tokio::net::lookup_host(("localhost", 51820))
+        .await
+        .expect("system localhost")
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 51820)
+    );
+    assert!(
+        !system.contains(&resolved.ip()),
+        "configured 127.0.0.2 must not be the system localhost answer, got {system:?}"
+    );
+}
+
+#[tokio::test]
+async fn direct_resolution_uses_configured_dns_not_system() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use hickory_proto::op::{Message, MessageType, Query};
+    use hickory_proto::rr::rdata::A;
+    use hickory_proto::rr::{RData, Record};
+    use hickory_proto::serialize::binary::BinDecodable;
+    use rewrite_config::Config;
+    use tokio::net::UdpSocket;
+
+    use crate::resolve_direct_or_system;
+
+    let configured = Ipv4Addr::new(192, 0, 2, 10);
+    let dns_socket = UdpSocket::bind("127.0.0.1:0").await.expect("dns bind");
+    let dns_addr = dns_socket.local_addr().expect("dns addr");
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 512];
+        loop {
+            let Ok((n, from)) = dns_socket.recv_from(&mut buf).await else {
+                break;
+            };
+            let Ok(query) = Message::from_bytes(&buf[..n]) else {
+                continue;
+            };
+            let mut response = query;
+            response.metadata.message_type = MessageType::Response;
+            if let Some(name) = response.queries.first().map(Query::name).cloned() {
+                response.add_answer(Record::from_rdata(name, 30, RData::A(A(configured))));
+            }
+            let Ok(payload) = response.to_vec() else {
+                continue;
+            };
+            let _ = dns_socket.send_to(&payload, from).await;
+        }
+    });
+
+    let source = format!(
+        r"
+mixed-port: 7890
+mode: rule
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  ipv6: false
+  nameserver:
+    - udp://{dns_addr}
+rules:
+  - MATCH,DIRECT
+"
+    );
+    let config = Config::from_yaml(&source).expect("dns config");
+    let host = "wg-health-diff.test";
+    let via_config = resolve_direct_or_system(config.dns.as_ref(), host, false)
+        .await
+        .expect("configured DNS");
+    assert_eq!(via_config, IpAddr::V4(configured));
+    let system = tokio::net::lookup_host((host, 80)).await;
+    if let Ok(addresses) = system {
+        let ips: Vec<IpAddr> = addresses.map(|address| address.ip()).collect();
+        assert!(
+            !ips.contains(&via_config),
+            "system DNS must not return the configured TEST-NET address, got {ips:?}"
+        );
+    }
+}

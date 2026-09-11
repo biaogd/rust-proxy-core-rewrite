@@ -27,6 +27,7 @@ pub use hysteria2::{
     Hysteria2Client, Hysteria2ProxyError, Hysteria2UdpAssociation, associate_hysteria2_udp,
 };
 pub use reality::{wrap_client_reality, wrap_client_reality_with_vision};
+pub use rewrite_protocol_wireguard::PeerResolveHook;
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};
 pub use rewrite_transport::{

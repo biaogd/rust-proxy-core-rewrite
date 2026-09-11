@@ -1,5 +1,6 @@
 //! `WireGuard` userspace outbound adapter (6I-C TCP+UDP+lifecycle).
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -9,7 +10,9 @@ use hickory_proto::rr::{Name, RData, RecordType};
 use hickory_proto::serialize::binary::BinDecodable;
 use rewrite_config::ProxyConfig;
 use rewrite_model::{Destination, Host};
-use rewrite_protocol_wireguard::{Client, ClientOptions, DEFAULT_MTU, WgUdpSocket};
+use rewrite_protocol_wireguard::{
+    Client, ClientOptions, DEFAULT_MTU, PeerResolveHook, WgUdpSocket,
+};
 use thiserror::Error;
 
 const TUNNEL_DNS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -39,7 +42,8 @@ impl std::fmt::Debug for WireGuardClient {
 
 impl WireGuardClient {
     /// Dials using a PSN-resolved IP for the outer UDP bind when `dial_server`
-    /// is an address. Refresh re-resolves the original YAML `server` hostname.
+    /// is an address. Refresh re-resolves the original YAML `server` hostname
+    /// through the same hosts + PSN policy as first connect.
     ///
     /// `bind_interface` / `routing_mark` apply to the outer UDP socket (TUN
     /// auto-route loop avoidance).
@@ -52,6 +56,7 @@ impl WireGuardClient {
         dial_server: &str,
         bind_interface: &str,
         routing_mark: i64,
+        resolve_peer: Option<PeerResolveHook>,
     ) -> Result<Self, WireGuardProxyError> {
         let mut options = client_options_from_proxy(proxy)?;
         if let Ok(ip) = dial_server.parse::<IpAddr>() {
@@ -59,6 +64,7 @@ impl WireGuardClient {
         }
         bind_interface.clone_into(&mut options.bind_interface);
         options.routing_mark = routing_mark;
+        options.resolve_peer = resolve_peer;
         let dns_servers = tunnel_dns_servers(proxy)?;
         let inner = Client::new(options).await?;
         Ok(Self {
@@ -126,32 +132,31 @@ impl WireGuardClient {
         }))
     }
 
-    /// Resolves a mixed/health destination the same way as the dataplane.
+    /// Resolves a mixed/health destination.
     ///
     /// Tunnel DNS (`remote-dns-resolve`) is used for domain names when
-    /// configured; otherwise the system resolver is used. Family must match
-    /// the inner `ip` / `ipv6` assignment.
+    /// configured; otherwise `resolve_direct` runs (configured `dns:` or the
+    /// system resolver). Family must match the inner `ip` / `ipv6` assignment.
     ///
     /// # Errors
     ///
     /// Returns when the name does not resolve or the family is unsupported.
-    pub async fn resolve_destination(
+    pub async fn resolve_destination<F, Fut, E>(
         &self,
         destination: &Destination,
-    ) -> Result<Destination, WireGuardProxyError> {
+        resolve_direct: F,
+    ) -> Result<Destination, WireGuardProxyError>
+    where
+        F: FnOnce(&str) -> Fut,
+        Fut: Future<Output = Result<IpAddr, E>>,
+        E: std::fmt::Display,
+    {
         let address = match &destination.host {
             Host::Ip(address) => *address,
             Host::Domain(domain) if self.uses_tunnel_dns() => self.resolve_host(domain).await?,
-            Host::Domain(domain) => tokio::net::lookup_host((domain.as_str(), destination.port))
-                .await?
-                .find(|candidate| {
-                    (self.has_ipv4() && candidate.is_ipv4())
-                        || (self.has_ipv6() && candidate.is_ipv6())
-                })
-                .map(|address| address.ip())
-                .ok_or_else(|| {
-                    WireGuardProxyError::Dial("WireGuard destination did not resolve".to_owned())
-                })?,
+            Host::Domain(domain) => resolve_direct(domain).await.map_err(|error| {
+                WireGuardProxyError::Dial(format!("WireGuard destination DNS failed: {error}"))
+            })?,
         };
         let supported = match address {
             IpAddr::V4(_) => self.has_ipv4(),

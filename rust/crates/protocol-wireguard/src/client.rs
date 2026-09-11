@@ -1,7 +1,9 @@
 //! Long-lived `WireGuard` client: UDP bind, handshake, smoltcp TCP/UDP dials.
 
+use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::stack::{IpStack, WgTcpStream, WgUdpSocket, lock_stack};
 use crate::tunnel::{NoiseTunnel, TunnelAction};
 use crate::{DEFAULT_MTU, HANDSHAKE_TIMEOUT, WireGuardProtocolError};
+
+const PEER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+const MIN_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Construction options for a single-peer `WireGuard` outbound.
 #[derive(Clone, Debug)]
@@ -36,21 +41,27 @@ pub struct ClientOptions {
     /// `ZERO` means resolve the peer hostname only at first connect (Go).
     pub refresh_server_ip_interval: Duration,
     /// Optional first hop for the outer UDP bind (PSN-resolved IP). Refresh
-    /// still re-resolves [`Self::server`].
+    /// still re-resolves [`Self::server`] through [`Self::resolve_peer`].
     pub initial_endpoint: Option<SocketAddr>,
-    /// Test hook replacing `lookup_host` for the configured server name.
+    /// Peer hostname resolver. Product path supplies hosts + PSN (same policy
+    /// as first connect). When set, refresh never falls back to `lookup_host`.
     pub resolve_peer: Option<PeerResolveHook>,
 }
 
-/// Resolves the configured `WireGuard` server name (used by DDNS refresh tests).
+/// Resolves the configured `WireGuard` server name (DDNS refresh and tests).
 #[derive(Clone)]
 pub struct PeerResolveHook(Arc<ResolvePeerFn>);
 
-type ResolvePeerFn = dyn Fn(&str, u16) -> Option<SocketAddr> + Send + Sync;
+type PeerResolveFuture = Pin<Box<dyn Future<Output = Option<SocketAddr>> + Send>>;
+type ResolvePeerFn = dyn Fn(String, u16) -> PeerResolveFuture + Send + Sync;
 
 impl PeerResolveHook {
-    pub fn new(hook: impl Fn(&str, u16) -> Option<SocketAddr> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(hook))
+    pub fn new<F, Fut>(hook: F) -> Self
+    where
+        F: Fn(String, u16) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Option<SocketAddr>> + Send + 'static,
+    {
+        Self(Arc::new(move |host, port| Box::pin(hook(host, port))))
     }
 }
 
@@ -94,7 +105,9 @@ struct ClientInner {
     preshared_key: Option<[u8; 32]>,
     persistent_keepalive: Option<u16>,
     refresh_server_ip_interval: Duration,
-    last_endpoint_refresh: Mutex<Instant>,
+    next_refresh_at: Mutex<Instant>,
+    refresh_inflight: AtomicBool,
+    refresh_backoff_ms: AtomicU64,
     resolve_peer: Option<PeerResolveHook>,
     notify: Arc<Notify>,
     shutdown: CancellationToken,
@@ -195,7 +208,9 @@ impl Client {
             preshared_key: options.preshared_key,
             persistent_keepalive: options.persistent_keepalive,
             refresh_server_ip_interval: options.refresh_server_ip_interval,
-            last_endpoint_refresh: Mutex::new(Instant::now()),
+            next_refresh_at: Mutex::new(Instant::now() + options.refresh_server_ip_interval),
+            refresh_inflight: AtomicBool::new(false),
+            refresh_backoff_ms: AtomicU64::new(0),
             resolve_peer: options.resolve_peer,
             notify,
             shutdown,
@@ -223,7 +238,7 @@ impl Client {
         &self,
         destination: &Destination,
     ) -> Result<BoxedStream, WireGuardProtocolError> {
-        self.refresh_endpoint_if_due().await;
+        schedule_endpoint_refresh(&self.inner);
         match self.open_tcp_once(destination).await {
             Ok(stream) => Ok(stream),
             Err(error) if tcp_retryable(&error) => {
@@ -240,7 +255,7 @@ impl Client {
     ///
     /// Returns handshake or stack bind failures.
     pub async fn open_udp(&self) -> Result<WgUdpSocket, WireGuardProtocolError> {
-        self.refresh_endpoint_if_due().await;
+        schedule_endpoint_refresh(&self.inner);
         self.ensure_handshake().await?;
         let handle = {
             let mut stack = lock_stack(&self.inner.stack);
@@ -360,10 +375,6 @@ impl Client {
         self.ensure_handshake().await
     }
 
-    async fn refresh_endpoint_if_due(&self) {
-        refresh_endpoint_if_due(&self.inner).await;
-    }
-
     async fn ensure_handshake(&self) -> Result<(), WireGuardProtocolError> {
         if self.inner.established.load(Ordering::Acquire) {
             return Ok(());
@@ -445,7 +456,7 @@ async fn run_reactor(inner: Arc<ClientInner>) {
             _ = timers.tick() => {
                 let action = inner.tunnel.update_timers();
                 let _ = dispatch_action(&inner, action).await;
-                refresh_endpoint_if_due(&inner).await;
+                schedule_endpoint_refresh(&inner);
                 pump_stack(&inner).await;
             }
         }
@@ -609,9 +620,11 @@ async fn apply_endpoint(
         *slot = endpoint;
     }
     *inner
-        .last_endpoint_refresh
+        .next_refresh_at
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Instant::now() + inner.refresh_server_ip_interval;
+    inner.refresh_backoff_ms.store(0, Ordering::Relaxed);
     let _ = inner.udp.connect(endpoint).await;
     Ok(())
 }
@@ -622,26 +635,70 @@ fn protect_peer_endpoint(endpoint: SocketAddr) -> Result<(), WireGuardProtocolEr
     })
 }
 
-async fn refresh_endpoint_if_due(inner: &ClientInner) {
+fn schedule_endpoint_refresh(inner: &Arc<ClientInner>) {
     if inner.refresh_server_ip_interval.is_zero() {
         return;
     }
-    let due = {
-        let last = inner
-            .last_endpoint_refresh
+    let due = Instant::now()
+        >= *inner
+            .next_refresh_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last.elapsed() >= inner.refresh_server_ip_interval
-    };
     if !due {
         return;
     }
-    let Ok(resolved) =
-        resolve_peer_endpoint(&inner.server, inner.port, inner.resolve_peer.as_ref()).await
-    else {
+    if inner.refresh_inflight.swap(true, Ordering::AcqRel) {
         return;
+    }
+    let inner = Arc::clone(inner);
+    tokio::spawn(async move {
+        refresh_endpoint_task(inner).await;
+    });
+}
+
+async fn refresh_endpoint_task(inner: Arc<ClientInner>) {
+    let resolved = tokio::select! {
+        () = inner.shutdown.cancelled() => {
+            inner.refresh_inflight.store(false, Ordering::Release);
+            return;
+        }
+        result = tokio::time::timeout(
+            PEER_RESOLVE_TIMEOUT,
+            resolve_peer_endpoint(&inner.server, inner.port, inner.resolve_peer.as_ref()),
+        ) => result,
     };
-    let _ = apply_endpoint(inner, resolved).await;
+    match resolved {
+        Ok(Ok(endpoint)) => {
+            if apply_endpoint(&inner, endpoint).await.is_err() {
+                schedule_refresh_backoff(&inner);
+            }
+        }
+        Ok(Err(_)) | Err(_) => schedule_refresh_backoff(&inner),
+    }
+    inner.refresh_inflight.store(false, Ordering::Release);
+}
+
+fn schedule_refresh_backoff(inner: &ClientInner) {
+    let interval = inner.refresh_server_ip_interval;
+    let cap = interval.max(MIN_REFRESH_BACKOFF);
+    let stored = inner.refresh_backoff_ms.load(Ordering::Relaxed);
+    let wait = if stored == 0 {
+        MIN_REFRESH_BACKOFF.min(cap)
+    } else {
+        Duration::from_millis(stored).min(cap)
+    };
+    let doubled = wait.saturating_mul(2).min(cap);
+    inner
+        .refresh_backoff_ms
+        .store(millis_u64(doubled), Ordering::Relaxed);
+    *inner
+        .next_refresh_at
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now() + wait;
+}
+
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct ConnectingTcp {
@@ -680,10 +737,10 @@ async fn resolve_peer_endpoint(
     port: u16,
     hook: Option<&PeerResolveHook>,
 ) -> Result<SocketAddr, WireGuardProtocolError> {
-    if let Some(hook) = hook
-        && let Some(endpoint) = (hook.0)(server, port)
-    {
-        return Ok(endpoint);
+    if let Some(hook) = hook {
+        return (hook.0)(server.to_owned(), port)
+            .await
+            .ok_or_else(|| WireGuardProtocolError::protocol("WireGuard server did not resolve"));
     }
     if let Ok(ip) = server.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));

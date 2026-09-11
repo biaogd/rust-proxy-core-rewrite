@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -747,6 +747,55 @@ pub async fn resolve_proxy_server_host(
         return Err(DnsError::Inactive);
     };
     resolve_proxy_domain(dns, host, allow_ipv6).await
+}
+
+/// Resolves a proxy-server hostname using configured hosts + PSN, falling back
+/// to the OS resolver only when DNS is disabled.
+///
+/// When DNS is enabled and the lookup fails, this does **not** fall back to
+/// system `lookup_host` (that would replace a configured endpoint with the
+/// wrong address).
+pub async fn resolve_proxy_server_or_system(
+    hosts: &HostTable,
+    dns: Option<&DnsConfig>,
+    host: &str,
+    port: u16,
+    allow_ipv6: bool,
+) -> Option<SocketAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, port));
+    }
+    let use_hosts = dns.is_some_and(|dns| dns.use_hosts);
+    match resolve_proxy_server_host(hosts, use_hosts, dns, host, allow_ipv6).await {
+        Ok(ip) => Some(SocketAddr::new(ip, port)),
+        Err(DnsError::Inactive) => tokio::net::lookup_host((host, port))
+            .await
+            .ok()
+            .and_then(|mut addresses| addresses.next()),
+        Err(_) => None,
+    }
+}
+
+/// Resolves a dataplane/health domain through configured direct DNS when
+/// present; otherwise the OS resolver.
+///
+/// # Errors
+///
+/// Returns [`DnsError`] when neither source produces a permitted address.
+pub async fn resolve_direct_or_system(
+    dns: Option<&DnsConfig>,
+    host: &str,
+    allow_ipv6: bool,
+) -> Result<IpAddr, DnsError> {
+    if let Some(dns) = dns {
+        return resolve_direct_domain(dns, host, allow_ipv6).await;
+    }
+    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host, 0))
+        .await?
+        .map(|address| address.ip())
+        .filter(|address| address.is_ipv4() || allow_ipv6)
+        .collect();
+    preferred_address(addresses)
 }
 
 fn preferred_host_address(addresses: &[IpAddr], allow_ipv6: bool) -> Option<IpAddr> {

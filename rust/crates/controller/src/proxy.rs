@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -299,11 +300,38 @@ pub(super) struct DelayMeasurement {
 async fn wireguard_health_destination(
     client: &rewrite_outbound::WireGuardClient,
     destination: Destination,
+    config: &Config,
 ) -> Result<Destination, ()> {
     client
-        .resolve_destination(&destination)
+        .resolve_destination(&destination, |host| {
+            let host = host.to_owned();
+            let dns = config.dns.clone();
+            let allow_ipv6 = client.has_ipv6();
+            async move { rewrite_dns::resolve_direct_or_system(dns.as_ref(), &host, allow_ipv6).await }
+        })
         .await
         .map_err(|_| ())
+}
+
+/// Peer hostname resolver matching first-connect hosts + PSN policy.
+#[must_use]
+pub fn wireguard_peer_resolve_hook(config: &Config) -> rewrite_outbound::PeerResolveHook {
+    let hosts = Arc::new(config.hosts.clone());
+    let dns = Arc::new(config.dns.clone());
+    rewrite_outbound::PeerResolveHook::new(move |host, port| {
+        let hosts = Arc::clone(&hosts);
+        let dns = Arc::clone(&dns);
+        async move {
+            rewrite_dns::resolve_proxy_server_or_system(
+                hosts.as_ref(),
+                dns.as_ref().as_ref(),
+                &host,
+                port,
+                false,
+            )
+            .await
+        }
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -865,6 +893,7 @@ pub(super) async fn measure_http_delay(
                                 &dial_server,
                                 &config.interface_name,
                                 config.routing_mark,
+                                Some(wireguard_peer_resolve_hook(config)),
                             )
                             .await
                             .map_err(|_| ())?;
@@ -872,7 +901,8 @@ pub(super) async fn measure_http_delay(
                             .wireguard_client(&proxy.name, identity, constructed)
                             .await
                     };
-                    let destination = wireguard_health_destination(&client, destination).await?;
+                    let destination =
+                        wireguard_health_destination(&client, destination, config).await?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::ShadowsocksR => {

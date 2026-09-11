@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use defguard_boringtun::x25519::{PublicKey, StaticSecret};
@@ -297,12 +298,15 @@ async fn refresh_resolves_original_hostname() {
     let hook = {
         let current = Arc::clone(&current);
         PeerResolveHook::new(move |host, _port| {
-            assert_eq!(host, "wg-refresh.test");
-            Some(
-                *current
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
+            let current = Arc::clone(&current);
+            async move {
+                assert_eq!(host, "wg-refresh.test");
+                Some(
+                    *current
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
+            }
         })
     };
     let client = Client::new(ClientOptions {
@@ -323,6 +327,145 @@ async fn refresh_resolves_original_hostname() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = second_addr;
     tokio::time::sleep(Duration::from_millis(400)).await;
     tcp_echo(&client, echo_port, b"via-hostname-second").await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn endpoint_refresh_does_not_block_reactor() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(53);
+    let (server_priv, server_pub) = pair(55);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let hook = PeerResolveHook::new(move |_host, _port| async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Some(endpoint)
+    });
+    let client = Client::new(ClientOptions {
+        server: "wg-slow-refresh.test".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(endpoint),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(50),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tcp_echo(&client, echo_port, b"during-slow-dns"),
+    )
+    .await
+    .expect("reactor should keep forwarding while DNS refresh is in flight");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn failed_refresh_backs_off_instead_of_retrying_every_tick() {
+    let (client_priv, client_pub) = pair(57);
+    let (server_priv, server_pub) = pair(59);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let hook = {
+        let attempts = Arc::clone(&attempts);
+        PeerResolveHook::new(move |_host, _port| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            async move { None }
+        })
+    };
+    let client = Client::new(ClientOptions {
+        server: "wg-backoff.test".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(endpoint),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(50),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let calls = attempts.load(Ordering::Relaxed);
+    assert_eq!(
+        calls, 1,
+        "failed refresh should back off instead of retrying every 100ms tick, got {calls}"
+    );
+    client.close().await;
+}
+
+#[tokio::test]
+async fn refresh_keeps_configured_endpoint_when_system_dns_differs() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(61);
+    let (server_priv, server_pub) = pair(63);
+    let listen = UdpSocket::bind("127.0.0.2:0")
+        .await
+        .expect("wg bind on 127.0.0.2");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let system = tokio::net::lookup_host(("localhost", endpoint.port()))
+        .await
+        .expect("system localhost")
+        .next()
+        .expect("localhost address");
+    assert_ne!(
+        system.ip(),
+        endpoint.ip(),
+        "test requires system localhost != 127.0.0.2"
+    );
+    let hook = PeerResolveHook::new(move |host, port| async move {
+        assert_eq!(host, "localhost");
+        Some(SocketAddr::new(endpoint.ip(), port))
+    });
+    let client = Client::new(ClientOptions {
+        server: "localhost".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(endpoint),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(80),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    tcp_echo(&client, echo_port, b"configured-not-system").await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn failed_configured_refresh_does_not_fall_back_to_system_dns() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(65);
+    let (server_priv, server_pub) = pair(67);
+    let listen = UdpSocket::bind("127.0.0.2:0")
+        .await
+        .expect("wg bind on 127.0.0.2");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let hook = PeerResolveHook::new(|_host, _port| async move { None });
+    let client = Client::new(ClientOptions {
+        server: "localhost".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(endpoint),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(80),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    tcp_echo(&client, echo_port, b"keep-configured-on-fail").await;
     client.close().await;
 }
 
