@@ -7,7 +7,9 @@ without remap). Device-name rules are unit-tested in rewrite-platform;
 
 Native traffic (YAML → utun → netstack-smoltcp → DIRECT, plus scutil DNS)
 requires Darwin arm64 with root/passwordless sudo. Set PHASE8B_NATIVE=1;
-missing capability fails closed instead of skipping green.
+missing capability fails closed instead of skipping green. System DNS
+queries use `*.example.com` names because current macOS treats reserved
+TLDs such as `.test` as mDNS and returns EAI_NONAME.
 """
 
 from __future__ import annotations
@@ -33,14 +35,12 @@ from phase8a_tun import (
     FAKE_IP_ROUTE,
     FixtureServers,
     HTTP_LARGE,
-    HTTP_NAME,
     HTTP_SMALL,
     MINIMAL,
     NATIVE_IO_DEADLINE,
     NATIVE_STARTUP_DEADLINE,
     SERVICE_IP,
     TUN_INET4,
-    UDP_NAME,
     UDP_PAYLOAD,
     config_identity,
     expect_accept,
@@ -54,6 +54,11 @@ FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase8b-tun-diff.json"
 CLEANUP_DEADLINE = 8.0
 TUN_DNS = "198.18.0.2"
 DARWIN_AUTO_PROBE = "1.1.1.1"
+# Reserved TLDs such as `.test` are intercepted as mDNS on current macOS
+# runners, so getaddrinfo returns EAI_NONAME even after scutil rewrite.
+HTTP_NAME = "http.phase8b.example.com"
+UDP_NAME = "udp.phase8b.example.com"
+SYSTEM_DNS_DEADLINE = 15.0
 
 
 def maybe_sudo(command: list[str]) -> list[str]:
@@ -157,7 +162,7 @@ dns:
   enhanced-mode: fake-ip
   fake-ip-range: {FAKE_IP_RANGE}
   fake-ip-filter:
-    - 'never-match.phase8b.test'
+    - 'never-match.phase8b.example.com'
   nameserver:
     - udp://{nameserver}
 tun:
@@ -303,11 +308,12 @@ def query_hijacked_dns(name: str) -> str:
 
 def resolve_system(name: str) -> str:
     flush_dns_cache()
-    deadline = time.monotonic() + NATIVE_IO_DEADLINE
+    query = name if name.endswith(".") else f"{name}."
+    deadline = time.monotonic() + SYSTEM_DNS_DEADLINE
     last_error = "not attempted"
     while time.monotonic() < deadline:
         try:
-            infos = socket.getaddrinfo(name, None, socket.AF_INET, socket.SOCK_STREAM)
+            infos = socket.getaddrinfo(query, None, socket.AF_INET, socket.SOCK_STREAM)
             address = str(infos[0][4][0])
             if address.startswith("198.19."):
                 return address
@@ -316,7 +322,12 @@ def resolve_system(name: str) -> str:
             last_error = str(error)
         time.sleep(0.1)
         flush_dns_cache()
-    raise AssertionError(f"system resolver did not return fake-IP for {name}: {last_error}")
+    details = (
+        f"{last_error}\nscutil DNS:\n{service_dns_text()}\n"
+        f"route {TUN_DNS} via {route_interface(TUN_DNS)!r}\n"
+        f"scutil --dns:\n{run_cmd(['scutil', '--dns'], check=False).stdout[:2000]}"
+    )
+    raise AssertionError(f"system resolver did not return fake-IP for {name}: {details}")
 
 
 def http_get(host: str, port: int, path: str) -> bytes:
@@ -363,11 +374,16 @@ def install_manual_routes(utun: str) -> None:
         ["route", "-n", "add", "-inet", "-host", DNS_HIJACK_TARGET, "-interface", utun],
         check=False,
     )
+    run_cmd(
+        ["route", "-n", "add", "-inet", "-host", TUN_DNS, "-interface", utun],
+        check=False,
+    )
 
 
 def delete_manual_routes() -> None:
     run_cmd(["route", "-n", "delete", "-inet", "-net", FAKE_IP_ROUTE], check=False)
     run_cmd(["route", "-n", "delete", "-inet", "-host", DNS_HIJACK_TARGET], check=False)
+    run_cmd(["route", "-n", "delete", "-inet", "-host", TUN_DNS], check=False)
 
 
 def assert_auto_routes(utun: str, stack: str) -> None:

@@ -620,6 +620,7 @@ def stage_wintun(
 
 def wintun_stage_identity(scratch: pathlib.Path) -> dict[str, Any]:
     """Unprivileged checks that a locked mismatched DLL is not treated as 0.14.1."""
+    scratch.mkdir(parents=True, exist_ok=True)
     dll = scratch / "verified.dll"
     dll.write_bytes(b"wintun-0.14.1-fixture")
     go_dir = scratch / "go-bin"

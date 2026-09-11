@@ -5,8 +5,6 @@ use futures_util::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use rewrite_config::{Config, DnsClassicEndpoint, DnsResolverClient, TunConfig};
 use rewrite_inbound::{BoxedInboundStream, InboundStream};
-#[cfg(target_os = "macos")]
-use rewrite_platform::apply_tun_system_dns;
 #[cfg(target_os = "windows")]
 use rewrite_platform::apply_windows_tun_interface_dns;
 use rewrite_platform::{
@@ -17,6 +15,8 @@ use rewrite_platform::{
     planned_bypass_host_route, reject_existing_windows_tun_device, set_auto_detect_bind_interface,
     update_outbound_bypass, validate_tun_device_name,
 };
+#[cfg(target_os = "macos")]
+use rewrite_platform::{apply_tun_system_dns, host_route_prefix};
 use rewrite_state::RuntimeState;
 use rewrite_tun::{
     TunDeviceConfig, TunInboundStream, build_smoltcp_stack, open_tun_device, spawn_session_hub,
@@ -151,6 +151,11 @@ fn prepare_tun(tun_config: &TunConfig, config: &Config) -> Result<PreparedTun, R
     let physical = current_default_interface(Some(&device_name))
         .unwrap_or_else(|_| DefaultInterfaceSnapshot::lost());
     let mut routes = RouteOwner::new();
+    #[cfg(target_os = "macos")]
+    if let Err(error) = install_darwin_tun_dns_route(tun_config, &device_name, &mut routes) {
+        let _ = routes.revert_all();
+        return Err(RuntimeError::Tun(error.to_string()));
+    }
     if tun_config.auto_route {
         if let Err(error) =
             protect_loop_avoidance(tun_config, config, &physical, &device_name, &mut routes)
@@ -511,6 +516,30 @@ async fn apply_network_change(
     }
 
     *previous = after;
+}
+
+#[cfg(target_os = "macos")]
+fn install_darwin_tun_dns_route(
+    tun: &TunConfig,
+    device: &str,
+    owner: &mut RouteOwner,
+) -> Result<(), rewrite_platform::PlatformError> {
+    // Darwin tun-rs is opened with associate_route(false), so the
+    // 198.18.0.2 point-to-point peer used as system DNS is not a kernel
+    // route unless we install it. Manual-route (no auto-route) still needs
+    // this host prefix or getaddrinfo never reaches TUN DNS.
+    let Some(dns) = tun.tun_dns_server() else {
+        return Ok(());
+    };
+    let route = OwnedRoute {
+        destination: host_route_prefix(dns)?,
+        device: device.to_owned(),
+        gateway: None,
+        table: None,
+    };
+    install_device_route(&route)?;
+    owner.record(route);
+    Ok(())
 }
 
 fn install_auto_routes(

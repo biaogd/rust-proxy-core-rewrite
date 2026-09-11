@@ -3061,7 +3061,9 @@ shared UDP session relay without SOCKS write-back.
 - **8B — macOS arm64:** reuse the 8A data path; focus utun, permissions, route
   and DNS restore, and native app-traffic acceptance. Implemented in this
   checkout (utun via tun-rs, Darwin split auto-route, scutil DNS
-  merge of `ServerAddresses` with extra-key snapshot/restore, `tun0`/`utun` rejected without remap). Native Parity waits
+  merge of `ServerAddresses` with extra-key snapshot/restore, owned TUN-DNS `/32`
+  on utun because `associate_route(false)` does not install the p-t-p route,
+  `tun0`/`utun` rejected without remap). Native Parity waits
   on `PHASE8B_NATIVE=1` / `phase8b-darwin-tun`.
 - **8C — Windows x86_64:** Wintun load/distribution/errors; routes, DNS and
   priority; privilege/driver failure paths; must not break other VPNs.
