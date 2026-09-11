@@ -8,7 +8,9 @@ use defguard_boringtun::x25519::{PublicKey, StaticSecret};
 use futures_util::{SinkExt, StreamExt};
 use netstack_smoltcp::StackBuilder;
 use rewrite_model::{Destination, Host};
-use rewrite_protocol_wireguard::{Client, ClientOptions, NoiseTunnel, TunnelAction};
+use rewrite_protocol_wireguard::{
+    Client, ClientOptions, NoiseTunnel, PeerResolveHook, TunnelAction,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
@@ -159,6 +161,168 @@ async fn traffic_follows_replaced_endpoint() {
         .await
         .expect("replace endpoint");
     tcp_echo(&client, echo_port, b"via-second").await;
+    client.close().await;
+}
+
+async fn wait_live_sockets(client: &Client, expected: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if client.live_socket_count() == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "live sockets {} != {expected}",
+            client.live_socket_count()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_dials_release_sockets() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(37);
+    let (server_priv, server_pub) = pair(39);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    tcp_echo(&client, echo_port, b"cleanup-ready").await;
+    wait_live_sockets(&client, 0).await;
+
+    let unused = TcpListener::bind("127.0.0.1:0").await.expect("unused bind");
+    let unused_port = unused.local_addr().expect("unused addr").port();
+    drop(unused);
+    let _ = client.open_tcp(&echo_destination(unused_port)).await;
+    wait_live_sockets(&client, 0).await;
+
+    let hanging = Destination {
+        host: Host::Ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        port: 81,
+    };
+    {
+        let mut dial = std::pin::pin!(client.open_tcp(&hanging));
+        let _ = tokio::time::timeout(Duration::from_millis(200), &mut dial).await;
+    }
+    wait_live_sockets(&client, 0).await;
+    client.close().await;
+}
+
+#[tokio::test]
+async fn close_unblocks_pending_udp_recv() {
+    let (client_priv, client_pub) = pair(41);
+    let (server_priv, server_pub) = pair(43);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let socket = client.open_udp().await.expect("udp");
+    let recv = tokio::spawn(async move { socket.recv().await });
+    client.close().await;
+    let result = tokio::time::timeout(Duration::from_secs(1), recv)
+        .await
+        .expect("pending UDP recv should finish after close")
+        .expect("join");
+    assert!(
+        result.is_err(),
+        "closed UDP recv should error, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn close_unblocks_pending_tcp_read() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(49);
+    let (server_priv, server_pub) = pair(51);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    let mut stream = client
+        .open_tcp(&echo_destination(echo_port))
+        .await
+        .expect("tcp");
+    let read = tokio::spawn(async move {
+        let mut buf = [0_u8; 8];
+        tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await
+    });
+    client.close().await;
+    let result = tokio::time::timeout(Duration::from_secs(1), read)
+        .await
+        .expect("pending TCP read should finish after close")
+        .expect("join");
+    assert!(
+        result.is_err(),
+        "closed TCP read should error, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn refresh_resolves_original_hostname() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(45);
+    let (server_priv, server_pub) = pair(47);
+    let first = UdpSocket::bind("127.0.0.1:0").await.expect("first bind");
+    let second = UdpSocket::bind("127.0.0.1:0").await.expect("second bind");
+    let first_addr = first.local_addr().expect("first addr");
+    let second_addr = second.local_addr().expect("second addr");
+    let tunnel = Arc::new(
+        NoiseTunnel::new(server_priv, client_pub, None, None, [0; 3], 2).expect("shared tunn"),
+    );
+    spawn_shared_responder(vec![first, second], Arc::clone(&tunnel));
+
+    let current = Arc::new(std::sync::Mutex::new(first_addr));
+    let hook = {
+        let current = Arc::clone(&current);
+        PeerResolveHook::new(move |host, _port| {
+            assert_eq!(host, "wg-refresh.test");
+            Some(
+                *current
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        })
+    };
+    let client = Client::new(ClientOptions {
+        server: "wg-refresh.test".to_owned(),
+        port: first_addr.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(first_addr),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(150),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    tcp_echo(&client, echo_port, b"via-hostname-first").await;
+    *current
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = second_addr;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    tcp_echo(&client, echo_port, b"via-hostname-second").await;
     client.close().await;
 }
 

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use rand::RngExt as _;
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
+use smoltcp::iface::SocketHandle;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +35,29 @@ pub struct ClientOptions {
     pub routing_mark: i64,
     /// `ZERO` means resolve the peer hostname only at first connect (Go).
     pub refresh_server_ip_interval: Duration,
+    /// Optional first hop for the outer UDP bind (PSN-resolved IP). Refresh
+    /// still re-resolves [`Self::server`].
+    pub initial_endpoint: Option<SocketAddr>,
+    /// Test hook replacing `lookup_host` for the configured server name.
+    pub resolve_peer: Option<PeerResolveHook>,
+}
+
+/// Resolves the configured `WireGuard` server name (used by DDNS refresh tests).
+#[derive(Clone)]
+pub struct PeerResolveHook(Arc<ResolvePeerFn>);
+
+type ResolvePeerFn = dyn Fn(&str, u16) -> Option<SocketAddr> + Send + Sync;
+
+impl PeerResolveHook {
+    pub fn new(hook: impl Fn(&str, u16) -> Option<SocketAddr> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(hook))
+    }
+}
+
+impl std::fmt::Debug for PeerResolveHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PeerResolveHook")
+    }
 }
 
 impl Default for ClientOptions {
@@ -52,6 +76,8 @@ impl Default for ClientOptions {
             bind_interface: String::new(),
             routing_mark: 0,
             refresh_server_ip_interval: Duration::ZERO,
+            initial_endpoint: None,
+            resolve_peer: None,
         }
     }
 }
@@ -69,6 +95,7 @@ struct ClientInner {
     persistent_keepalive: Option<u16>,
     refresh_server_ip_interval: Duration,
     last_endpoint_refresh: Mutex<Instant>,
+    resolve_peer: Option<PeerResolveHook>,
     notify: Arc<Notify>,
     shutdown: CancellationToken,
     established: AtomicBool,
@@ -108,7 +135,12 @@ impl Client {
     ///
     /// Returns UDP bind / endpoint resolution failures.
     pub async fn new(options: ClientOptions) -> Result<Self, WireGuardProtocolError> {
-        let endpoint = resolve_peer_endpoint(&options.server, options.port).await?;
+        let endpoint = if let Some(initial) = options.initial_endpoint {
+            initial
+        } else {
+            resolve_peer_endpoint(&options.server, options.port, options.resolve_peer.as_ref())
+                .await?
+        };
         protect_peer_endpoint(endpoint)?;
         let mtu = if options.mtu == 0 {
             DEFAULT_MTU
@@ -164,6 +196,7 @@ impl Client {
             persistent_keepalive: options.persistent_keepalive,
             refresh_server_ip_interval: options.refresh_server_ip_interval,
             last_endpoint_refresh: Mutex::new(Instant::now()),
+            resolve_peer: options.resolve_peer,
             notify,
             shutdown,
             established: AtomicBool::new(false),
@@ -240,6 +273,12 @@ impl Client {
         self.inner.datagrams_sent.load(Ordering::Relaxed)
     }
 
+    /// Live userspace TCP/UDP sockets (tests assert cleanup after fail/cancel).
+    #[must_use]
+    pub fn live_socket_count(&self) -> usize {
+        lock_stack(&self.inner.stack).live_socket_count()
+    }
+
     #[must_use]
     pub fn has_ipv4(&self) -> bool {
         self.inner.has_v4
@@ -273,6 +312,11 @@ impl Client {
                 }
             })?
         };
+        let connecting = ConnectingTcp {
+            handle: Some(handle),
+            stack: Arc::clone(&self.inner.stack),
+            notify: Arc::clone(&self.inner.notify),
+        };
         self.inner.notify.notify_one();
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
         loop {
@@ -281,11 +325,7 @@ impl Client {
                 match stack.state(handle) {
                     Some(smoltcp::socket::tcp::State::Established) => {
                         drop(stack);
-                        return Ok(Box::new(WgTcpStream::new(
-                            handle,
-                            Arc::clone(&self.inner.stack),
-                            Arc::clone(&self.inner.notify),
-                        )));
+                        return Ok(Box::new(connecting.into_stream()));
                     }
                     Some(
                         smoltcp::socket::tcp::State::Closed
@@ -300,8 +340,6 @@ impl Client {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                lock_stack(&self.inner.stack).abort(handle);
-                self.inner.notify.notify_one();
                 return Err(WireGuardProtocolError::protocol(
                     "WireGuard TCP connect timed out",
                 ));
@@ -323,24 +361,7 @@ impl Client {
     }
 
     async fn refresh_endpoint_if_due(&self) {
-        if self.inner.refresh_server_ip_interval.is_zero() {
-            return;
-        }
-        let due = {
-            let last = self
-                .inner
-                .last_endpoint_refresh
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            last.elapsed() >= self.inner.refresh_server_ip_interval
-        };
-        if !due {
-            return;
-        }
-        let Ok(resolved) = resolve_peer_endpoint(&self.inner.server, self.inner.port).await else {
-            return;
-        };
-        let _ = apply_endpoint(&self.inner, resolved).await;
+        refresh_endpoint_if_due(&self.inner).await;
     }
 
     async fn ensure_handshake(&self) -> Result<(), WireGuardProtocolError> {
@@ -424,10 +445,17 @@ async fn run_reactor(inner: Arc<ClientInner>) {
             _ = timers.tick() => {
                 let action = inner.tunnel.update_timers();
                 let _ = dispatch_action(&inner, action).await;
+                refresh_endpoint_if_due(&inner).await;
                 pump_stack(&inner).await;
             }
         }
     }
+    {
+        let mut stack = lock_stack(&inner.stack);
+        stack.shutdown_all();
+        stack.poll();
+    }
+    inner.notify.notify_waiters();
 }
 
 async fn handle_incoming(inner: &ClientInner, from: Option<SocketAddr>, datagram: &[u8]) {
@@ -594,6 +622,50 @@ fn protect_peer_endpoint(endpoint: SocketAddr) -> Result<(), WireGuardProtocolEr
     })
 }
 
+async fn refresh_endpoint_if_due(inner: &ClientInner) {
+    if inner.refresh_server_ip_interval.is_zero() {
+        return;
+    }
+    let due = {
+        let last = inner
+            .last_endpoint_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        last.elapsed() >= inner.refresh_server_ip_interval
+    };
+    if !due {
+        return;
+    }
+    let Ok(resolved) =
+        resolve_peer_endpoint(&inner.server, inner.port, inner.resolve_peer.as_ref()).await
+    else {
+        return;
+    };
+    let _ = apply_endpoint(inner, resolved).await;
+}
+
+struct ConnectingTcp {
+    handle: Option<SocketHandle>,
+    stack: Arc<Mutex<IpStack>>,
+    notify: Arc<Notify>,
+}
+
+impl ConnectingTcp {
+    fn into_stream(mut self) -> WgTcpStream {
+        let handle = self.handle.take().expect("connecting handle");
+        WgTcpStream::new(handle, Arc::clone(&self.stack), Arc::clone(&self.notify))
+    }
+}
+
+impl Drop for ConnectingTcp {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            lock_stack(&self.stack).abort(handle);
+            self.notify.notify_one();
+        }
+    }
+}
+
 fn tcp_retryable(error: &WireGuardProtocolError) -> bool {
     match error {
         WireGuardProtocolError::Protocol(message) => {
@@ -606,7 +678,13 @@ fn tcp_retryable(error: &WireGuardProtocolError) -> bool {
 async fn resolve_peer_endpoint(
     server: &str,
     port: u16,
+    hook: Option<&PeerResolveHook>,
 ) -> Result<SocketAddr, WireGuardProtocolError> {
+    if let Some(hook) = hook
+        && let Some(endpoint) = (hook.0)(server, port)
+    {
+        return Ok(endpoint);
+    }
     if let Ok(ip) = server.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }

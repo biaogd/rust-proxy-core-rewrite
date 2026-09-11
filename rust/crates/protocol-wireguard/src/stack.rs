@@ -1,6 +1,6 @@
 //! smoltcp IPv4/IPv6 TCP+UDP client stack bound to virtual IPs (no OS TUN).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::poll_fn;
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -108,11 +108,13 @@ pub(crate) struct IpStack {
     device: PacketDevice,
     sockets: SocketSet<'static>,
     wakers: HashMap<SocketHandle, SocketWakers>,
-    live: HashMap<SocketHandle, SocketKind>,
+    live: HashMap<SocketHandle, (SocketKind, u16)>,
     releasing: Vec<SocketHandle>,
+    allocated_ports: HashSet<u16>,
     local_v4: Option<Ipv4Addr>,
     local_v6: Option<Ipv6Addr>,
     next_port: u16,
+    terminated: bool,
 }
 
 impl IpStack {
@@ -162,9 +164,11 @@ impl IpStack {
             wakers: HashMap::new(),
             live: HashMap::new(),
             releasing: Vec::new(),
+            allocated_ports: HashSet::new(),
             local_v4: local_v4.map(|(addr, _)| addr),
             local_v6: local_v6.map(|(addr, _)| addr),
             next_port: EPHEMERAL_START,
+            terminated: false,
         }
     }
 
@@ -192,7 +196,7 @@ impl IpStack {
     fn wake_ready(&mut self) {
         let handles: Vec<SocketHandle> = self.wakers.keys().copied().collect();
         for handle in handles {
-            let Some(kind) = self.live.get(&handle).copied() else {
+            let Some(kind) = self.kind(handle) else {
                 continue;
             };
             let (wake_read, wake_write) = match kind {
@@ -226,7 +230,7 @@ impl IpStack {
     fn reap(&mut self) {
         let mut still = Vec::new();
         for handle in self.releasing.drain(..) {
-            let Some(kind) = self.live.get(&handle).copied() else {
+            let Some((kind, port)) = self.live.get(&handle).copied() else {
                 continue;
             };
             let finished = match kind {
@@ -240,6 +244,7 @@ impl IpStack {
                 self.sockets.remove(handle);
                 self.wakers.remove(&handle);
                 self.live.remove(&handle);
+                self.allocated_ports.remove(&port);
             } else {
                 still.push(handle);
             }
@@ -248,29 +253,32 @@ impl IpStack {
     }
 
     pub(crate) fn connect(&mut self, dest: SocketAddr) -> Result<SocketHandle, io::Error> {
+        self.ensure_active()?;
         let local_ip = self.local_for(dest.ip()).ok_or_else(|| {
             io::Error::new(
                 ErrorKind::AddrNotAvailable,
                 "WireGuard stack has no address for this family",
             )
         })?;
-        let local_port = self.alloc_port();
+        let local_port = self.alloc_port()?;
         let rx = SocketBuffer::new(vec![0_u8; TCP_BUFFER]);
         let tx = SocketBuffer::new(vec![0_u8; TCP_BUFFER]);
         let mut socket = TcpSocket::new(rx, tx);
         socket.set_nagle_enabled(false);
         let remote = IpEndpoint::new(to_smol_ip(dest.ip()), dest.port());
         let local = IpEndpoint::new(to_smol_ip(local_ip), local_port);
-        socket
-            .connect(self.iface.context(), remote, local)
-            .map_err(|error| io::Error::other(format!("smoltcp connect: {error}")))?;
+        if let Err(error) = socket.connect(self.iface.context(), remote, local) {
+            self.allocated_ports.remove(&local_port);
+            return Err(io::Error::other(format!("smoltcp connect: {error}")));
+        }
         let handle = self.sockets.add(socket);
-        self.live.insert(handle, SocketKind::Tcp);
+        self.live.insert(handle, (SocketKind::Tcp, local_port));
         Ok(handle)
     }
 
     pub(crate) fn bind_udp(&mut self) -> Result<SocketHandle, io::Error> {
-        let local_port = self.alloc_port();
+        self.ensure_active()?;
+        let local_port = self.alloc_port()?;
         let rx = UdpPacketBuffer::new(
             vec![UdpPacketMetadata::EMPTY; UDP_PACKET_SLOTS],
             vec![0_u8; UDP_PAYLOAD],
@@ -280,25 +288,37 @@ impl IpStack {
             vec![0_u8; UDP_PAYLOAD],
         );
         let mut socket = UdpSocket::new(rx, tx);
-        socket
-            .bind(IpListenEndpoint {
-                addr: None,
-                port: local_port,
-            })
-            .map_err(|error| io::Error::other(format!("smoltcp udp bind: {error}")))?;
+        if let Err(error) = socket.bind(IpListenEndpoint {
+            addr: None,
+            port: local_port,
+        }) {
+            self.allocated_ports.remove(&local_port);
+            return Err(io::Error::other(format!("smoltcp udp bind: {error}")));
+        }
         let handle = self.sockets.add(socket);
-        self.live.insert(handle, SocketKind::Udp);
+        self.live.insert(handle, (SocketKind::Udp, local_port));
         Ok(handle)
     }
 
-    fn alloc_port(&mut self) -> u16 {
-        let port = self.next_port;
-        self.next_port = if self.next_port == u16::MAX {
-            EPHEMERAL_START
-        } else {
-            self.next_port.saturating_add(1)
-        };
-        port
+    fn alloc_port(&mut self) -> Result<u16, io::Error> {
+        let start = self.next_port;
+        loop {
+            let port = self.next_port;
+            self.next_port = if self.next_port == u16::MAX {
+                EPHEMERAL_START
+            } else {
+                self.next_port.saturating_add(1)
+            };
+            if self.allocated_ports.insert(port) {
+                return Ok(port);
+            }
+            if self.next_port == start {
+                return Err(io::Error::new(
+                    ErrorKind::AddrInUse,
+                    "WireGuard ephemeral ports exhausted",
+                ));
+            }
+        }
     }
 
     fn local_for(&self, dest: IpAddr) -> Option<IpAddr> {
@@ -308,13 +328,53 @@ impl IpStack {
         }
     }
 
+    fn kind(&self, handle: SocketHandle) -> Option<SocketKind> {
+        self.live.get(&handle).map(|(kind, _)| *kind)
+    }
+
+    fn ensure_active(&self) -> io::Result<()> {
+        if self.terminated {
+            Err(retired())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn live_socket_count(&self) -> usize {
+        self.live.len()
+    }
+
+    pub(crate) fn shutdown_all(&mut self) {
+        self.terminated = true;
+        let handles: Vec<SocketHandle> = self.live.keys().copied().collect();
+        for handle in handles {
+            self.abort(handle);
+        }
+        for wakers in self.wakers.values_mut() {
+            if let Some(waker) = wakers.read.take() {
+                waker.wake();
+            }
+            if let Some(waker) = wakers.write.take() {
+                waker.wake();
+            }
+        }
+    }
+
     pub(crate) fn abort(&mut self, handle: SocketHandle) {
-        let Some(kind) = self.live.get(&handle).copied() else {
+        let Some(kind) = self.kind(handle) else {
             return;
         };
         match kind {
             SocketKind::Tcp => self.sockets.get_mut::<TcpSocket>(handle).abort(),
             SocketKind::Udp => self.sockets.get_mut::<UdpSocket>(handle).close(),
+        }
+        if let Some(wakers) = self.wakers.get_mut(&handle) {
+            if let Some(waker) = wakers.read.take() {
+                waker.wake();
+            }
+            if let Some(waker) = wakers.write.take() {
+                waker.wake();
+            }
         }
         if !self.releasing.contains(&handle) {
             self.releasing.push(handle);
@@ -322,14 +382,14 @@ impl IpStack {
     }
 
     pub(crate) fn close_write(&mut self, handle: SocketHandle) {
-        if !matches!(self.live.get(&handle), Some(SocketKind::Tcp)) {
+        if !matches!(self.kind(handle), Some(SocketKind::Tcp)) {
             return;
         }
         self.sockets.get_mut::<TcpSocket>(handle).close();
     }
 
     pub(crate) fn state(&self, handle: SocketHandle) -> Option<State> {
-        matches!(self.live.get(&handle), Some(SocketKind::Tcp))
+        matches!(self.kind(handle), Some(SocketKind::Tcp))
             .then(|| self.sockets.get::<TcpSocket>(handle).state())
     }
 
@@ -338,7 +398,8 @@ impl IpStack {
         handle: SocketHandle,
         buf: &mut [u8],
     ) -> Result<usize, io::Error> {
-        if !matches!(self.live.get(&handle), Some(SocketKind::Tcp)) {
+        self.ensure_active()?;
+        if !matches!(self.kind(handle), Some(SocketKind::Tcp)) {
             return Ok(0);
         }
         let socket = self.sockets.get_mut::<TcpSocket>(handle);
@@ -356,7 +417,8 @@ impl IpStack {
     }
 
     pub(crate) fn send(&mut self, handle: SocketHandle, buf: &[u8]) -> Result<usize, io::Error> {
-        if !matches!(self.live.get(&handle), Some(SocketKind::Tcp)) {
+        self.ensure_active()?;
+        if !matches!(self.kind(handle), Some(SocketKind::Tcp)) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "tcp send closed"));
         }
         let socket = self.sockets.get_mut::<TcpSocket>(handle);
@@ -377,7 +439,8 @@ impl IpStack {
         dest: SocketAddr,
         payload: &[u8],
     ) -> Result<(), io::Error> {
-        if !matches!(self.live.get(&handle), Some(SocketKind::Udp)) {
+        self.ensure_active()?;
+        if !matches!(self.kind(handle), Some(SocketKind::Udp)) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "udp send closed"));
         }
         if self.local_for(dest.ip()).is_none() {
@@ -403,7 +466,8 @@ impl IpStack {
         &mut self,
         handle: SocketHandle,
     ) -> Result<(SocketAddr, Vec<u8>), io::Error> {
-        if !matches!(self.live.get(&handle), Some(SocketKind::Udp)) {
+        self.ensure_active()?;
+        if !matches!(self.kind(handle), Some(SocketKind::Udp)) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "udp recv closed"));
         }
         let socket = self.sockets.get_mut::<UdpSocket>(handle);
@@ -677,4 +741,51 @@ pub(crate) fn lock_stack(stack: &Arc<Mutex<IpStack>>) -> std::sync::MutexGuard<'
     stack
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn retired() -> io::Error {
+    io::Error::new(ErrorKind::BrokenPipe, "WireGuard client retired")
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    fn stack() -> IpStack {
+        IpStack::new(Some((Ipv4Addr::new(10, 0, 0, 2), 32)), None, 1408)
+    }
+
+    #[test]
+    fn alloc_port_skips_occupied_and_wraps() {
+        let mut first = stack();
+        first.allocated_ports.insert(EPHEMERAL_START);
+        let port = first.alloc_port().expect("next port");
+        assert_eq!(port, EPHEMERAL_START + 1);
+        let mut wrapping = stack();
+        wrapping.next_port = u16::MAX;
+        wrapping.allocated_ports.insert(u16::MAX);
+        let wrapped = wrapping.alloc_port().expect("wrap");
+        assert_eq!(wrapped, EPHEMERAL_START);
+    }
+
+    #[test]
+    fn alloc_port_errors_when_ephemeral_range_is_full() {
+        let mut stack = stack();
+        for port in EPHEMERAL_START..=u16::MAX {
+            stack.allocated_ports.insert(port);
+        }
+        let error = stack.alloc_port().expect_err("exhausted");
+        assert_eq!(error.kind(), ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn shutdown_all_marks_stack_retired() {
+        let mut stack = stack();
+        let handle = stack.bind_udp().expect("udp");
+        assert_eq!(stack.live_socket_count(), 1);
+        stack.shutdown_all();
+        assert!(stack.recv_udp(handle).is_err());
+        stack.poll();
+        assert_eq!(stack.live_socket_count(), 0);
+    }
 }

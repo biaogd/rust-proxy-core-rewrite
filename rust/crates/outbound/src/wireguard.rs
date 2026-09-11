@@ -38,8 +38,11 @@ impl std::fmt::Debug for WireGuardClient {
 }
 
 impl WireGuardClient {
-    /// Dials `dial_server` (typically a PSN-resolved IP). `bind_interface` /
-    /// `routing_mark` apply to the outer UDP socket (TUN auto-route loop avoidance).
+    /// Dials using a PSN-resolved IP for the outer UDP bind when `dial_server`
+    /// is an address. Refresh re-resolves the original YAML `server` hostname.
+    ///
+    /// `bind_interface` / `routing_mark` apply to the outer UDP socket (TUN
+    /// auto-route loop avoidance).
     ///
     /// # Errors
     ///
@@ -51,7 +54,9 @@ impl WireGuardClient {
         routing_mark: i64,
     ) -> Result<Self, WireGuardProxyError> {
         let mut options = client_options_from_proxy(proxy)?;
-        dial_server.clone_into(&mut options.server);
+        if let Ok(ip) = dial_server.parse::<IpAddr>() {
+            options.initial_endpoint = Some(SocketAddr::new(ip, options.port));
+        }
         bind_interface.clone_into(&mut options.bind_interface);
         options.routing_mark = routing_mark;
         let dns_servers = tunnel_dns_servers(proxy)?;
@@ -119,6 +124,49 @@ impl WireGuardClient {
         Err(last_error.unwrap_or_else(|| {
             WireGuardProxyError::Dial("WireGuard tunnel DNS returned no address".to_owned())
         }))
+    }
+
+    /// Resolves a mixed/health destination the same way as the dataplane.
+    ///
+    /// Tunnel DNS (`remote-dns-resolve`) is used for domain names when
+    /// configured; otherwise the system resolver is used. Family must match
+    /// the inner `ip` / `ipv6` assignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the name does not resolve or the family is unsupported.
+    pub async fn resolve_destination(
+        &self,
+        destination: &Destination,
+    ) -> Result<Destination, WireGuardProxyError> {
+        let address = match &destination.host {
+            Host::Ip(address) => *address,
+            Host::Domain(domain) if self.uses_tunnel_dns() => self.resolve_host(domain).await?,
+            Host::Domain(domain) => tokio::net::lookup_host((domain.as_str(), destination.port))
+                .await?
+                .find(|candidate| {
+                    (self.has_ipv4() && candidate.is_ipv4())
+                        || (self.has_ipv6() && candidate.is_ipv6())
+                })
+                .map(|address| address.ip())
+                .ok_or_else(|| {
+                    WireGuardProxyError::Dial("WireGuard destination did not resolve".to_owned())
+                })?,
+        };
+        let supported = match address {
+            IpAddr::V4(_) => self.has_ipv4(),
+            IpAddr::V6(_) => self.has_ipv6(),
+        };
+        if supported {
+            Ok(Destination {
+                host: Host::Ip(address),
+                port: destination.port,
+            })
+        } else {
+            Err(WireGuardProxyError::Dial(
+                "WireGuard has no inner address for this family".to_owned(),
+            ))
+        }
     }
 
     #[allow(clippy::unused_async)] // matches TUIC/Hysteria2 retire shape
@@ -223,6 +271,8 @@ fn client_options_from_proxy(proxy: &ProxyConfig) -> Result<ClientOptions, WireG
         bind_interface: String::new(),
         routing_mark: 0,
         refresh_server_ip_interval: Duration::from_secs(wireguard.refresh_server_ip_interval),
+        initial_endpoint: None,
+        resolve_peer: None,
     })
 }
 

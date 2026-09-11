@@ -62,6 +62,8 @@ async fn userspace_tcp_relays_echo() {
         bind_interface: String::new(),
         routing_mark: 0,
         refresh_server_ip_interval: Duration::ZERO,
+        initial_endpoint: None,
+        resolve_peer: None,
     })
     .await
     .expect("client");

@@ -22,7 +22,7 @@ mod keys;
 mod stack;
 mod tunnel;
 
-pub use client::{Client, ClientOptions};
+pub use client::{Client, ClientOptions, PeerResolveHook};
 pub use keys::{decode_key, encode_key};
 pub use stack::{WgTcpStream, WgUdpSocket};
 pub use tunnel::{NoiseTunnel, TunnelAction};

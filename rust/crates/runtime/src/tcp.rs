@@ -712,42 +712,28 @@ pub(super) async fn resolve_wireguard_destination(
     destination: &Destination,
     config: &Config,
 ) -> Result<Destination, String> {
-    let address = match &destination.host {
-        Host::Ip(address) => *address,
-        Host::Domain(domain) if client.uses_tunnel_dns() => client
-            .resolve_host(domain)
+    if let (Host::Domain(domain), false) = (&destination.host, client.uses_tunnel_dns())
+        && let Some(dns) = config.dns.as_ref()
+    {
+        let address = rewrite_dns::resolve_direct_domain(dns, domain, client.has_ipv6())
             .await
-            .map_err(|error| format!("WireGuard tunnel DNS failed: {error}"))?,
-        Host::Domain(domain) => {
-            if let Some(dns) = config.dns.as_ref() {
-                rewrite_dns::resolve_direct_domain(dns, domain, client.has_ipv6())
-                    .await
-                    .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?
-            } else {
-                let mut addresses = tokio::net::lookup_host((domain.as_str(), destination.port))
-                    .await
-                    .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?;
-                addresses
-                    .find(|address| {
-                        (client.has_ipv4() && address.is_ipv4())
-                            || (client.has_ipv6() && address.is_ipv6())
-                    })
-                    .map(|address| address.ip())
-                    .ok_or_else(|| "WireGuard destination did not resolve".to_owned())?
-            }
+            .map_err(|error| format!("WireGuard destination DNS failed: {error}"))?;
+        let supported = match address {
+            IpAddr::V4(_) => client.has_ipv4(),
+            IpAddr::V6(_) => client.has_ipv6(),
+        };
+        if !supported {
+            return Err("WireGuard has no inner address for this family".to_owned());
         }
-    };
-    let supported = match address {
-        IpAddr::V4(_) => client.has_ipv4(),
-        IpAddr::V6(_) => client.has_ipv6(),
-    };
-    if !supported {
-        return Err("WireGuard has no inner address for this family".to_owned());
+        return Ok(Destination {
+            host: Host::Ip(address),
+            port: destination.port,
+        });
     }
-    Ok(Destination {
-        host: Host::Ip(address),
-        port: destination.port,
-    })
+    client
+        .resolve_destination(destination)
+        .await
+        .map_err(|error| format!("WireGuard destination DNS failed: {error}"))
 }
 
 fn quic_client_identity(
