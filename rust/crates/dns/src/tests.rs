@@ -332,7 +332,7 @@ rules:
     );
     let config = Config::from_yaml(&source).expect("dns config");
     let host = "wg-health-diff.test";
-    let via_config = resolve_direct_or_system(config.dns.as_ref(), host, false)
+    let via_config = resolve_direct_or_system(config.dns.as_ref(), host, true, false)
         .await
         .expect("configured DNS");
     assert_eq!(via_config, IpAddr::V4(configured));
@@ -344,4 +344,78 @@ rules:
             "system DNS must not return the configured TEST-NET address, got {ips:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn ipv6_only_selects_aaaa_from_dual_stack_domain() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use hickory_proto::op::{Message, MessageType};
+    use hickory_proto::rr::rdata::{A, AAAA};
+    use hickory_proto::rr::{RData, Record, RecordType};
+    use hickory_proto::serialize::binary::BinDecodable;
+    use rewrite_config::Config;
+    use tokio::net::UdpSocket;
+
+    use crate::resolve_direct_or_system;
+
+    let ipv4 = Ipv4Addr::new(192, 0, 2, 10);
+    let ipv6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10);
+    let dns_socket = UdpSocket::bind("127.0.0.1:0").await.expect("dns bind");
+    let dns_addr = dns_socket.local_addr().expect("dns addr");
+    tokio::spawn(async move {
+        let mut buf = [0_u8; 512];
+        loop {
+            let Ok((n, from)) = dns_socket.recv_from(&mut buf).await else {
+                break;
+            };
+            let Ok(query) = Message::from_bytes(&buf[..n]) else {
+                continue;
+            };
+            let mut response = query;
+            response.metadata.message_type = MessageType::Response;
+            let question = response
+                .queries
+                .first()
+                .map(|item| (item.name().clone(), item.query_type()));
+            if let Some((name, qtype)) = question {
+                let data = match qtype {
+                    RecordType::A => Some(RData::A(A(ipv4))),
+                    RecordType::AAAA => Some(RData::AAAA(AAAA(ipv6))),
+                    _ => None,
+                };
+                if let Some(data) = data {
+                    response.add_answer(Record::from_rdata(name, 30, data));
+                }
+            }
+            if let Ok(payload) = response.to_vec() {
+                let _ = dns_socket.send_to(&payload, from).await;
+            }
+        }
+    });
+
+    let source = format!(
+        r"
+mixed-port: 7890
+mode: rule
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  ipv6: true
+  nameserver:
+    - udp://{dns_addr}
+rules:
+  - MATCH,DIRECT
+"
+    );
+    let config = Config::from_yaml(&source).expect("dns config");
+    let host = "wg-dualstack.test";
+    let ipv6_only = resolve_direct_or_system(config.dns.as_ref(), host, false, true)
+        .await
+        .expect("IPv6-only from dual-stack name");
+    assert_eq!(ipv6_only, IpAddr::V6(ipv6));
+    let dual = resolve_direct_or_system(config.dns.as_ref(), host, true, true)
+        .await
+        .expect("dual-stack prefers IPv4");
+    assert_eq!(dual, IpAddr::V4(ipv4));
 }

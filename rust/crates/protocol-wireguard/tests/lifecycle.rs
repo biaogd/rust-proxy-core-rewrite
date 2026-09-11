@@ -401,32 +401,70 @@ async fn failed_refresh_backs_off_instead_of_retrying_every_tick() {
 }
 
 #[tokio::test]
+async fn drop_during_refresh_stops_reactor() {
+    let (client_priv, client_pub) = pair(69);
+    let (server_priv, server_pub) = pair(71);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let hook = PeerResolveHook::new(move |_host, _port| async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Some(endpoint)
+    });
+    let client = Client::new(ClientOptions {
+        server: "wg-drop-during-refresh.test".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        initial_endpoint: Some(endpoint),
+        resolve_peer: Some(hook),
+        refresh_server_ip_interval: Duration::from_millis(50),
+        ..ClientOptions::default()
+    })
+    .await
+    .expect("client");
+    let socket = client.open_udp().await.expect("udp");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let recv = tokio::spawn(async move { socket.recv().await });
+    drop(client);
+    let result = tokio::time::timeout(Duration::from_secs(1), recv)
+        .await
+        .expect("pending UDP recv should finish after dropping the last client during refresh")
+        .expect("join");
+    assert!(
+        result.is_err(),
+        "drop during refresh should cancel the reactor, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn refresh_keeps_configured_endpoint_when_system_dns_differs() {
     let echo_port = spawn_echo().await;
     let (client_priv, client_pub) = pair(61);
     let (server_priv, server_pub) = pair(63);
-    let listen = UdpSocket::bind("127.0.0.2:0")
-        .await
-        .expect("wg bind on 127.0.0.2");
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let decoy = UdpSocket::bind("127.0.0.1:0").await.expect("decoy bind");
     let endpoint = listen.local_addr().expect("wg addr");
+    let decoy_addr = decoy.local_addr().expect("decoy addr");
     spawn_responder(listen, server_priv, client_pub, 2);
-    let system = tokio::net::lookup_host(("localhost", endpoint.port()))
+    let system = tokio::net::lookup_host(("localhost", decoy_addr.port()))
         .await
         .expect("system localhost")
         .next()
         .expect("localhost address");
     assert_ne!(
-        system.ip(),
-        endpoint.ip(),
-        "test requires system localhost != 127.0.0.2"
+        system,
+        endpoint,
+        "system localhost:{decoy} must differ from the WireGuard bind",
+        decoy = decoy_addr.port()
     );
-    let hook = PeerResolveHook::new(move |host, port| async move {
+    let hook = PeerResolveHook::new(move |host, _port| async move {
         assert_eq!(host, "localhost");
-        Some(SocketAddr::new(endpoint.ip(), port))
+        Some(endpoint)
     });
     let client = Client::new(ClientOptions {
         server: "localhost".to_owned(),
-        port: endpoint.port(),
+        port: decoy_addr.port(),
         private_key: client_priv,
         peer_public_key: server_pub,
         initial_endpoint: Some(endpoint),
@@ -439,6 +477,7 @@ async fn refresh_keeps_configured_endpoint_when_system_dns_differs() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     tcp_echo(&client, echo_port, b"configured-not-system").await;
     client.close().await;
+    drop(decoy);
 }
 
 #[tokio::test]
@@ -446,15 +485,15 @@ async fn failed_configured_refresh_does_not_fall_back_to_system_dns() {
     let echo_port = spawn_echo().await;
     let (client_priv, client_pub) = pair(65);
     let (server_priv, server_pub) = pair(67);
-    let listen = UdpSocket::bind("127.0.0.2:0")
-        .await
-        .expect("wg bind on 127.0.0.2");
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let decoy = UdpSocket::bind("127.0.0.1:0").await.expect("decoy bind");
     let endpoint = listen.local_addr().expect("wg addr");
+    let decoy_addr = decoy.local_addr().expect("decoy addr");
     spawn_responder(listen, server_priv, client_pub, 2);
     let hook = PeerResolveHook::new(|_host, _port| async move { None });
     let client = Client::new(ClientOptions {
         server: "localhost".to_owned(),
-        port: endpoint.port(),
+        port: decoy_addr.port(),
         private_key: client_priv,
         peer_public_key: server_pub,
         initial_endpoint: Some(endpoint),
@@ -467,6 +506,7 @@ async fn failed_configured_refresh_does_not_fall_back_to_system_dns() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     tcp_echo(&client, echo_port, b"keep-configured-on-fail").await;
     client.close().await;
+    drop(decoy);
 }
 
 fn spawn_responder(udp: UdpSocket, private_key: [u8; 32], peer_public_key: [u8; 32], index: u32) {

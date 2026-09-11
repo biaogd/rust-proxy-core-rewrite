@@ -306,8 +306,12 @@ async fn wireguard_health_destination(
         .resolve_destination(&destination, |host| {
             let host = host.to_owned();
             let dns = config.dns.clone();
+            let allow_ipv4 = client.has_ipv4();
             let allow_ipv6 = client.has_ipv6();
-            async move { rewrite_dns::resolve_direct_or_system(dns.as_ref(), &host, allow_ipv6).await }
+            async move {
+                rewrite_dns::resolve_direct_or_system(dns.as_ref(), &host, allow_ipv4, allow_ipv6)
+                    .await
+            }
         })
         .await
         .map_err(|_| ())

@@ -777,7 +777,10 @@ pub async fn resolve_proxy_server_or_system(
 }
 
 /// Resolves a dataplane/health domain through configured direct DNS when
-/// present; otherwise the OS resolver.
+/// present; otherwise the OS resolver. Candidates are filtered to the
+/// families the caller can use (`allow_ipv4` / `allow_ipv6`) before the
+/// usual IPv4-preferred pick, so an IPv6-only client does not receive an A
+/// record from a dual-stack name.
 ///
 /// # Errors
 ///
@@ -785,17 +788,28 @@ pub async fn resolve_proxy_server_or_system(
 pub async fn resolve_direct_or_system(
     dns: Option<&DnsConfig>,
     host: &str,
+    allow_ipv4: bool,
     allow_ipv6: bool,
 ) -> Result<IpAddr, DnsError> {
-    if let Some(dns) = dns {
-        return resolve_direct_domain(dns, host, allow_ipv6).await;
-    }
-    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host, 0))
-        .await?
-        .map(|address| address.ip())
-        .filter(|address| address.is_ipv4() || allow_ipv6)
-        .collect();
-    preferred_address(addresses)
+    let addresses = if let Some(dns) = dns {
+        lookup_domain_with(dns, host, allow_ipv6, true).await?
+    } else {
+        tokio::net::lookup_host((host, 0))
+            .await?
+            .map(|address| address.ip())
+            .collect()
+    };
+    preferred_address(filter_by_family(addresses, allow_ipv4, allow_ipv6))
+}
+
+fn filter_by_family(addresses: Vec<IpAddr>, allow_ipv4: bool, allow_ipv6: bool) -> Vec<IpAddr> {
+    addresses
+        .into_iter()
+        .filter(|address| match address {
+            IpAddr::V4(_) => allow_ipv4,
+            IpAddr::V6(_) => allow_ipv6,
+        })
+        .collect()
 }
 
 fn preferred_host_address(addresses: &[IpAddr], allow_ipv6: bool) -> Option<IpAddr> {

@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -115,10 +115,12 @@ struct ClientInner {
     datagrams_sent: AtomicU64,
     has_v4: bool,
     has_v6: bool,
+    /// `Client` clones only. Reactor and refresh tasks hold `Arc` but do not
+    /// increment this, so Drop can cancel when the last handle is released.
+    client_handles: AtomicUsize,
 }
 
 /// Userspace `WireGuard` client matching Go `adapter/outbound.WireGuard` for 6I-C.
-#[derive(Clone)]
 pub struct Client {
     inner: Arc<ClientInner>,
 }
@@ -129,11 +131,18 @@ impl std::fmt::Debug for Client {
     }
 }
 
+impl Clone for Client {
+    fn clone(&self) -> Self {
+        self.inner.client_handles.fetch_add(1, Ordering::Relaxed);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
-        // Client clones plus the reactor each hold `ClientInner`. Cancel only
-        // when this is the last Client (count is 2: this value + reactor).
-        if Arc::strong_count(&self.inner) <= 2 {
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.inner.shutdown.cancel();
             self.inner.notify.notify_waiters();
         }
@@ -218,6 +227,7 @@ impl Client {
             datagrams_sent: AtomicU64::new(0),
             has_v4: options.local_v4.is_some(),
             has_v6: options.local_v6.is_some(),
+            client_handles: AtomicUsize::new(1),
         });
         let reactor = Arc::clone(&inner);
         tokio::spawn(async move {
