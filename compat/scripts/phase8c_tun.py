@@ -10,8 +10,11 @@ requires Windows x86_64 with Administrator. Set PHASE8C_NATIVE=1; missing
 capability or missing wintun.dll fails closed instead of skipping green.
 
 Wintun is not vendored. The native gate downloads the official 0.14.1 zip,
-verifies SHA-256, and stages `wintun/bin/amd64/wintun.dll` next to the
-binaries. `delete_driver` stays false so other Wintun/WireGuard VPNs remain.
+verifies SHA-256, and keeps the extracted `wintun/bin/amd64/wintun.dll` in the
+scratch directory for Rust via `MIHOMO_WINTUN`. Go still gets a next-to-exe
+copy when that destination is writable; a sharing violation (WinError 32) on
+an already-loaded file is skipped rather than failing fixture setup.
+`delete_driver` stays false so other Wintun/WireGuard VPNs remain.
 DNS is set on this adapter only; other NIC DNS must stay unchanged.
 """
 
@@ -533,16 +536,46 @@ def download_wintun(scratch: pathlib.Path) -> pathlib.Path:
     return extracted
 
 
-def stage_wintun(dll: pathlib.Path, binaries: dict[str, pathlib.Path]) -> pathlib.Path:
-    staged: pathlib.Path | None = None
-    for binary in binaries.values():
-        target = binary.parent / "wintun.dll"
+def file_sha256(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def is_sharing_violation(error: OSError) -> bool:
+    if getattr(error, "winerror", None) == 32:
+        return True
+    text = str(error).lower()
+    return "being used by another process" in text or "winerror 32" in text
+
+
+def copy_wintun_beside(dll: pathlib.Path, binary: pathlib.Path) -> pathlib.Path:
+    target = binary.parent / "wintun.dll"
+    if target.exists():
+        try:
+            if file_sha256(target) == file_sha256(dll):
+                return target
+        except OSError:
+            pass
+    try:
         shutil.copy2(dll, target)
-        if binary == binaries["rust"]:
-            staged = target
-    assert staged is not None
-    os.environ["MIHOMO_WINTUN"] = str(staged)
-    return staged
+    except OSError as error:
+        if is_sharing_violation(error) and target.exists():
+            return target
+        raise AssertionError(f"failed to stage wintun.dll next to {binary}: {error}") from error
+    return target
+
+
+def stage_wintun(dll: pathlib.Path, binaries: dict[str, pathlib.Path]) -> pathlib.Path:
+    """Point Rust at the scratch DLL; copy beside Go when the file is not in use.
+
+    Rust loads `MIHOMO_WINTUN` first. Copying onto a Cargo target directory that
+    already has a loaded `wintun.dll` hits WinError 32 and never reaches TUN
+    traffic. Keep the hashed extract in scratch for Rust.
+    """
+    go = binaries.get("go")
+    if go is not None:
+        copy_wintun_beside(dll, go)
+    os.environ["MIHOMO_WINTUN"] = str(dll)
+    return dll
 
 
 def run_closed_loop(

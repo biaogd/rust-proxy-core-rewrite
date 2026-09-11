@@ -6,7 +6,9 @@ without remapping. The Go oracle still accepts `system`/`gvisor`/`mixed`.
 
 Native traffic (YAML → tun-rs → netstack-smoltcp → DIRECT) requires a
 privileged Linux runner. Set PHASE8A_NATIVE=1; missing capability fails
-closed instead of skipping green.
+closed instead of skipping green. Failed `/configs` reloads must restore
+retired listeners after dropping uncommitted sockets, including same-port
+replacement then TUN failure and bind-fail after the old listener stopped.
 """
 
 from __future__ import annotations
@@ -425,6 +427,8 @@ def tun_config(
     enable: bool = True,
     controller_port: int | None = None,
     extra_tun: str = "",
+    allow_lan: bool = False,
+    bind_address: str | None = None,
 ) -> str:
     controller = ""
     if controller_port is not None:
@@ -432,11 +436,16 @@ def tun_config(
     extra = extra_tun
     if extra and not extra.endswith("\n"):
         extra += "\n"
+    lan = ""
+    if allow_lan:
+        lan += "allow-lan: true\n"
+    if bind_address is not None:
+        lan += f'bind-address: "{bind_address}"\n'
     return f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
 ipv6: false
-{controller}dns:
+{lan}{controller}dns:
   enable: true
   listen: 127.0.0.1:{dns_listen}
   ipv6: false
@@ -574,23 +583,50 @@ def wait_port_closed(
     port: int,
     process: subprocess.Popen[bytes],
     scratch: pathlib.Path,
+    host: str = "127.0.0.1",
 ) -> None:
     deadline = time.monotonic() + CLEANUP_DEADLINE
     last_error = "not attempted"
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(
-                f"proxy exited while waiting for port {port} to close: {process.returncode}\n"
+                f"proxy exited while waiting for {host}:{port} to close: {process.returncode}\n"
                 f"{process_logs(scratch)}"
             )
         try:
-            ns_client(ns, "tcp-closed", "127.0.0.1", str(port), timeout=1)
+            ns_client(ns, "tcp-closed", host, str(port), timeout=1)
             return
         except Exception as error:  # noqa: BLE001 — surface last probe error
             last_error = str(error)
             time.sleep(0.05)
     raise TimeoutError(
-        f"new mixed-port {port} stayed open after failed reload: {last_error}\n"
+        f"{host}:{port} stayed open after failed reload: {last_error}\n"
+        f"{process_logs(scratch)}"
+    )
+
+
+def wait_controller(
+    ns: str,
+    process: subprocess.Popen[bytes],
+    port: int,
+    scratch: pathlib.Path,
+) -> None:
+    deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
+    last_error = "not attempted"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"proxy exited before controller {port} was ready: {process.returncode}\n"
+                f"{process_logs(scratch)}"
+            )
+        try:
+            ns_client(ns, "wait-tcp", "127.0.0.1", str(port), timeout=1)
+            return
+        except Exception as error:  # noqa: BLE001 — surface last probe error
+            last_error = str(error)
+            time.sleep(0.1)
+    raise TimeoutError(
+        f"controller {port} did not become ready: {last_error}\n"
         f"{process_logs(scratch)}"
     )
 
@@ -835,20 +871,7 @@ def run_failed_reload_keeps_old_traffic(
     try:
         wait_mixed(ns.name, process, mixed_port, case_dir)
         wait_tun_device(ns, process, case_dir)
-        deadline = time.monotonic() + NATIVE_STARTUP_DEADLINE
-        last_error = "not attempted"
-        while time.monotonic() < deadline:
-            try:
-                ns_client(ns.name, "wait-tcp", "127.0.0.1", str(controller_port), timeout=1)
-                break
-            except Exception as error:  # noqa: BLE001 — surface last probe error
-                last_error = str(error)
-                time.sleep(0.1)
-        else:
-            raise TimeoutError(
-                f"controller {controller_port} did not become ready: {last_error}\n"
-                f"{process_logs(case_dir)}"
-            )
+        wait_controller(ns.name, process, controller_port, case_dir)
         assert_auto_routes(ns, "smoltcp")
         fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
         body = http_get(ns.name, fake_http, servers.http_port, "/small")
@@ -917,6 +940,211 @@ def run_failed_reload_keeps_old_traffic(
         wait_gone(ns, ns.tun)
 
 
+def run_same_port_tun_fail_releases_wildcard(
+    binary: pathlib.Path,
+    ns: Netns,
+    servers: FixtureServers,
+    scratch: pathlib.Path,
+) -> dict[str, Any]:
+    case_dir = scratch / "same-port-tun-fail"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    mixed_port = 17895
+    dns_listen = 15357
+    controller_port = 19095
+    nameserver = f"{SERVICE_IP}:{servers.dns_port}"
+    initial = write_config(
+        case_dir,
+        "config.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+        ),
+    )
+    conflict = write_config(
+        case_dir,
+        "conflict.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+            allow_lan=True,
+            bind_address="*",
+            extra_tun=f"  inet4-route-address:\n    - {FOREIGN_ROUTE}\n",
+        ),
+    )
+    process, stdout, stderr = launch_in_ns(ns.name, binary, initial, case_dir)
+    observation: dict[str, Any] = {"label": "same-port-tun-fail"}
+    try:
+        wait_mixed(ns.name, process, mixed_port, case_dir)
+        wait_tun_device(ns, process, case_dir)
+        wait_controller(ns.name, process, controller_port, case_dir)
+        assert_auto_routes(ns, "smoltcp")
+        fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"same-port TUN fail baseline HTTP mismatch: {body!r}")
+        run_ip(
+            "route",
+            "replace",
+            FOREIGN_ROUTE,
+            "via",
+            VETH_HOST_IP,
+            "dev",
+            ns.veth_ns,
+            ns=ns.name,
+        )
+        put = ns_client(
+            ns.name,
+            "put-config",
+            str(controller_port),
+            str(conflict),
+            timeout=NATIVE_STARTUP_DEADLINE,
+        )
+        status = int(put.get("status") or 0)
+        message = str(put.get("body") or "")
+        if 200 <= status < 300:
+            raise AssertionError(f"same-port conflicting TUN reload succeeded: {put}")
+        if "refusing to replace existing route" not in message:
+            raise AssertionError(f"same-port TUN reload missing foreign-route error: {put}")
+        if "restored previous instance" not in message:
+            raise AssertionError(f"same-port TUN reload did not restore previous TUN: {put}")
+        if process.poll() is not None:
+            raise AssertionError(
+                f"proxy exited after same-port TUN reload: {process.returncode}\n"
+                f"{process_logs(case_dir)}"
+            )
+        if not ns.has_device(ns.tun):
+            raise AssertionError(f"TUN device missing after same-port failed reload\n{ns.links()}")
+        assert_auto_routes(ns, "smoltcp")
+        ns_client(ns.name, "wait-tcp", "127.0.0.1", str(mixed_port), timeout=1)
+        wait_port_closed(ns.name, mixed_port, process, case_dir, host=VETH_NS_IP)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"old TUN HTTP failed after same-port rejected reload: {body!r}")
+        observation.update(
+            {
+                "reload-rejected": True,
+                "previous-tun-restored": True,
+                "http-after-failed-reload": True,
+                "old-mixed-port-kept": True,
+                "wildcard-bind-released": True,
+            }
+        )
+        return observation
+    except Exception:
+        print(process_logs(case_dir), file=sys.stderr)
+        raise
+    finally:
+        stdout.close()
+        stderr.close()
+        stop_process(process, case_dir)
+        run_ip("route", "del", FOREIGN_ROUTE, ns=ns.name, check=False)
+        wait_gone(ns, ns.tun)
+
+
+def run_bind_fail_after_stop_restores_old_port(
+    binary: pathlib.Path,
+    ns: Netns,
+    servers: FixtureServers,
+    scratch: pathlib.Path,
+) -> dict[str, Any]:
+    case_dir = scratch / "bind-fail-after-stop"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    mixed_port = 17896
+    dns_listen = 15358
+    controller_port = 19096
+    nameserver = f"{SERVICE_IP}:{servers.dns_port}"
+    initial = write_config(
+        case_dir,
+        "config.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+        ),
+    )
+    conflict = write_config(
+        case_dir,
+        "conflict.yaml",
+        tun_config(
+            mixed_port=mixed_port,
+            dns_listen=dns_listen,
+            nameserver=nameserver,
+            device=ns.tun,
+            auto_route=True,
+            stack="smoltcp",
+            controller_port=controller_port,
+            allow_lan=True,
+            bind_address="192.0.2.1",
+        ),
+    )
+    process, stdout, stderr = launch_in_ns(ns.name, binary, initial, case_dir)
+    observation: dict[str, Any] = {"label": "bind-fail-after-stop"}
+    try:
+        wait_mixed(ns.name, process, mixed_port, case_dir)
+        wait_tun_device(ns, process, case_dir)
+        wait_controller(ns.name, process, controller_port, case_dir)
+        assert_auto_routes(ns, "smoltcp")
+        fake_http = query_hijacked_dns(ns.name, HTTP_NAME)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"bind-fail baseline HTTP mismatch: {body!r}")
+        put = ns_client(
+            ns.name,
+            "put-config",
+            str(controller_port),
+            str(conflict),
+            timeout=NATIVE_STARTUP_DEADLINE,
+        )
+        status = int(put.get("status") or 0)
+        if 200 <= status < 300:
+            raise AssertionError(f"unassigned bind-address reload succeeded: {put}")
+        if process.poll() is not None:
+            raise AssertionError(
+                f"proxy exited after bind-fail reload: {process.returncode}\n"
+                f"{process_logs(case_dir)}"
+            )
+        if not ns.has_device(ns.tun):
+            raise AssertionError(f"TUN was stopped after bind-fail reload\n{ns.links()}")
+        assert_auto_routes(ns, "smoltcp")
+        ns_client(ns.name, "wait-tcp", "127.0.0.1", str(mixed_port), timeout=1)
+        wait_port_closed(ns.name, mixed_port, process, case_dir, host=VETH_NS_IP)
+        body = http_get(ns.name, fake_http, servers.http_port, "/small")
+        if body != HTTP_SMALL:
+            raise AssertionError(f"old TUN HTTP failed after bind-fail reload: {body!r}")
+        observation.update(
+            {
+                "reload-rejected": True,
+                "tun-kept": True,
+                "http-after-failed-reload": True,
+                "old-mixed-port-kept": True,
+                "unassigned-bind-released": True,
+            }
+        )
+        return observation
+    except Exception:
+        print(process_logs(case_dir), file=sys.stderr)
+        raise
+    finally:
+        stdout.close()
+        stderr.close()
+        stop_process(process, case_dir)
+        wait_gone(ns, ns.tun)
+
+
 def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dict[str, Any]:
     if os.environ.get("PHASE8A_NATIVE") != "1":
         print(
@@ -974,6 +1202,18 @@ def native_gate(binaries: dict[str, pathlib.Path], scratch: pathlib.Path) -> dic
             observations["go-rust-http-body-match"] = True
             observations["go-rust-fake-ip-not-compared"] = True
             observations["rust-failed-reload"] = run_failed_reload_keeps_old_traffic(
+                binaries["rust"],
+                ns,
+                servers,
+                scratch,
+            )
+            observations["rust-same-port-tun-fail"] = run_same_port_tun_fail_releases_wildcard(
+                binaries["rust"],
+                ns,
+                servers,
+                scratch,
+            )
+            observations["rust-bind-fail-after-stop"] = run_bind_fail_after_stop_restores_old_port(
                 binaries["rust"],
                 ns,
                 servers,

@@ -29,16 +29,17 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> Result<(), Runt
 /// Runs transactional local listener generations and applies validated reloads.
 ///
 /// A reload binds every non-conflicting socket before publishing its config.
-/// A same-port bind-address change must retire the old socket first, matching
-/// the Go fixed-listener recreation boundary. Other bind failures leave the
-/// previous generation running.
+/// A same-port bind-address or Shadowsocks-identity change must retire the old
+/// socket first, matching the Go fixed-listener recreation boundary. Any later
+/// failure — including a bind/`?` error during prepare, not just TUN start —
+/// drops uncommitted sockets and restores those retired listeners before the
+/// error is returned.
 ///
 /// # Errors
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
 /// Later reload errors are logged and leave the current generation unchanged,
-/// including restoring previous listeners, controllers, DNS and TUN when a
-/// replacement TUN fails.
+/// including restoring previous listeners, controllers, DNS and TUN.
 pub async fn run_with_reload(
     initial: Config,
     reloads: mpsc::Receiver<Config>,
@@ -59,8 +60,7 @@ pub async fn run_with_reload(
 ///
 /// Returns [`RuntimeError`] only when the initial generation cannot be created.
 /// Later reload errors are logged and leave the current generation unchanged,
-/// including restoring previous listeners, controllers, DNS and TUN when a
-/// replacement TUN fails.
+/// including restoring previous listeners, controllers, DNS and TUN.
 pub async fn run_with_reload_lifecycle(
     initial: Config,
     reloads: mpsc::Receiver<Config>,
@@ -319,19 +319,103 @@ mod tests {
 
     use rewrite_config::Config;
     use tokio::sync::mpsc;
+    use tokio::task::JoinHandle;
     use tokio_util::sync::CancellationToken;
 
     use super::run_with_reload;
+    use crate::types::RuntimeError;
+
+    fn reserve_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let port = listener.local_addr().expect("port").port();
+        drop(listener);
+        port
+    }
+
+    fn failing_tun_yaml() -> String {
+        let device = if cfg!(target_os = "linux") {
+            "lo"
+        } else if cfg!(target_os = "macos") {
+            "tun0"
+        } else if cfg!(windows) {
+            "Loopback Pseudo-Interface 1"
+        } else {
+            "unsupported-tun"
+        };
+        format!(
+            "tun:\n  enable: true\n  stack: smoltcp\n  device: {device}\n  inet4-address:\n    - 198.18.0.1/30\n"
+        )
+    }
+
+    async fn wait_controller_ready(
+        client: &reqwest::Client,
+        url: &str,
+        runtime: &JoinHandle<Result<(), RuntimeError>>,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if client
+                .get(format!("{url}/version"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "controller did not become ready; runtime finished: {}",
+                runtime.is_finished()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_tcp_open(address: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{address} did not become ready"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(not(windows))]
+    async fn assert_tcp_closed(address: &str) {
+        if let Ok(Ok(_)) = tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        {
+            panic!("{address} stayed open after rollback");
+        }
+    }
+
+    fn ss_listener_yaml(port: u16, password: &str) -> String {
+        format!(
+            "listeners:\n  - name: ss-reload\n    type: shadowsocks\n    listen: 127.0.0.1\n    port: {port}\n    cipher: aes-128-gcm\n    password: {password}\n"
+        )
+    }
+
+    fn put_config_body(payload: &str) -> String {
+        let escaped = payload
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        format!(r#"{{"path":"","payload":"{escaped}"}}"#)
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn controller_updates_continue_after_reload_source_closes() {
         rewrite_services::install_default_crypto_provider();
-        let mixed = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve mixed port");
-        let mixed_port = mixed.local_addr().expect("mixed address").port();
-        let controller =
-            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve controller port");
-        let controller_port = controller.local_addr().expect("controller address").port();
-        drop((mixed, controller));
+        let mixed_port = reserve_port();
+        let controller_port = reserve_port();
         let initial = Config::from_yaml(&format!(
             "mixed-port: {mixed_port}\nexternal-controller: 127.0.0.1:{controller_port}\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n"
         ))
@@ -345,23 +429,7 @@ mod tests {
             .build()
             .expect("HTTP client");
         let url = format!("http://127.0.0.1:{controller_port}");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if client
-                .get(format!("{url}/version"))
-                .send()
-                .await
-                .is_ok_and(|response| response.status().is_success())
-            {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "controller did not become ready; runtime finished: {}",
-                runtime.is_finished()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_controller_ready(&client, &url, &runtime).await;
         let response = client
             .put(format!("{url}/configs"))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -376,6 +444,106 @@ mod tests {
         drop(client);
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(2), runtime)
+            .await
+            .expect("runtime stops")
+            .expect("runtime task joins")
+            .expect("runtime succeeds");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_port_replacement_restored_after_failed_tun_reload() {
+        rewrite_services::install_default_crypto_provider();
+        let mixed_port = reserve_port();
+        let ss_port = reserve_port();
+        let controller_port = reserve_port();
+        let initial_yaml = format!(
+            "mixed-port: {mixed_port}\nexternal-controller: 127.0.0.1:{controller_port}\n{}\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n",
+            ss_listener_yaml(ss_port, "rollback-old")
+        );
+        let initial = Config::from_yaml(&initial_yaml).expect("initial config");
+        let (reload_sender, reload_receiver) = mpsc::channel(1);
+        drop(reload_sender);
+        let shutdown = CancellationToken::new();
+        let runtime = tokio::spawn(run_with_reload(initial, reload_receiver, shutdown.clone()));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .expect("HTTP client");
+        let url = format!("http://127.0.0.1:{controller_port}");
+        wait_controller_ready(&client, &url, &runtime).await;
+        wait_tcp_open(&format!("127.0.0.1:{ss_port}")).await;
+        wait_tcp_open(&format!("127.0.0.1:{mixed_port}")).await;
+        let payload = format!(
+            "mixed-port: {mixed_port}\nallow-lan: true\nbind-address: \"*\"\n{}\n{}\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n",
+            ss_listener_yaml(ss_port, "rollback-new"),
+            failing_tun_yaml()
+        );
+        let response = client
+            .put(format!("{url}/configs"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(put_config_body(&payload))
+            .send()
+            .await
+            .expect("controller update completes");
+        assert!(
+            !response.status().is_success(),
+            "TUN reload should fail: {}",
+            response.status()
+        );
+        drop(response);
+        wait_tcp_open(&format!("127.0.0.1:{ss_port}")).await;
+        wait_tcp_open(&format!("127.0.0.1:{mixed_port}")).await;
+        #[cfg(not(windows))]
+        assert_tcp_closed(&format!("127.0.0.2:{mixed_port}")).await;
+        drop(client);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(3), runtime)
+            .await
+            .expect("runtime stops")
+            .expect("runtime task joins")
+            .expect("runtime succeeds");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_listener_restored_when_replacement_bind_fails() {
+        rewrite_services::install_default_crypto_provider();
+        let mixed_port = reserve_port();
+        let controller_port = reserve_port();
+        let initial = Config::from_yaml(&format!(
+            "mixed-port: {mixed_port}\nexternal-controller: 127.0.0.1:{controller_port}\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n"
+        ))
+        .expect("initial config");
+        let (reload_sender, reload_receiver) = mpsc::channel(1);
+        drop(reload_sender);
+        let shutdown = CancellationToken::new();
+        let runtime = tokio::spawn(run_with_reload(initial, reload_receiver, shutdown.clone()));
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .expect("HTTP client");
+        let url = format!("http://127.0.0.1:{controller_port}");
+        wait_controller_ready(&client, &url, &runtime).await;
+        wait_tcp_open(&format!("127.0.0.1:{mixed_port}")).await;
+        let payload = format!(
+            "mixed-port: {mixed_port}\nallow-lan: true\nbind-address: 192.0.2.1\nmode: rule\nipv6: false\nrules: ['MATCH,DIRECT']\n"
+        );
+        let response = client
+            .put(format!("{url}/configs"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(put_config_body(&payload))
+            .send()
+            .await
+            .expect("controller update completes");
+        assert!(
+            !response.status().is_success(),
+            "unassigned bind-address reload should fail: {}",
+            response.status()
+        );
+        drop(response);
+        wait_tcp_open(&format!("127.0.0.1:{mixed_port}")).await;
+        drop(client);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(3), runtime)
             .await
             .expect("runtime stops")
             .expect("runtime task joins")

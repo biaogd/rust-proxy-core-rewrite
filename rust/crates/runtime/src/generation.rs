@@ -19,10 +19,31 @@ use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
 };
 
+#[derive(Default)]
+struct PreparedGeneration {
+    listeners: Vec<(ListenerKey, LocalTcpListener, Option<Arc<UdpSocket>>)>,
+    shadowsocks: Vec<(ListenerKey, ShadowsocksListener)>,
+    controllers: Vec<PreparedController>,
+    dns: Option<(SocketAddr, TcpListener, UdpSocket)>,
+    retired_listeners: Vec<ListenerKey>,
+    retired_controllers: Vec<ControllerKey>,
+    previous_published: Option<Arc<Config>>,
+    published: bool,
+}
+
+impl PreparedGeneration {
+    fn release_uncommitted(&mut self) {
+        self.listeners.clear();
+        self.shadowsocks.clear();
+        self.controllers.clear();
+        self.dns = None;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub(super) async fn apply_generation(
-    mut next: Config,
+    next: Config,
     config_sender: &watch::Sender<Arc<Config>>,
     config_receiver: &watch::Receiver<Arc<Config>>,
     state: &Arc<RuntimeState>,
@@ -33,15 +54,64 @@ pub(super) async fn apply_generation(
     dns: &mut Option<(SocketAddr, RuntimeTask)>,
     tun: &mut Option<(rewrite_config::TunConfig, RuntimeTask)>,
 ) -> Result<(), RuntimeError> {
+    let mut prepared = PreparedGeneration {
+        previous_published: Some(Arc::clone(&*config_sender.borrow())),
+        ..PreparedGeneration::default()
+    };
+    let result = apply_generation_inner(
+        next,
+        config_sender,
+        config_receiver,
+        state,
+        dns_service,
+        controller_updates,
+        listeners,
+        controllers,
+        dns,
+        tun,
+        &mut prepared,
+    )
+    .await;
+    if let Err(error) = &result
+        && let Err(restore_error) = rollback_uncommitted_generation(
+            config_sender,
+            config_receiver,
+            state,
+            dns_service,
+            controller_updates,
+            listeners,
+            controllers,
+            &mut prepared,
+        )
+        .await
+    {
+        return Err(RuntimeError::Tun(format!(
+            "{error}; failed to restore previous listeners ({restore_error})"
+        )));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+async fn apply_generation_inner(
+    mut next: Config,
+    config_sender: &watch::Sender<Arc<Config>>,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+    controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
+    dns: &mut Option<(SocketAddr, RuntimeTask)>,
+    tun: &mut Option<(rewrite_config::TunConfig, RuntimeTask)>,
+    prepared: &mut PreparedGeneration,
+) -> Result<(), RuntimeError> {
     hydrate_http_proxy_providers(&mut next, state).await;
     let desired_listeners = next.listener_ports()?;
     let desired_controllers = controller_keys(&next)?;
     let desired_dns = next.dns.as_ref().map(|config| config.listen);
 
-    let mut prepared_listeners = Vec::new();
-    let mut prepared_shadowsocks_listeners = Vec::new();
-    let mut retired_listeners = Vec::new();
-    let mut retired_controllers = Vec::new();
     let desired_listener_keys = desired_listeners
         .iter()
         .map(|&(kind, port)| {
@@ -80,7 +150,7 @@ pub(super) async fn apply_generation(
             && let Some(task) = listeners.remove(&conflicting)
         {
             stop_task(task).await;
-            retired_listeners.push(conflicting);
+            prepared.retired_listeners.push(conflicting);
         }
 
         if kind == ListenerKind::Shadowsocks {
@@ -88,35 +158,13 @@ pub(super) async fn apply_generation(
                 continue;
             };
             let listener = ShadowsocksListener::bind(shadowsocks).await?;
-            prepared_shadowsocks_listeners.push((key, listener));
+            prepared.shadowsocks.push((key, listener));
             continue;
         }
 
-        let dual_stack = next.allow_lan && next.bind_address == "*";
-        let listener = rewrite_platform::bind_local_tcp_listener(
-            address,
-            rewrite_platform::LocalTcpOptions {
-                dual_stack,
-                multipath: next.inbound_mptcp,
-                keep_alive_idle: next.keep_alive_idle,
-                keep_alive_interval: next.keep_alive_interval,
-                disable_keep_alive: next.disable_keep_alive,
-            },
-        )?;
-        let listener = if next.inbound_tfo {
-            LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
-        } else {
-            LocalTcpListener::Plain(TcpListener::from_std(listener)?)
-        };
-        let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
-            let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
-            Some(Arc::new(UdpSocket::from_std(udp)?))
-        } else {
-            None
-        };
-        prepared_listeners.push((key, listener, udp));
+        let (listener, udp) = bind_fixed_listener(&next, kind, address)?;
+        prepared.listeners.push((key, listener, udp));
     }
-    let mut prepared_controllers = Vec::new();
     for key in &desired_controllers {
         if controllers.contains_key(key) {
             continue;
@@ -132,28 +180,26 @@ pub(super) async fn apply_generation(
         {
             stop_task(task).await;
             cleanup_controller_key(&replaced);
-            retired_controllers.push(replaced);
+            prepared.retired_controllers.push(replaced);
         }
         match prepare_controller(key.clone(), state.clock()) {
-            Ok(prepared) => prepared_controllers.push(prepared),
+            Ok(controller) => prepared.controllers.push(controller),
             Err(error) => {
                 state.log("error", format!("controller listen failed: {error}"));
                 eprintln!("controller listen failed: {error}");
             }
         }
     }
-    let prepared_dns = if desired_dns
+    if desired_dns
         .is_some_and(|address| dns.as_ref().is_none_or(|(current, _)| *current != address))
     {
         let address = desired_dns.expect("checked as present");
-        Some((
+        prepared.dns = Some((
             address,
             TcpListener::bind(address).await?,
             UdpSocket::bind(address).await?,
-        ))
-    } else {
-        None
-    };
+        ));
+    }
 
     sync_selector_state(state, &next);
     state.clear_grpc_clients().await;
@@ -162,45 +208,28 @@ pub(super) async fn apply_generation(
     state.clear_ssr_clients();
     state.clear_hysteria2_clients().await;
     state.clear_tuic_clients().await;
-    let previous_published = Arc::clone(&*config_sender.borrow());
+    let previous_published = prepared
+        .previous_published
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&*config_sender.borrow()));
     let desired_tun = next.tun.clone();
     config_sender.send_replace(Arc::new(next));
+    prepared.published = true;
     dns_service.clear_cache().await;
     dns_service.reset_connections().await;
 
-    if let Err(error) = apply_tun_task(
+    apply_tun_task(
         desired_tun,
-        Arc::clone(&previous_published),
+        previous_published,
         config_sender,
         config_receiver,
         state,
         dns_service,
         tun,
     )
-    .await
-    {
-        sync_selector_state(state, previous_published.as_ref());
-        if let Err(restore_error) = restore_retired_sockets(
-            retired_listeners,
-            retired_controllers,
-            previous_published.as_ref(),
-            config_receiver,
-            state,
-            dns_service,
-            controller_updates,
-            listeners,
-            controllers,
-        )
-        .await
-        {
-            return Err(RuntimeError::Tun(format!(
-                "{error}; failed to restore previous listeners ({restore_error})"
-            )));
-        }
-        return Err(error);
-    }
+    .await?;
 
-    for (key, listener, udp) in prepared_listeners {
+    for (key, listener, udp) in std::mem::take(&mut prepared.listeners) {
         spawn_fixed_listener(
             key,
             listener,
@@ -212,7 +241,7 @@ pub(super) async fn apply_generation(
         );
     }
 
-    for (key, listener) in prepared_shadowsocks_listeners {
+    for (key, listener) in std::mem::take(&mut prepared.shadowsocks) {
         spawn_shadowsocks_listener(
             key,
             listener,
@@ -224,7 +253,7 @@ pub(super) async fn apply_generation(
     }
 
     apply_controller_tasks(
-        prepared_controllers,
+        std::mem::take(&mut prepared.controllers),
         &desired_controllers,
         config_receiver,
         state,
@@ -235,7 +264,7 @@ pub(super) async fn apply_generation(
     .await;
 
     apply_dns_task(
-        prepared_dns,
+        prepared.dns.take(),
         desired_dns,
         config_receiver,
         state,
@@ -257,6 +286,41 @@ pub(super) async fn apply_generation(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_uncommitted_generation(
+    config_sender: &watch::Sender<Arc<Config>>,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    controller_updates: &mpsc::Sender<rewrite_controller::ConfigUpdate>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+    controllers: &mut BTreeMap<ControllerKey, RuntimeTask>,
+    prepared: &mut PreparedGeneration,
+) -> Result<(), RuntimeError> {
+    // Drop replacement sockets first. Same-port rebinds (address or SS
+    // identity) still hold the port until these values are released.
+    prepared.release_uncommitted();
+    let Some(previous) = prepared.previous_published.clone() else {
+        return Ok(());
+    };
+    if prepared.published {
+        config_sender.send_replace(Arc::clone(&previous));
+        sync_selector_state(state, previous.as_ref());
+    }
+    restore_retired_sockets(
+        std::mem::take(&mut prepared.retired_listeners),
+        std::mem::take(&mut prepared.retired_controllers),
+        previous.as_ref(),
+        config_receiver,
+        state,
+        dns_service,
+        controller_updates,
+        listeners,
+        controllers,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
