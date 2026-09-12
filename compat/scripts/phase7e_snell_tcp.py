@@ -168,7 +168,6 @@ def proxy_snapshot(
         "name": value["name"],
         "type": value["type"],
         "udp": value["udp"],
-        "uot": value.get("uot", False),
     }
 
 
