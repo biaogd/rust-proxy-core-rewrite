@@ -89,9 +89,12 @@ rules:
         time.sleep(0.3)
 
         first = wait_exchange(process, mixed_port, "echo.snell.test", echo_port, b"reuse-1")
+        v2_after_warmup = accepted_count(v2_scratch)
         second = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-2")
         third = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-3")
+        fourth = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-4")
         v2_accepted = accepted_count(v2_scratch)
+        v2_reuse_delta = v2_accepted - v2_after_warmup
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
@@ -119,7 +122,9 @@ rules:
             "v2-first": first,
             "v2-second": second,
             "v2-third": third,
+            "v2-fourth": fourth,
             "v2-accepted": v2_accepted,
+            "v2-reuse-delta": v2_reuse_delta,
             "concurrent-ok": concurrent_ok,
             "v3-first": v3_first,
             "v3-second": v3_second,
@@ -209,8 +214,8 @@ def main() -> int:
     rust = observations["rust"]
     rust_only = ["rust-reuse-accepted", "rust-v4-rejected"]
     pooled = (
-        rust.get("v2-accepted") == 1
-        and go.get("v2-accepted") == 1
+        rust.get("v2-reuse-delta") == 0
+        and go.get("v2-reuse-delta") == 0
         and rust.get("v3-accepted") == 3
         and go.get("v3-accepted") == 3
     )
