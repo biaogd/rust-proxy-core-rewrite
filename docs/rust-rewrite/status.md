@@ -273,10 +273,11 @@ native (`PHASE8B_NATIVE=1`) is fail-closed and not Parity until
 `phase8c-windows-tun` reports success. Privileged 8F dual-uplink network-change
 (`PHASE8F_NATIVE=1`) is fail-closed and not Parity until `phase8f-linux-tun`
 reports success. TUN is not Parity.
-Additional remote-protocol inbounds, AmneziaWG, SSH and other Phase 7
-families remain deferred. WireGuard outbound 6I-A/B/C is implemented in this
-checkout (not Parity). Canonical numbering is AnyTLS **6G**, Hysteria2
-**HY2**, TUIC **6H**, WireGuard **6I**, SSR **7A–7D**. The
+Additional remote-protocol inbounds, AmneziaWG and other Phase 7
+families remain deferred. WireGuard outbound 6I-A/B/C and SSH outbound 6J-A
+are implemented in this checkout (not Parity). Canonical numbering is AnyTLS
+**6G**, Hysteria2 **HY2**, TUIC **6H**, WireGuard **6I**, SSH **6J**,
+SSR **7A–7D**. The
 [roadmap](roadmap.md#next-work-priority--2026-09-11) owns the plan
 ([Phase 8 stages](roadmap.md#phase-8--tun-transparent-proxying-and-platform-breadth)).
 

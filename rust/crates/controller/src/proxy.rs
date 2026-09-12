@@ -910,6 +910,33 @@ pub(super) async fn measure_http_delay(
                         wireguard_health_destination(&client, destination, config).await?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Ssh => {
+                    let dial_server = match &server.host {
+                        Host::Ip(address) => address.to_string(),
+                        Host::Domain(domain) => domain.clone(),
+                    };
+                    let identity = rewrite_outbound::ssh_adapter_identity(
+                        proxy,
+                        &dial_server,
+                        &config.interface_name,
+                        config.routing_mark,
+                    );
+                    let client = if let Some(existing) =
+                        state.cached_ssh_client(&proxy.name, &identity).await
+                    {
+                        existing
+                    } else {
+                        let constructed = rewrite_outbound::SshClient::from_proxy_with_dial_server(
+                            proxy,
+                            &dial_server,
+                            &config.interface_name,
+                            config.routing_mark,
+                        )
+                        .map_err(|_| ())?;
+                        state.ssh_client(&proxy.name, identity, constructed).await
+                    };
+                    client.create_proxy(&destination).await.map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::ShadowsocksR => {
                     let ssr = proxy.ssr.as_ref().ok_or(())?;
                     let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
@@ -1169,6 +1196,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
         rewrite_config::ProxyKind::WireGuard => "WireGuard",
+        rewrite_config::ProxyKind::Ssh => "Ssh",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1185,7 +1213,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Tuic
         | rewrite_config::ProxyKind::ShadowsocksR
         | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
@@ -1348,7 +1376,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Tuic
             | rewrite_config::ProxyKind::ShadowsocksR
             | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns

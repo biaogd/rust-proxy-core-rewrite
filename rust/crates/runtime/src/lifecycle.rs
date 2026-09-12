@@ -208,6 +208,7 @@ pub(super) async fn run_with_reload_inner(
     // Producers have stopped; now retire pooled QUIC/UDP tunnel workers.
     state.clear_tuic_clients().await;
     state.clear_wireguard_clients().await;
+    state.clear_ssh_clients().await;
     if restart_requested {
         restart_current_process();
     }
