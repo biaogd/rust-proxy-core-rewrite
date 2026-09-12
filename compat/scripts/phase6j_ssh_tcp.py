@@ -67,14 +67,16 @@ def authority_binary() -> pathlib.Path:
     return target / profile / f"rewrite-ssh-authority{suffix}"
 
 
-def ssh_record(name: str, server_port: int, *, extra: str = "", password: str = PASSWORD) -> str:
+def ssh_record(
+    name: str, server_port: int, *, extra: str = "", password: str | None = PASSWORD
+) -> str:
+    password_line = f"    password: {password}\n" if password is not None else ""
     return f"""  - name: {name}
     type: ssh
     server: 127.0.0.1
     port: {server_port}
     username: {USERNAME}
-    password: {password}
-{extra}"""
+{password_line}{extra}"""
 
 
 def exchange(
@@ -180,14 +182,19 @@ def start_authority(
     binary: pathlib.Path,
     scratch: pathlib.Path,
     listen_port: int,
+    *,
+    authorized_key: str | None = None,
 ) -> tuple[subprocess.Popen[bytes], Any, Any, str]:
     scratch.mkdir(parents=True, exist_ok=True)
     stdout_path = scratch / "authority-stdout.log"
     stderr_path = scratch / "authority-stderr.log"
     stdout = stdout_path.open("wb")
     stderr = stderr_path.open("wb")
+    command = [str(binary), f"127.0.0.1:{listen_port}", USERNAME, PASSWORD]
+    if authorized_key:
+        command.append(authorized_key)
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{listen_port}", USERNAME, PASSWORD],
+        command,
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,

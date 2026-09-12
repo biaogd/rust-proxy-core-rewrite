@@ -1,4 +1,4 @@
-//! SSH `direct-tcpip` authority for 6J-A Go/Rust differentials.
+//! SSH `direct-tcpip` authority for 6J Go/Rust differentials.
 //!
 //! This is not a Clash inbound. It accepts password and optional public-key
 //! authentication, then splices opened channels to the requested TCP dest.
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Err("unexpected argument".into());
     }
 
-    let (bound, host_key) = spawn_authority(
+    let authority = spawn_authority(
         listen,
         AuthorityOptions {
             username,
@@ -32,8 +32,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
     )
     .await?;
-    println!("READY {bound}");
-    println!("HOST_KEY {host_key}");
+    println!("READY {}", authority.listen);
+    println!("HOST_KEY {}", authority.host_key);
     io::stdout().flush()?;
     std::future::pending::<()>().await;
     Ok(())

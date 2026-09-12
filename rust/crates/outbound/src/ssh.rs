@@ -1,4 +1,4 @@
-//! SSH outbound adapter (6J-A TCP + session reuse).
+//! SSH outbound adapter (6J-A/B TCP + session reuse + transport keepalive).
 
 use rewrite_config::ProxyConfig;
 use rewrite_model::Destination;
@@ -13,6 +13,17 @@ pub enum SshProxyError {
     Dial(String),
 }
 
+/// Socket / cache identity inputs that are not stored on `ProxyConfig`.
+#[derive(Clone, Copy, Debug)]
+pub struct SshTransportHints<'a> {
+    pub dial_server: &'a str,
+    pub bind_interface: &'a str,
+    pub routing_mark: i64,
+    pub keep_alive_idle: i64,
+    pub keep_alive_interval: i64,
+    pub disable_keep_alive: bool,
+}
+
 /// Long-lived outbound client matching Go `adapter/outbound.Ssh`.
 pub struct SshClient {
     inner: std::sync::Arc<Client>,
@@ -25,22 +36,24 @@ impl std::fmt::Debug for SshClient {
 }
 
 impl SshClient {
-    /// Dials `dial_server` (typically a PSN-resolved IP) for the SSH TCP
-    /// transport. `bind_interface` / `routing_mark` apply to that socket.
+    /// Dials `hints.dial_server` (typically a PSN-resolved IP) for the SSH TCP
+    /// transport. Interface, routing-mark and transport keepalive apply to that
+    /// socket.
     ///
     /// # Errors
     ///
     /// Returns when the proxy is missing SSH options or key material is invalid.
     pub fn from_proxy_with_dial_server(
         proxy: &ProxyConfig,
-        dial_server: &str,
-        bind_interface: &str,
-        routing_mark: i64,
+        hints: SshTransportHints<'_>,
     ) -> Result<Self, SshProxyError> {
         let mut options = client_options_from_proxy(proxy)?;
-        dial_server.clone_into(&mut options.server);
-        bind_interface.clone_into(&mut options.bind_interface);
-        options.routing_mark = routing_mark;
+        hints.dial_server.clone_into(&mut options.server);
+        hints.bind_interface.clone_into(&mut options.bind_interface);
+        options.routing_mark = hints.routing_mark;
+        options.keep_alive_idle = hints.keep_alive_idle;
+        options.keep_alive_interval = hints.keep_alive_interval;
+        options.disable_keep_alive = hints.disable_keep_alive;
         let inner = Client::new(options)?;
         Ok(Self {
             inner: std::sync::Arc::new(inner),
@@ -66,13 +79,16 @@ impl SshClient {
 
 /// Cache identity for a configured SSH adapter.
 #[must_use]
-pub fn ssh_adapter_identity(
-    proxy: &ProxyConfig,
-    dial_server: &str,
-    bind_interface: &str,
-    routing_mark: i64,
-) -> String {
-    format!("{dial_server}|{bind_interface}|{routing_mark}|{proxy:?}")
+pub fn ssh_adapter_identity(proxy: &ProxyConfig, hints: SshTransportHints<'_>) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{proxy:?}",
+        hints.dial_server,
+        hints.bind_interface,
+        hints.routing_mark,
+        hints.keep_alive_idle,
+        hints.keep_alive_interval,
+        hints.disable_keep_alive
+    )
 }
 
 fn client_options_from_proxy(proxy: &ProxyConfig) -> Result<ClientOptions, SshProxyError> {
@@ -91,5 +107,8 @@ fn client_options_from_proxy(proxy: &ProxyConfig) -> Result<ClientOptions, SshPr
         host_key_algorithms: ssh.host_key_algorithms.clone(),
         bind_interface: String::new(),
         routing_mark: 0,
+        keep_alive_idle: 0,
+        keep_alive_interval: 0,
+        disable_keep_alive: false,
     })
 }

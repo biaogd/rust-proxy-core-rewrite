@@ -738,22 +738,20 @@ pub(super) async fn ssh_client_for_proxy(
         Host::Ip(address) => address.to_string(),
         Host::Domain(domain) => domain.clone(),
     };
-    let identity = rewrite_outbound::ssh_adapter_identity(
-        proxy,
-        &dial_server,
-        &config.interface_name,
-        config.routing_mark,
-    );
+    let hints = rewrite_outbound::SshTransportHints {
+        dial_server: &dial_server,
+        bind_interface: &config.interface_name,
+        routing_mark: config.routing_mark,
+        keep_alive_idle: config.keep_alive_idle,
+        keep_alive_interval: config.keep_alive_interval,
+        disable_keep_alive: config.disable_keep_alive,
+    };
+    let identity = rewrite_outbound::ssh_adapter_identity(proxy, hints);
     if let Some(existing) = state.cached_ssh_client(&proxy.name, &identity).await {
         return Ok(existing);
     }
-    let client = rewrite_outbound::SshClient::from_proxy_with_dial_server(
-        proxy,
-        &dial_server,
-        &config.interface_name,
-        config.routing_mark,
-    )
-    .map_err(|error| format!("SSH client failed: {error}"))?;
+    let client = rewrite_outbound::SshClient::from_proxy_with_dial_server(proxy, hints)
+        .map_err(|error| format!("SSH client failed: {error}"))?;
     Ok(state.ssh_client(&proxy.name, identity, client).await)
 }
 

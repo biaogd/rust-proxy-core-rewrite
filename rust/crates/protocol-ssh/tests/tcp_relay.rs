@@ -71,6 +71,9 @@ fn client_options(
         host_key_algorithms: Vec::new(),
         bind_interface: String::new(),
         routing_mark: 0,
+        keep_alive_idle: 0,
+        keep_alive_interval: 0,
+        disable_keep_alive: false,
     }
 }
 
@@ -103,7 +106,7 @@ async fn raw_russh_connects_with_password() {
         }
     }
 
-    let (listen, _) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -113,9 +116,13 @@ async fn raw_russh_connects_with_password() {
     )
     .await
     .expect("authority");
-    let mut handle = client::connect(Arc::new(client::Config::default()), listen, AcceptAll)
-        .await
-        .expect("raw connect");
+    let mut handle = client::connect(
+        Arc::new(client::Config::default()),
+        authority.listen,
+        AcceptAll,
+    )
+    .await
+    .expect("raw connect");
     assert!(matches!(
         handle
             .authenticate_password("alice", "secret")
@@ -128,7 +135,7 @@ async fn raw_russh_connects_with_password() {
 #[tokio::test]
 async fn password_relays_echo_and_reuses_session() {
     let (dest, _echo) = echo_listener().await;
-    let (listen, host_key) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -139,10 +146,10 @@ async fn password_relays_echo_and_reuses_session() {
     .await
     .expect("authority");
     let client = Client::new(client_options(
-        listen.port(),
+        authority.listen.port(),
         Some("secret"),
         None,
-        vec![host_key],
+        vec![authority.host_key.clone()],
     ))
     .expect("client");
     exchange(&client, &dest, b"ssh-password").await;
@@ -153,7 +160,7 @@ async fn password_relays_echo_and_reuses_session() {
 #[tokio::test]
 async fn publickey_relays_echo() {
     let (dest, _echo) = echo_listener().await;
-    let (listen, _) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -164,7 +171,7 @@ async fn publickey_relays_echo() {
     .await
     .expect("authority");
     let client = Client::new(client_options(
-        listen.port(),
+        authority.listen.port(),
         None,
         Some(USER_PRIVATE),
         Vec::new(),
@@ -176,7 +183,7 @@ async fn publickey_relays_echo() {
 
 #[tokio::test]
 async fn host_key_mismatch_is_rejected() {
-    let (listen, _) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -187,7 +194,7 @@ async fn host_key_mismatch_is_rejected() {
     .await
     .expect("authority");
     let client = Client::new(client_options(
-        listen.port(),
+        authority.listen.port(),
         Some("secret"),
         None,
         vec![WRONG_HOST.to_owned()],
@@ -211,7 +218,7 @@ async fn host_key_mismatch_is_rejected() {
 #[tokio::test]
 async fn dest_refused_does_not_drop_session() {
     let (dest, _echo) = echo_listener().await;
-    let (listen, _) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -222,7 +229,7 @@ async fn dest_refused_does_not_drop_session() {
     .await
     .expect("authority");
     let client = Client::new(client_options(
-        listen.port(),
+        authority.listen.port(),
         Some("secret"),
         None,
         Vec::new(),
@@ -240,7 +247,7 @@ async fn dest_refused_does_not_drop_session() {
 #[tokio::test]
 async fn concurrent_direct_tcpip_streams() {
     let (dest, _echo) = echo_listener().await;
-    let (listen, _) = spawn_authority(
+    let authority = spawn_authority(
         "127.0.0.1:0".parse().expect("listen"),
         AuthorityOptions {
             username: "alice".to_owned(),
@@ -252,7 +259,7 @@ async fn concurrent_direct_tcpip_streams() {
     .expect("authority");
     let client = std::sync::Arc::new(
         Client::new(client_options(
-            listen.port(),
+            authority.listen.port(),
             Some("secret"),
             None,
             Vec::new(),

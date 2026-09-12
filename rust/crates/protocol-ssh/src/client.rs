@@ -1,12 +1,14 @@
+use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use rand::RngExt;
 use rewrite_model::Destination;
 use rewrite_platform::{OutboundTcpOptions, connect_tcp};
-use russh::SshId;
 use russh::client::{self, AuthResult, Handle};
-use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey, decode_secret_key};
+use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKey, decode_secret_key};
+use russh::{Preferred, SshId};
 use tokio::sync::Mutex;
 
 use crate::SshProtocolError;
@@ -17,7 +19,7 @@ pub struct Client {
     session: Mutex<Option<Handle<HostKeyHandler>>>,
 }
 
-/// Clash `type: ssh` options accepted in 6J-A.
+/// Clash `type: ssh` options accepted in 6J-A/B.
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
     pub server: String,
@@ -29,10 +31,15 @@ pub struct ClientOptions {
     pub private_key_passphrase: Option<String>,
     /// `authorized_keys` lines. Empty means insecure-ignore like Go.
     pub host_keys: Vec<String>,
-    /// Accepted at parse; default russh host-key algorithms are used in 6J-A.
+    /// Host-key algorithms offered during negotiation. Empty keeps russh defaults.
     pub host_key_algorithms: Vec<String>,
     pub bind_interface: String,
     pub routing_mark: i64,
+    /// Transport-socket keepalive from the global Mihomo dialer, not SSH-level
+    /// keepalive. Identity with Go's SSH keepalive packets is not claimed.
+    pub keep_alive_idle: i64,
+    pub keep_alive_interval: i64,
+    pub disable_keep_alive: bool,
 }
 
 struct HostKeyHandler {
@@ -57,16 +64,18 @@ impl client::Handler for HostKeyHandler {
 }
 
 impl Client {
-    /// Builds a client after validating key material.
+    /// Builds a client after validating key material and host-key algorithms.
     ///
     /// # Errors
     ///
-    /// Returns when a configured private key or host key cannot be parsed.
+    /// Returns when a configured private key, host key, or host-key algorithm
+    /// cannot be parsed.
     pub fn new(options: ClientOptions) -> Result<Self, SshProtocolError> {
         if let Some(material) = options.private_key.as_deref() {
             let _ = load_private_key(material, options.private_key_passphrase.as_deref())?;
         }
         let _ = parse_host_keys(&options.host_keys)?;
+        let _ = preferred_host_keys(&options.host_key_algorithms)?;
         Ok(Self {
             options,
             session: Mutex::new(None),
@@ -74,7 +83,8 @@ impl Client {
     }
 
     /// Opens a multiplexed `direct-tcpip` stream. Destination failure must not
-    /// drop the shared SSH session.
+    /// drop the shared SSH session. A dead transport is replaced on the next
+    /// dial without requiring the caller to `close()`.
     ///
     /// # Errors
     ///
@@ -130,36 +140,28 @@ impl Client {
             nodelay: true,
             client_id: random_openssh_id(),
             inactivity_timeout: None,
+            preferred: preferred_host_keys(&self.options.host_key_algorithms)?,
             ..client::Config::default()
         });
         let handler = HostKeyHandler {
             allowed: parse_host_keys(&self.options.host_keys)?,
         };
-        let mut handle = if self.options.bind_interface.is_empty() && self.options.routing_mark == 0
-        {
-            client::connect(config, address, handler)
-                .await
-                .map_err(|error| {
-                    SshProtocolError::Protocol(format!("SSH transport handshake failed: {error}"))
-                })?
-        } else {
-            let stream = connect_tcp(
-                address,
-                OutboundTcpOptions {
-                    interface: &self.options.bind_interface,
-                    routing_mark: self.options.routing_mark,
-                    keep_alive_idle: 0,
-                    keep_alive_interval: 0,
-                    disable_keep_alive: false,
-                },
-            )
-            .await?;
-            client::connect_stream(config, stream, handler)
-                .await
-                .map_err(|error| {
-                    SshProtocolError::Protocol(format!("SSH transport handshake failed: {error}"))
-                })?
-        };
+        let stream = connect_tcp(
+            address,
+            OutboundTcpOptions {
+                interface: &self.options.bind_interface,
+                routing_mark: self.options.routing_mark,
+                keep_alive_idle: self.options.keep_alive_idle,
+                keep_alive_interval: self.options.keep_alive_interval,
+                disable_keep_alive: self.options.disable_keep_alive,
+            },
+        )
+        .await?;
+        let mut handle = client::connect_stream(config, stream, handler)
+            .await
+            .map_err(|error| {
+                SshProtocolError::Protocol(format!("SSH transport handshake failed: {error}"))
+            })?;
         if !authenticate(&mut handle, &self.options).await? {
             return Err(SshProtocolError::Protocol(
                 "SSH authentication rejected".to_owned(),
@@ -254,6 +256,31 @@ fn load_private_key(
         std::fs::read_to_string(material)?
     };
     decode_secret_key(&pem, passphrase).map_err(Into::into)
+}
+
+fn preferred_host_keys(names: &[String]) -> Result<Preferred, SshProtocolError> {
+    if names.is_empty() {
+        return Ok(Preferred::DEFAULT);
+    }
+    let mut key = Vec::with_capacity(names.len());
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(SshProtocolError::Protocol(
+                "empty SSH host-key-algorithm".to_owned(),
+            ));
+        }
+        let algorithm = Algorithm::from_str(trimmed).map_err(|error| {
+            SshProtocolError::Protocol(format!(
+                "unsupported SSH host-key-algorithm {trimmed}: {error}"
+            ))
+        })?;
+        key.push(algorithm);
+    }
+    Ok(Preferred {
+        key: Cow::Owned(key),
+        ..Preferred::DEFAULT
+    })
 }
 
 pub(crate) fn parse_host_keys(lines: &[String]) -> Result<Vec<PublicKey>, SshProtocolError> {

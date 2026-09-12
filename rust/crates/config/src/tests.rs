@@ -495,7 +495,7 @@ fn ssh_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: ssh-pw\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    password: secret\n    host-key:\n      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIkBPFDYJnKqQmG9M8V7XJk7/99afMObZ6Aph1lh6mb7 comment\n    host-key-algorithms: [ssh-ed25519]\n"
     );
-    let config = Config::from_yaml(&source).expect("6J-A SSH password config");
+    let config = Config::from_yaml(&source).expect("6J SSH password config");
     let proxy = &config.proxies[0];
     assert_eq!(proxy.kind, ProxyKind::Ssh);
     assert!(!proxy.udp);
@@ -510,7 +510,7 @@ fn ssh_configuration_is_supported_and_scoped() {
     let key = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: ssh-key\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    private-key: |\n      -----BEGIN OPENSSH PRIVATE KEY-----\n      test\n      -----END OPENSSH PRIVATE KEY-----\n    private-key-passphrase: phrase\n"
     ))
-    .expect("6J-A SSH private-key config");
+    .expect("6J SSH private-key config");
     let key_opts = key.proxies[0].ssh.as_ref().expect("key options");
     assert!(
         key_opts

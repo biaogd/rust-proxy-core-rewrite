@@ -284,9 +284,11 @@ pub struct WireGuardProxyConfig {
     pub refresh_server_ip_interval: u64,
 }
 
-/// Clash `type: ssh` options accepted in 6J-A (TCP outbound, session reuse).
+/// Clash `type: ssh` options accepted in 6J-A/B (TCP outbound, session reuse).
 ///
-/// UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected.
+/// UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected. Host-key
+/// algorithms are applied at handshake; transport keepalive comes from the
+/// global config, not these fields.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshProxyConfig {
     pub username: String,

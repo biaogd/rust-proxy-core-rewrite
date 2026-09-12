@@ -1305,7 +1305,7 @@ separate exit gates inside these labels.
 
 The agreed next-work order after TUN landing was **SSH outbound 6J**,
 with **AmneziaWG deferred**. WireGuard outbound **6I-A/B/C** and SSH
-outbound **6J-A** are implemented in this checkout. Existing-protocol
+outbound **6J-A/B** are implemented in this checkout. Existing-protocol
 regressions remain release blockers.
 See [status](status.md) and [compatibility matrix](compatibility-matrix.md)
 for claims.
@@ -1327,10 +1327,12 @@ for claims.
    checkout. Mixed/SOCKS using WireGuard does not require administrator
    privileges. There is no WireGuard inbound. Cryptography is
    `defguard_boringtun`. AmneziaWG stays later.
-5. **SSH outbound (6J, OUT-15):** **6J-A** (password/public-key TCP outbound,
-   optional host-key verify, session reuse / `direct-tcpip` mux) is implemented
-   in this checkout. UDP, `dialer-proxy`, TFO/MPTCP and inbound remain
-   rejected. Not Parity.
+5. **SSH outbound (6J, OUT-15):** **6J-A/B** (password/public-key TCP outbound,
+   optional host-key verify, applied `host-key-algorithms`, transport TCP
+   keepalive, session reuse / `direct-tcpip` mux, authority-restart reconnect,
+   encrypted private-key file + passphrase) are implemented in this checkout.
+   UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected. SSH-protocol
+   keepalive identity with Go is not claimed. Not Parity.
 
 The remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
@@ -1348,8 +1350,15 @@ SSH is a multiplexed TCP tunnel (`direct-tcpip`), not a UDP protocol. Product
   (`authorized_keys` lines). Default host-key policy is insecure-ignore like
   Go when `host-key` is empty. `udp: true`, `dialer-proxy`, TFO/MPTCP and
   unknown extras are rejected. Evidence: `compat/scripts/phase6j_ssh_tcp.py`
-  plus `protocol-ssh` `tcp_relay`. Keepalive algorithm identity and
-  host-key-algorithm preference application remain later slices.
+  plus `protocol-ssh` `tcp_relay`.
+- **6J-B (implemented in this checkout):** `host-key-algorithms` is applied to
+  russh `Preferred.key`. Global `keep-alive-idle` / `keep-alive-interval` /
+  `disable-keep-alive` are written on the SSH TCP transport socket (not
+  SSH-protocol keepalive). A dead authority is replaced on the next dial
+  without reload. Encrypted OpenSSH private-key files with
+  `private-key-passphrase` have live crate and differential evidence. Short
+  soak plus dest-refused isolation stay in
+  `compat/scripts/phase6j_ssh_lifecycle.py` and `protocol-ssh` `lifecycle`.
 
 The matrix row is **SSH** plus applicable configuration, groups/providers and
 controller rows. These are implementation-in-this-checkout claims, not Parity.

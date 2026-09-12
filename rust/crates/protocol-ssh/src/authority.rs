@@ -1,7 +1,7 @@
-//! In-process / CLI SSH authority used by 6J-A tests. This is not an inbound.
+//! In-process / CLI SSH authority used by 6J tests. This is not an inbound.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
@@ -102,6 +102,39 @@ fn reject() -> Auth {
     }
 }
 
+/// In-process SSH `direct-tcpip` authority for crate tests and differentials.
+///
+/// Dropping or calling [`TestAuthority::shutdown`] aborts the accept loop and
+/// every live session so the listen port can be rebound.
+pub struct TestAuthority {
+    /// Bound listen address, including the ephemeral port.
+    pub listen: SocketAddr,
+    /// OpenSSH `authorized_keys` line for the generated host key.
+    pub host_key: String,
+    accept: tokio::task::AbortHandle,
+    sessions: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+}
+
+impl TestAuthority {
+    /// Stops accepting and aborts in-flight sessions.
+    pub fn shutdown(&self) {
+        self.accept.abort();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for handle in sessions.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for TestAuthority {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// Binds `listen` and serves SSH `direct-tcpip` for tests / differentials.
 ///
 /// # Errors
@@ -110,7 +143,7 @@ fn reject() -> Auth {
 pub async fn spawn_authority(
     listen: SocketAddr,
     options: AuthorityOptions,
-) -> Result<(SocketAddr, String), SshProtocolError> {
+) -> Result<TestAuthority, SshProtocolError> {
     let listener = TcpListener::bind(listen).await?;
     let bound = listener.local_addr()?;
     let host_key = generate_host_key()?;
@@ -130,7 +163,9 @@ pub async fn spawn_authority(
         ..server::Config::default()
     });
     let options = Arc::new(options);
-    tokio::spawn(async move {
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    let session_handles = Arc::clone(&sessions);
+    let accept = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
@@ -141,14 +176,23 @@ pub async fn spawn_authority(
                 authorized: authorized.clone(),
             };
             let config = Arc::clone(&config);
-            tokio::spawn(async move {
+            let session = tokio::spawn(async move {
                 if let Ok(session) = server::run_stream(config, stream, handler).await {
                     let _ = session.await;
                 }
             });
+            session_handles
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(session.abort_handle());
         }
     });
-    Ok((bound, host_key_openssh))
+    Ok(TestAuthority {
+        listen: bound,
+        host_key: host_key_openssh,
+        accept: accept.abort_handle(),
+        sessions,
+    })
 }
 
 fn generate_host_key() -> Result<PrivateKey, SshProtocolError> {

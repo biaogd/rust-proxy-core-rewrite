@@ -432,6 +432,7 @@ jobs:
           compat/scripts/phase6i_wireguard_udp.py \
           compat/scripts/phase6i_wireguard_lifecycle.py \
           compat/scripts/phase6j_ssh_tcp.py \
+          compat/scripts/phase6j_ssh_lifecycle.py \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
           compat/scripts/phase5c_fallback.py \

@@ -1,14 +1,14 @@
-//! SSH outbound client (Phase 6J-A): password/public-key auth, optional
-//! host-key verify, and reused `direct-tcpip` multiplexing.
+//! SSH outbound client (Phase 6J-A/B): password/public-key auth, optional
+//! host-key verify, applied `host-key-algorithms`, transport TCP keepalive,
+//! reused `direct-tcpip` multiplexing, and reconnect after a dead session.
 //!
-//! This is not an SSH inbound. UDP, `dialer-proxy`, keepalive knobs beyond
-//! the transport socket, and host-key-algorithm preference application stay
-//! out of this slice.
+//! This is not an SSH inbound. UDP, `dialer-proxy`, and SSH-protocol keepalive
+//! identity with Go stay out of this slice.
 
 mod authority;
 mod client;
 
-pub use authority::{AuthorityOptions, spawn_authority};
+pub use authority::{AuthorityOptions, TestAuthority, spawn_authority};
 pub use client::{Client, ClientOptions};
 
 use thiserror::Error;

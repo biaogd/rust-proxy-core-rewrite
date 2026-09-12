@@ -62,7 +62,7 @@ pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,
     connect_socks5_with_options,
 };
-pub use ssh::{SshClient, SshProxyError, ssh_adapter_identity};
+pub use ssh::{SshClient, SshProxyError, SshTransportHints, ssh_adapter_identity};
 pub use ssr::{
     SsrClientState, SsrProxyError, SsrUdpAssociation, associate_ssr_udp_with_options,
     connect_ssr_with_options,
