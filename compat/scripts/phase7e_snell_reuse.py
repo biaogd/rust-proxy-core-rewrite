@@ -89,10 +89,14 @@ rules:
         time.sleep(0.3)
 
         first = wait_exchange(process, mixed_port, "echo.snell.test", echo_port, b"reuse-1")
+        time.sleep(0.4)
         v2_after_warmup = accepted_count(v2_scratch)
         second = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-2")
+        time.sleep(0.4)
         third = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-3")
+        time.sleep(0.4)
         fourth = exchange(mixed_port, "127.0.0.1", echo_port, b"reuse-4")
+        time.sleep(0.2)
         v2_accepted = accepted_count(v2_scratch)
         v2_reuse_delta = v2_accepted - v2_after_warmup
 
