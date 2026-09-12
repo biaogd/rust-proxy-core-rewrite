@@ -167,6 +167,7 @@ jobs:
           - hysteria2
           - tuic
           - wireguard
+          - snell
           - local-runtime
           - builtins
     defaults:
@@ -339,6 +340,7 @@ jobs:
       PHASE_HY2C_SOAK_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6HTUIC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6IWG_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7ESNELL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7A_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7B_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7C_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -409,6 +411,7 @@ jobs:
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
             wireguard) SHARD_REGEX='phase6i_wireguard_.*\.py$' ;;
+            snell) SHARD_REGEX='phase7e_snell_.*\.py$' ;;
             local-runtime) SHARD_REGEX='phase(5f_[a-z0-9_]+|8a_tun|8b_tun|8c_tun|8f_tun)\.py$' ;;
             builtins) SHARD_REGEX='phase6a_[a-z0-9_]+\.py$' ;;
             *) echo "unknown differential shard: $SHARD" >&2; exit 2 ;;
@@ -428,6 +431,7 @@ jobs:
           compat/scripts/phase6i_wireguard_tcp.py \
           compat/scripts/phase6i_wireguard_udp.py \
           compat/scripts/phase6i_wireguard_lifecycle.py \
+          compat/scripts/phase7e_snell_tcp.py \
           compat/scripts/phase5c_provider_refresh.py \
           compat/scripts/phase5c_selector_persistence.py \
           compat/scripts/phase5c_fallback.py \

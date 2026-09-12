@@ -1,6 +1,16 @@
 # Rust rewrite status
 
-Last updated: 2026-09-11
+Last updated: 2026-09-12
+
+### 7E-A Snell outbound TCP — 2026-09-12
+
+Clash `type: snell` versions 1–3 TCP is implemented: YAML `psk` (required),
+omitted/`0` version → 1, v1 ChaCha20-Poly1305, v2/v3 AES-128-GCM, Argon2id
+KDF, Shadowsocks AEAD records, mixed/SOCKS → rules/groups → TCP target.
+`udp`, `reuse`, `obfs-opts`, version 4/5, `dialer-proxy` and inbound remain
+rejected. Evidence: `compat/scripts/phase7e_snell_tcp.py` plus
+`protocol-snell` `tcp_relay`. Not Parity; three-platform CI is the new snell
+shard. SSH 6J stays on its own PR.
 
 ### 6I-C WireGuard outbound lifecycle — 2026-09-11
 
@@ -481,12 +491,13 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6I-A WireGuard outbound TCP | Implemented in this checkout; not Parity | Clash `type: wireguard` single-peer IPv4 TCP; `defguard_boringtun` Noise + smoltcp `Medium::Ip` userspace stack (no OS TUN); mixed/SOCKS does not need admin; AmneziaWG/`peers`/`ip-stack` rejected; default MTU 1408. Evidence: `phase6i_wireguard_tcp.py` plus crate `tcp_relay`. Three-platform CI pending |
 | Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending |
 | Phase 6I-C WireGuard outbound lifecycle | Implemented in this checkout; not Parity | Rehandshake after peer restart, `persistent-keepalive`, `refresh-server-ip-interval`, TUN `protect_outbound_destination` for the peer IP, mixed UDP session teardown on network-generation change. Evidence: `phase6i_wireguard_lifecycle.py` plus crate `lifecycle`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending; native Parity is not claimed |
+| Phase 7E-A Snell outbound TCP | Implemented in this checkout; not Parity | Clash `type: snell` v1–v3 TCP; Argon2id + SS AEAD; mixed/SOCKS/rules/groups/providers/health; `udp`/`reuse`/`obfs-opts`/v4 rejected. Evidence: `phase7e_snell_tcp.py` plus crate `tcp_relay`. No inbound. Three-platform CI pending |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
 | CI portability/fixture hardening | Three-platform full matrix configured; results pending | Linux x86_64, Windows x86_64 and macOS arm64 each run fmt, full clippy, workspace tests, release build, Go/with-gVisor baseline and all ten differential shards. Windows named-pipe and privileged Linux routing-mark tests remain additional platform-specific jobs. No new platform parity is claimed before the matrix completes |
 | Controller Axum/Hyper refactor | Complete in the existing declared controller scope | Hand-written HTTP parsing/routing/framing removed; Phase 3, 4D4, 4F14 and 4F15 differentials re-pass without adding routes or compatibility claims |
-| Cargo workspace | Implemented | Focused crates under `rust/crates/` including `protocol-wireguard`; `Cargo.lock` is present with the workspace |
+| Cargo workspace | Implemented | Focused crates under `rust/crates/` including `protocol-wireguard` and `protocol-snell`; `Cargo.lock` is present with the workspace |
 | Differential harness | Implemented through Phase 6E-N; three-platform matrix pending | VLESS now has a dedicated fail-independent shard on Linux x86_64, Windows x86_64 and macOS arm64, including pooled Gun, common xHTTP, REALITY/XMUX and bounded production gates. Local Cargo targets remain outside the repository while CI uses one external target per job |
 | First mixed-to-DIRECT slice | Parity in declared scope | Minimal YAML -> mixed HTTP/SOCKS5 TCP -> `MATCH,DIRECT` -> DIRECT relay |
 | Phase 2 declared spec/rule subset | Parity in declared scope | Normalized general config plus pure domain/IP/port/network/logic/sub-rule/rematch behavior |

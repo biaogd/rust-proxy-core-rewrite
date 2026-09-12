@@ -417,6 +417,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::Hysteria2
         | ProxyKind::Tuic
         | ProxyKind::WireGuard
+        | ProxyKind::Snell
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }

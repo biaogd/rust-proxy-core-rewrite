@@ -239,6 +239,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -377,6 +389,12 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "basic-toml"
@@ -2745,6 +2763,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3412,6 +3441,7 @@ dependencies = [
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-shadowsocksr",
+ "rewrite-protocol-snell",
  "rewrite-protocol-trojan",
  "rewrite-protocol-tuic",
  "rewrite-protocol-vless",
@@ -3507,6 +3537,19 @@ dependencies = [
  "rewrite-model",
  "sha1 0.10.7",
  "shadowsocks-crypto",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-snell"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "argon2",
+ "chacha20poly1305 0.10.1",
+ "rand 0.10.2",
+ "rewrite-model",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -3707,6 +3750,7 @@ dependencies = [
  "rewrite-model",
  "rewrite-outbound",
  "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-snell",
  "rewrite-protocol-wireguard",
  "rewrite-rules",
  "rustls-pemfile",

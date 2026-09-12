@@ -21,6 +21,7 @@ members = [
   "crates/protocol-vless",
   "crates/protocol-vmess",
   "crates/protocol-wireguard",
+  "crates/protocol-snell",
   "crates/rules",
   "crates/ruleset",
   "crates/runtime",
@@ -42,6 +43,7 @@ publish = false
 age = { version = "0.12.1", features = ["armor"] }
 aes = "0.8.4"
 aes-gcm = "0.10.3"
+argon2 = "0.5.3"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 base64 = "0.22"
 blake2 = "0.10"

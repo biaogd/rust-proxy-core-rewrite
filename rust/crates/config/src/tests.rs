@@ -403,6 +403,44 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn snell_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: snell\n    type: snell\n    server: 127.0.0.1\n    port: 8388\n    psk: password\n"
+    );
+    let config = Config::from_yaml(&source).expect("7E-A Snell config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Snell);
+    assert!(!proxy.udp);
+    let snell = proxy.snell.as_ref().expect("snell options");
+    assert_eq!(snell.psk, "password");
+    assert_eq!(snell.version, 1);
+
+    let v3 = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: snell-v3\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n"
+    ))
+    .expect("Snell v3");
+    assert_eq!(v3.proxies[0].snell.as_ref().expect("v3").version, 3);
+
+    for unsupported in [
+        "psk: password\n    udp: true",
+        "psk: password\n    reuse: true",
+        "psk: password\n    version: 4",
+        "psk: password\n    version: 5",
+        "psk: password\n    obfs-opts:\n      mode: http",
+        "psk: password\n    dialer-proxy: DIRECT",
+        "password: password",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn wireguard_configuration_is_supported_and_scoped() {
     const PRIVATE: &str = "ERERERERERERERERERERERERERERERERERERERERERE=";
     const PUBLIC: &str = "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=";
@@ -1943,6 +1981,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 tuic: None,
                 ssr: None,
                 wireguard: None,
+                snell: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -2029,6 +2068,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             tuic: None,
             ssr: None,
             wireguard: None,
+            snell: None,
             headers: BTreeMap::new(),
         }],
     };

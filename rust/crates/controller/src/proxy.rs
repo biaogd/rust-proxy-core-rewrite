@@ -930,6 +930,19 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Snell => {
+                    let snell = proxy.snell.as_ref().ok_or(())?;
+                    rewrite_outbound::connect_snell_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        snell.psk.as_bytes(),
+                        snell.version,
+                        controller_socket_options(config),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -1169,6 +1182,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
         rewrite_config::ProxyKind::WireGuard => "WireGuard",
+        rewrite_config::ProxyKind::Snell => "Snell",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1185,7 +1199,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Tuic
         | rewrite_config::ProxyKind::ShadowsocksR
         | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Snell => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
@@ -1348,7 +1362,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Tuic
             | rewrite_config::ProxyKind::ShadowsocksR
             | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Snell => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
