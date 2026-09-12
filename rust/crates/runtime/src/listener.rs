@@ -266,6 +266,7 @@ pub(super) enum UdpSessionMode {
     AnyTls(String),
     Hysteria2(String),
     Tuic(String),
+    WireGuard(String),
 }
 
 #[derive(Default)]
@@ -404,6 +405,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::AnyTls if proxy.udp => Some(UdpSessionMode::AnyTls(target.to_owned())),
         ProxyKind::Hysteria2 if proxy.udp => Some(UdpSessionMode::Hysteria2(target.to_owned())),
         ProxyKind::Tuic if proxy.udp => Some(UdpSessionMode::Tuic(target.to_owned())),
+        ProxyKind::WireGuard if proxy.udp => Some(UdpSessionMode::WireGuard(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -414,6 +416,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::AnyTls
         | ProxyKind::Hysteria2
         | ProxyKind::Tuic
+        | ProxyKind::WireGuard
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }
@@ -549,6 +552,12 @@ pub(super) async fn run_udp_session(
         }
         UdpSessionMode::Tuic(proxy) => {
             Box::pin(run_tuic_udp_session(
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
+            ))
+            .await;
+        }
+        UdpSessionMode::WireGuard(proxy) => {
+            Box::pin(run_wireguard_udp_session(
                 reply, source, first, requests, config, state, proxy, decision, shutdown,
             ))
             .await;
@@ -914,6 +923,108 @@ pub(super) async fn run_tuic_udp_session(
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
+                    continue;
+                };
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_wireguard_udp_session(
+    reply: UdpReplySink,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name).cloned() else {
+        return;
+    };
+    if proxy.wireguard.is_none() {
+        return;
+    }
+    let setup = async {
+        let client = super::tcp::wireguard_client_for_proxy(&proxy, &config, &state).await?;
+        let association = rewrite_outbound::associate_wireguard_udp(&client)
+            .await
+            .map_err(|error| format!("WireGuard UDP association failed: {error}"))?;
+        Ok::<_, String>((client, association))
+    };
+    let (client, mut association) = match await_udp_setup(&shutdown, setup).await {
+        Ok(ready) => ready,
+        Err(error) => {
+            state.log("error", format!("WireGuard UDP setup failed: {error}"));
+            return;
+        }
+    };
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut generation = state.subscribe_network_generation();
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            let destination =
+                match super::tcp::resolve_wireguard_destination(&client, &destination, &config)
+                    .await
+                {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!("WireGuard UDP destination failed: {error}"),
+                        );
+                        break;
+                    }
+                };
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tracker.cancelled() => break,
+                _ = generation.changed() => break,
+                () = &mut idle => break,
+                result = association.send(&destination, &request.payload) => {
+                    if result.is_err() {
+                        break;
+                    }
+                    uploaded = uploaded.saturating_add(request.payload.len() as u64);
+                    idle.as_mut()
+                        .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+                }
+            }
+            continue;
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            _ = generation.changed() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 current = Some(request);

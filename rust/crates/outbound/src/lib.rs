@@ -10,6 +10,7 @@ mod trojan;
 mod tuic;
 mod vless;
 mod vmess;
+mod wireguard;
 
 pub use anytls::{
     AnyTlsClient, AnyTlsClientOptions, AnyTlsDialOut, AnyTlsProxyError, associate_anytls_udp,
@@ -26,6 +27,7 @@ pub use hysteria2::{
     Hysteria2Client, Hysteria2ProxyError, Hysteria2UdpAssociation, associate_hysteria2_udp,
 };
 pub use reality::{wrap_client_reality, wrap_client_reality_with_vision};
+pub use rewrite_protocol_wireguard::PeerResolveHook;
 pub use rewrite_transport::ClientTlsOptions as HttpProxyTls;
 pub use rewrite_transport::{BoxedStream as BoxedOutboundStream, VisionDirectControl};
 pub use rewrite_transport::{
@@ -77,4 +79,8 @@ pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
     associate_vmess_udp_on_stream, associate_vmess_udp_with_options, connect_vmess_on_stream,
     connect_vmess_with_options,
+};
+pub use wireguard::{
+    WireGuardClient, WireGuardProxyError, WireGuardUdpAssociation, associate_wireguard_udp,
+    wireguard_adapter_identity,
 };

@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 base64.workspace = true
 bytes.workspace = true
+hickory-proto.workspace = true
 fast-socks5.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
@@ -24,6 +25,7 @@ rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-protocol-tuic = { path = "../protocol-tuic" }
 rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }
+rewrite-protocol-wireguard = { path = "../protocol-wireguard" }
 rewrite-services = { path = "../services" }
 rewrite-transport = { path = "../transport" }
 thiserror.workspace = true

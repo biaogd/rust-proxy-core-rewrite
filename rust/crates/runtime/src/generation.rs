@@ -208,6 +208,7 @@ async fn apply_generation_inner(
     state.clear_ssr_clients();
     state.clear_hysteria2_clients().await;
     state.clear_tuic_clients().await;
+    state.clear_wireguard_clients().await;
     let previous_published = prepared
         .previous_published
         .clone()

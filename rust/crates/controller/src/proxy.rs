@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -294,6 +295,48 @@ pub(super) async fn group_delay(
 pub(super) struct DelayMeasurement {
     delay: u16,
     satisfied: bool,
+}
+
+async fn wireguard_health_destination(
+    client: &rewrite_outbound::WireGuardClient,
+    destination: Destination,
+    config: &Config,
+) -> Result<Destination, ()> {
+    client
+        .resolve_destination(&destination, |host| {
+            let host = host.to_owned();
+            let dns = config.dns.clone();
+            let allow_ipv4 = client.has_ipv4();
+            let allow_ipv6 = client.has_ipv6();
+            async move {
+                rewrite_dns::resolve_direct_or_system(dns.as_ref(), &host, allow_ipv4, allow_ipv6)
+                    .await
+            }
+        })
+        .await
+        .map_err(|_| ())
+}
+
+/// Peer hostname resolver matching first-connect hosts + PSN policy.
+#[must_use]
+pub fn wireguard_peer_resolve_hook(config: &Config) -> rewrite_outbound::PeerResolveHook {
+    let hosts = Arc::new(config.hosts.clone());
+    let dns = Arc::new(config.dns.clone());
+    let allow_ipv6 = config.ipv6;
+    rewrite_outbound::PeerResolveHook::new(move |host, port| {
+        let hosts = Arc::clone(&hosts);
+        let dns = Arc::clone(&dns);
+        async move {
+            rewrite_dns::resolve_proxy_server_or_system(
+                hosts.as_ref(),
+                dns.as_ref().as_ref(),
+                &host,
+                port,
+                allow_ipv6,
+            )
+            .await
+        }
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -833,6 +876,40 @@ pub(super) async fn measure_http_delay(
                     .map_err(|_| ())?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::WireGuard => {
+                    let dial_server = match &server.host {
+                        Host::Ip(address) => address.to_string(),
+                        Host::Domain(domain) => domain.clone(),
+                    };
+                    let identity = rewrite_outbound::wireguard_adapter_identity(
+                        proxy,
+                        &dial_server,
+                        &config.interface_name,
+                        config.routing_mark,
+                    );
+                    let client = if let Some(existing) =
+                        state.cached_wireguard_client(&proxy.name, &identity).await
+                    {
+                        existing
+                    } else {
+                        let constructed =
+                            rewrite_outbound::WireGuardClient::from_proxy_with_dial_server(
+                                proxy,
+                                &dial_server,
+                                &config.interface_name,
+                                config.routing_mark,
+                                Some(wireguard_peer_resolve_hook(config)),
+                            )
+                            .await
+                            .map_err(|_| ())?;
+                        state
+                            .wireguard_client(&proxy.name, identity, constructed)
+                            .await
+                    };
+                    let destination =
+                        wireguard_health_destination(&client, destination, config).await?;
+                    client.create_proxy(&destination).await.map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::ShadowsocksR => {
                     let ssr = proxy.ssr.as_ref().ok_or(())?;
                     let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
@@ -1091,6 +1168,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Hysteria2 => "Hysteria2",
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
+        rewrite_config::ProxyKind::WireGuard => "WireGuard",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1105,7 +1183,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::AnyTls
         | rewrite_config::ProxyKind::Hysteria2
         | rewrite_config::ProxyKind::Tuic
-        | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+        | rewrite_config::ProxyKind::ShadowsocksR
+        | rewrite_config::ProxyKind::WireGuard => proxy.udp,
         rewrite_config::ProxyKind::Http => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
@@ -1267,7 +1346,8 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::AnyTls
             | rewrite_config::ProxyKind::Hysteria2
             | rewrite_config::ProxyKind::Tuic
-            | rewrite_config::ProxyKind::ShadowsocksR => proxy.udp,
+            | rewrite_config::ProxyKind::ShadowsocksR
+            | rewrite_config::ProxyKind::WireGuard => proxy.udp,
             rewrite_config::ProxyKind::Http => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject

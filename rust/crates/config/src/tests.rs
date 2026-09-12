@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use md5::{Digest, Md5};
@@ -394,6 +394,94 @@ fn tuic_v5_configuration_is_supported_and_scoped() {
     ] {
         let source = format!(
             "{MINIMAL}\nproxies:\n  - name: bad\n    type: tuic\n    server: 127.0.0.1\n    port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+}
+
+#[test]
+fn wireguard_configuration_is_supported_and_scoped() {
+    const PRIVATE: &str = "ERERERERERERERERERERERERERERERERERERERERERE=";
+    const PUBLIC: &str = "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=";
+    const PSK: &str = "ERERERERERERERERERERERERERERERERERERERERERE=";
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: wg\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    pre-shared-key: {PSK}\n    mtu: 1280\n    persistent-keepalive: 25\n    reserved: [1, 2, 3]\n    allowed-ips: [10.0.0.0/24]\n"
+    );
+    let config = Config::from_yaml(&source).expect("6I-A WireGuard config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::WireGuard);
+    assert!(!proxy.udp);
+    assert!(!proxy.tls);
+    let options = proxy.wireguard.as_ref().expect("WireGuard options");
+    assert_eq!(options.private_key, [0x11; 32]);
+    assert_eq!(options.public_key, [0x22; 32]);
+    assert_eq!(options.preshared_key, Some([0x11; 32]));
+    assert_eq!(options.local_addr, Ipv4Addr::new(10, 0, 0, 2));
+    assert_eq!(options.local_prefix_len, 32);
+    assert_eq!(options.mtu, 1280);
+    assert_eq!(options.persistent_keepalive, Some(25));
+    assert_eq!(options.reserved, [1, 2, 3]);
+    assert_eq!(options.allowed_ips, ["10.0.0.0/24"]);
+    assert!(options.local_ipv6.is_none());
+    assert!(!options.remote_dns_resolve);
+    assert!(options.dns_servers.is_empty());
+    assert_eq!(options.refresh_server_ip_interval, 0);
+
+    let cidr = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-cidr\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2/24\n"
+    ))
+    .expect("WireGuard CIDR ip");
+    let cidr_opts = cidr.proxies[0].wireguard.as_ref().expect("cidr");
+    assert_eq!(cidr_opts.local_prefix_len, 24);
+    assert_eq!(cidr_opts.mtu, 0);
+    assert!(cidr_opts.preshared_key.is_none());
+    assert_eq!(cidr_opts.reserved, [0, 0, 0]);
+
+    let dual = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-v6\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    ipv6: fd00::2/64\n    remote-dns-resolve: true\n    dns: [1.1.1.1, 8.8.8.8:53]\n"
+    ))
+    .expect("WireGuard ipv6 and remote DNS");
+    let dual_opts = dual.proxies[0].wireguard.as_ref().expect("dual");
+    assert_eq!(
+        dual_opts.local_ipv6,
+        Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 64))
+    );
+    assert!(dual_opts.remote_dns_resolve);
+    assert_eq!(dual_opts.dns_servers, ["1.1.1.1", "8.8.8.8:53"]);
+
+    let udp = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-udp\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    udp: true\n"
+    ))
+    .expect("WireGuard udp flag");
+    assert!(udp.proxies[0].udp);
+
+    let refresh = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: wg-refresh\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    refresh-server-ip-interval: 60\n"
+    ))
+    .expect("WireGuard refresh-server-ip-interval");
+    assert_eq!(
+        refresh.proxies[0]
+            .wireguard
+            .as_ref()
+            .expect("refresh")
+            .refresh_server_ip_interval,
+        60
+    );
+
+    for unsupported in [
+        "amnezia-wg-option:\n      jc: 4",
+        "peers:\n      - server: 1.1.1.1\n        port: 1\n        public-key: {PUBLIC}\n        allowed-ips: [0.0.0.0/0]",
+        "ip-stack:\n      mode: gvisor",
+        "dialer-proxy: other",
+        "workers: 2",
+        "sni: example.com",
+        "private-key: not-a-key",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: wireguard\n    server: 127.0.0.1\n    port: 51820\n    private-key: {PRIVATE}\n    public-key: {PUBLIC}\n    ip: 10.0.0.2\n    {unsupported}\n"
         );
         assert!(
             Config::from_yaml(&source).is_err(),
@@ -1854,6 +1942,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 hysteria2: None,
                 tuic: None,
                 ssr: None,
+                wireguard: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -1939,6 +2028,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             hysteria2: None,
             tuic: None,
             ssr: None,
+            wireguard: None,
             headers: BTreeMap::new(),
         }],
     };

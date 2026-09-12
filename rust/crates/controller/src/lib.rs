@@ -9,7 +9,9 @@ mod server;
 mod tls;
 
 pub use context::{ConfigUpdate, ConfigUpdateKind};
-pub use proxy::{healthcheck_proxy_group, healthcheck_proxy_provider_config};
+pub use proxy::{
+    healthcheck_proxy_group, healthcheck_proxy_provider_config, wireguard_peer_resolve_hook,
+};
 #[cfg(unix)]
 pub use server::serve_unix;
 #[cfg(windows)]

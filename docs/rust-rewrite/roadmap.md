@@ -1301,18 +1301,13 @@ is deferred and does not inherit HY2 evidence.
 TCP and UDP, client and server, and each security/transport variant remain
 separate exit gates inside these labels.
 
-### Next-work priority — 2026-09-09
+### Next-work priority — 2026-09-11
 
-The agreed next-work order was **SSR review/CI closure → TUIC v5 outbound →
-TUN integration**. This supersedes the previous numerical development order.
-**SSR and TUIC v5 outbound are done in this checkout**; **TUN (Phase 8) is
-current**, with Linux **8A**, Darwin **8B**, and Windows **8C** implemented in
-this checkout. Native Parity waits on the privileged CI jobs.
-Existing-protocol regressions remain
-release blockers; this schedule does not declare Hysteria2, SSR or any other
-partial implementation production-ready. See [status](status.md) for
-branch-specific evidence versus implementation in this checkout, and
-[compatibility matrix](compatibility-matrix.md) for claims.
+The agreed next-work order after TUN landing is **SSH outbound 6J**,
+with **AmneziaWG deferred**. WireGuard outbound **6I-A/B/C** is implemented
+in this checkout. Existing-protocol regressions remain release blockers.
+See [status](status.md) and [compatibility matrix](compatibility-matrix.md)
+for claims.
 
 1. **SSR closure (7A–7D, OUT-06):** done in this checkout (merged PR #13 path).
    Keep pre-handshake half-close rejection, missing multi-user evidence and
@@ -1320,18 +1315,21 @@ branch-specific evidence versus implementation in this checkout, and
 2. **TUIC v5 (6H, OUT-12):** done in this checkout for outbound 6H-A/B/C.
    v4, 0-RTT and server direction remain deferred; unsupported options must
    fail explicitly rather than downgrade.
-3. **TUN (Phase 8) — current:** deliver **8A → 8B → 8C**, then prioritize
-   **8F** before mobile/more arches (**8D/8E** later). 8A Linux parse/runtime,
-   8B Darwin arm64 utun/route/DNS restore, and 8C Windows x86_64 Wintun/route/
-   adapter DNS are implemented in this checkout; native Parity waits on the
-   privileged CI jobs. TUN is packet
-   ingress/platform integration, not another remote proxy protocol. Other
-   remote-protocol inbounds remain deferred; preserve the existing Shadowsocks
-   inbound scope without expanding it.
+3. **TUN (Phase 8):** **8A → 8B → 8C** plus **8F** are implemented in this
+   checkout; native Parity waits on the privileged CI jobs. TUN is packet
+   ingress/platform integration and stays independent of WireGuard outbound.
+   Other remote-protocol inbounds remain deferred; preserve the existing
+   Shadowsocks inbound scope without expanding it.
+4. **WireGuard outbound (6I, OUT-14):** **6I-A/B/C** (single-peer IPv4/IPv6
+   TCP+UDP userspace outbound, tunnel DNS, rehandshake, keepalive,
+   `refresh-server-ip-interval`, TUN loop-avoidance) are implemented in this
+   checkout. Mixed/SOCKS using WireGuard does not require administrator
+   privileges. There is no WireGuard inbound. Cryptography is
+   `defguard_boringtun`. AmneziaWG stays later. Next slice is **SSH (6J)**.
 
-WireGuard/AmneziaWG, SSH and the remaining Phase 7 families are backlog, not
-prerequisites for TUN. Hysteria2 Brutal precision/Quinn modifications remain
-deferred; the declared BBR profile still needs its own release evidence.
+SSH and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
+precision/Quinn modifications remain deferred; the declared BBR profile still
+needs its own release evidence.
 
 ### Phase 6H — TUIC v5 outbound acceptance plan
 
@@ -1354,6 +1352,39 @@ deferred; the declared BBR profile still needs its own release evidence.
 The matrix rows are **TUIC outbound** and the applicable configuration,
 groups/providers and native-platform rows. The TUIC inbound row stays
 unimplemented. These are planned acceptance gates, not new support claims.
+
+### Phase 6I — WireGuard outbound acceptance plan
+
+WireGuard is an encrypted UDP tunnel for inner IP packets, not another streaming
+proxy protocol. Product 6I is **outbound only**: YAML `type: wireguard` through
+mixed/SOCKS and rules, using a userspace Noise session plus a userspace TCP/IP
+stack. TUN inbound (Phase 8) stays independent; mixed/SOCKS → WireGuard must
+not require administrator privileges. Cryptography is owned by
+`defguard_boringtun`; this rewrite does not implement Noise_IK. AmneziaWG is
+rejected at parse until a later slice.
+
+- **6I-A (implemented in this checkout):** YAML → mixed HTTP/SOCKS TCP →
+  rules/groups → userspace WireGuard → IPv4 TCP target. Single peer, Clash
+  top-level `server`/`port`/`private-key`/`public-key`/`ip`. Default MTU 1408.
+  Empty `peers` implies `allowed_ip=0.0.0.0/0` like Go. Evidence:
+  `compat/scripts/phase6i_wireguard_tcp.py` plus `protocol-wireguard`
+  `tcp_relay`.
+- **6I-B (implemented in this checkout):** UDP forwarding, IPv4/IPv6
+  destinations, MTU 1408, concurrent SOCKS UDP sessions, and tunnel DNS
+  (`remote-dns-resolve` + `dns`). Evidence: `compat/scripts/phase6i_wireguard_udp.py`
+  plus `protocol-wireguard` `udp_relay`. AmneziaWG, `peers`, `ip-stack` and
+  inbound remain rejected.
+- **6I-C (implemented in this checkout):** rehandshake after peer restart,
+  `persistent-keepalive`, `refresh-server-ip-interval`, TUN loop-avoidance
+  (`protect_outbound_destination` for the resolved peer IP), mixed UDP
+  teardown on network-generation change, and a Go/Rust lifecycle differential.
+  Evidence: `compat/scripts/phase6i_wireguard_lifecycle.py` plus
+  `protocol-wireguard` `lifecycle`. Native Parity is not claimed. Three-platform
+  CI is the existing wireguard shard running this script, not a Parity gate.
+
+The matrix row is **WireGuard / AmneziaWG** plus applicable configuration,
+groups/providers and native-platform rows. The WireGuard inbound row stays
+unimplemented. 6I-A/B/C are implementation-in-this-checkout claims, not Parity.
 
 ### Phase 6A1 accepted scope
 
