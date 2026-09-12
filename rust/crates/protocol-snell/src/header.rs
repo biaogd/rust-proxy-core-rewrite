@@ -11,8 +11,23 @@ pub(crate) const COMMAND_ERROR: u8 = 2;
 pub(crate) const COMMAND_UDP_FORWARD: u8 = 1;
 
 pub(crate) enum ClientCommand {
-    Connect { host: String, port: u16 },
+    Connect {
+        host: String,
+        port: u16,
+        reuse: bool,
+    },
     Udp,
+}
+
+pub(crate) fn encode_command_error(code: u8, message: &str) -> Vec<u8> {
+    let bytes = message.as_bytes();
+    let take = bytes.len().min(255);
+    let mut out = Vec::with_capacity(3 + take);
+    out.push(COMMAND_ERROR);
+    out.push(code);
+    out.push(u8::try_from(take).unwrap_or(255));
+    out.extend_from_slice(bytes.get(..take).unwrap_or(&[]));
+    out
 }
 
 pub(crate) fn encode_udp_header() -> Vec<u8> {
@@ -29,12 +44,13 @@ pub(crate) fn destination_host(destination: &Destination) -> String {
 pub(crate) fn encode_connect_header(
     destination: &Destination,
     version: u8,
+    reuse: bool,
 ) -> Result<Vec<u8>, SnellProtocolError> {
     let host = destination_host(destination);
     let host_len = u8::try_from(host.len()).map_err(|_| {
         SnellProtocolError::Protocol("Snell destination host exceeds 255 bytes".to_owned())
     })?;
-    let command = if version == 2 {
+    let command = if version == 2 || reuse {
         COMMAND_CONNECT_V2
     } else {
         COMMAND_CONNECT
@@ -109,10 +125,13 @@ pub(crate) fn parse_client_command(
         )));
     }
     match buffer[1] {
-        COMMAND_CONNECT | COMMAND_CONNECT_V2 => {
-            Ok(parse_connect_header(buffer)?
-                .map(|(host, port)| ClientCommand::Connect { host, port }))
-        }
+        command @ (COMMAND_CONNECT | COMMAND_CONNECT_V2) => Ok(parse_connect_header(buffer)?.map(
+            |(host, port)| ClientCommand::Connect {
+                host,
+                port,
+                reuse: command == COMMAND_CONNECT_V2,
+            },
+        )),
         COMMAND_UDP => {
             let client_id_len = usize::from(buffer[2]);
             if buffer.len() < 3 + client_id_len {

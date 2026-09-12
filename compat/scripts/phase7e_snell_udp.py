@@ -234,11 +234,11 @@ def main() -> int:
                 f"    psk: {PSK}\n"
                 "    udp: true\n",
             )
-            observations["rust-reuse-rejected"] = not config_validation(
+            observations["rust-reuse-accepted"] = config_validation(
                 binaries["rust"],
                 root / "rust-validate-reuse",
                 "proxies:\n"
-                "  - name: deferred\n"
+                "  - name: ok\n"
                 "    type: snell\n"
                 "    server: 127.0.0.1\n"
                 "    port: 1\n"
@@ -267,7 +267,7 @@ def main() -> int:
     rust_only = [
         "rust-v3-udp-accepted",
         "rust-v1-udp-rejected",
-        "rust-reuse-rejected",
+        "rust-reuse-accepted",
     ]
     if (
         go != rust

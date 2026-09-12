@@ -6,7 +6,7 @@ use crate::header::{encode_connect_header, encode_udp_header};
 use crate::packet::{encode_udp_request, parse_udp_response};
 use crate::{DEFAULT_VERSION, SnellProtocolError};
 
-/// Options for a single Snell TCP dial. No session pool in 7E-A.
+/// Options for a single Snell TCP dial.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientOptions {
     /// Pre-shared key (`psk`).
@@ -38,8 +38,52 @@ where
         options.version
     };
     let kind = CipherKind::for_version(version)?;
-    let header = encode_connect_header(destination, version)?;
+    let header = encode_connect_header(destination, version, version == 2)?;
     SnellStream::client(stream, &options.psk, kind, &header).await
+}
+
+/// Opens AEAD (client salt) without a connect header so a pool can write later.
+///
+/// # Errors
+///
+/// Returns when the version is unsupported or the salt cannot be written.
+pub async fn open_tcp<S>(
+    stream: S,
+    options: &ClientOptions,
+) -> Result<SnellStream<S>, SnellProtocolError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let version = if options.version == 0 {
+        DEFAULT_VERSION
+    } else {
+        options.version
+    };
+    let kind = CipherKind::for_version(version)?;
+    SnellStream::open_client(stream, &options.psk, kind).await
+}
+
+/// Writes a connect header on an already-opened client stream.
+///
+/// # Errors
+///
+/// Returns when the destination host is too long or the record cannot be written.
+pub async fn write_connect<S>(
+    stream: &mut SnellStream<S>,
+    destination: &Destination,
+    version: u8,
+) -> Result<(), SnellProtocolError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let version = if version == 0 {
+        DEFAULT_VERSION
+    } else {
+        version
+    };
+    stream
+        .write_plain(&encode_connect_header(destination, version, version == 2)?)
+        .await
 }
 
 /// UDP association over one Snell TCP/AEAD session (v3+).

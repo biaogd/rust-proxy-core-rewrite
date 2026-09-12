@@ -1,18 +1,22 @@
-//! Snell outbound client (Phase 7E-A/B/C): versions 1–3 TCP, v3 UDP, Argon2id
-//! KDF, Shadowsocks-style AEAD framing, and simple-obfs HTTP/TLS on the test
-//! authority. This is not a Snell inbound.
+//! Snell outbound client (Phase 7E-A/B/C/D): versions 1–3 TCP, v3 UDP, Argon2id
+//! KDF, Shadowsocks-style AEAD framing, simple-obfs HTTP/TLS on the test
+//! authority, and v2 `ConnectV2` session reuse. This is not a Snell inbound.
 //!
-//! v4/v5, `reuse` pooling, and remaining `obfs-opts` stay out of this slice.
+//! v4/v5 and remaining `obfs-opts` stay out of this slice.
 
 mod aead;
 mod authority;
 mod client;
 mod header;
 mod packet;
+mod pool;
 
 pub use aead::SnellStream;
 pub use authority::{Authority, AuthorityObfs, AuthorityOptions, spawn_authority};
-pub use client::{ClientOptions, SnellUdpAssociation, associate_udp, connect_tcp};
+pub use client::{
+    ClientOptions, SnellUdpAssociation, associate_udp, connect_tcp, open_tcp, write_connect,
+};
+pub use pool::{PooledSnellStream, SnellSessionPool};
 
 use thiserror::Error;
 

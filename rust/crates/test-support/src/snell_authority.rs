@@ -1,8 +1,9 @@
-//! Snell TCP/UDP relay authority for 7E-A/B/C Go/Rust differentials.
+//! Snell TCP/UDP relay authority for 7E-A/B/C/D Go/Rust differentials.
 //!
 //! This is not a Clash inbound. It decrypts versions 1–3, optionally wraps
-//! simple-obfs HTTP/TLS, writes `CommandTunnel`, and splices Connect to TCP or
-//! `CommandUDP` to a per-packet UDP echo path.
+//! simple-obfs HTTP/TLS, writes `CommandTunnel`, splices Connect to TCP or
+//! `CommandUDP` to a per-packet UDP echo path, and keeps `ConnectV2` sessions
+//! open after a zero-chunk half-close.
 
 use std::error::Error;
 use std::io::{self, Write};

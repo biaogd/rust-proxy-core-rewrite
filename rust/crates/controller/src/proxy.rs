@@ -932,6 +932,8 @@ pub(super) async fn measure_http_delay(
                 }
                 rewrite_config::ProxyKind::Snell => {
                     let snell = proxy.snell.as_ref().ok_or(())?;
+                    let pool = (snell.version == 2)
+                        .then(|| state.snell_pool(&proxy.name, format!("{proxy:?}")));
                     rewrite_outbound::connect_snell_with_options(
                         &server,
                         &destination,
@@ -940,6 +942,7 @@ pub(super) async fn measure_http_delay(
                         snell.version,
                         snell.obfs.as_ref(),
                         controller_socket_options(config),
+                        pool,
                     )
                     .await
                     .map_err(|_| ())?

@@ -1,12 +1,15 @@
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use rewrite_model::{Destination, Host};
 use rewrite_protocol_snell::{
-    AuthorityObfs, AuthorityOptions, ClientOptions, DEFAULT_VERSION, connect_tcp, spawn_authority,
+    AuthorityObfs, AuthorityOptions, ClientOptions, DEFAULT_VERSION, PooledSnellStream,
+    SnellSessionPool, connect_tcp, open_tcp, spawn_authority, write_connect,
 };
 use rewrite_transport::{HttpObfsClient, TlsObfsClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn v1_password_echo_and_large_payload() {
@@ -106,6 +109,87 @@ async fn tls_obfs_echo() {
     let mut got = vec![0_u8; 9];
     stream.read_exact(&mut got).await.expect("read");
     assert_eq!(got, b"snell-tls");
+}
+
+#[tokio::test]
+async fn v2_reuse_two_sequential_echoes_share_accept() {
+    let echo = spawn_echo().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"password".to_vec(),
+        version: 2,
+        obfs: None,
+    })
+    .await
+    .expect("authority");
+    let pool = Arc::new(SnellSessionPool::new());
+    for payload in [b"snell-one".as_slice(), b"snell-two".as_slice()] {
+        let mut stream = pooled_connect(
+            Arc::clone(&pool),
+            authority.local_addr,
+            &echo.destination,
+            b"password",
+            2,
+        )
+        .await;
+        stream.write_all(payload).await.expect("write");
+        stream.shutdown().await.expect("half-close");
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).await.expect("read");
+        assert_eq!(got, payload);
+        drop(stream);
+    }
+    assert_eq!(authority.accepted.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn v2_reuse_dest_refused_then_success_on_same_session() {
+    let echo = spawn_echo().await;
+    let unused = unused_tcp_port().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"password".to_vec(),
+        version: 2,
+        obfs: None,
+    })
+    .await
+    .expect("authority");
+    let mut stream = open_tcp(
+        TcpStream::connect(authority.local_addr)
+            .await
+            .expect("dial"),
+        &ClientOptions {
+            psk: b"password".to_vec(),
+            version: 2,
+        },
+    )
+    .await
+    .expect("open");
+    write_connect(
+        &mut stream,
+        &Destination {
+            host: Host::Ip("127.0.0.1".parse().expect("ip")),
+            port: unused,
+        },
+        2,
+    )
+    .await
+    .expect("refused header");
+    let mut buf = [0_u8; 1];
+    let refused = tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await;
+    assert!(
+        matches!(refused, Ok(Err(_)) | Err(_)),
+        "refused dest should report CommandError"
+    );
+    stream.reset_for_reuse();
+    write_connect(&mut stream, &echo.destination, 2)
+        .await
+        .expect("echo header");
+    stream.write_all(b"after-error").await.expect("write");
+    let mut got = vec![0_u8; 11];
+    stream.read_exact(&mut got).await.expect("read");
+    assert_eq!(got, b"after-error");
+    assert_eq!(authority.accepted.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -243,6 +327,30 @@ async fn spawn_echo() -> EchoServer {
             port: local.port(),
         },
     }
+}
+
+async fn pooled_connect(
+    pool: Arc<SnellSessionPool<TcpStream>>,
+    server: std::net::SocketAddr,
+    destination: &Destination,
+    psk: &[u8],
+    version: u8,
+) -> PooledSnellStream<TcpStream> {
+    let options = ClientOptions {
+        psk: psk.to_vec(),
+        version,
+    };
+    let mut stream = if let Some(existing) = pool.take() {
+        existing
+    } else {
+        open_tcp(TcpStream::connect(server).await.expect("dial"), &options)
+            .await
+            .expect("open")
+    };
+    write_connect(&mut stream, destination, version)
+        .await
+        .expect("header");
+    PooledSnellStream::new(stream, pool)
 }
 
 async fn unused_tcp_port() -> u16 {

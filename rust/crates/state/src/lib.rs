@@ -27,6 +27,27 @@ mod ssr_identity_tests {
             &state.ssr_client("node", "config-b".into())
         ));
     }
+
+    #[test]
+    fn snell_pools_share_only_unchanged_adapter_identity_and_clear_on_reload() {
+        let state = RuntimeState::default();
+        let first = state.snell_pool("node", "config-a".into());
+        assert!(Arc::ptr_eq(
+            &first,
+            &state.snell_pool("node", "config-a".into())
+        ));
+        assert!(!Arc::ptr_eq(
+            &first,
+            &state.snell_pool("other", "config-a".into())
+        ));
+        let replaced = state.snell_pool("node", "config-b".into());
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        state.clear_snell_pools();
+        assert!(!Arc::ptr_eq(
+            &replaced,
+            &state.snell_pool("node", "config-b".into())
+        ));
+    }
 }
 #[cfg(test)]
 mod tests;
@@ -86,6 +107,7 @@ pub struct RuntimeState {
         AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::WireGuardClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
     ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
+    snell_pools: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::BoxedSnellSessionPool>)>>,
     network_generation: watch::Sender<u64>,
 }
 
@@ -125,6 +147,7 @@ impl Default for RuntimeState {
             wireguard_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
             ssr_clients: Mutex::new(BTreeMap::new()),
+            snell_pools: Mutex::new(BTreeMap::new()),
             network_generation,
         }
     }
@@ -159,6 +182,39 @@ impl RuntimeState {
     /// Drops adapter identities when a new configuration generation is installed.
     pub fn clear_ssr_clients(&self) {
         self.ssr_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Reuses the Snell v2 `ConnectV2` pool until the configured adapter changes.
+    pub fn snell_pool(
+        &self,
+        name: &str,
+        identity: String,
+    ) -> Arc<rewrite_outbound::BoxedSnellSessionPool> {
+        let mut pools = self
+            .snell_pools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = pools.entry(name.to_owned()).or_insert_with(|| {
+            (
+                identity.clone(),
+                Arc::new(rewrite_outbound::BoxedSnellSessionPool::default()),
+            )
+        });
+        if entry.0 != identity {
+            *entry = (
+                identity,
+                Arc::new(rewrite_outbound::BoxedSnellSessionPool::default()),
+            );
+        }
+        Arc::clone(&entry.1)
+    }
+
+    /// Drops Snell session pools when a new configuration generation is installed.
+    pub fn clear_snell_pools(&self) {
+        self.snell_pools
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();

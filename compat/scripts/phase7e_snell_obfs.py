@@ -190,11 +190,11 @@ def main() -> int:
                 "    obfs-opts:\n"
                 "      mode: shadow-tls\n",
             )
-            observations["rust-reuse-rejected"] = not config_validation(
+            observations["rust-reuse-accepted"] = config_validation(
                 binaries["rust"],
                 root / "rust-validate-reuse",
                 "proxies:\n"
-                "  - name: deferred\n"
+                "  - name: ok\n"
                 "    type: snell\n"
                 "    server: 127.0.0.1\n"
                 "    port: 1\n"
@@ -222,7 +222,7 @@ def main() -> int:
         "rust-obfs-http-accepted",
         "rust-obfs-tls-accepted",
         "rust-shadowtls-rejected",
-        "rust-reuse-rejected",
+        "rust-reuse-accepted",
     ]
     if (
         go != rust

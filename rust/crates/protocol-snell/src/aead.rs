@@ -209,31 +209,67 @@ pub struct SnellStream<S> {
     pending_off: usize,
     read_phase: ReadPhase,
     reply_pending: bool,
+    reuse: ReuseFlags,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReuseFlags {
+    peer_closed: bool,
+    hold_inner_shutdown: bool,
+    zero_chunk_written: bool,
+}
+
+impl<S> SnellStream<S> {
+    pub(crate) fn set_hold_inner_shutdown(&mut self, hold: bool) {
+        self.reuse.hold_inner_shutdown = hold;
+    }
+
+    pub(crate) fn zero_chunk_written(&self) -> bool {
+        self.reuse.zero_chunk_written
+    }
+
+    pub(crate) fn can_return_to_pool(&self) -> bool {
+        self.reuse.peer_closed
+            && self.reuse.zero_chunk_written
+            && self.leftover_off >= self.leftover.len()
+            && self.pending_off >= self.pending.len()
+    }
+
+    /// Prepares the client stream to consume the next `CommandTunnel` reply.
+    pub fn reset_for_reuse(&mut self) {
+        self.reply_pending = true;
+        self.clear_read_after_request();
+    }
+
+    pub(crate) fn clear_read_after_request(&mut self) {
+        self.leftover.clear();
+        self.leftover_off = 0;
+        self.read_phase = ReadPhase::Idle;
+        self.reuse.peer_closed = false;
+        self.reuse.zero_chunk_written = false;
+    }
 }
 
 impl<S> SnellStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pub(crate) async fn client(
+    pub(crate) async fn open_client(
         mut inner: S,
         psk: &[u8],
         kind: CipherKind,
-        header: &[u8],
     ) -> Result<Self, SnellProtocolError> {
         let mut write_salt = [0_u8; SALT_SIZE];
         rand::rng().fill(&mut write_salt);
         let write_aead = derive_key(psk, &write_salt, kind)?;
         inner.write_all(&write_salt).await?;
-        let mut write_nonce = [0_u8; NONCE_SIZE];
-        write_record(&mut inner, &write_aead, &mut write_nonce, header).await?;
         Ok(Self {
             inner,
             psk: psk.to_vec(),
             kind,
             write_aead: Some(write_aead),
             read_aead: None,
-            write_nonce,
+            write_nonce: [0_u8; NONCE_SIZE],
             read_nonce: [0_u8; NONCE_SIZE],
             leftover: Vec::new(),
             leftover_off: 0,
@@ -244,7 +280,19 @@ where
                 filled: 0,
             },
             reply_pending: true,
+            reuse: ReuseFlags::default(),
         })
+    }
+
+    pub(crate) async fn client(
+        inner: S,
+        psk: &[u8],
+        kind: CipherKind,
+        header: &[u8],
+    ) -> Result<Self, SnellProtocolError> {
+        let mut stream = Self::open_client(inner, psk, kind).await?;
+        stream.write_plain(header).await?;
+        Ok(stream)
     }
 
     pub(crate) async fn server(
@@ -269,6 +317,7 @@ where
             pending_off: 0,
             read_phase: ReadPhase::Idle,
             reply_pending: false,
+            reuse: ReuseFlags::default(),
         })
     }
 
@@ -366,20 +415,73 @@ where
             .get(self.leftover_off)
             .ok_or_else(|| std::io::Error::other("Snell leftover reply index is out of range"))?;
         self.leftover_off += 1;
-        if self.leftover_off == self.leftover.len() {
-            self.leftover.clear();
-            self.leftover_off = 0;
-        }
-        self.reply_pending = false;
         if command == COMMAND_TUNNEL {
+            self.finish_leftover_if_consumed();
+            self.reply_pending = false;
             return Ok(());
         }
         if command != COMMAND_ERROR {
+            self.finish_leftover_if_consumed();
+            self.reply_pending = false;
             return Err(std::io::Error::other(format!(
                 "Snell command not supported: {command}"
             )));
         }
+        let rest = self.leftover.get(self.leftover_off..).unwrap_or(&[]);
+        if rest.len() >= 2 {
+            let code = rest[0];
+            let length = usize::from(rest[1]);
+            if rest.len() >= 2 + length {
+                let message =
+                    String::from_utf8_lossy(rest.get(2..2 + length).unwrap_or(&[])).into_owned();
+                self.leftover_off += 2 + length;
+                self.finish_leftover_if_consumed();
+                self.reply_pending = false;
+                return Err(std::io::Error::other(format!(
+                    "server reported code: {code}, message: {message}"
+                )));
+            }
+        }
+        self.finish_leftover_if_consumed();
+        self.reply_pending = false;
         Err(std::io::Error::other("Snell server reported an error"))
+    }
+
+    fn finish_leftover_if_consumed(&mut self) {
+        if self.leftover_off >= self.leftover.len() {
+            self.leftover.clear();
+            self.leftover_off = 0;
+        }
+    }
+
+    fn encrypt_zero_chunk(&mut self) -> Result<Vec<u8>, std::io::Error> {
+        if self.write_aead.is_none() {
+            let mut write_salt = [0_u8; SALT_SIZE];
+            rand::rng().fill(&mut write_salt);
+            let write_aead = derive_key(&self.psk, &write_salt, self.kind)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let mut pending = write_salt.to_vec();
+            self.write_aead = Some(write_aead);
+            let aead = self
+                .write_aead
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("Snell writer is not initialized"))?;
+            let size_record = aead
+                .seal(&self.write_nonce, &[0_u8; 2])
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            increment_nonce(&mut self.write_nonce);
+            pending.extend_from_slice(&size_record);
+            return Ok(pending);
+        }
+        let aead = self
+            .write_aead
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Snell writer is not initialized"))?;
+        let size_record = aead
+            .seal(&self.write_nonce, &[0_u8; 2])
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        increment_nonce(&mut self.write_nonce);
+        Ok(size_record)
     }
 
     fn encrypt_payload(&mut self, buf: &[u8]) -> Result<Vec<u8>, std::io::Error> {
@@ -477,6 +579,9 @@ where
         loop {
             {
                 let this = self.as_mut().get_mut();
+                if this.reuse.peer_closed {
+                    return Poll::Ready(Ok(()));
+                }
                 this.consume_reply()?;
                 if this.copy_leftover(buf) {
                     return Poll::Ready(Ok(()));
@@ -540,10 +645,9 @@ where
                         let size = ((usize::from(size_plain[0]) << 8) | usize::from(size_plain[1]))
                             & PAYLOAD_SIZE_MASK;
                         if size == 0 {
-                            return Poll::Ready(Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Snell zero chunk",
-                            )));
+                            this.reuse.peer_closed = true;
+                            this.read_phase = ReadPhase::Idle;
+                            return Poll::Ready(Ok(()));
                         }
                         this.read_phase = ReadPhase::Payload {
                             buf: vec![0_u8; size + TAG_SIZE],
@@ -622,6 +726,23 @@ where
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         if self.as_mut().flush_pending(cx).is_pending() {
             return Poll::Pending;
+        }
+        if self.reuse.hold_inner_shutdown {
+            if !self.reuse.zero_chunk_written {
+                let pending = self
+                    .as_mut()
+                    .get_mut()
+                    .encrypt_zero_chunk()
+                    .map_err(std::io::Error::other)?;
+                let this = self.as_mut().get_mut();
+                this.pending = pending;
+                this.pending_off = 0;
+                this.reuse.zero_chunk_written = true;
+                if Pin::new(this).flush_pending(cx).is_pending() {
+                    return Poll::Pending;
+                }
+            }
+            return Pin::new(&mut self.inner).poll_flush(cx);
         }
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }

@@ -995,13 +995,11 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         Ok(None) => false,
         Ok(Some(value)) => match value.to_ascii_lowercase().as_str() {
             "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         },
         Err(()) => return Err(ConfigError::UnsupportedProxy(name)),
     };
-    if reuse {
-        return Err(ConfigError::UnsupportedProxy(name));
-    }
     let psk = hysteria2_extra_string(&mut proxy.extra, "psk")
         .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
         .filter(|value| !value.is_empty())
@@ -1061,7 +1059,12 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         tuic: None,
         ssr: None,
         wireguard: None,
-        snell: Some(SnellProxyConfig { psk, version, obfs }),
+        snell: Some(SnellProxyConfig {
+            psk,
+            version,
+            obfs,
+            reuse,
+        }),
         headers: BTreeMap::new(),
     })
 }

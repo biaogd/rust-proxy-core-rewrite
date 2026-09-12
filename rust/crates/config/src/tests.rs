@@ -415,6 +415,7 @@ fn snell_configuration_is_supported_and_scoped() {
     assert_eq!(snell.psk, "password");
     assert_eq!(snell.version, 1);
     assert!(snell.obfs.is_none());
+    assert!(!snell.reuse);
 
     let v3 = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: snell-v3\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n"
@@ -445,9 +446,22 @@ fn snell_configuration_is_supported_and_scoped() {
         })
     );
 
+    let reused = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: snell-reuse\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 2\n    reuse: true\n"
+    ))
+    .expect("Snell reuse");
+    let reused = reused.proxies[0].snell.as_ref().expect("reuse");
+    assert_eq!(reused.version, 2);
+    assert!(reused.reuse);
+
+    let v3_reuse = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: snell-v3-reuse\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n    reuse: true\n"
+    ))
+    .expect("Snell v3 reuse flag");
+    assert!(v3_reuse.proxies[0].snell.as_ref().expect("v3 reuse").reuse);
+
     for unsupported in [
         "psk: password\n    udp: true",
-        "psk: password\n    reuse: true",
         "psk: password\n    version: 4",
         "psk: password\n    version: 5",
         "psk: password\n    obfs-opts:\n      mode: shadow-tls",
