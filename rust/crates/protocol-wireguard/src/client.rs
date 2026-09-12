@@ -501,16 +501,12 @@ async fn run_reactor(inner: Arc<ClientInner>) {
         tokio::select! {
             () = inner.shutdown.cancelled() => break,
             result = udp.recv_from(&mut buf) => {
-                match result {
-                    Ok((n, from)) => handle_incoming(&inner, Some(from), &buf[..n]).await,
-                    Err(_) => {
-                        if inner.shutdown.is_cancelled() {
-                            break;
-                        }
-                        if inner.udp_epoch.load(Ordering::Acquire) == udp_epoch {
-                            tokio::time::sleep(Duration::from_millis(20)).await;
-                        }
-                    }
+                if let Ok((n, from)) = result {
+                    handle_incoming(&inner, Some(from), &buf[..n]).await;
+                } else if inner.shutdown.is_cancelled() {
+                    break;
+                } else if inner.udp_epoch.load(Ordering::Acquire) == udp_epoch {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }
             () = udp_changed => {}

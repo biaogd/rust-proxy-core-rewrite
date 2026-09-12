@@ -25,10 +25,10 @@ const TCP_BUFFER: usize = 64 * 1024;
 const UDP_PACKET_SLOTS: usize = 32;
 const UDP_PAYLOAD: usize = 64 * 1024;
 const EPHEMERAL_START: u16 = 49_152;
-/// Bound for dropped sockets stuck in FinWait2 / Syn* / Established.
+/// Bound for dropped sockets stuck in `FinWait2` / Syn* / Established.
 /// Held half-closes are not on this list and are not aborted.
 const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-/// FinWait1 still has an unacked FIN (`send_queue` does not include it).
+/// `FinWait1` still has an unacked FIN (`send_queue` does not include it).
 /// Aborting at [`RELEASE_TIMEOUT`] turns a graceful close into RST.
 const FIN_WAIT1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
