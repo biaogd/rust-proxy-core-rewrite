@@ -173,6 +173,7 @@ pub enum ProxyKind {
     Rematch,
     Tuic,
     WireGuard,
+    Ssh,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +231,7 @@ pub struct ProxyConfig {
     pub tuic: Option<TuicProxyConfig>,
     pub ssr: Option<SsrProxyConfig>,
     pub wireguard: Option<WireGuardProxyConfig>,
+    pub ssh: Option<SshProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -280,6 +282,23 @@ pub struct WireGuardProxyConfig {
     pub dns_servers: Vec<String>,
     /// Seconds; `0` means resolve the peer hostname only at first connect (Go).
     pub refresh_server_ip_interval: u64,
+}
+
+/// Clash `type: ssh` options accepted in 6J-A/B (TCP outbound, session reuse).
+///
+/// UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected. Host-key
+/// algorithms are applied at handshake; transport keepalive comes from the
+/// global config, not these fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshProxyConfig {
+    pub username: String,
+    pub password: Option<String>,
+    /// Inline PEM or a home-resolved filesystem path.
+    pub private_key: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    /// `authorized_keys` lines for the SSH server host key.
+    pub host_keys: Vec<String>,
+    pub host_key_algorithms: Vec<String>,
 }
 
 /// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).

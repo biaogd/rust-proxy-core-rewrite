@@ -1,0 +1,21 @@
+[package]
+name = "rewrite-protocol-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rand.workspace = true
+rewrite-io = { path = "../io" }
+rewrite-model = { path = "../model" }
+rewrite-platform = { path = "../platform" }
+russh.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

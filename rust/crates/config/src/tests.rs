@@ -491,6 +491,62 @@ fn wireguard_configuration_is_supported_and_scoped() {
 }
 
 #[test]
+fn ssh_configuration_is_supported_and_scoped() {
+    let source = format!(
+        "{MINIMAL}\nproxies:\n  - name: ssh-pw\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    password: secret\n    host-key:\n      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIkBPFDYJnKqQmG9M8V7XJk7/99afMObZ6Aph1lh6mb7 comment\n    host-key-algorithms: [ssh-ed25519]\n"
+    );
+    let config = Config::from_yaml(&source).expect("6J SSH password config");
+    let proxy = &config.proxies[0];
+    assert_eq!(proxy.kind, ProxyKind::Ssh);
+    assert!(!proxy.udp);
+    assert_eq!(proxy.username.as_deref(), Some("alice"));
+    let options = proxy.ssh.as_ref().expect("SSH options");
+    assert_eq!(options.username, "alice");
+    assert_eq!(options.password.as_deref(), Some("secret"));
+    assert!(options.private_key.is_none());
+    assert_eq!(options.host_keys.len(), 1);
+    assert_eq!(options.host_key_algorithms, ["ssh-ed25519"]);
+
+    let key = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: ssh-key\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    private-key: |\n      -----BEGIN OPENSSH PRIVATE KEY-----\n      test\n      -----END OPENSSH PRIVATE KEY-----\n    private-key-passphrase: phrase\n"
+    ))
+    .expect("6J SSH private-key config");
+    let key_opts = key.proxies[0].ssh.as_ref().expect("key options");
+    assert!(
+        key_opts
+            .private_key
+            .as_deref()
+            .is_some_and(|value| value.contains("PRIVATE KEY"))
+    );
+    assert_eq!(key_opts.private_key_passphrase.as_deref(), Some("phrase"));
+
+    for unsupported in [
+        "udp: true",
+        "dialer-proxy: other",
+        "tfo: true",
+        "mptcp: true",
+        "tls: true",
+        "sni: example.com",
+    ] {
+        let source = format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    password: secret\n    {unsupported}\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "unexpectedly accepted {unsupported}"
+        );
+    }
+
+    assert!(
+        Config::from_yaml(&format!(
+            "{MINIMAL}\nproxies:\n  - name: bad\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n"
+        ))
+        .is_err(),
+        "accepted SSH without password or private-key"
+    );
+}
+
+#[test]
 fn anytls_native_tls_configuration_is_supported_and_scoped() {
     let source = format!(
         "{MINIMAL}\nproxies:\n  - name: anytls-native\n    type: anytls\n    server: 127.0.0.1\n    port: 443\n    password: secret\n    sni: anytls.example\n    alpn: [h2, http/1.1]\n    skip-cert-verify: true\n    name-cert-verify: verify.example\n    client-metadata: phase6g-a\n    idle-session-check-interval: 45\n    idle-session-timeout: 60\n    min-idle-session: 2\n    disable-reuse: true\n"
@@ -1943,6 +1999,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 tuic: None,
                 ssr: None,
                 wireguard: None,
+                ssh: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -2029,6 +2086,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             tuic: None,
             ssr: None,
             wireguard: None,
+            ssh: None,
             headers: BTreeMap::new(),
         }],
     };

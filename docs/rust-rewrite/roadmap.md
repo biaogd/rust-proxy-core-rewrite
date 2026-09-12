@@ -1303,9 +1303,10 @@ separate exit gates inside these labels.
 
 ### Next-work priority — 2026-09-11
 
-The agreed next-work order after TUN landing is **SSH outbound 6J**,
-with **AmneziaWG deferred**. WireGuard outbound **6I-A/B/C** is implemented
-in this checkout. Existing-protocol regressions remain release blockers.
+The agreed next-work order after TUN landing was **SSH outbound 6J**,
+with **AmneziaWG deferred**. WireGuard outbound **6I-A/B/C** and SSH
+outbound **6J-A/B** are implemented in this checkout. Existing-protocol
+regressions remain release blockers.
 See [status](status.md) and [compatibility matrix](compatibility-matrix.md)
 for claims.
 
@@ -1325,11 +1326,42 @@ for claims.
    `refresh-server-ip-interval`, TUN loop-avoidance) are implemented in this
    checkout. Mixed/SOCKS using WireGuard does not require administrator
    privileges. There is no WireGuard inbound. Cryptography is
-   `defguard_boringtun`. AmneziaWG stays later. Next slice is **SSH (6J)**.
+   `defguard_boringtun`. AmneziaWG stays later.
+5. **SSH outbound (6J, OUT-15):** **6J-A/B** (password/public-key TCP outbound,
+   optional host-key verify, applied `host-key-algorithms`, transport TCP
+   keepalive, session reuse / `direct-tcpip` mux, authority-restart reconnect,
+   encrypted private-key file + passphrase) are implemented in this checkout.
+   UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected. SSH-protocol
+   keepalive identity with Go is not claimed. Not Parity.
 
-SSH and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
+The remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
 needs its own release evidence.
+
+### Phase 6J — SSH outbound acceptance plan
+
+SSH is a multiplexed TCP tunnel (`direct-tcpip`), not a UDP protocol. Product
+6J is **outbound only**: YAML `type: ssh` through mixed/SOCKS and rules, using
+`russh` for the client session. There is no SSH inbound.
+
+- **6J-A (implemented in this checkout):** YAML → mixed HTTP/SOCKS TCP →
+  rules/groups → reused SSH client → TCP target. Password and/or private key
+  (inline PEM or home-resolved path, optional passphrase). Optional `host-key`
+  (`authorized_keys` lines). Default host-key policy is insecure-ignore like
+  Go when `host-key` is empty. `udp: true`, `dialer-proxy`, TFO/MPTCP and
+  unknown extras are rejected. Evidence: `compat/scripts/phase6j_ssh_tcp.py`
+  plus `protocol-ssh` `tcp_relay`.
+- **6J-B (implemented in this checkout):** `host-key-algorithms` is applied to
+  russh `Preferred.key`. Global `keep-alive-idle` / `keep-alive-interval` /
+  `disable-keep-alive` are written on the SSH TCP transport socket (not
+  SSH-protocol keepalive). A dead authority is replaced on the next dial
+  without reload. Encrypted OpenSSH private-key files with
+  `private-key-passphrase` have live crate and differential evidence. Short
+  soak plus dest-refused isolation stay in
+  `compat/scripts/phase6j_ssh_lifecycle.py` and `protocol-ssh` `lifecycle`.
+
+The matrix row is **SSH** plus applicable configuration, groups/providers and
+controller rows. These are implementation-in-this-checkout claims, not Parity.
 
 ### Phase 6H — TUIC v5 outbound acceptance plan
 

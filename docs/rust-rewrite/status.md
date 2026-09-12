@@ -1,6 +1,16 @@
 # Rust rewrite status
 
-Last updated: 2026-09-11
+Last updated: 2026-09-12
+
+### 6J-B SSH outbound lifecycle — 2026-09-12
+
+Clash `type: ssh` now applies `host-key-algorithms`, writes global transport
+TCP keepalive on the SSH dial socket, reconnects after the authority dies
+without requiring reload, and authenticates from an encrypted private-key
+file plus `private-key-passphrase`. Destination TCP failure still leaves the
+shared session up. Evidence: `compat/scripts/phase6j_ssh_lifecycle.py` plus
+`protocol-ssh` `lifecycle`. UDP, `dialer-proxy` and inbound remain rejected.
+SSH-protocol keepalive identity with Go is not claimed. Not Parity.
 
 ### 6I-C WireGuard outbound lifecycle — 2026-09-11
 
@@ -273,10 +283,11 @@ native (`PHASE8B_NATIVE=1`) is fail-closed and not Parity until
 `phase8c-windows-tun` reports success. Privileged 8F dual-uplink network-change
 (`PHASE8F_NATIVE=1`) is fail-closed and not Parity until `phase8f-linux-tun`
 reports success. TUN is not Parity.
-Additional remote-protocol inbounds, AmneziaWG, SSH and other Phase 7
-families remain deferred. WireGuard outbound 6I-A/B/C is implemented in this
-checkout (not Parity). Canonical numbering is AnyTLS **6G**, Hysteria2
-**HY2**, TUIC **6H**, WireGuard **6I**, SSR **7A–7D**. The
+Additional remote-protocol inbounds, AmneziaWG and other Phase 7
+families remain deferred. WireGuard outbound 6I-A/B/C and SSH outbound 6J-A/B
+are implemented in this checkout (not Parity). Canonical numbering is AnyTLS
+**6G**, Hysteria2 **HY2**, TUIC **6H**, WireGuard **6I**, SSH **6J**,
+SSR **7A–7D**. The
 [roadmap](roadmap.md#next-work-priority--2026-09-11) owns the plan
 ([Phase 8 stages](roadmap.md#phase-8--tun-transparent-proxying-and-platform-breadth)).
 
@@ -481,6 +492,8 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6I-A WireGuard outbound TCP | Implemented in this checkout; not Parity | Clash `type: wireguard` single-peer IPv4 TCP; `defguard_boringtun` Noise + smoltcp `Medium::Ip` userspace stack (no OS TUN); mixed/SOCKS does not need admin; AmneziaWG/`peers`/`ip-stack` rejected; default MTU 1408. Evidence: `phase6i_wireguard_tcp.py` plus crate `tcp_relay`. Three-platform CI pending |
 | Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending |
 | Phase 6I-C WireGuard outbound lifecycle | Implemented in this checkout; not Parity | Rehandshake after peer restart, `persistent-keepalive`, `refresh-server-ip-interval`, TUN `protect_outbound_destination` for the peer IP, mixed UDP session teardown on network-generation change. Evidence: `phase6i_wireguard_lifecycle.py` plus crate `lifecycle`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending; native Parity is not claimed |
+| Phase 6J-A SSH outbound TCP | Implemented in this checkout; not Parity | Clash `type: ssh` password and/or private-key TCP via reused `direct-tcpip`; optional `host-key`; mixed/SOCKS, rules/groups/providers/health/reload. Evidence: `phase6j_ssh_tcp.py` plus crate `tcp_relay`. UDP/`dialer-proxy`/inbound rejected. Three-platform CI pending |
+| Phase 6J-B SSH outbound lifecycle | Implemented in this checkout; not Parity | Applied `host-key-algorithms`, transport TCP keepalive from global config, authority-restart reconnect without reload, encrypted key file + passphrase, dest-refused isolation, short soak. Evidence: `phase6j_ssh_lifecycle.py` plus crate `lifecycle`. SSH-protocol keepalive identity not claimed. Three-platform CI pending |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |
