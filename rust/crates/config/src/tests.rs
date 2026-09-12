@@ -416,10 +416,11 @@ fn snell_configuration_is_supported_and_scoped() {
     assert_eq!(snell.version, 1);
 
     let v3 = Config::from_yaml(&format!(
-        "{MINIMAL}\nproxies:\n  - name: snell-v3\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n"
+        "{MINIMAL}\nproxies:\n  - name: snell-v3\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n"
     ))
-    .expect("Snell v3");
+    .expect("Snell v3 UDP");
     assert_eq!(v3.proxies[0].snell.as_ref().expect("v3").version, 3);
+    assert!(v3.proxies[0].udp);
 
     for unsupported in [
         "psk: password\n    udp: true",

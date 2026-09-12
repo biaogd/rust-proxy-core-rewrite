@@ -273,21 +273,31 @@ where
     }
 
     pub(crate) async fn read_plain(&mut self, max: usize) -> Result<Vec<u8>, SnellProtocolError> {
-        if let Some(available) = self.take_leftover_bytes(max) {
-            return Ok(available);
-        }
-        let aead = self.read_aead.as_ref().ok_or_else(|| {
-            SnellProtocolError::Protocol("Snell reader is not initialized".to_owned())
-        })?;
-        let record = read_record(&mut self.inner, aead, &mut self.read_nonce).await?;
-        if record.len() <= max {
-            Ok(record)
-        } else {
-            let kept = record.get(..max).unwrap_or(&[]).to_vec();
-            self.leftover = record.get(max..).unwrap_or(&[]).to_vec();
+        self.ensure_reader().await?;
+        loop {
+            self.consume_reply()
+                .map_err(|error| SnellProtocolError::Protocol(error.to_string()))?;
+            if let Some(available) = self.take_leftover_bytes(max) {
+                return Ok(available);
+            }
+            let aead = self.read_aead.as_ref().ok_or_else(|| {
+                SnellProtocolError::Protocol("Snell reader is not initialized".to_owned())
+            })?;
+            let record = read_record(&mut self.inner, aead, &mut self.read_nonce).await?;
+            self.leftover = record;
             self.leftover_off = 0;
-            Ok(kept)
         }
+    }
+
+    async fn ensure_reader(&mut self) -> Result<(), SnellProtocolError> {
+        if self.read_aead.is_some() {
+            return Ok(());
+        }
+        let mut salt = [0_u8; SALT_SIZE];
+        self.inner.read_exact(&mut salt).await?;
+        self.read_aead = Some(derive_key(&self.psk, &salt, self.kind)?);
+        self.read_phase = ReadPhase::Idle;
+        Ok(())
     }
 
     pub(crate) async fn write_plain(&mut self, payload: &[u8]) -> Result<(), SnellProtocolError> {

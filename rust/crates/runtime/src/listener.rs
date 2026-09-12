@@ -267,6 +267,7 @@ pub(super) enum UdpSessionMode {
     Hysteria2(String),
     Tuic(String),
     WireGuard(String),
+    Snell(String),
 }
 
 #[derive(Default)]
@@ -406,6 +407,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         ProxyKind::Hysteria2 if proxy.udp => Some(UdpSessionMode::Hysteria2(target.to_owned())),
         ProxyKind::Tuic if proxy.udp => Some(UdpSessionMode::Tuic(target.to_owned())),
         ProxyKind::WireGuard if proxy.udp => Some(UdpSessionMode::WireGuard(target.to_owned())),
+        ProxyKind::Snell if proxy.udp => Some(UdpSessionMode::Snell(target.to_owned())),
         ProxyKind::Http
         | ProxyKind::Socks5
         | ProxyKind::Shadowsocks
@@ -563,6 +565,12 @@ pub(super) async fn run_udp_session(
             ))
             .await;
         }
+        UdpSessionMode::Snell(proxy) => {
+            Box::pin(run_snell_udp_session(
+                reply, source, first, requests, config, state, proxy, decision, shutdown,
+            ))
+            .await;
+        }
     }
 }
 
@@ -627,6 +635,106 @@ pub(super) async fn run_trojan_udp_session(
         &initial_destination,
         &trojan.password,
     );
+    let tracker = state.register(
+        &first.metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = 0_u64;
+    let mut downloaded = 0_u64;
+    let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
+    tokio::pin!(idle);
+    let mut current = Some(first);
+    loop {
+        if let Some(request) = current.take() {
+            let destination = udp_proxy_destination(&request);
+            if association
+                .send(&destination, &request.payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            uploaded = uploaded.saturating_add(request.payload.len() as u64);
+            idle.as_mut()
+                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            request = requests.recv() => {
+                let Some(request) = request else { break };
+                current = Some(request);
+            }
+            response = association.recv() => {
+                let Ok((remote, payload)) = response else { break };
+                let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
+                    continue;
+                };
+                if reply.send_datagram(source, remote, &payload).await.is_err() {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(payload.len() as u64);
+                idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            }
+            () = &mut idle => break,
+        }
+    }
+    tracker.finish(uploaded, downloaded);
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn run_snell_udp_session(
+    reply: UdpReplySink,
+    source: SocketAddr,
+    first: UdpSessionPacket,
+    mut requests: mpsc::Receiver<UdpSessionPacket>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    proxy_name: String,
+    decision: rewrite_rules::Decision,
+    shutdown: CancellationToken,
+) {
+    const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+
+    let Some(proxy) = configured_proxy(&config, &proxy_name) else {
+        return;
+    };
+    let Some(snell) = proxy.snell.as_ref() else {
+        return;
+    };
+    let server = match proxy_dial_server(proxy, &config).await {
+        Ok(server) => server,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("proxy-server DNS resolution failed: {error}"),
+            );
+            return;
+        }
+    };
+    let psk = snell.psk.as_bytes().to_vec();
+    let version = snell.version;
+    let allow_ipv6 = config.ipv6;
+    let socket_options = direct_tcp_options(&config);
+    let setup = async {
+        rewrite_outbound::associate_snell_udp_with_options(
+            &server,
+            allow_ipv6,
+            &psk,
+            version,
+            socket_options,
+        )
+        .await
+        .map_err(|error| format!("Snell UDP association failed: {error}"))
+    };
+    let mut association = match await_udp_setup(&shutdown, setup).await {
+        Ok(association) => association,
+        Err(error) => {
+            state.log("error", format!("Snell UDP setup failed: {error}"));
+            return;
+        }
+    };
     let tracker = state.register(
         &first.metadata,
         &decision.target,

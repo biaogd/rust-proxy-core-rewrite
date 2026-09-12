@@ -58,7 +58,10 @@ pub use shadowsocks::{
     associate_shadowsocks_uot_with_options, connect_shadowsocks_with_options,
     connect_shadowsocks_with_plugin_options,
 };
-pub use snell::{SnellProxyError, connect_snell_with_options};
+pub use snell::{
+    SnellProxyError, SnellUdpAssociation, associate_snell_udp_with_options,
+    connect_snell_with_options,
+};
 pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,
     connect_socks5_with_options,

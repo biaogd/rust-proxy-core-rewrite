@@ -981,7 +981,6 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         || proxy.alpn.is_some()
         || proxy.headers.is_some()
         || proxy.disable_reuse.is_some()
-        || proxy.udp == Some(true)
     {
         return Err(ConfigError::UnsupportedProxy(name));
     }
@@ -1016,6 +1015,10 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         3 => 3,
         _ => return Err(ConfigError::UnsupportedProxy(name)),
     };
+    let udp = proxy.udp.unwrap_or(false);
+    if udp && version < 3 {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -1045,7 +1048,7 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         private_key: None,
         client_fingerprint: None,
         reality: None,
-        udp: false,
+        udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
         shadowsocks_plugin: None,

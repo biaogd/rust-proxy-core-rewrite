@@ -284,9 +284,9 @@ pub struct WireGuardProxyConfig {
     pub refresh_server_ip_interval: u64,
 }
 
-/// Clash `type: snell` options accepted in 7E-A (versions 1–3 TCP).
+/// Clash `type: snell` options accepted in 7E-A/B (versions 1–3 TCP, v3 UDP).
 ///
-/// `udp`, `reuse`, `obfs-opts`, v4/v5, `dialer-proxy` and inbound remain rejected.
+/// `reuse`, `obfs-opts`, v4/v5, `dialer-proxy` and inbound remain rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnellProxyConfig {
     pub psk: String,

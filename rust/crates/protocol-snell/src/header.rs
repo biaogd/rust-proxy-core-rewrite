@@ -5,8 +5,19 @@ use crate::SnellProtocolError;
 pub(crate) const WIRE_VERSION: u8 = 1;
 pub(crate) const COMMAND_CONNECT: u8 = 1;
 pub(crate) const COMMAND_CONNECT_V2: u8 = 5;
+pub(crate) const COMMAND_UDP: u8 = 6;
 pub(crate) const COMMAND_TUNNEL: u8 = 0;
 pub(crate) const COMMAND_ERROR: u8 = 2;
+pub(crate) const COMMAND_UDP_FORWARD: u8 = 1;
+
+pub(crate) enum ClientCommand {
+    Connect { host: String, port: u16 },
+    Udp,
+}
+
+pub(crate) fn encode_udp_header() -> Vec<u8> {
+    vec![WIRE_VERSION, COMMAND_UDP, 0]
+}
 
 pub(crate) fn destination_host(destination: &Destination) -> String {
     match &destination.host {
@@ -58,7 +69,7 @@ pub(crate) fn parse_connect_header(
     let command = buffer[1];
     if command != COMMAND_CONNECT && command != COMMAND_CONNECT_V2 {
         return Err(SnellProtocolError::Protocol(format!(
-            "unsupported Snell command {command}"
+            "unsupported Snell connect command {command}"
         )));
     }
     let client_id_len = usize::from(buffer[2]);
@@ -83,4 +94,34 @@ pub(crate) fn parse_connect_header(
         .ok_or_else(|| SnellProtocolError::Protocol("Snell header port slice failed".to_owned()))?;
     let port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
     Ok(Some((host, port)))
+}
+
+pub(crate) fn parse_client_command(
+    buffer: &[u8],
+) -> Result<Option<ClientCommand>, SnellProtocolError> {
+    if buffer.len() < 3 {
+        return Ok(None);
+    }
+    let version = buffer[0];
+    if version != WIRE_VERSION {
+        return Err(SnellProtocolError::Protocol(format!(
+            "unsupported Snell wire version {version}"
+        )));
+    }
+    match buffer[1] {
+        COMMAND_CONNECT | COMMAND_CONNECT_V2 => {
+            Ok(parse_connect_header(buffer)?
+                .map(|(host, port)| ClientCommand::Connect { host, port }))
+        }
+        COMMAND_UDP => {
+            let client_id_len = usize::from(buffer[2]);
+            if buffer.len() < 3 + client_id_len {
+                return Ok(None);
+            }
+            Ok(Some(ClientCommand::Udp))
+        }
+        other => Err(SnellProtocolError::Protocol(format!(
+            "unsupported Snell command {other}"
+        ))),
+    }
 }
