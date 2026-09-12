@@ -145,7 +145,6 @@ async fn v2_reuse_two_sequential_echoes_share_accept() {
 #[tokio::test]
 async fn v2_reuse_dest_refused_then_success_on_same_session() {
     let echo = spawn_echo().await;
-    let unused = unused_tcp_port().await;
     let authority = spawn_authority(AuthorityOptions {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
@@ -169,17 +168,23 @@ async fn v2_reuse_dest_refused_then_success_on_same_session() {
         &mut stream,
         &Destination {
             host: Host::Ip("127.0.0.1".parse().expect("ip")),
-            port: unused,
+            // Immediate RST on all CI platforms; a just-closed ephemeral port
+            // can SYN-retry for seconds on Windows and starve CommandError.
+            port: 1,
         },
         2,
     )
     .await
     .expect("refused header");
     let mut buf = [0_u8; 1];
-    let refused = tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut buf)).await;
+    let refused = tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
+        .await
+        .expect("CommandError should arrive before timeout")
+        .expect_err("refused dest should report CommandError");
+    let message = refused.to_string();
     assert!(
-        matches!(refused, Ok(Err(_)) | Err(_)),
-        "refused dest should report CommandError"
+        message.contains("server reported") || message.contains("error"),
+        "unexpected refuse error: {message}"
     );
     stream.reset_for_reuse();
     write_connect(&mut stream, &echo.destination, 2)

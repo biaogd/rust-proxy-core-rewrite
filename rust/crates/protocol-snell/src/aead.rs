@@ -244,7 +244,14 @@ impl<S> SnellStream<S> {
     pub(crate) fn clear_read_after_request(&mut self) {
         self.leftover.clear();
         self.leftover_off = 0;
-        self.read_phase = ReadPhase::Idle;
+        self.read_phase = if self.read_aead.is_some() {
+            ReadPhase::Idle
+        } else {
+            ReadPhase::Salt {
+                buf: [0_u8; SALT_SIZE],
+                filled: 0,
+            }
+        };
         self.reuse.peer_closed = false;
         self.reuse.zero_chunk_written = false;
     }

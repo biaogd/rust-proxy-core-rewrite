@@ -993,7 +993,10 @@ pub(super) async fn measure_http_delay(
             .iter()
             .any(|(start, end)| (*start..=*end).contains(&status));
     Ok(DelayMeasurement {
-        delay: u16::try_from(started.elapsed().as_millis()).map_err(|_| ())?,
+        // Clash/Go treat a completed probe as at least 1ms. `as_millis()`
+        // truncates a sub-millisecond localhost success to 0, which the
+        // delay API then records as a failed/timeout probe.
+        delay: u16::try_from(started.elapsed().as_millis().max(1)).map_err(|_| ())?,
         satisfied,
     })
 }
