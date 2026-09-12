@@ -1325,9 +1325,15 @@ for claims.
    `refresh-server-ip-interval`, TUN loop-avoidance) are implemented in this
    checkout. Mixed/SOCKS using WireGuard does not require administrator
    privileges. There is no WireGuard inbound. Cryptography is
-   `defguard_boringtun`. AmneziaWG stays later. Next slice is **SSH (6J)**.
+   `defguard_boringtun`. AmneziaWG stays later. SSH (6J) is a separate PR.
+5. **Snell outbound (7E-A/B/C/D, OUT-10):** implemented in this checkout.
+   Clash `type: snell` versions 1–3 TCP plus v3 UDP through mixed/SOCKS,
+   Argon2id + Shadowsocks AEAD, simple-obfs HTTP/TLS, v2 ConnectV2 reuse.
+   No inbound/v4. Evidence: `compat/scripts/phase7e_snell_tcp.py`,
+   `phase7e_snell_udp.py`, `phase7e_snell_obfs.py`, `phase7e_snell_reuse.py`,
+   plus `protocol-snell` `tcp_relay` / `udp_relay`.
 
-SSH and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
+SSH (if still unmerged) and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
 needs its own release evidence.
 
@@ -3070,11 +3076,37 @@ Snell, Mieru, ShadowQUIC, Sudoku, TrustTunnel, MASQUE, OpenVPN,
 Tailscale, ZeroTier, SSR, obfuscation plugins and less common transports are
 separate slices. No aggregate "protocol parity" claim is allowed.
 
-Reserve **7A–7D** for the existing SSR work/test names. Older inventory mappings
-of Snell to 7B or ShadowQUIC to 7C are superseded: deferred families use their
-stable `OUT-*` IDs until a non-conflicting phase is assigned. AnyTLS belongs to
-6G, Hysteria2 to HY2, TUIC to 6H, WireGuard to 6I and SSH to 6J, even where a
-grouped inventory row mentions them alongside a deferred protocol.
+Reserve **7A–7D** for the existing SSR work/test names. **7E** is Snell
+outbound (OUT-10). Older inventory mappings of Snell to 7B or ShadowQUIC to 7C
+are superseded. AnyTLS belongs to 6G, Hysteria2 to HY2, TUIC to 6H, WireGuard
+to 6I and SSH to 6J, even where a grouped inventory row mentions them
+alongside a deferred protocol.
+
+### Phase 7E — Snell outbound acceptance plan
+
+Snell is a Clash-specific Shadowsocks-like stream. Product 7E is **outbound
+only**: YAML `type: snell` through mixed/SOCKS and rules. There is no Snell
+inbound in this rewrite. Cryptography is Argon2id (`time=3`, `memory=8KiB`,
+`threads=1`) plus Shadowsocks AEAD records (v1 ChaCha20-Poly1305, v2/v3
+AES-128-GCM). Native Parity is not claimed.
+
+- **7E-A (implemented in this checkout):** YAML → mixed HTTP/SOCKS TCP →
+  rules/groups → Snell v1/v2/v3 TCP. Required `psk`. Omitted/`0` version is
+  `1`. Reject version 4/5, `dialer-proxy`, TFO/MPTCP. v1/v2 + `udp: true`
+  stay rejected. Evidence: `compat/scripts/phase7e_snell_tcp.py` plus
+  `protocol-snell` `tcp_relay`.
+- **7E-B (implemented in this checkout):** v3 `udp: true` → mixed/SOCKS UDP
+  ASSOCIATE → one TCP+AEAD session → UDP target. Evidence:
+  `compat/scripts/phase7e_snell_udp.py` plus `protocol-snell` `udp_relay`.
+- **7E-C (implemented in this checkout):** simple-obfs `obfs-opts` HTTP/TLS
+  on the TCP carrier before AEAD (TCP and v3 UDP). Host defaults to
+  `bing.com`. Evidence: `compat/scripts/phase7e_snell_obfs.py` plus crate
+  `http_obfs_echo` / `tls_obfs_echo`.
+- **7E-D (implemented in this checkout):** `reuse: true` accepted; pooling
+  only when `version == 2` (always, even without the flag). ConnectV2
+  zero-chunk half-close, pool size 10 / age 15s. Remaining `obfs-opts`
+  (shadow-tls/restls/jls) and v4/v5 stay later. Evidence:
+  `compat/scripts/phase7e_snell_reuse.py` plus crate sequential-accept.
 Use **7T** subphases for shared dialer chains, mux, WebSocket,
 HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, plugins, Reality, ECH, JLS, ReSTLS,
 ShadowTLS and TLSMirror. A protocol gate may depend on a 7T transport gate but

@@ -4,6 +4,7 @@ mod http;
 mod hysteria2;
 mod reality;
 mod shadowsocks;
+mod snell;
 mod socks5;
 mod ssr;
 mod trojan;
@@ -56,6 +57,10 @@ pub use shadowsocks::{
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,
     associate_shadowsocks_uot_with_options, connect_shadowsocks_with_options,
     connect_shadowsocks_with_plugin_options,
+};
+pub use snell::{
+    BoxedSnellSessionPool, PooledSnellStream, SnellProxyError, SnellSessionPool,
+    SnellUdpAssociation, associate_snell_udp_with_options, connect_snell_with_options,
 };
 pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,

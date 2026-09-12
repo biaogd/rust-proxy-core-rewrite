@@ -45,11 +45,16 @@ path = "src/shadowsocks_websocket_authority.rs"
 name = "rewrite-wireguard-authority"
 path = "src/wireguard_authority.rs"
 
+[[bin]]
+name = "rewrite-snell-authority"
+path = "src/snell_authority.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-snell = { path = "../protocol-snell" }
 rewrite-protocol-wireguard = { path = "../protocol-wireguard" }
 rewrite-rules = { path = "../rules" }
 rewrite-dns = { path = "../dns" }

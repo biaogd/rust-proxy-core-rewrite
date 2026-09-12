@@ -569,6 +569,17 @@ pub(super) async fn connect_configured_proxy(
         ProxyKind::Hysteria2 => connect_hysteria2_proxy(proxy, destination, config, state).await,
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
+        ProxyKind::Snell => {
+            connect_snell_proxy(
+                proxy,
+                &server,
+                destination,
+                allow_ipv6,
+                socket_options,
+                state,
+            )
+            .await
+        }
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
             Err("configured proxy is not a TCP dialer".to_owned())
         }
@@ -1954,6 +1965,33 @@ async fn connect_shadowsocks_proxy(
     )
     .await
     .map_err(|error| format!("Shadowsocks proxy connection failed: {error}"))
+}
+
+async fn connect_snell_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    state: &RuntimeState,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let snell = proxy
+        .snell
+        .as_ref()
+        .ok_or_else(|| "Snell proxy missing snell options".to_owned())?;
+    let pool = (snell.version == 2).then(|| state.snell_pool(&proxy.name, format!("{proxy:?}")));
+    rewrite_outbound::connect_snell_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        snell.psk.as_bytes(),
+        snell.version,
+        snell.obfs.as_ref(),
+        socket_options,
+        pool,
+    )
+    .await
+    .map_err(|error| format!("Snell proxy connection failed: {error}"))
 }
 
 async fn connect_ssr_proxy(

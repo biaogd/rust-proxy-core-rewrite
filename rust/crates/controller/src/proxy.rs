@@ -930,6 +930,23 @@ pub(super) async fn measure_http_delay(
                     .await
                     .map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Snell => {
+                    let snell = proxy.snell.as_ref().ok_or(())?;
+                    let pool = (snell.version == 2)
+                        .then(|| state.snell_pool(&proxy.name, format!("{proxy:?}")));
+                    rewrite_outbound::connect_snell_with_options(
+                        &server,
+                        &destination,
+                        config.ipv6,
+                        snell.psk.as_bytes(),
+                        snell.version,
+                        snell.obfs.as_ref(),
+                        controller_socket_options(config),
+                        pool,
+                    )
+                    .await
+                    .map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::Reject
                 | rewrite_config::ProxyKind::Dns
                 | rewrite_config::ProxyKind::Rematch => return Err(()),
@@ -976,7 +993,10 @@ pub(super) async fn measure_http_delay(
             .iter()
             .any(|(start, end)| (*start..=*end).contains(&status));
     Ok(DelayMeasurement {
-        delay: u16::try_from(started.elapsed().as_millis()).map_err(|_| ())?,
+        // Clash/Go treat a completed probe as at least 1ms. `as_millis()`
+        // truncates a sub-millisecond localhost success to 0, which the
+        // delay API then records as a failed/timeout probe.
+        delay: u16::try_from(started.elapsed().as_millis().max(1)).map_err(|_| ())?,
         satisfied,
     })
 }
@@ -1169,6 +1189,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
         rewrite_config::ProxyKind::WireGuard => "WireGuard",
+        rewrite_config::ProxyKind::Snell => "Snell",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1184,7 +1205,8 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Hysteria2
         | rewrite_config::ProxyKind::Tuic
         | rewrite_config::ProxyKind::ShadowsocksR
-        | rewrite_config::ProxyKind::WireGuard => proxy.udp,
+        | rewrite_config::ProxyKind::WireGuard
+        | rewrite_config::ProxyKind::Snell => proxy.udp,
         rewrite_config::ProxyKind::Http => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
@@ -1347,7 +1369,8 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Hysteria2
             | rewrite_config::ProxyKind::Tuic
             | rewrite_config::ProxyKind::ShadowsocksR
-            | rewrite_config::ProxyKind::WireGuard => proxy.udp,
+            | rewrite_config::ProxyKind::WireGuard
+            | rewrite_config::ProxyKind::Snell => proxy.udp,
             rewrite_config::ProxyKind::Http => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject

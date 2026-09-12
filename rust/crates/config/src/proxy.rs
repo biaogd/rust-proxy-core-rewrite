@@ -16,10 +16,10 @@ use crate::model::{
     AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
     ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
     ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
-    SsrProxyConfig, TrojanProxyConfig, TrojanTransport, TuicProxyConfig, VlessFlow,
-    VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions,
-    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
-    VmessTransport, WireGuardProxyConfig,
+    SnellObfs, SnellProxyConfig, SsrProxyConfig, TrojanProxyConfig, TrojanTransport,
+    TuicProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode,
+    VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
+    VmessSecurity, VmessTransport, WireGuardProxyConfig,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,
@@ -144,6 +144,7 @@ pub(crate) fn parse_proxies(
             Some("hysteria2") => outbounds.push(parse_hysteria2_proxy(name, proxy)?),
             Some("tuic") => outbounds.push(parse_tuic_proxy(name, proxy)?),
             Some("wireguard") => outbounds.push(parse_wireguard_proxy(name, proxy)?),
+            Some("snell") => outbounds.push(parse_snell_proxy(name, proxy)?),
             _ => return Err(ConfigError::UnsupportedProxy(name)),
         }
     }
@@ -302,6 +303,7 @@ fn parse_anytls_proxy(
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -531,6 +533,7 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -741,6 +744,7 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         }),
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -945,8 +949,168 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
             dns_servers,
             refresh_server_ip_interval,
         }),
+        snell: None,
         headers: BTreeMap::new(),
     })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    const ACCEPTED_EXTRA: &[&str] = &["psk", "version", "reuse", "obfs-opts"];
+    if proxy.target_rematch_name.is_some()
+        || proxy.target_sub_rule.is_some()
+        || proxy.username.is_some()
+        || proxy.password.is_some()
+        || proxy.cipher.is_some()
+        || proxy.uuid.is_some()
+        || proxy.flow.is_some()
+        || proxy.encryption.is_some()
+        || proxy.alter_id.is_some()
+        || proxy.network.is_some()
+        || proxy.plugin.is_some()
+        || proxy.plugin_opts.is_some()
+        || proxy.udp_over_tcp.is_some()
+        || proxy.udp_over_tcp_version.is_some()
+        || proxy.tls.is_some()
+        || proxy.sni.is_some()
+        || proxy.skip_cert_verify.is_some()
+        || proxy.client_fingerprint.is_some()
+        || proxy.fingerprint.is_some()
+        || proxy.certificate.is_some()
+        || proxy.private_key.is_some()
+        || proxy.alpn.is_some()
+        || proxy.headers.is_some()
+        || proxy.disable_reuse.is_some()
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if proxy
+        .extra
+        .keys()
+        .any(|key| !ACCEPTED_EXTRA.contains(&key.as_str()))
+    {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let reuse = match hysteria2_extra_string(&mut proxy.extra, "reuse") {
+        Ok(None) => false,
+        Ok(Some(value)) => match value.to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" => false,
+            "1" | "true" | "yes" => true,
+            _ => return Err(ConfigError::UnsupportedProxy(name)),
+        },
+        Err(()) => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+    let psk = hysteria2_extra_string(&mut proxy.extra, "psk")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let version = match hysteria2_extra_u64(&mut proxy.extra, "version")
+        .map_err(|()| ConfigError::UnsupportedProxy(name.clone()))?
+        .unwrap_or(0)
+    {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => return Err(ConfigError::UnsupportedProxy(name)),
+    };
+    let udp = proxy.udp.unwrap_or(false);
+    if udp && version < 3 {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    let obfs = parse_snell_obfs(&mut proxy.extra, &name)?;
+    let server = proxy
+        .server
+        .filter(|server| !server.is_empty())
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    let port = proxy
+        .port
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| ConfigError::UnsupportedProxy(name.clone()))?;
+    if !proxy.extra.is_empty() {
+        return Err(ConfigError::UnsupportedProxy(name));
+    }
+    Ok(ProxyConfig {
+        name,
+        kind: ProxyKind::Snell,
+        server,
+        port,
+        username: None,
+        password: None,
+        cipher: None,
+        tls: false,
+        sni: None,
+        skip_cert_verify: false,
+        name_cert_verify: None,
+        fingerprint: None,
+        certificate: None,
+        private_key: None,
+        client_fingerprint: None,
+        reality: None,
+        udp,
+        udp_over_tcp: false,
+        udp_over_tcp_version: 1,
+        shadowsocks_plugin: None,
+        vmess: None,
+        vless: None,
+        trojan: None,
+        anytls: None,
+        hysteria2: None,
+        tuic: None,
+        ssr: None,
+        wireguard: None,
+        snell: Some(SnellProxyConfig {
+            psk,
+            version,
+            obfs,
+            reuse,
+        }),
+        headers: BTreeMap::new(),
+    })
+}
+
+fn parse_snell_obfs(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    name: &str,
+) -> Result<Option<SnellObfs>, ConfigError> {
+    match extra.remove("obfs-opts") {
+        None | Some(serde_yaml_ng::Value::Null) => Ok(None),
+        Some(serde_yaml_ng::Value::Mapping(map)) => {
+            let mut mode = String::new();
+            let mut host = String::from("bing.com");
+            for (key, value) in map {
+                let Some(key) = key.as_str() else {
+                    return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+                };
+                match key {
+                    "mode" => {
+                        mode = match value {
+                            serde_yaml_ng::Value::String(text) => text,
+                            serde_yaml_ng::Value::Null => String::new(),
+                            _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                        };
+                    }
+                    "host" => {
+                        host = match value {
+                            serde_yaml_ng::Value::String(text) if !text.is_empty() => text,
+                            serde_yaml_ng::Value::Null | serde_yaml_ng::Value::String(_) => {
+                                "bing.com".to_owned()
+                            }
+                            _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                        };
+                    }
+                    _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                }
+            }
+            match mode.to_ascii_lowercase().as_str() {
+                "" => Ok(None),
+                "http" => Ok(Some(SnellObfs::Http { host })),
+                "tls" => Ok(Some(SnellObfs::Tls { host })),
+                _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+            }
+        }
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
 }
 
 fn decode_wireguard_key(text: &str, name: &str) -> Result<[u8; 32], ConfigError> {
@@ -1492,6 +1656,7 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1598,6 +1763,7 @@ fn parse_remote_proxy(
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
@@ -1697,6 +1863,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1846,6 +2013,7 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
             obfs_param,
         }),
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1953,6 +2121,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -2067,6 +2236,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     })
 }
@@ -3114,6 +3284,7 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         tuic: None,
         ssr: None,
         wireguard: None,
+        snell: None,
         headers: BTreeMap::new(),
     }
 }
@@ -3484,6 +3655,7 @@ pub(crate) fn proxy_member_types(
             ProxyKind::Dns => "Dns",
             ProxyKind::Rematch => "Rematch",
             ProxyKind::WireGuard => "WireGuard",
+            ProxyKind::Snell => "Snell",
         };
         types.insert(proxy.name.clone(), kind.to_owned());
     }
