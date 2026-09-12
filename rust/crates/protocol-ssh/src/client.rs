@@ -52,7 +52,7 @@ impl client::Handler for HostKeyHandler {
         Ok(self
             .allowed
             .iter()
-            .any(|allowed| allowed == server_public_key))
+            .any(|allowed| same_public_key(allowed, server_public_key)))
     }
 }
 
@@ -126,27 +126,40 @@ impl Client {
 
     async fn handshake(&self) -> Result<Handle<HostKeyHandler>, SshProtocolError> {
         let address = resolve_server(&self.options).await?;
-        let stream = connect_tcp(
-            address,
-            OutboundTcpOptions {
-                interface: &self.options.bind_interface,
-                routing_mark: self.options.routing_mark,
-                keep_alive_idle: 0,
-                keep_alive_interval: 0,
-                disable_keep_alive: false,
-            },
-        )
-        .await?;
-        let config = client::Config {
+        let config = Arc::new(client::Config {
             nodelay: true,
             client_id: random_openssh_id(),
             inactivity_timeout: None,
             ..client::Config::default()
-        };
+        });
         let handler = HostKeyHandler {
             allowed: parse_host_keys(&self.options.host_keys)?,
         };
-        let mut handle = client::connect_stream(Arc::new(config), stream, handler).await?;
+        let mut handle = if self.options.bind_interface.is_empty() && self.options.routing_mark == 0
+        {
+            client::connect(config, address, handler)
+                .await
+                .map_err(|error| {
+                    SshProtocolError::Protocol(format!("SSH transport handshake failed: {error}"))
+                })?
+        } else {
+            let stream = connect_tcp(
+                address,
+                OutboundTcpOptions {
+                    interface: &self.options.bind_interface,
+                    routing_mark: self.options.routing_mark,
+                    keep_alive_idle: 0,
+                    keep_alive_interval: 0,
+                    disable_keep_alive: false,
+                },
+            )
+            .await?;
+            client::connect_stream(config, stream, handler)
+                .await
+                .map_err(|error| {
+                    SshProtocolError::Protocol(format!("SSH transport handshake failed: {error}"))
+                })?
+        };
         if !authenticate(&mut handle, &self.options).await? {
             return Err(SshProtocolError::Protocol(
                 "SSH authentication rejected".to_owned(),
@@ -190,7 +203,8 @@ async fn open_direct_tcpip(
     let host = destination.host.to_string();
     let channel = handle
         .channel_open_direct_tcpip(host, u32::from(destination.port), "127.0.0.1", 0)
-        .await?;
+        .await
+        .map_err(|error| SshProtocolError::Protocol(format!("SSH direct-tcpip failed: {error}")))?;
     Ok(Box::new(channel.into_stream()))
 }
 
@@ -223,7 +237,11 @@ fn random_openssh_id() -> SshId {
     } else {
         format!("OpenSSH_8.{}", rng.random_range(0..9))
     };
-    SshId::Standard(version)
+    SshId::Standard(format!("SSH-2.0-{version}"))
+}
+
+pub(crate) fn same_public_key(left: &PublicKey, right: &PublicKey) -> bool {
+    left.key_data() == right.key_data()
 }
 
 fn load_private_key(

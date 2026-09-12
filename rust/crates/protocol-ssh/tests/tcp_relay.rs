@@ -75,11 +75,54 @@ fn client_options(
 }
 
 async fn exchange(client: &Client, dest: &Destination, payload: &[u8]) {
-    let mut stream = client.open_tcp(dest).await.expect("open tcp");
+    let mut stream = match client.open_tcp(dest).await {
+        Ok(stream) => stream,
+        Err(error) => panic!("open tcp: {error:?}"),
+    };
     stream.write_all(payload).await.expect("write");
     let mut got = vec![0_u8; payload.len()];
     stream.read_exact(&mut got).await.expect("read");
     assert_eq!(got, payload);
+}
+
+#[tokio::test]
+async fn raw_russh_connects_with_password() {
+    use std::sync::Arc;
+
+    use russh::client;
+    use russh::keys::PublicKey;
+
+    struct AcceptAll;
+    impl client::Handler for AcceptAll {
+        type Error = russh::Error;
+        async fn check_server_key(
+            &mut self,
+            _server_public_key: &PublicKey,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    let (listen, _) = spawn_authority(
+        "127.0.0.1:0".parse().expect("listen"),
+        AuthorityOptions {
+            username: "alice".to_owned(),
+            password: Some("secret".to_owned()),
+            authorized_keys: Vec::new(),
+        },
+    )
+    .await
+    .expect("authority");
+    let mut handle = client::connect(Arc::new(client::Config::default()), listen, AcceptAll)
+        .await
+        .expect("raw connect");
+    assert!(matches!(
+        handle
+            .authenticate_password("alice", "secret")
+            .await
+            .expect("auth"),
+        russh::client::AuthResult::Success
+    ));
 }
 
 #[tokio::test]

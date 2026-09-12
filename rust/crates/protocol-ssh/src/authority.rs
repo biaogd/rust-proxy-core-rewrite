@@ -48,7 +48,12 @@ impl Handler for ClientHandler {
         user: &str,
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
-        if user == self.username && self.authorized.iter().any(|allowed| allowed == public_key) {
+        if user == self.username
+            && self
+                .authorized
+                .iter()
+                .any(|allowed| crate::client::same_public_key(allowed, public_key))
+        {
             Ok(Auth::Accept)
         } else {
             Ok(reject())
@@ -137,7 +142,9 @@ pub async fn spawn_authority(
             };
             let config = Arc::clone(&config);
             tokio::spawn(async move {
-                let _ = server::run_stream(config, stream, handler).await;
+                if let Ok(session) = server::run_stream(config, stream, handler).await {
+                    let _ = session.await;
+                }
             });
         }
     });
