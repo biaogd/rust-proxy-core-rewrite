@@ -11,7 +11,7 @@ pub(crate) fn encode_udp_request(
     destination: &Destination,
     payload: &[u8],
 ) -> Result<Vec<u8>, SnellProtocolError> {
-    let header_len = udp_request_header_len(destination)?;
+    let header_len = udp_request_header_len(destination);
     if header_len + payload.len() > MAX_UDP_LENGTH {
         return Err(SnellProtocolError::Protocol(
             "Snell UDP payload too large".to_owned(),
@@ -84,18 +84,18 @@ pub(crate) fn parse_udp_request(
     }
     match packet[2] {
         0x04 => parse_ip_request(packet, 4, |bytes| {
-            Host::Ip(IpAddr::V4(Ipv4Addr::from(
+            Ok(Host::Ip(IpAddr::V4(Ipv4Addr::from(
                 <[u8; 4]>::try_from(bytes).map_err(|_| {
                     SnellProtocolError::Protocol("Snell UDP IPv4 slice failed".to_owned())
                 })?,
-            )))
+            ))))
         }),
         0x06 => parse_ip_request(packet, 16, |bytes| {
-            Host::Ip(IpAddr::V6(Ipv6Addr::from(
+            Ok(Host::Ip(IpAddr::V6(Ipv6Addr::from(
                 <[u8; 16]>::try_from(bytes).map_err(|_| {
                     SnellProtocolError::Protocol("Snell UDP IPv6 slice failed".to_owned())
                 })?,
-            )))
+            ))))
         }),
         other => Err(SnellProtocolError::Protocol(format!(
             "Snell invalid UDP address type {other}"
@@ -138,18 +138,18 @@ pub(crate) fn parse_udp_response(
     };
     match kind {
         0x04 => parse_ip_response(rest, 4, |bytes| {
-            Host::Ip(IpAddr::V4(Ipv4Addr::from(
+            Ok(Host::Ip(IpAddr::V4(Ipv4Addr::from(
                 <[u8; 4]>::try_from(bytes).map_err(|_| {
                     SnellProtocolError::Protocol("Snell UDP IPv4 response slice failed".to_owned())
                 })?,
-            )))
+            ))))
         }),
         0x06 => parse_ip_response(rest, 16, |bytes| {
-            Host::Ip(IpAddr::V6(Ipv6Addr::from(
+            Ok(Host::Ip(IpAddr::V6(Ipv6Addr::from(
                 <[u8; 16]>::try_from(bytes).map_err(|_| {
                     SnellProtocolError::Protocol("Snell UDP IPv6 response slice failed".to_owned())
                 })?,
-            )))
+            ))))
         }),
         other => Err(SnellProtocolError::Protocol(format!(
             "Snell UDP response address type {other} is invalid"
@@ -157,12 +157,12 @@ pub(crate) fn parse_udp_response(
     }
 }
 
-fn udp_request_header_len(destination: &Destination) -> Result<usize, SnellProtocolError> {
-    Ok(match &destination.host {
+fn udp_request_header_len(destination: &Destination) -> usize {
+    match &destination.host {
         Host::Domain(domain) => 1 + 1 + domain.len() + 2,
         Host::Ip(IpAddr::V4(_)) => 1 + 2 + 4 + 2,
         Host::Ip(IpAddr::V6(_)) => 1 + 2 + 16 + 2,
-    })
+    }
 }
 
 fn parse_ip_request(

@@ -67,7 +67,7 @@ async fn v3_udp_domain_echo() {
 #[tokio::test]
 async fn v1_udp_is_rejected() {
     let (client, _server) = tokio::io::duplex(64);
-    let error = associate_udp(
+    let Err(error) = associate_udp(
         client,
         &ClientOptions {
             psk: b"password".to_vec(),
@@ -75,7 +75,9 @@ async fn v1_udp_is_rejected() {
         },
     )
     .await
-    .expect_err("v1 UDP");
+    else {
+        panic!("v1 UDP should be rejected");
+    };
     assert!(error.to_string().contains("does not support UDP"));
 }
 
