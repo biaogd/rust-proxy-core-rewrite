@@ -680,7 +680,7 @@ pub(super) async fn wireguard_client_for_proxy(
         proxy_server(proxy),
         &config.hosts,
         config.dns.as_ref(),
-        false,
+        config.ipv6,
     )
     .await?;
     let dial_server = match &dial.host {

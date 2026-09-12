@@ -322,6 +322,7 @@ async fn wireguard_health_destination(
 pub fn wireguard_peer_resolve_hook(config: &Config) -> rewrite_outbound::PeerResolveHook {
     let hosts = Arc::new(config.hosts.clone());
     let dns = Arc::new(config.dns.clone());
+    let allow_ipv6 = config.ipv6;
     rewrite_outbound::PeerResolveHook::new(move |host, port| {
         let hosts = Arc::clone(&hosts);
         let dns = Arc::clone(&dns);
@@ -331,7 +332,7 @@ pub fn wireguard_peer_resolve_hook(config: &Config) -> rewrite_outbound::PeerRes
                 dns.as_ref().as_ref(),
                 &host,
                 port,
-                false,
+                allow_ipv6,
             )
             .await
         }

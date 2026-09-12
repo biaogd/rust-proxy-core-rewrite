@@ -165,9 +165,13 @@ async fn tcp_retries_handshake_after_peer_restart() {
     *responder.tunnel.lock().expect("swap") = Arc::new(
         NoiseTunnel::new(server_priv, client_pub, None, None, [0; 3], 4).expect("new peer"),
     );
-    responder.initiate_handshake().await;
 
-    tcp_echo(&client, echo_port, b"after-restart").await;
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        tcp_echo(&client, echo_port, b"after-restart"),
+    )
+    .await
+    .expect("silent peer restart must rekey without the peer initiating");
     client.close().await;
 }
 
@@ -486,8 +490,52 @@ async fn traffic_follows_replaced_endpoint() {
     client.close().await;
 }
 
+#[tokio::test]
+async fn endpoint_swap_to_unbound_port_keeps_reactor() {
+    let echo_port = spawn_echo().await;
+    let (client_priv, client_pub) = pair(33);
+    let (server_priv, server_pub) = pair(35);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub, 2);
+    let client = Client::new(client_options(
+        endpoint.port(),
+        client_priv,
+        server_pub,
+        None,
+    ))
+    .await
+    .expect("client");
+    tcp_echo(&client, echo_port, b"before-dead-endpoint").await;
+    let unused = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("unused bind")
+        .local_addr()
+        .expect("unused addr");
+    client
+        .replace_endpoint(unused)
+        .await
+        .expect("unconnected socket can move to an unbound port");
+    let _ = tokio::time::timeout(
+        Duration::from_millis(400),
+        client.open_tcp(&echo_destination(echo_port)),
+    )
+    .await;
+    client
+        .replace_endpoint(endpoint)
+        .await
+        .expect("restore endpoint");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tcp_echo(&client, echo_port, b"after-dead-endpoint"),
+    )
+    .await
+    .expect("reactor must survive ICMP/recv_from errors after endpoint swap");
+    client.close().await;
+}
+
 async fn wait_live_sockets(client: &Client, expected: usize) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         if client.live_socket_count() == expected {
             return;
@@ -882,8 +930,8 @@ fn spawn_swappable_responder(
             .expect("server tunn"),
     );
     let slot = Arc::new(std::sync::Mutex::new(Arc::clone(&tunnel)));
-    let peer = spawn_shared_responder_with_slot(vec![udp], &slot, InnerTcpHooks::default());
-    SwappableResponder { tunnel: slot, peer }
+    let _peer = spawn_shared_responder_with_slot(vec![udp], &slot, InnerTcpHooks::default());
+    SwappableResponder { tunnel: slot }
 }
 
 fn spawn_shared_responder(sockets: Vec<UdpSocket>, tunnel: Arc<NoiseTunnel>) {
@@ -902,26 +950,6 @@ struct InnerTcpHooks {
 
 struct SwappableResponder {
     tunnel: Arc<std::sync::Mutex<Arc<NoiseTunnel>>>,
-    peer: PeerEndpoint,
-}
-
-impl SwappableResponder {
-    async fn initiate_handshake(&self) {
-        let tunnel = self
-            .tunnel
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some((endpoint, udp)) = self.peer.lock().await.clone() else {
-            panic!("peer endpoint unknown");
-        };
-        let TunnelAction::SendUdp(init) = tunnel.format_handshake(true) else {
-            panic!("expected handshake initiation");
-        };
-        udp.send_to(&init, endpoint)
-            .await
-            .expect("send peer handshake");
-    }
 }
 
 #[allow(clippy::too_many_lines)]

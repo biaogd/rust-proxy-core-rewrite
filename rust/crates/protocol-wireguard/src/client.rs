@@ -22,6 +22,10 @@ use crate::{DEFAULT_MTU, HANDSHAKE_TIMEOUT, WireGuardProtocolError};
 
 const PEER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+/// If a TCP dial sees no authenticated peer traffic, rekey the existing `Tunn`
+/// instead of waiting for boringtun's 15s unanswered-data timer. Must stay
+/// below [`HANDSHAKE_TIMEOUT`]. Never `reset_session` from dest TCP failure.
+const STALE_SESSION_REKEY: Duration = Duration::from_secs(1);
 
 /// Construction options for a single-peer `WireGuard` outbound.
 #[derive(Clone, Debug)]
@@ -114,6 +118,8 @@ struct ClientInner {
     shutdown: CancellationToken,
     handshake: AsyncMutex<()>,
     established: AtomicBool,
+    last_tunnel_recv: Mutex<Instant>,
+    udp_epoch: AtomicU64,
     datagrams_sent: AtomicU64,
     bind_interface: String,
     routing_mark: i64,
@@ -185,14 +191,12 @@ impl Client {
             },
             0,
         );
-        let std_socket = rewrite_platform::bind_outbound_udp(
+        let udp = Arc::new(bind_unconnected_udp(
             local,
             endpoint,
             &options.bind_interface,
             options.routing_mark,
-        )?;
-        std_socket.set_nonblocking(true)?;
-        let udp = Arc::new(UdpSocket::from_std(std_socket)?);
+        )?);
         let index = rand::rng().random::<u32>();
         let tunnel = NoiseTunnel::new(
             options.private_key,
@@ -230,6 +234,8 @@ impl Client {
             shutdown,
             handshake: AsyncMutex::new(()),
             established: AtomicBool::new(false),
+            last_tunnel_recv: Mutex::new(Instant::now()),
+            udp_epoch: AtomicU64::new(0),
             datagrams_sent: AtomicU64::new(0),
             bind_interface: options.bind_interface,
             routing_mark: options.routing_mark,
@@ -282,8 +288,11 @@ impl Client {
 
     /// Replaces the peer UDP endpoint (Go `updateServerAddr`).
     ///
-    /// Socket bind/connect is prepared first; the previous endpoint is kept if
-    /// the new socket cannot be used (including address-family changes).
+    /// A throwaway socket is `connect`ed to validate the address (broadcast /
+    /// unscoped link-local fail). The live socket stays unconnected so
+    /// `send_to` / `recv_from` keep working on Darwin and ICMP errors cannot
+    /// tear down the reactor. The previous endpoint is kept if the new socket
+    /// cannot be used (including address-family changes).
     ///
     /// # Errors
     ///
@@ -348,6 +357,8 @@ impl Client {
         };
         self.inner.notify.notify_one();
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let dialed_at = Instant::now();
+        let mut rekeyed = false;
         loop {
             {
                 let stack = lock_stack(&self.inner.stack);
@@ -373,6 +384,23 @@ impl Client {
                     "WireGuard TCP connect timed out",
                 ));
             }
+            if !rekeyed
+                && self.inner.established.load(Ordering::Acquire)
+                && Instant::now() >= dialed_at + STALE_SESSION_REKEY
+                && *self
+                    .inner
+                    .last_tunnel_recv
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    < dialed_at
+            {
+                // Existing keys are unanswered (silent peer restart). Rekey the
+                // current Tunn; do not reset_session (that would drop other dials).
+                rekeyed = true;
+                let _ = self
+                    .send_action(self.inner.tunnel.format_handshake(true))
+                    .await;
+            }
             tokio::select! {
                 () = self.inner.shutdown.cancelled() => {
                     return Err(WireGuardProtocolError::protocol("WireGuard client retired"));
@@ -395,8 +423,13 @@ impl Client {
         if self.inner.established.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.send_action(self.inner.tunnel.format_handshake(true))
-            .await?;
+        match self.inner.tunnel.format_handshake_unless_session() {
+            None => {
+                self.inner.established.store(true, Ordering::Release);
+                return Ok(());
+            }
+            Some(action) => self.send_action(action).await?,
+        }
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
         while !self.inner.established.load(Ordering::Acquire) {
             if tokio::time::Instant::now() >= deadline {
@@ -453,18 +486,32 @@ async fn run_reactor(inner: Arc<ClientInner>) {
     let mut buf = vec![0_u8; 65_535];
     let mut timers = tokio::time::interval(Duration::from_millis(100));
     timers.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut udp_epoch = inner.udp_epoch.load(Ordering::Acquire);
     loop {
         let delay = lock_stack(&inner.stack)
             .poll_delay()
             .unwrap_or(Duration::from_millis(100));
         let udp_changed = inner.udp_changed.notified();
         tokio::pin!(udp_changed);
+        let next_epoch = inner.udp_epoch.load(Ordering::Acquire);
+        if next_epoch != udp_epoch {
+            udp_epoch = next_epoch;
+        }
         let udp = clone_udp(&inner);
         tokio::select! {
             () = inner.shutdown.cancelled() => break,
             result = udp.recv_from(&mut buf) => {
-                let Ok((n, from)) = result else { break };
-                handle_incoming(&inner, Some(from), &buf[..n]).await;
+                match result {
+                    Ok((n, from)) => handle_incoming(&inner, Some(from), &buf[..n]).await,
+                    Err(_) => {
+                        if inner.shutdown.is_cancelled() {
+                            break;
+                        }
+                        if inner.udp_epoch.load(Ordering::Acquire) == udp_epoch {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }
+                }
             }
             () = udp_changed => {}
             () = inner.notify.notified() => {
@@ -499,10 +546,12 @@ async fn handle_incoming(inner: &ClientInner, from: Option<SocketAddr>, datagram
                 break;
             }
             TunnelAction::SendUdp(reply) => {
+                note_peer_alive(inner);
                 let _ = send_udp(inner, &reply).await;
                 packet = &[];
             }
             TunnelAction::RecvIp(ip) => {
+                note_peer_alive(inner);
                 inner.established.store(true, Ordering::Release);
                 lock_stack(&inner.stack).ingest_ip(ip);
                 inner.notify.notify_waiters();
@@ -539,6 +588,7 @@ async fn pump_stack(inner: &ClientInner) {
                     let _ = send_udp(inner, &extra).await;
                 }
                 TunnelAction::RecvIp(ip) => {
+                    note_peer_alive(inner);
                     inner.established.store(true, Ordering::Release);
                     lock_stack(&inner.stack).ingest_ip(ip);
                     inner.notify.notify_waiters();
@@ -596,6 +646,8 @@ async fn dispatch_action(
 }
 
 async fn handle_expired(inner: &ClientInner) {
+    // Brief lock only: never hold `handshake` across await (complete_handshake
+    // waits for `established` while holding it).
     reset_session(inner);
     inner.notify.notify_waiters();
     match inner.tunnel.format_handshake(true) {
@@ -604,6 +656,13 @@ async fn handle_expired(inner: &ClientInner) {
         }
         TunnelAction::Expired | TunnelAction::Done | TunnelAction::RecvIp(_) => {}
     }
+}
+
+fn note_peer_alive(inner: &ClientInner) {
+    *inner
+        .last_tunnel_recv
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
 }
 
 fn reset_session(inner: &ClientInner) {
@@ -671,6 +730,7 @@ async fn apply_endpoint(
         .unwrap_or_else(std::sync::PoisonError::into_inner) =
         Instant::now() + inner.refresh_server_ip_interval;
     inner.refresh_backoff_ms.store(0, Ordering::Relaxed);
+    inner.udp_epoch.fetch_add(1, Ordering::Release);
     inner.udp_changed.notify_waiters();
     inner.notify.notify_waiters();
     Ok(())
@@ -687,16 +747,36 @@ async fn bind_peer_udp(
         },
         0,
     );
-    let std_socket = rewrite_platform::bind_outbound_udp(
-        local,
-        endpoint,
-        &inner.bind_interface,
-        inner.routing_mark,
-    )?;
+    validate_peer_udp(inner, endpoint).await?;
+    bind_unconnected_udp(local, endpoint, &inner.bind_interface, inner.routing_mark)
+}
+
+async fn validate_peer_udp(
+    inner: &ClientInner,
+    endpoint: SocketAddr,
+) -> Result<(), WireGuardProtocolError> {
+    let local = SocketAddr::new(
+        match endpoint.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        0,
+    );
+    let probe = bind_unconnected_udp(local, endpoint, &inner.bind_interface, inner.routing_mark)?;
+    probe.connect(endpoint).await?;
+    Ok(())
+}
+
+fn bind_unconnected_udp(
+    local: SocketAddr,
+    endpoint: SocketAddr,
+    bind_interface: &str,
+    routing_mark: i64,
+) -> Result<UdpSocket, WireGuardProtocolError> {
+    let std_socket =
+        rewrite_platform::bind_outbound_udp(local, endpoint, bind_interface, routing_mark)?;
     std_socket.set_nonblocking(true)?;
-    let udp = UdpSocket::from_std(std_socket)?;
-    udp.connect(endpoint).await?;
-    Ok(udp)
+    Ok(UdpSocket::from_std(std_socket)?)
 }
 
 fn clone_udp(inner: &ClientInner) -> Arc<UdpSocket> {

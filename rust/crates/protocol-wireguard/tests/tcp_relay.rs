@@ -1,6 +1,6 @@
 //! In-process 6I-A TCP relay: userspace client → `WireGuard` → netstack → echo.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +77,67 @@ async fn userspace_tcp_relays_echo() {
     let mut got = [0_u8; 7];
     stream.read_exact(&mut got).await.expect("read");
     assert_eq!(&got, b"wg-echo");
+    client.close().await;
+}
+
+#[tokio::test]
+async fn userspace_tcp_relays_echo_ipv6() {
+    let echo = TcpListener::bind("[::1]:0").await.expect("echo bind");
+    let echo_addr = echo.local_addr().expect("echo addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = echo.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 4096];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if stream.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let (client_priv, client_pub) = pair(11);
+    let (server_priv, server_pub) = pair(13);
+    let listen = UdpSocket::bind("127.0.0.1:0").await.expect("wg bind");
+    let endpoint = listen.local_addr().expect("wg addr");
+    spawn_responder(listen, server_priv, client_pub);
+
+    let client = Client::new(ClientOptions {
+        server: "127.0.0.1".to_owned(),
+        port: endpoint.port(),
+        private_key: client_priv,
+        peer_public_key: server_pub,
+        preshared_key: None,
+        local_v4: None,
+        local_v6: Some((Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2), 128)),
+        mtu: 1408,
+        persistent_keepalive: None,
+        reserved: [0; 3],
+        bind_interface: String::new(),
+        routing_mark: 0,
+        refresh_server_ip_interval: Duration::ZERO,
+        initial_endpoint: None,
+        resolve_peer: None,
+    })
+    .await
+    .expect("client");
+
+    let destination = Destination {
+        host: Host::Ip(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        port: echo_addr.port(),
+    };
+    let mut stream = client.open_tcp(&destination).await.expect("open ipv6 tcp");
+    stream.write_all(b"wg-v6").await.expect("write");
+    let mut got = [0_u8; 5];
+    stream.read_exact(&mut got).await.expect("read");
+    assert_eq!(&got, b"wg-v6");
     client.close().await;
 }
 

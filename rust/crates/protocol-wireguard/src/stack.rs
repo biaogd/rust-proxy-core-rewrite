@@ -25,9 +25,12 @@ const TCP_BUFFER: usize = 64 * 1024;
 const UDP_PACKET_SLOTS: usize = 32;
 const UDP_PAYLOAD: usize = 64 * 1024;
 const EPHEMERAL_START: u16 = 49_152;
-/// Bound for sockets the application already dropped. Held half-closes are
-/// not on this list and are not aborted.
+/// Bound for dropped sockets stuck in FinWait2 / Syn* / Established.
+/// Held half-closes are not on this list and are not aborted.
 const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// FinWait1 still has an unacked FIN (`send_queue` does not include it).
+/// Aborting at [`RELEASE_TIMEOUT`] turns a graceful close into RST.
+const FIN_WAIT1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone, Copy)]
 enum SocketKind {
@@ -108,6 +111,7 @@ struct SocketWakers {
 
 struct ReleasedSocket {
     handle: SocketHandle,
+    released_at: std::time::Instant,
     abort_at: Option<std::time::Instant>,
 }
 
@@ -194,7 +198,11 @@ impl IpStack {
             .iface
             .poll(timestamp, &mut self.device, &mut self.sockets);
         self.wake_ready();
-        self.reap();
+        if self.reap() {
+            let _ = self.iface.poll(now(), &mut self.device, &mut self.sockets);
+            self.wake_ready();
+            let _ = self.reap();
+        }
     }
 
     pub(crate) fn poll_delay(&mut self) -> Option<std::time::Duration> {
@@ -239,26 +247,36 @@ impl IpStack {
         }
     }
 
-    fn reap(&mut self) {
+    /// Returns `true` when at least one socket was aborted and needs another
+    /// `iface.poll` so the RST is emitted before `sockets.remove`.
+    fn reap(&mut self) -> bool {
         let now = std::time::Instant::now();
         let mut still = Vec::new();
+        let mut aborted = false;
         for item in self.releasing.drain(..) {
             let Some((kind, port)) = self.live.get(&item.handle).copied() else {
                 continue;
             };
-            let mut finished = match kind {
+            let finished = match kind {
                 SocketKind::Tcp => {
                     let state = self.sockets.get::<TcpSocket>(item.handle).state();
-                    matches!(state, State::Closed | State::TimeWait | State::Listen)
+                    matches!(state, State::Closed | State::Listen)
                 }
                 SocketKind::Udp => !self.sockets.get::<UdpSocket>(item.handle).is_open(),
             };
             if !finished
                 && matches!(kind, SocketKind::Tcp)
-                && item.abort_at.is_some_and(|deadline| now >= deadline)
+                && should_timeout_abort(
+                    self.sockets.get::<TcpSocket>(item.handle).state(),
+                    item.released_at,
+                    item.abort_at,
+                    now,
+                )
             {
                 self.sockets.get_mut::<TcpSocket>(item.handle).abort();
-                finished = true;
+                aborted = true;
+                still.push(item);
+                continue;
             }
             if finished {
                 self.sockets.remove(item.handle);
@@ -270,6 +288,7 @@ impl IpStack {
             }
         }
         self.releasing = still;
+        aborted
     }
 
     pub(crate) fn connect(&mut self, dest: SocketAddr) -> Result<SocketHandle, io::Error> {
@@ -427,7 +446,19 @@ impl IpStack {
         if self.releasing.iter().any(|item| item.handle == handle) {
             return;
         }
-        self.releasing.push(ReleasedSocket { handle, abort_at });
+        self.releasing.push(ReleasedSocket {
+            handle,
+            released_at: std::time::Instant::now(),
+            abort_at,
+        });
+    }
+
+    pub(crate) fn tcp_recv_finished(&self, handle: SocketHandle) -> bool {
+        if !matches!(self.kind(handle), Some(SocketKind::Tcp)) {
+            return false;
+        }
+        let socket = self.sockets.get::<TcpSocket>(handle);
+        !socket.may_recv() && socket.recv_queue() == 0
     }
 
     pub(crate) fn tcp_send_queue(&self, handle: SocketHandle) -> usize {
@@ -671,9 +702,7 @@ impl AsyncRead for WgTcpStream {
         let unfilled = buf.initialize_unfilled();
         match stack.recv(self.handle, unfilled) {
             Ok(0) => {
-                if stack.state(self.handle).is_some_and(|state| {
-                    matches!(state, State::CloseWait | State::Closed | State::TimeWait)
-                }) {
+                if stack.tcp_recv_finished(self.handle) {
                     Poll::Ready(Ok(()))
                 } else {
                     stack.register_read(self.handle, cx.waker().clone());
@@ -859,6 +888,19 @@ fn retired() -> io::Error {
     io::Error::new(ErrorKind::BrokenPipe, "WireGuard client retired")
 }
 
+fn should_timeout_abort(
+    state: State,
+    released_at: std::time::Instant,
+    abort_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match state {
+        State::Closed | State::Listen | State::TimeWait => false,
+        State::FinWait1 => now >= released_at + FIN_WAIT1_TIMEOUT,
+        _ => abort_at.is_some_and(|deadline| now >= deadline),
+    }
+}
+
 #[cfg(test)]
 mod port_tests {
     use super::*;
@@ -1028,5 +1070,127 @@ mod port_tests {
         std::thread::sleep(RELEASE_TIMEOUT + std::time::Duration::from_millis(20));
         stack.poll();
         assert_eq!(stack.live_socket_count(), 1);
+    }
+
+    fn establish(
+        stack: &mut IpStack,
+    ) -> (
+        SocketHandle,
+        Ipv4Address,
+        Ipv4Address,
+        u16,
+        u16,
+        TcpSeqNumber,
+    ) {
+        let dest = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 80));
+        let handle = stack.connect(dest).expect("connect");
+        stack.poll();
+        let syn = stack.take_ip().pop().expect("syn");
+        let (ip, tcp) = parse_ipv4_tcp(&syn);
+        assert_eq!(tcp.control, TcpControl::Syn);
+        let client_next = tcp.seq_number + 1;
+        let syn_ack = emit_ipv4_tcp(
+            ip.dst_addr,
+            ip.src_addr,
+            empty_tcp(
+                tcp.dst_port,
+                tcp.src_port,
+                TcpControl::Syn,
+                TcpSeqNumber(1),
+                Some(client_next),
+            ),
+        );
+        stack.ingest_ip(syn_ack);
+        stack.poll();
+        let _ = stack.take_ip();
+        assert_eq!(stack.state(handle), Some(State::Established));
+        (
+            handle,
+            ip.src_addr,
+            ip.dst_addr,
+            tcp.src_port,
+            tcp.dst_port,
+            client_next,
+        )
+    }
+
+    #[test]
+    fn last_ack_and_closing_are_recv_eof() {
+        let mut stack = stack();
+        let (handle, local, remote, local_port, remote_port, client_next) = establish(&mut stack);
+        let fin = emit_ipv4_tcp(
+            remote,
+            local,
+            empty_tcp(
+                remote_port,
+                local_port,
+                TcpControl::Fin,
+                TcpSeqNumber(2),
+                Some(client_next),
+            ),
+        );
+        stack.ingest_ip(fin);
+        stack.poll();
+        assert_eq!(stack.state(handle), Some(State::CloseWait));
+        assert!(stack.tcp_recv_finished(handle));
+        stack.close_write(handle);
+        stack.poll();
+        assert_eq!(stack.state(handle), Some(State::LastAck));
+        assert!(
+            stack.tcp_recv_finished(handle),
+            "LastAck must complete poll_read as EOF"
+        );
+    }
+
+    #[test]
+    fn time_wait_keeps_ephemeral_port() {
+        let mut stack = stack();
+        let (handle, local, remote, local_port, remote_port, _) = establish(&mut stack);
+        let port = stack
+            .live
+            .get(&handle)
+            .map(|(_, port)| *port)
+            .expect("local port");
+        stack.close_write(handle);
+        stack.release(handle);
+        stack.poll();
+        assert_eq!(stack.state(handle), Some(State::FinWait1));
+        let fin = stack.take_ip().pop().expect("fin");
+        let (_, fin_tcp) = parse_ipv4_tcp(&fin);
+        let ack = emit_ipv4_tcp(
+            remote,
+            local,
+            empty_tcp(
+                remote_port,
+                local_port,
+                TcpControl::None,
+                TcpSeqNumber(2),
+                Some(fin_tcp.seq_number + 1),
+            ),
+        );
+        stack.ingest_ip(ack);
+        stack.poll();
+        let _ = stack.take_ip();
+        assert_eq!(stack.state(handle), Some(State::FinWait2));
+        let peer_fin = emit_ipv4_tcp(
+            remote,
+            local,
+            empty_tcp(
+                remote_port,
+                local_port,
+                TcpControl::Fin,
+                TcpSeqNumber(2),
+                Some(fin_tcp.seq_number + 1),
+            ),
+        );
+        stack.ingest_ip(peer_fin);
+        stack.poll();
+        let _ = stack.take_ip();
+        assert_eq!(stack.state(handle), Some(State::TimeWait));
+        assert_eq!(stack.live_socket_count(), 1);
+        assert!(
+            stack.allocated_ports.contains(&port),
+            "TIME-WAIT must keep the 4-tuple reserved"
+        );
     }
 }

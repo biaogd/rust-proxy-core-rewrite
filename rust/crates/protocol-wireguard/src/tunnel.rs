@@ -86,6 +86,28 @@ impl NoiseTunnel {
         }
     }
 
+    /// `true` when boringtun already has a completed session that is not expired.
+    #[must_use]
+    pub fn has_session(&self) -> bool {
+        let tunn = self.lock();
+        !tunn.is_expired() && tunn.stats().0.is_some()
+    }
+
+    /// Starts a handshake only when no session exists. `None` means a session
+    /// is already live — callers must not `format_handshake(true)`, which would
+    /// clobber keys the reactor just installed.
+    pub fn format_handshake_unless_session(&self) -> Option<TunnelAction> {
+        let mut output = vec![0_u8; 2048];
+        let mut tunn = self.lock();
+        if !tunn.is_expired() && tunn.stats().0.is_some() {
+            return None;
+        }
+        Some(match tunn.format_handshake_initiation(&mut output, true) {
+            TunnResult::WriteToNetwork(packet) => owned_udp(packet, self.reserved),
+            other => map_result(other, self.reserved),
+        })
+    }
+
     /// Encrypts an inner IP packet (empty `src` sends a keepalive when a session exists).
     pub fn encapsulate(&self, src: &[u8]) -> TunnelAction {
         let mut output = vec![0_u8; src.len().saturating_add(64).max(2048)];
@@ -213,6 +235,11 @@ mod tests {
             TunnelAction::RecvIp(plain) => assert_eq!(plain, ip),
             other => panic!("expected inner IP, got {other:?}"),
         }
+        assert!(alice.has_session());
+        assert!(
+            alice.format_handshake_unless_session().is_none(),
+            "forcing a handshake after the session exists would clobber it"
+        );
     }
 
     #[test]
