@@ -1,8 +1,11 @@
+use rewrite_config::SnellObfs;
 use rewrite_model::Destination;
 use thiserror::Error;
-use tokio::net::TcpStream;
 
-use crate::{BoxedOutboundStream, DirectError, DirectTcpOptions, connect_with_options};
+use crate::{
+    BoxedOutboundStream, DirectError, DirectTcpOptions, HttpObfsClient, TlsObfsClient,
+    connect_with_options,
+};
 
 pub use rewrite_protocol_snell::SnellUdpAssociation;
 
@@ -25,9 +28,14 @@ pub async fn connect_snell_with_options(
     allow_ipv6: bool,
     psk: &[u8],
     version: u8,
+    obfs: Option<&SnellObfs>,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, SnellProxyError> {
-    let stream = connect_with_options(server, allow_ipv6, options).await?;
+    let stream = apply_snell_obfs(
+        Box::new(connect_with_options(server, allow_ipv6, options).await?),
+        server,
+        obfs,
+    );
     let wrapped = rewrite_protocol_snell::connect_tcp(
         stream,
         destination,
@@ -51,9 +59,14 @@ pub async fn associate_snell_udp_with_options(
     allow_ipv6: bool,
     psk: &[u8],
     version: u8,
+    obfs: Option<&SnellObfs>,
     options: DirectTcpOptions<'_>,
-) -> Result<SnellUdpAssociation<TcpStream>, SnellProxyError> {
-    let stream = connect_with_options(server, allow_ipv6, options).await?;
+) -> Result<SnellUdpAssociation<BoxedOutboundStream>, SnellProxyError> {
+    let stream = apply_snell_obfs(
+        Box::new(connect_with_options(server, allow_ipv6, options).await?),
+        server,
+        obfs,
+    );
     Ok(rewrite_protocol_snell::associate_udp(
         stream,
         &rewrite_protocol_snell::ClientOptions {
@@ -62,4 +75,18 @@ pub async fn associate_snell_udp_with_options(
         },
     )
     .await?)
+}
+
+fn apply_snell_obfs(
+    stream: BoxedOutboundStream,
+    server: &Destination,
+    obfs: Option<&SnellObfs>,
+) -> BoxedOutboundStream {
+    match obfs {
+        None => stream,
+        Some(SnellObfs::Http { host }) => {
+            Box::new(HttpObfsClient::new(stream, host.clone(), server.port))
+        }
+        Some(SnellObfs::Tls { host }) => Box::new(TlsObfsClient::new(stream, host.clone())),
+    }
 }

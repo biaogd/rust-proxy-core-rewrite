@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use rewrite_model::{Destination, Host};
 use rewrite_protocol_snell::{
-    AuthorityOptions, ClientOptions, DEFAULT_VERSION, connect_tcp, spawn_authority,
+    AuthorityObfs, AuthorityOptions, ClientOptions, DEFAULT_VERSION, connect_tcp, spawn_authority,
 };
+use rewrite_transport::{HttpObfsClient, TlsObfsClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -20,6 +21,7 @@ async fn omitted_version_defaults_to_v1() {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
         version: 0,
+        obfs: None,
     })
     .await
     .expect("authority");
@@ -47,12 +49,73 @@ async fn v3_aes_gcm_echo() {
 }
 
 #[tokio::test]
+async fn http_obfs_echo() {
+    let echo = spawn_echo().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"password".to_vec(),
+        version: 1,
+        obfs: Some(AuthorityObfs::Http),
+    })
+    .await
+    .expect("authority");
+    let raw = tokio::net::TcpStream::connect(authority.local_addr)
+        .await
+        .expect("dial");
+    let mut stream = connect_tcp(
+        HttpObfsClient::new(raw, "bing.com".to_owned(), authority.local_addr.port()),
+        &echo.destination,
+        &ClientOptions {
+            psk: b"password".to_vec(),
+            version: 1,
+        },
+    )
+    .await
+    .expect("client");
+    stream.write_all(b"snell-http").await.expect("write");
+    let mut got = vec![0_u8; 10];
+    stream.read_exact(&mut got).await.expect("read");
+    assert_eq!(got, b"snell-http");
+}
+
+#[tokio::test]
+async fn tls_obfs_echo() {
+    let echo = spawn_echo().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"phase7e-psk".to_vec(),
+        version: 3,
+        obfs: Some(AuthorityObfs::Tls),
+    })
+    .await
+    .expect("authority");
+    let raw = tokio::net::TcpStream::connect(authority.local_addr)
+        .await
+        .expect("dial");
+    let mut stream = connect_tcp(
+        TlsObfsClient::new(raw, "bing.com".to_owned()),
+        &echo.destination,
+        &ClientOptions {
+            psk: b"phase7e-psk".to_vec(),
+            version: 3,
+        },
+    )
+    .await
+    .expect("client");
+    stream.write_all(b"snell-tls").await.expect("write");
+    let mut got = vec![0_u8; 9];
+    stream.read_exact(&mut got).await.expect("read");
+    assert_eq!(got, b"snell-tls");
+}
+
+#[tokio::test]
 async fn dest_refused_does_not_panic() {
     let unused = unused_tcp_port().await;
     let authority = spawn_authority(AuthorityOptions {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
         version: 1,
+        obfs: None,
     })
     .await
     .expect("authority");
@@ -90,6 +153,7 @@ async fn concurrent_sessions_stay_isolated() {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
         version: 1,
+        obfs: None,
     })
     .await
     .expect("authority");
@@ -126,6 +190,7 @@ async fn relay_echo(version: u8, psk: &[u8], payload: &[u8]) {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: psk.to_vec(),
         version,
+        obfs: None,
     })
     .await
     .expect("authority");

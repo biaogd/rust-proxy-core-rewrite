@@ -1326,11 +1326,11 @@ for claims.
    checkout. Mixed/SOCKS using WireGuard does not require administrator
    privileges. There is no WireGuard inbound. Cryptography is
    `defguard_boringtun`. AmneziaWG stays later. SSH (6J) is a separate PR.
-5. **Snell outbound (7E-A/B, OUT-10):** implemented in this checkout.
+5. **Snell outbound (7E-A/B/C, OUT-10):** implemented in this checkout.
    Clash `type: snell` versions 1–3 TCP plus v3 UDP through mixed/SOCKS,
-   Argon2id + Shadowsocks AEAD, no inbound/`reuse`/`obfs-opts`/v4. Evidence:
-   `compat/scripts/phase7e_snell_tcp.py`, `phase7e_snell_udp.py`, plus
-   `protocol-snell` `tcp_relay` / `udp_relay`.
+   Argon2id + Shadowsocks AEAD, simple-obfs HTTP/TLS, no inbound/`reuse`/v4.
+   Evidence: `compat/scripts/phase7e_snell_tcp.py`, `phase7e_snell_udp.py`,
+   `phase7e_snell_obfs.py`, plus `protocol-snell` `tcp_relay` / `udp_relay`.
 
 SSH (if still unmerged) and the remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
@@ -3097,8 +3097,12 @@ AES-128-GCM). Native Parity is not claimed.
 - **7E-B (implemented in this checkout):** v3 `udp: true` → mixed/SOCKS UDP
   ASSOCIATE → one TCP+AEAD session → UDP target. No session pool. Evidence:
   `compat/scripts/phase7e_snell_udp.py` plus `protocol-snell` `udp_relay`.
-- **7E-C (later):** `reuse` pooling, simple-obfs / remaining `obfs-opts`.
-  v4/v5 stay later.
+- **7E-C (implemented in this checkout):** simple-obfs `obfs-opts` HTTP/TLS
+  on the TCP carrier before AEAD (TCP and v3 UDP). Host defaults to
+  `bing.com`. Evidence: `compat/scripts/phase7e_snell_obfs.py` plus crate
+  `http_obfs_echo` / `tls_obfs_echo`.
+- **7E-D (later):** `reuse` pooling (v2 always / ConnectV2 half-close).
+  Remaining `obfs-opts` (shadow-tls/restls/jls) and v4/v5 stay later.
 Use **7T** subphases for shared dialer chains, mux, WebSocket,
 HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, plugins, Reality, ECH, JLS, ReSTLS,
 ShadowTLS and TLSMirror. A protocol gate may depend on a 7T transport gate but

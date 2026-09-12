@@ -1976,6 +1976,7 @@ async fn connect_snell_proxy(
         allow_ipv6,
         snell.psk.as_bytes(),
         snell.version,
+        snell.obfs.as_ref(),
         socket_options,
     )
     .await

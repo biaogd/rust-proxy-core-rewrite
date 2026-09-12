@@ -414,6 +414,7 @@ fn snell_configuration_is_supported_and_scoped() {
     let snell = proxy.snell.as_ref().expect("snell options");
     assert_eq!(snell.psk, "password");
     assert_eq!(snell.version, 1);
+    assert!(snell.obfs.is_none());
 
     let v3 = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: snell-v3\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n"
@@ -422,12 +423,34 @@ fn snell_configuration_is_supported_and_scoped() {
     assert_eq!(v3.proxies[0].snell.as_ref().expect("v3").version, 3);
     assert!(v3.proxies[0].udp);
 
+    let http = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: snell-http\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    obfs-opts:\n      mode: http\n      host: snell.example\n"
+    ))
+    .expect("Snell HTTP obfs");
+    assert_eq!(
+        http.proxies[0].snell.as_ref().expect("http").obfs,
+        Some(SnellObfs::Http {
+            host: "snell.example".to_owned()
+        })
+    );
+
+    let tls = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: snell-tls\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    obfs-opts:\n      mode: tls\n"
+    ))
+    .expect("Snell TLS obfs");
+    assert_eq!(
+        tls.proxies[0].snell.as_ref().expect("tls").obfs,
+        Some(SnellObfs::Tls {
+            host: "bing.com".to_owned()
+        })
+    );
+
     for unsupported in [
         "psk: password\n    udp: true",
         "psk: password\n    reuse: true",
         "psk: password\n    version: 4",
         "psk: password\n    version: 5",
-        "psk: password\n    obfs-opts:\n      mode: http",
+        "psk: password\n    obfs-opts:\n      mode: shadow-tls",
         "psk: password\n    dialer-proxy: DIRECT",
         "password: password",
     ] {

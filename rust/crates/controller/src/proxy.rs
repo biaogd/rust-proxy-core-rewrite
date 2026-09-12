@@ -938,6 +938,7 @@ pub(super) async fn measure_http_delay(
                         config.ipv6,
                         snell.psk.as_bytes(),
                         snell.version,
+                        snell.obfs.as_ref(),
                         controller_socket_options(config),
                     )
                     .await

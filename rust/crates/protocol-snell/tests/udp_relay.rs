@@ -9,6 +9,7 @@ async fn v3_udp_ipv4_echo_and_second_packet() {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"phase7e-psk".to_vec(),
         version: 3,
+        obfs: None,
     })
     .await
     .expect("authority");
@@ -41,6 +42,7 @@ async fn v3_udp_domain_echo() {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
         version: 3,
+        obfs: None,
     })
     .await
     .expect("authority");
@@ -88,6 +90,7 @@ async fn oversized_udp_payload_is_rejected() {
         listen: "127.0.0.1:0".parse().expect("listen"),
         psk: b"password".to_vec(),
         version: 3,
+        obfs: None,
     })
     .await
     .expect("authority");

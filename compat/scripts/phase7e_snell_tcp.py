@@ -177,6 +177,7 @@ def start_authority(
     listen_port: int,
     psk: str,
     version: int,
+    obfs: str | None = None,
 ) -> tuple[subprocess.Popen[bytes], Any, Any]:
     scratch.mkdir(parents=True, exist_ok=True)
     stdout_path = scratch / "authority-stdout.log"
@@ -184,7 +185,8 @@ def start_authority(
     stdout = stdout_path.open("wb")
     stderr = stderr_path.open("wb")
     process = subprocess.Popen(
-        [str(binary), f"127.0.0.1:{listen_port}", psk, str(version)],
+        [str(binary), f"127.0.0.1:{listen_port}", psk, str(version)]
+        + ([obfs] if obfs else []),
         cwd=scratch,
         stdout=stdout,
         stderr=stderr,
@@ -433,7 +435,19 @@ def main() -> int:
                 f"    psk: {PSK}\n"
                 "    reuse: true\n",
             )
-            observations["rust-obfs-rejected"] = not config_validation(
+            observations["rust-obfs-http-accepted"] = config_validation(
+                binaries["rust"],
+                root / "rust-validate-obfs-http",
+                "proxies:\n"
+                "  - name: ok\n"
+                "    type: snell\n"
+                "    server: 127.0.0.1\n"
+                "    port: 1\n"
+                f"    psk: {PSK}\n"
+                "    obfs-opts:\n"
+                "      mode: http\n",
+            )
+            observations["rust-obfs-shadowtls-rejected"] = not config_validation(
                 binaries["rust"],
                 root / "rust-validate-obfs",
                 "proxies:\n"
@@ -443,7 +457,7 @@ def main() -> int:
                 "    port: 1\n"
                 f"    psk: {PSK}\n"
                 "    obfs-opts:\n"
-                "      mode: http\n",
+                "      mode: shadow-tls\n",
             )
             observations["rust-v4-rejected"] = not config_validation(
                 binaries["rust"],
@@ -486,7 +500,8 @@ def main() -> int:
     rust_only = [
         "rust-udp-rejected",
         "rust-reuse-rejected",
-        "rust-obfs-rejected",
+        "rust-obfs-http-accepted",
+        "rust-obfs-shadowtls-rejected",
         "rust-v4-rejected",
         "rust-v1-accepted",
     ]

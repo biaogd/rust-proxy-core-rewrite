@@ -1,7 +1,8 @@
-//! Snell TCP/UDP relay authority for 7E-A/B Go/Rust differentials.
+//! Snell TCP/UDP relay authority for 7E-A/B/C Go/Rust differentials.
 //!
-//! This is not a Clash inbound. It decrypts versions 1–3, writes `CommandTunnel`,
-//! and splices Connect to TCP or `CommandUDP` to a per-packet UDP echo path.
+//! This is not a Clash inbound. It decrypts versions 1–3, optionally wraps
+//! simple-obfs HTTP/TLS, writes `CommandTunnel`, and splices Connect to TCP or
+//! `CommandUDP` to a per-packet UDP echo path.
 
 use std::error::Error;
 use std::io::{self, Write};
@@ -21,6 +22,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(text) => text.parse::<u8>().map_err(|_| "invalid version")?,
         None => 1,
     };
+    let obfs = match arguments.next().as_deref() {
+        None | Some("" | "none") => None,
+        Some("http") => Some(rewrite_protocol_snell::AuthorityObfs::Http),
+        Some("tls") => Some(rewrite_protocol_snell::AuthorityObfs::Tls),
+        Some(other) => return Err(format!("unsupported obfs mode {other}").into()),
+    };
     if arguments.next().is_some() {
         return Err("unexpected argument".into());
     }
@@ -28,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         listen,
         psk: psk.into_bytes(),
         version,
+        obfs,
     })
     .await?;
     println!("READY {}", authority.local_addr);

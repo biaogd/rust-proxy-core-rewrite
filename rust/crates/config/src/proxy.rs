@@ -16,8 +16,8 @@ use crate::model::{
     AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
     ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
     ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
-    SnellProxyConfig, SsrProxyConfig, TrojanProxyConfig, TrojanTransport, TuicProxyConfig,
-    VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode,
+    SnellObfs, SnellProxyConfig, SsrProxyConfig, TrojanProxyConfig, TrojanTransport,
+    TuicProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode,
     VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig,
     VmessSecurity, VmessTransport, WireGuardProxyConfig,
 };
@@ -956,7 +956,7 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
 
 #[allow(clippy::too_many_lines)]
 fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
-    const ACCEPTED_EXTRA: &[&str] = &["psk", "version", "reuse"];
+    const ACCEPTED_EXTRA: &[&str] = &["psk", "version", "reuse", "obfs-opts"];
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -1019,6 +1019,7 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
     if udp && version < 3 {
         return Err(ConfigError::UnsupportedProxy(name));
     }
+    let obfs = parse_snell_obfs(&mut proxy.extra, &name)?;
     let server = proxy
         .server
         .filter(|server| !server.is_empty())
@@ -1060,9 +1061,53 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         tuic: None,
         ssr: None,
         wireguard: None,
-        snell: Some(SnellProxyConfig { psk, version }),
+        snell: Some(SnellProxyConfig { psk, version, obfs }),
         headers: BTreeMap::new(),
     })
+}
+
+fn parse_snell_obfs(
+    extra: &mut BTreeMap<String, serde_yaml_ng::Value>,
+    name: &str,
+) -> Result<Option<SnellObfs>, ConfigError> {
+    match extra.remove("obfs-opts") {
+        None | Some(serde_yaml_ng::Value::Null) => Ok(None),
+        Some(serde_yaml_ng::Value::Mapping(map)) => {
+            let mut mode = String::new();
+            let mut host = String::from("bing.com");
+            for (key, value) in map {
+                let Some(key) = key.as_str() else {
+                    return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+                };
+                match key {
+                    "mode" => {
+                        mode = match value {
+                            serde_yaml_ng::Value::String(text) => text,
+                            serde_yaml_ng::Value::Null => String::new(),
+                            _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                        };
+                    }
+                    "host" => {
+                        host = match value {
+                            serde_yaml_ng::Value::String(text) if !text.is_empty() => text,
+                            serde_yaml_ng::Value::Null | serde_yaml_ng::Value::String(_) => {
+                                "bing.com".to_owned()
+                            }
+                            _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                        };
+                    }
+                    _ => return Err(ConfigError::UnsupportedProxy(name.to_owned())),
+                }
+            }
+            match mode.to_ascii_lowercase().as_str() {
+                "" => Ok(None),
+                "http" => Ok(Some(SnellObfs::Http { host })),
+                "tls" => Ok(Some(SnellObfs::Tls { host })),
+                _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+            }
+        }
+        _ => Err(ConfigError::UnsupportedProxy(name.to_owned())),
+    }
 }
 
 fn decode_wireguard_key(text: &str, name: &str) -> Result<[u8; 32], ConfigError> {

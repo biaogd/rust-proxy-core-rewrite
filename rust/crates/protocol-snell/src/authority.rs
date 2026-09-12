@@ -1,15 +1,24 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use rewrite_transport::{HttpObfsServer, TlsObfsServer};
 
 use crate::aead::{CipherKind, SnellStream};
 use crate::header::{COMMAND_TUNNEL, ClientCommand, parse_client_command};
 use crate::packet::{encode_udp_response, parse_udp_request};
 use crate::{DEFAULT_VERSION, SnellProtocolError};
+
+/// Simple-obfs wrap for the 7E-C test authority (not a product inbound).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorityObfs {
+    Http,
+    Tls,
+}
 
 /// Listen options for the 7E test authority (not a product inbound).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +29,8 @@ pub struct AuthorityOptions {
     pub psk: Vec<u8>,
     /// Clash `version`. `0` means [`DEFAULT_VERSION`].
     pub version: u8,
+    /// Optional simple-obfs HTTP/TLS wrap before AEAD.
+    pub obfs: Option<AuthorityObfs>,
 }
 
 /// Running test authority. Dropping it stops the accept loop.
@@ -64,6 +75,7 @@ pub async fn spawn_authority(options: AuthorityOptions) -> Result<Authority, Sne
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let psk = options.psk;
+    let obfs = options.obfs;
     let join = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -76,7 +88,7 @@ pub async fn spawn_authority(options: AuthorityOptions) -> Result<Authority, Sne
                     };
                     let psk = psk.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = serve_connection(stream, &psk, kind).await {
+                        if let Err(error) = serve_accepted(stream, &psk, kind, obfs).await {
                             eprintln!("Snell authority connection failed: {error}");
                         }
                     });
@@ -91,11 +103,31 @@ pub async fn spawn_authority(options: AuthorityOptions) -> Result<Authority, Sne
     })
 }
 
-async fn serve_connection(
+async fn serve_accepted(
     stream: TcpStream,
     psk: &[u8],
     kind: CipherKind,
+    obfs: Option<AuthorityObfs>,
 ) -> Result<(), SnellProtocolError> {
+    match obfs {
+        None => serve_connection(stream, psk, kind).await,
+        Some(AuthorityObfs::Http) => {
+            serve_connection(HttpObfsServer::new(stream, None), psk, kind).await
+        }
+        Some(AuthorityObfs::Tls) => {
+            serve_connection(TlsObfsServer::new(stream, None), psk, kind).await
+        }
+    }
+}
+
+async fn serve_connection<S>(
+    stream: S,
+    psk: &[u8],
+    kind: CipherKind,
+) -> Result<(), SnellProtocolError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut inbound = SnellStream::server(stream, psk, kind).await?;
     match read_client_command(&mut inbound).await? {
         ClientCommand::Connect { host, port } => {

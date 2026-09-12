@@ -2,6 +2,14 @@
 
 Last updated: 2026-09-12
 
+### 7E-C Snell simple-obfs HTTP/TLS — 2026-09-12
+
+Clash `type: snell` now accepts `obfs-opts.mode: http|tls` (host defaults to
+`bing.com`). The wrap sits on the TCP carrier before AEAD and applies to TCP
+and v3 UDP. `reuse` pooling, shadow-tls/restls/jls, v4/v5 and inbound stay
+later. Evidence: `compat/scripts/phase7e_snell_obfs.py` plus crate
+`http_obfs_echo` / `tls_obfs_echo`. Not Parity.
+
 ### 7E-B Snell v3 outbound UDP — 2026-09-12
 
 Clash `type: snell` version 3 now accepts `udp: true`. Mixed/SOCKS UDP
@@ -501,7 +509,8 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6I-B WireGuard outbound UDP | Implemented in this checkout; not Parity | Mixed/SOCKS UDP ASSOCIATE through userspace WireGuard; inner IPv4/IPv6; `remote-dns-resolve` tunnel DNS; concurrent sessions. Evidence: `phase6i_wireguard_udp.py` plus crate `udp_relay`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending |
 | Phase 6I-C WireGuard outbound lifecycle | Implemented in this checkout; not Parity | Rehandshake after peer restart, `persistent-keepalive`, `refresh-server-ip-interval`, TUN `protect_outbound_destination` for the peer IP, mixed UDP session teardown on network-generation change. Evidence: `phase6i_wireguard_lifecycle.py` plus crate `lifecycle`. AmneziaWG/`peers`/inbound still rejected. Three-platform CI pending; native Parity is not claimed |
 | Phase 7E-A Snell outbound TCP | Implemented in this checkout; not Parity | Clash `type: snell` v1–v3 TCP; Argon2id + SS AEAD; mixed/SOCKS/rules/groups/providers/health; `reuse`/`obfs-opts`/v4 rejected. Evidence: `phase7e_snell_tcp.py` plus crate `tcp_relay`. No inbound. Three-platform CI pending |
-| Phase 7E-B Snell v3 outbound UDP | Implemented in this checkout; not Parity | `udp: true` only with version 3; mixed/SOCKS UDP ASSOCIATE over one TCP+AEAD session; v1/v2 + UDP rejected. Evidence: `phase7e_snell_udp.py` plus crate `udp_relay`. `reuse`/`obfs-opts`/inbound remain later. Three-platform CI pending |
+| Phase 7E-B Snell v3 outbound UDP | Implemented in this checkout; not Parity | `udp: true` only with version 3; mixed/SOCKS UDP ASSOCIATE over one TCP+AEAD session; v1/v2 + UDP rejected. Evidence: `phase7e_snell_udp.py` plus crate `udp_relay`. `reuse`/inbound remain later. Three-platform CI pending |
+| Phase 7E-C Snell simple-obfs | Implemented in this checkout; not Parity | `obfs-opts` HTTP/TLS on the TCP carrier before AEAD (TCP + v3 UDP). Host defaults to `bing.com`. shadow-tls/restls/jls and `reuse` pooling remain later. Evidence: `phase7e_snell_obfs.py` plus crate `http_obfs_echo`/`tls_obfs_echo`. Three-platform CI pending |
 | Protocol/transport ownership refactor | Complete; behavior-neutral | `rewrite-protocol-shadowsocks`, `rewrite-protocol-vmess` and `rewrite-protocol-vless` own transport-independent wire/session behavior; `rewrite-transport` owns TLS, ShadowTLS, simple-obfs, WS/Upgrade, HTTP/1, H2, gRPC/Gun, common HTTP/2 xHTTP/basic XMUX, mKCP, Mekya and v2ray mux carriers; `rewrite-io` is the only shared stream-type dependency. `rewrite-outbound` remains a thin dial/policy facade |
 | Outbound module refactor | Complete; behavior-neutral | The facade now contains only DIRECT, HTTP CONNECT, SOCKS5 and thin SS/VMess/VLESS dial composition; protocol crypto/framing and reusable carriers live outside the adapter crate |
 | Controller/runtime module refactor | Complete; behavior-neutral | The controller and runtime crate roots are reduced to 77 lines (including tests) and 9 lines; `context`/`types` own shared state and production modules use direct external and `crate::module` imports with no `use super`; Phase 3 differential, workspace clippy and tests pass |

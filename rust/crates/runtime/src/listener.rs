@@ -715,6 +715,7 @@ pub(super) async fn run_snell_udp_session(
     };
     let psk = snell.psk.as_bytes().to_vec();
     let version = snell.version;
+    let obfs = snell.obfs.clone();
     let allow_ipv6 = config.ipv6;
     let socket_options = direct_tcp_options(&config);
     let setup = async {
@@ -723,6 +724,7 @@ pub(super) async fn run_snell_udp_session(
             allow_ipv6,
             &psk,
             version,
+            obfs.as_ref(),
             socket_options,
         )
         .await
