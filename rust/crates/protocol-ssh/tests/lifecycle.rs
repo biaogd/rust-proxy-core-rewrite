@@ -196,11 +196,17 @@ async fn authority_restart_reconnects_without_close() {
     first.shutdown();
     drop(first);
 
-    let dest_fail = tokio::time::timeout(Duration::from_secs(3), client.open_tcp(&dest)).await;
-    assert!(
-        matches!(dest_fail, Ok(Err(_)) | Err(_)),
-        "dead authority still accepted a dial"
-    );
+    let mut dead = false;
+    for _ in 0..30 {
+        match tokio::time::timeout(Duration::from_millis(200), client.open_tcp(&dest)).await {
+            Ok(Err(_)) | Err(_) => {
+                dead = true;
+                break;
+            }
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(dead, "dead authority still accepted a dial");
 
     let mut restarted = None;
     for _ in 0..20 {

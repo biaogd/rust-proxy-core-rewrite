@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Handler, Msg, Session};
-use russh::{Channel, MethodKind, MethodSet};
+use russh::{Channel, Disconnect, MethodKind, MethodSet};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -112,19 +112,34 @@ pub struct TestAuthority {
     /// OpenSSH `authorized_keys` line for the generated host key.
     pub host_key: String,
     accept: tokio::task::AbortHandle,
-    sessions: Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+    sessions: Arc<Mutex<Vec<server::Handle>>>,
 }
 
 impl TestAuthority {
-    /// Stops accepting and aborts in-flight sessions.
+    /// Stops accepting and disconnects in-flight sessions.
+    ///
+    /// Aborting the accept task alone is not enough: russh
+    /// `RunningSession` detaches its join handle on drop, so live
+    /// sessions must be disconnected explicitly.
     pub fn shutdown(&self) {
         self.accept.abort();
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        for handle in sessions.drain(..) {
-            handle.abort();
+        let handles = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *sessions)
+        };
+        for handle in handles {
+            tokio::spawn(async move {
+                let _ = handle
+                    .disconnect(
+                        Disconnect::ByApplication,
+                        "rewrite ssh authority stopped".to_owned(),
+                        String::new(),
+                    )
+                    .await;
+            });
         }
     }
 }
@@ -176,15 +191,16 @@ pub async fn spawn_authority(
                 authorized: authorized.clone(),
             };
             let config = Arc::clone(&config);
-            let session = tokio::spawn(async move {
-                if let Ok(session) = server::run_stream(config, stream, handler).await {
-                    let _ = session.await;
+            let session_handles = Arc::clone(&session_handles);
+            tokio::spawn(async move {
+                if let Ok(running) = server::run_stream(config, stream, handler).await {
+                    session_handles
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(running.handle());
+                    let _ = running.await;
                 }
             });
-            session_handles
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .push(session.abort_handle());
         }
     });
     Ok(TestAuthority {
