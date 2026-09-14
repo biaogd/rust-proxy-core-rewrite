@@ -684,6 +684,25 @@ pub(super) async fn run_trojan_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
+async fn flush_snell_inbound_queue(
+    inbound_rx: &mut mpsc::Receiver<(Destination, Vec<u8>)>,
+    reply: &UdpReplySink,
+    source: SocketAddr,
+    config: &Config,
+    downloaded: &mut u64,
+) -> bool {
+    while let Ok((remote, payload)) = inbound_rx.try_recv() {
+        let Some(remote) = resolve_udp_response_source(&remote, config).await else {
+            continue;
+        };
+        if reply.send_datagram(source, remote, &payload).await.is_err() {
+            return false;
+        }
+        *downloaded = downloaded.saturating_add(payload.len() as u64);
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn run_snell_udp_session(
     reply: UdpReplySink,
@@ -757,39 +776,51 @@ pub(super) async fn run_snell_udp_session(
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<(Destination, Vec<u8>)>(OUTBOUND_QUEUE);
     // Upload bytes are reported only after a successful AEAD/TCP write.
     let (upload_tx, mut upload_rx) = mpsc::unbounded_channel::<u64>();
-    let tasks_cancel = CancellationToken::new();
+    let tasks_cancel = shutdown.child_token();
 
     let send_cancel = tasks_cancel.clone();
     let mut send_task = tokio::spawn(async move {
         loop {
-            tokio::select! {
+            let item = tokio::select! {
                 () = send_cancel.cancelled() => break,
-                item = outbound_rx.recv() => {
-                    let Some((destination, payload)) = item else { break };
-                    let len = payload.len() as u64;
-                    if sender.send(&destination, &payload).await.is_err() {
-                        break;
-                    }
-                    let _ = upload_tx.send(len);
-                }
+                item = outbound_rx.recv() => item,
+            };
+            let Some((destination, payload)) = item else {
+                break;
+            };
+            let len = payload.len() as u64;
+            // Race the TCP/AEAD write against cancel so cleanup cannot hang on
+            // a blocked socket write.
+            let send_result = tokio::select! {
+                () = send_cancel.cancelled() => break,
+                result = sender.send(&destination, &payload) => result,
+            };
+            if send_result.is_err() {
+                break;
             }
+            let _ = upload_tx.send(len);
         }
     });
     let recv_cancel = tasks_cancel.clone();
     let mut recv_task = tokio::spawn(async move {
         loop {
-            tokio::select! {
+            let result = tokio::select! {
                 () = recv_cancel.cancelled() => break,
-                result = receiver.recv() => {
-                    match result {
-                        Ok((remote, payload)) => {
-                            if inbound_tx.send((remote, payload)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                result = receiver.recv() => result,
+            };
+            match result {
+                Ok((remote, payload)) => {
+                    // Also cancel while applying inbound backpressure; otherwise
+                    // a full response queue can pin this task past session exit.
+                    let enqueue = tokio::select! {
+                        () = recv_cancel.cancelled() => break,
+                        result = inbound_tx.send((remote, payload)) => result,
+                    };
+                    if enqueue.is_err() {
+                        break;
                     }
                 }
+                Err(_) => break,
             }
         }
     });
@@ -826,11 +857,28 @@ pub(super) async fn run_snell_udp_session(
                 result = &mut send_task, if send_alive => {
                     send_alive = false;
                     let _ = result;
+                    let _ = flush_snell_inbound_queue(
+                        &mut inbound_rx,
+                        &reply,
+                        source,
+                        &config,
+                        &mut downloaded,
+                    )
+                    .await;
                     break;
                 }
                 result = &mut recv_task, if recv_alive => {
                     recv_alive = false;
                     let _ = result;
+                    // Flush datagrams already queued before the worker exited.
+                    let _ = flush_snell_inbound_queue(
+                        &mut inbound_rx,
+                        &reply,
+                        source,
+                        &config,
+                        &mut downloaded,
+                    )
+                    .await;
                     break;
                 }
                 Some(bytes) = upload_rx.recv() => {
@@ -847,7 +895,9 @@ pub(super) async fn run_snell_udp_session(
                 response = inbound_rx.recv() => {
                     // Keep draining responses while the outbound queue is full.
                     waiting_send = Some((destination, payload));
-                    let Some((remote, payload)) = response else { break };
+                    let Some((remote, payload)) = response else {
+                        break;
+                    };
                     let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                         continue;
                     };
@@ -867,11 +917,27 @@ pub(super) async fn run_snell_udp_session(
             result = &mut send_task, if send_alive => {
                 send_alive = false;
                 let _ = result;
+                let _ = flush_snell_inbound_queue(
+                    &mut inbound_rx,
+                    &reply,
+                    source,
+                    &config,
+                    &mut downloaded,
+                )
+                .await;
                 break;
             }
             result = &mut recv_task, if recv_alive => {
                 recv_alive = false;
                 let _ = result;
+                let _ = flush_snell_inbound_queue(
+                    &mut inbound_rx,
+                    &reply,
+                    source,
+                    &config,
+                    &mut downloaded,
+                )
+                .await;
                 break;
             }
             Some(bytes) = upload_rx.recv() => {
@@ -882,7 +948,9 @@ pub(super) async fn run_snell_udp_session(
                 pending = Some(request);
             }
             response = inbound_rx.recv() => {
-                let Some((remote, payload)) = response else { break };
+                let Some((remote, payload)) = response else {
+                    break;
+                };
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
@@ -896,15 +964,27 @@ pub(super) async fn run_snell_udp_session(
         }
     }
 
-    // Cancel workers cooperatively, then wait for them to finish so a cancelled
-    // parent cannot leave orphaned send/recv tasks behind.
+    // Cancel workers cooperatively. Dropping the inbound receiver unblocks a
+    // recv worker stuck on a full response queue; dropping outbound_tx wakes
+    // the send worker if it is waiting for more work.
     tasks_cancel.cancel();
     drop(outbound_tx);
+    let _ =
+        flush_snell_inbound_queue(&mut inbound_rx, &reply, source, &config, &mut downloaded).await;
+    drop(inbound_rx);
+
+    // Prefer a graceful join; abort only if a worker still ignores cancel.
     if send_alive {
-        let _ = send_task.await;
+        match tokio::time::timeout(Duration::from_secs(2), &mut send_task).await {
+            Ok(_) => {}
+            Err(_) => send_task.abort(),
+        }
     }
     if recv_alive {
-        let _ = recv_task.await;
+        match tokio::time::timeout(Duration::from_secs(2), &mut recv_task).await {
+            Ok(_) => {}
+            Err(_) => recv_task.abort(),
+        }
     }
     while let Ok(bytes) = upload_rx.try_recv() {
         uploaded = uploaded.saturating_add(bytes);
