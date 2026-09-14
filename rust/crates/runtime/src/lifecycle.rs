@@ -84,6 +84,9 @@ pub(super) async fn run_with_reload_inner(
     lifecycle: Option<LifecycleSignals>,
 ) -> Result<(), RuntimeError> {
     let state = Arc::new(RuntimeState::default());
+    state.set_proxy_tcp_dialer(Some(Arc::new(
+        crate::dialer_proxy::ConfiguredProxyTcpDialer,
+    )));
     state.enable_storage_persistence();
     let dns_service = Arc::new(rewrite_dns::DnsService::new());
     let (config_sender, config_receiver) = watch::channel(Arc::new(initial.clone()));

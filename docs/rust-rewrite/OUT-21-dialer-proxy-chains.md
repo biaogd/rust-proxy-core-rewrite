@@ -30,7 +30,9 @@ path (no ordinary business-rule rematch on B's server address).
 | Groups / providers | Name may resolve to a group; members can change | Unwrap via existing selector/fallback/url-test/LB; new dials see current leaf |
 | Failure | Dial/handshake errors propagate; no silent DIRECT bypass | Same |
 | Reload | New generation uses new graph; existing sockets are not rewritten | Same lifecycle as other outbound reloads |
-| UDP server dial | Some adapters use dialer-proxy for UDP/WG | **Not in 7T1-A** |
+| UDP server dial | Some adapters use dialer-proxy for UDP/WG | **Not in 7T1-A** — `dialer-proxy` + `udp: true` / `udp-over-tcp` is rejected at load; UDP session mode also refuses chained leaves |
+| Health / delay | Go delay uses the same dialer stack as traffic | Rust delay/health uses the shared runtime dial entry when installed |
+| Snell v2 pool | Unchained v2 reuses `ConnectV2` pool | Unchained Snell keeps the pool; chained Snell dials on-stream (no pool share across dialer identities) |
 | sing-mux | Separate composition | **Not in 7T1-A** |
 
 ## Supported combinations (7T1-A)
@@ -43,18 +45,21 @@ normal TCP destination:
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | HTTP / SOCKS5 | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
 | SS / SSR / Snell | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
-| VMess / VLESS / Trojan | later | later | later | later | later | later | later | no* | later | no | no | later |
-| AnyTLS | no* | no* | no* | no* | no* | no* | no* | no* | no* | no | no | no* |
+| VMess / VLESS / Trojan | later\* | later\* | later\* | later\* | later\* | later\* | later\* | no\* | later\* | no | no | later\* |
+| AnyTLS | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no | no | no\* |
 | SSH | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 | Hy2 / TUIC / WG | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 
-\* AnyTLS dialer-proxy stays deferred until the pooled DialOut path can carry
-chain context without silent DIRECT fallback. VMess/VLESS/Trojan TCP carriers
-are next on this PR.
+\* **Parse vs runtime:** VMess / VLESS / Trojan / AnyTLS may still **parse** a
+`dialer-proxy` field on the leaf, but the shared TCP dial entry **rejects** that
+combination at runtime until those carriers are wired. Treat them as unsupported
+for 7T1-A. AnyTLS stays deferred until the pooled DialOut path can carry chain
+context without silent DIRECT fallback.
 
 ## Explicit rejects
 
 - Missing, self, or cyclic `dialer-proxy` references at load time.
+- `dialer-proxy` combined with `udp: true` or `udp-over-tcp` (no UDP chains).
 - `dialer-proxy` on SSH, Hysteria2, TUIC, WireGuard (UDP/session-owned dial).
 - `dialer-proxy` on DIRECT/REJECT/DNS/REMATCH and on proxy **groups as owners**.
 - UDP association chains and `sing-mux`.

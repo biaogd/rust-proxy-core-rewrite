@@ -620,11 +620,36 @@ pub(super) async fn connect_configured_proxy_with_chain(
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Snell => {
-            let transport =
-                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
-                    .await?;
-            let configured = proxy_server(proxy);
-            connect_snell_proxy_on_stream(proxy, transport, &configured, destination, state).await
+            if proxy
+                .dialer_proxy
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+            {
+                let transport = crate::dialer_proxy::dial_proxy_server(
+                    proxy,
+                    config,
+                    state,
+                    socket_options,
+                    chain,
+                )
+                .await?;
+                let configured = proxy_server(proxy);
+                connect_snell_proxy_on_stream(proxy, transport, &configured, destination, state)
+                    .await
+            } else {
+                let server =
+                    resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                        .await?;
+                connect_snell_proxy(
+                    proxy,
+                    &server,
+                    destination,
+                    allow_ipv6,
+                    socket_options,
+                    state,
+                )
+                .await
+            }
         }
         ProxyKind::Ssh => connect_ssh_proxy(proxy, destination, config, state).await,
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
@@ -2058,6 +2083,33 @@ async fn connect_shadowsocks_proxy_on_stream(
     .map_err(|error| format!("Shadowsocks proxy connection failed: {error}"))
 }
 
+async fn connect_snell_proxy(
+    proxy: &rewrite_config::ProxyConfig,
+    server: &Destination,
+    destination: &Destination,
+    allow_ipv6: bool,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    state: &RuntimeState,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let snell = proxy
+        .snell
+        .as_ref()
+        .ok_or_else(|| "Snell proxy missing snell options".to_owned())?;
+    let pool = (snell.version == 2).then(|| state.snell_pool(&proxy.name, format!("{proxy:?}")));
+    rewrite_outbound::connect_snell_with_options(
+        server,
+        destination,
+        allow_ipv6,
+        snell.psk.as_bytes(),
+        snell.version,
+        snell.obfs.as_ref(),
+        socket_options,
+        pool,
+    )
+    .await
+    .map_err(|error| format!("Snell proxy connection failed: {error}"))
+}
+
 async fn connect_snell_proxy_on_stream(
     proxy: &rewrite_config::ProxyConfig,
     stream: rewrite_outbound::BoxedOutboundStream,
@@ -2069,8 +2121,8 @@ async fn connect_snell_proxy_on_stream(
         .snell
         .as_ref()
         .ok_or_else(|| "Snell proxy missing snell options".to_owned())?;
-    // Dialer-proxy chains dial outside the v2 pool so a changed upstream cannot
-    // reclaim a socket that was opened on a different path.
+    // Chained dials stay outside the v2 pool so a changed dialer-proxy cannot
+    // reclaim a socket that was opened on a different upstream path.
     let _ = state;
     rewrite_outbound::connect_snell_on_stream(
         stream,

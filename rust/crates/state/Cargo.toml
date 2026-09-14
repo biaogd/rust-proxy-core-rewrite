@@ -9,6 +9,7 @@ publish.workspace = true
 bbolt.workspace = true
 ipnet.workspace = true
 lru.workspace = true
+rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-services = { path = "../services" }

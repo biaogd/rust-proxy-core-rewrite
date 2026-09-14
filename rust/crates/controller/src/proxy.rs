@@ -383,6 +383,12 @@ pub(super) async fn measure_http_delay(
                 .await
                 .map_err(|_| ())?,
             )
+        } else if let Some(dialer) = state.proxy_tcp_dialer() {
+            // Share the runtime dialer-proxy entry with business traffic.
+            dialer
+                .dial_proxy_tcp(config, state, name, &destination)
+                .await
+                .map_err(|_| ())?
         } else {
             let proxy = config
                 .proxies
@@ -1234,7 +1240,13 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Tuic
         | rewrite_config::ProxyKind::ShadowsocksR
         | rewrite_config::ProxyKind::WireGuard
-        | rewrite_config::ProxyKind::Snell => proxy.udp,
+        | rewrite_config::ProxyKind::Snell => {
+            proxy.udp
+                && proxy
+                    .dialer_proxy
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty())
+        }
         rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
@@ -1398,7 +1410,13 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Tuic
             | rewrite_config::ProxyKind::ShadowsocksR
             | rewrite_config::ProxyKind::WireGuard
-            | rewrite_config::ProxyKind::Snell => proxy.udp,
+            | rewrite_config::ProxyKind::Snell => {
+                proxy.udp
+                    && proxy
+                        .dialer_proxy
+                        .as_deref()
+                        .is_none_or(|name| name.trim().is_empty())
+            }
             rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject

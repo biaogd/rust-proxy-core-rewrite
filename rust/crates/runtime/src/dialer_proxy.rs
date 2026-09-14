@@ -11,8 +11,8 @@ use rewrite_model::{InboundProtocol, Metadata, Network};
 use rewrite_state::RuntimeState;
 
 use crate::tcp::{
-    configured_proxy, connect_configured_proxy_with_chain, direct_tcp_options, proxy_server,
-    resolve_proxy_dial_server, resolve_selector_target,
+    configured_proxy, connect_configured_proxy, connect_configured_proxy_with_chain,
+    direct_tcp_options, proxy_server, resolve_proxy_dial_server, resolve_selector_target,
 };
 
 /// Visited leaf proxy names while resolving a dialer-proxy chain.
@@ -127,6 +127,33 @@ pub(super) async fn dial_proxy_server_fresh(
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let mut chain = DialChain::new();
     dial_proxy_server(proxy, config, state, direct_tcp_options(config), &mut chain).await
+}
+
+/// Runtime dialer installed into [`RuntimeState`] for delay / health probes.
+pub(super) struct ConfiguredProxyTcpDialer;
+
+impl rewrite_state::ProxyTcpDialer for ConfiguredProxyTcpDialer {
+    fn dial_proxy_tcp<'a>(
+        &'a self,
+        config: &'a Config,
+        state: &'a RuntimeState,
+        proxy_name: &'a str,
+        destination: &'a rewrite_model::Destination,
+    ) -> rewrite_state::ProxyTcpDialFuture<'a> {
+        Box::pin(async move {
+            let proxy = configured_proxy(config, proxy_name).ok_or_else(|| {
+                format!("proxy [{proxy_name}] not found for delay / health probe")
+            })?;
+            connect_configured_proxy(
+                proxy,
+                destination,
+                config,
+                state,
+                direct_tcp_options(config),
+            )
+            .await
+        })
+    }
 }
 
 #[cfg(test)]

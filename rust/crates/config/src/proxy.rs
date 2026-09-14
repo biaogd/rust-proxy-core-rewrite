@@ -3564,6 +3564,12 @@ pub(crate) fn validate_dialer_proxies(
         let Some(dialer) = proxy.dialer_proxy.as_deref() else {
             continue;
         };
+        if proxy.udp || proxy.udp_over_tcp {
+            return Err(ConfigError::DialerProxy(format!(
+                "proxy [{}] dialer-proxy cannot be combined with udp (UDP chains are not supported in 7T1-A)",
+                proxy.name
+            )));
+        }
         if !known.contains(dialer) {
             return Err(ConfigError::DialerProxy(format!(
                 "proxy [{}] dialer-proxy [{}] not found",

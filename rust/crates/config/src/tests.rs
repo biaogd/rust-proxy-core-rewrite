@@ -4176,4 +4176,12 @@ fn dialer_proxy_configuration_contract() {
         via_direct.proxies[0].dialer_proxy.as_deref(),
         Some("DIRECT")
     );
+
+    let udp_combo = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: snell-via\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n    dialer-proxy: hop-a\n"
+    ));
+    let udp_err = udp_combo
+        .expect_err("dialer-proxy + udp must fail closed")
+        .to_string();
+    assert!(udp_err.contains("cannot be combined with udp"), "{udp_err}");
 }

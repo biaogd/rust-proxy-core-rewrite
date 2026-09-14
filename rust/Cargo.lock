@@ -4253,6 +4253,7 @@ dependencies = [
  "bbolt",
  "ipnet",
  "lru",
+ "rewrite-config",
  "rewrite-model",
  "rewrite-outbound",
  "rewrite-services",
