@@ -684,23 +684,64 @@ pub(super) async fn run_trojan_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnellUdpExitKind {
+    /// Shutdown / tracker / idle: stop delivering queued replies immediately.
+    Cancelled,
+    /// Peer EOF / worker failure: deliver already-queued replies until deadline.
+    Graceful,
+}
+
 async fn flush_snell_inbound_queue(
     inbound_rx: &mut mpsc::Receiver<(Destination, Vec<u8>)>,
     reply: &UdpReplySink,
     source: SocketAddr,
     config: &Config,
     downloaded: &mut u64,
+    deadline: tokio::time::Instant,
 ) -> bool {
     while let Ok((remote, payload)) = inbound_rx.try_recv() {
-        let Some(remote) = resolve_udp_response_source(&remote, config).await else {
-            continue;
-        };
-        if reply.send_datagram(source, remote, &payload).await.is_err() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return false;
         }
-        *downloaded = downloaded.saturating_add(payload.len() as u64);
+        let remaining = deadline.saturating_duration_since(now);
+        let deliver = async {
+            let Some(remote) = resolve_udp_response_source(&remote, config).await else {
+                return Ok(false);
+            };
+            reply.send_datagram(source, remote, &payload).await?;
+            Ok::<bool, std::io::Error>(true)
+        };
+        match tokio::time::timeout(remaining, deliver).await {
+            Ok(Ok(true)) => {
+                *downloaded = downloaded.saturating_add(payload.len() as u64);
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(_)) | Err(_) => return false,
+        }
     }
     true
+}
+
+async fn join_snell_udp_worker(
+    alive: bool,
+    task: &mut tokio::task::JoinHandle<()>,
+    deadline: tokio::time::Instant,
+) {
+    if !alive {
+        return;
+    }
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        task.abort();
+        let _ = task.await;
+        return;
+    }
+    if tokio::time::timeout(remaining, &mut *task).await.is_err() {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -717,6 +758,7 @@ pub(super) async fn run_snell_udp_session(
 ) {
     const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
     const OUTBOUND_QUEUE: usize = 32;
+    const CLEANUP_BUDGET: Duration = Duration::from_secs(2);
 
     let Some(proxy) = configured_proxy(&config, &proxy_name) else {
         return;
@@ -837,12 +879,14 @@ pub(super) async fn run_snell_udp_session(
     let mut waiting_send: Option<(Destination, Vec<u8>)> = None;
     let mut send_alive = true;
     let mut recv_alive = true;
+    let exit_kind;
     loop {
         if let Some(request) = pending.take() {
             if enqueue(&outbound_tx, &request) {
                 idle.as_mut()
                     .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
             } else if outbound_tx.is_closed() {
+                exit_kind = SnellUdpExitKind::Graceful;
                 break;
             } else {
                 waiting_send = Some((udp_proxy_destination(&request), request.payload));
@@ -851,34 +895,28 @@ pub(super) async fn run_snell_udp_session(
 
         if let Some((destination, payload)) = waiting_send.take() {
             tokio::select! {
-                () = shutdown.cancelled() => break,
-                () = tracker.cancelled() => break,
-                () = &mut idle => break,
+                () = shutdown.cancelled() => {
+                    exit_kind = SnellUdpExitKind::Cancelled;
+                    break;
+                }
+                () = tracker.cancelled() => {
+                    exit_kind = SnellUdpExitKind::Cancelled;
+                    break;
+                }
+                () = &mut idle => {
+                    exit_kind = SnellUdpExitKind::Cancelled;
+                    break;
+                }
                 result = &mut send_task, if send_alive => {
                     send_alive = false;
                     let _ = result;
-                    let _ = flush_snell_inbound_queue(
-                        &mut inbound_rx,
-                        &reply,
-                        source,
-                        &config,
-                        &mut downloaded,
-                    )
-                    .await;
+                    exit_kind = SnellUdpExitKind::Graceful;
                     break;
                 }
                 result = &mut recv_task, if recv_alive => {
                     recv_alive = false;
                     let _ = result;
-                    // Flush datagrams already queued before the worker exited.
-                    let _ = flush_snell_inbound_queue(
-                        &mut inbound_rx,
-                        &reply,
-                        source,
-                        &config,
-                        &mut downloaded,
-                    )
-                    .await;
+                    exit_kind = SnellUdpExitKind::Graceful;
                     break;
                 }
                 Some(bytes) = upload_rx.recv() => {
@@ -887,6 +925,7 @@ pub(super) async fn run_snell_udp_session(
                 }
                 result = outbound_tx.send((destination.clone(), payload.clone())) => {
                     if result.is_err() {
+                        exit_kind = SnellUdpExitKind::Graceful;
                         break;
                     }
                     idle.as_mut()
@@ -896,12 +935,14 @@ pub(super) async fn run_snell_udp_session(
                     // Keep draining responses while the outbound queue is full.
                     waiting_send = Some((destination, payload));
                     let Some((remote, payload)) = response else {
+                        exit_kind = SnellUdpExitKind::Graceful;
                         break;
                     };
                     let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                         continue;
                     };
                     if reply.send_datagram(source, remote, &payload).await.is_err() {
+                        exit_kind = SnellUdpExitKind::Cancelled;
                         break;
                     }
                     downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -912,80 +953,83 @@ pub(super) async fn run_snell_udp_session(
         }
 
         tokio::select! {
-            () = shutdown.cancelled() => break,
-            () = tracker.cancelled() => break,
+            () = shutdown.cancelled() => {
+                exit_kind = SnellUdpExitKind::Cancelled;
+                break;
+            }
+            () = tracker.cancelled() => {
+                exit_kind = SnellUdpExitKind::Cancelled;
+                break;
+            }
             result = &mut send_task, if send_alive => {
                 send_alive = false;
                 let _ = result;
-                let _ = flush_snell_inbound_queue(
-                    &mut inbound_rx,
-                    &reply,
-                    source,
-                    &config,
-                    &mut downloaded,
-                )
-                .await;
+                exit_kind = SnellUdpExitKind::Graceful;
                 break;
             }
             result = &mut recv_task, if recv_alive => {
                 recv_alive = false;
                 let _ = result;
-                let _ = flush_snell_inbound_queue(
-                    &mut inbound_rx,
-                    &reply,
-                    source,
-                    &config,
-                    &mut downloaded,
-                )
-                .await;
+                exit_kind = SnellUdpExitKind::Graceful;
                 break;
             }
             Some(bytes) = upload_rx.recv() => {
                 uploaded = uploaded.saturating_add(bytes);
             }
             request = requests.recv() => {
-                let Some(request) = request else { break };
+                let Some(request) = request else {
+                    exit_kind = SnellUdpExitKind::Graceful;
+                    break;
+                };
                 pending = Some(request);
             }
             response = inbound_rx.recv() => {
                 let Some((remote, payload)) = response else {
+                    exit_kind = SnellUdpExitKind::Graceful;
                     break;
                 };
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
                 if reply.send_datagram(source, remote, &payload).await.is_err() {
+                    exit_kind = SnellUdpExitKind::Cancelled;
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
                 idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
             }
-            () = &mut idle => break,
+            () = &mut idle => {
+                exit_kind = SnellUdpExitKind::Cancelled;
+                break;
+            }
         }
     }
 
-    // Cancel workers cooperatively. Dropping the inbound receiver unblocks a
-    // recv worker stuck on a full response queue; dropping outbound_tx wakes
-    // the send worker if it is waiting for more work.
+    // One shared cleanup budget covers reply flush (graceful only) and worker
+    // joins, so a blocked SOCKS UDP send_to cannot starve abort.
+    let deadline = tokio::time::Instant::now() + CLEANUP_BUDGET;
     tasks_cancel.cancel();
     drop(outbound_tx);
-    let _ =
-        flush_snell_inbound_queue(&mut inbound_rx, &reply, source, &config, &mut downloaded).await;
+    match exit_kind {
+        SnellUdpExitKind::Cancelled => {
+            // Active cancel: discard queued replies and unblock workers immediately.
+        }
+        SnellUdpExitKind::Graceful => {
+            let _ = flush_snell_inbound_queue(
+                &mut inbound_rx,
+                &reply,
+                source,
+                &config,
+                &mut downloaded,
+                deadline,
+            )
+            .await;
+        }
+    }
     drop(inbound_rx);
 
-    // Prefer a graceful join; abort only if a worker still ignores cancel.
-    if send_alive {
-        match tokio::time::timeout(Duration::from_secs(2), &mut send_task).await {
-            Ok(_) => {}
-            Err(_) => send_task.abort(),
-        }
-    }
-    if recv_alive {
-        match tokio::time::timeout(Duration::from_secs(2), &mut recv_task).await {
-            Ok(_) => {}
-            Err(_) => recv_task.abort(),
-        }
-    }
+    join_snell_udp_worker(send_alive, &mut send_task, deadline).await;
+    join_snell_udp_worker(recv_alive, &mut recv_task, deadline).await;
     while let Ok(bytes) = upload_rx.try_recv() {
         uploaded = uploaded.saturating_add(bytes);
     }
@@ -2341,5 +2385,136 @@ mod tests {
     fn vless_xudp_id_is_stable_per_source() {
         let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12000);
         assert_eq!(vless_xudp_global_id(first), vless_xudp_global_id(first));
+    }
+}
+
+#[cfg(test)]
+mod snell_udp_cleanup_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rewrite_config::Config;
+    use rewrite_model::{Destination, Host};
+    use tokio::net::UdpSocket;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{UdpReplySink, flush_snell_inbound_queue, join_snell_udp_worker};
+
+    fn empty_config() -> Config {
+        Config::from_yaml("{}").expect("empty config")
+    }
+
+    fn sample_destination() -> Destination {
+        Destination {
+            host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: 9,
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_returns_immediately_when_deadline_already_elapsed() {
+        let reply_sock = UdpSocket::bind("127.0.0.1:0").await.expect("reply bind");
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("peer bind");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let reply = UdpReplySink::Socks5(Arc::new(reply_sock));
+        let (tx, mut rx) = mpsc::channel::<(Destination, Vec<u8>)>(4);
+        for i in 0..4 {
+            tx.try_send((sample_destination(), vec![i])).expect("queue");
+        }
+        drop(tx);
+
+        let config = empty_config();
+        let mut downloaded = 0_u64;
+        let deadline = tokio::time::Instant::now();
+        let started = std::time::Instant::now();
+        let ok = flush_snell_inbound_queue(
+            &mut rx,
+            &reply,
+            peer_addr,
+            &config,
+            &mut downloaded,
+            deadline,
+        )
+        .await;
+        assert!(!ok, "elapsed deadline must stop flush");
+        assert_eq!(downloaded, 0, "cancelled/expired flush must not deliver");
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "expired deadline must not await SOCKS send_to"
+        );
+        // Queued datagrams remain for the caller to drop without delivery.
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn flush_delivers_under_deadline_when_path_is_ready() {
+        let reply_sock = UdpSocket::bind("127.0.0.1:0").await.expect("reply bind");
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("peer bind");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let reply = UdpReplySink::Socks5(Arc::new(reply_sock));
+        let (tx, mut rx) = mpsc::channel::<(Destination, Vec<u8>)>(2);
+        tx.try_send((sample_destination(), b"one".to_vec()))
+            .expect("queue");
+        tx.try_send((sample_destination(), b"two".to_vec()))
+            .expect("queue");
+        drop(tx);
+
+        let config = empty_config();
+        let mut downloaded = 0_u64;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let ok = flush_snell_inbound_queue(
+            &mut rx,
+            &reply,
+            peer_addr,
+            &config,
+            &mut downloaded,
+            deadline,
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(downloaded, 6);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn recv_worker_unblocks_when_queue_full_and_cancel_drops_receiver() {
+        let (tx, rx) = mpsc::channel::<(Destination, Vec<u8>)>(1);
+        tx.send((sample_destination(), b"fill".to_vec()))
+            .await
+            .expect("fill");
+
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let worker = tokio::spawn(async move {
+            loop {
+                let enqueue = tokio::select! {
+                    () = worker_cancel.cancelled() => break,
+                    result = tx.send((sample_destination(), b"blocked".to_vec())) => result,
+                };
+                if enqueue.is_err() {
+                    break;
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.cancel();
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .expect("worker join timed out")
+            .expect("worker join");
+    }
+
+    #[tokio::test]
+    async fn join_worker_aborts_when_deadline_already_elapsed() {
+        let mut task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let deadline = tokio::time::Instant::now();
+        join_snell_udp_worker(true, &mut task, deadline).await;
+        assert!(task.is_finished());
     }
 }
