@@ -1454,12 +1454,12 @@ Out of IN-B: Snell server, SSR inbound, full camouflage carrier zoo.
 
 ### IN-C — Trojan inbound
 
-**TLS slice complete (2026-09-14):** named `type: trojan` with certificate /
-private-key, password users, TCP via `serve_stream_session`, UDP-over-TLS
-command 3 (Direct). Evidence `phase_inc_trojan_tls.py` (including product
-Trojan-outbound half-close). WS/gRPC/Reality / `ss-option` stay fail-closed at
-parse. Certificate rotation and a thinner shared remote accept helper remain
-optional follow-ups. Remaining IN-C work: WS/gRPC carriers via shared transport.
+**TLS + WebSocket slices complete (2026-09-14):** named `type: trojan` with
+certificate / private-key, optional `ws-path`, password users, TCP via
+`serve_stream_session`, UDP-over-TLS command 3 (Direct). Evidence
+`phase_inc_trojan_tls.py` and `phase_inc_trojan_websocket.py`. gRPC / Reality /
+`ss-option` stay fail-closed at parse. Remaining IN-C work: gRPC/Gun carrier via
+shared transport.
 
 ### IN-D — VLESS inbound
 

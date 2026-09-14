@@ -1274,6 +1274,8 @@ pub struct TrojanInboundConfig {
     pub users: Vec<TrojanInboundUser>,
     pub certificate: String,
     pub private_key: String,
+    /// When set, clients must WebSocket-upgrade on this path before Trojan bytes.
+    pub ws_path: Option<String>,
 }
 
 impl TrojanInboundConfig {
@@ -1281,8 +1283,13 @@ impl TrojanInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}",
-            self.name, self.listen, self.users, self.certificate, self.private_key
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.ws_path.as_deref().unwrap_or("")
         )
     }
 }

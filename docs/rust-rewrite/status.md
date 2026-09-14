@@ -2,14 +2,24 @@
 
 Last updated: 2026-09-14
 
+### IN-C Trojan WebSocket inbound — 2026-09-14
+
+Named `type: trojan` with `ws-path` accepts TLS then WebSocket upgrade
+(`rewrite_transport::accept_websocket_path`) before Trojan auth/relay. Evidence:
+`compat/scripts/phase_inc_trojan_websocket.py` (product WSS outbound vs Go/Rust
+inbounds: TCP small/large, UDP multi-dest, wrong-password; Rust-only gRPC
+reject). WSS half-close remains go↔go-only (same omission as Phase 6F-C);
+native TLS half-close stays on `phase_inc_trojan_tls.py`. Next: Trojan gRPC
+inbound or **IN-D** VLESS.
+
 ### IN-C Trojan TLS inbound — 2026-09-14
 
 Named `type: trojan` TLS inbound owns password (SHA-224 hex) auth, TCP relay
 through `serve_stream_session`, and UDP-over-TLS (command 3) on the Direct path.
-WS/gRPC/Reality/`ss-option` stay rejected at named-listener parse. Evidence:
+gRPC/Reality/`ss-option` stay rejected at named-listener parse; `ws-path` is
+owned by the WebSocket slice above. Evidence:
 `compat/scripts/phase_inc_trojan_tls.py` (Go/Rust TCP small/large, product-client
-half-close, wrong-password fail-closed, UDP multi-dest; Rust-only `ws-path`
-reject). Next: Trojan WS/gRPC carriers or **IN-D** VLESS.
+half-close, wrong-password fail-closed, UDP multi-dest; Rust-only gRPC reject).
 
 ### IN-B Shadowsocks 2022 UDP inbound — 2026-09-14
 

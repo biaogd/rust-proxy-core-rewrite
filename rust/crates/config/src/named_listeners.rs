@@ -178,6 +178,7 @@ fn parse_trojan_listener(
             "users",
             "certificate",
             "private-key",
+            "ws-path",
         ],
         &format!("listener {index}"),
     )?;
@@ -213,6 +214,10 @@ fn parse_trojan_listener(
             "listener {name} requires non-empty certificate and private-key"
         )));
     }
+    let ws_path = mapping_string(&mapping, "ws-path").and_then(|path| {
+        let trimmed = path.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
     let users = parse_trojan_users(&mapping, &name)?;
     if users.is_empty() {
         return Err(ConfigError::InvalidInbound(format!(
@@ -225,6 +230,7 @@ fn parse_trojan_listener(
         users,
         certificate,
         private_key,
+        ws_path,
     })
 }
 

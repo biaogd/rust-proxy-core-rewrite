@@ -4218,6 +4218,7 @@ dependencies = [
  "rewrite-rules",
  "rewrite-services",
  "rewrite-state",
+ "rewrite-transport",
  "rewrite-tun",
  "shadowsocks",
  "thiserror 2.0.20",
