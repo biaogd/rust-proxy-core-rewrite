@@ -16,6 +16,7 @@ network-interface.workspace = true
 prost.workspace = true
 regex.workspace = true
 rewrite-model = { path = "../model" }
+rewrite-protocol-ssh = { path = "../protocol-ssh" }
 rewrite-rules = { path = "../rules" }
 rewrite-ruleset = { path = "../ruleset" }
 serde.workspace = true

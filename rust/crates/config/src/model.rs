@@ -174,6 +174,7 @@ pub enum ProxyKind {
     Tuic,
     WireGuard,
     Snell,
+    Ssh,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +233,7 @@ pub struct ProxyConfig {
     pub ssr: Option<SsrProxyConfig>,
     pub wireguard: Option<WireGuardProxyConfig>,
     pub snell: Option<SnellProxyConfig>,
+    pub ssh: Option<SshProxyConfig>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -305,6 +307,23 @@ pub struct SnellProxyConfig {
 pub enum SnellObfs {
     Http { host: String },
     Tls { host: String },
+}
+
+/// Clash `type: ssh` options accepted in 6J-A/B (TCP outbound, session reuse).
+///
+/// UDP, `dialer-proxy`, TFO/MPTCP and inbound remain rejected. Host-key
+/// algorithms are applied at handshake; transport keepalive comes from the
+/// global config, not these fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SshProxyConfig {
+    pub username: String,
+    pub password: Option<String>,
+    /// Inline PEM or a home-resolved filesystem path.
+    pub private_key: Option<String>,
+    pub private_key_passphrase: Option<String>,
+    /// `authorized_keys` lines for the SSH server host key.
+    pub host_keys: Vec<String>,
+    pub host_key_algorithms: Vec<String>,
 }
 
 /// Clash `type: tuic` options accepted in 6H-A/B (v5 TCP + UDP outbound).

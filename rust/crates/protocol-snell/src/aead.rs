@@ -151,31 +151,6 @@ async fn write_record<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn read_record<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    aead: &AeadKey,
-    nonce: &mut [u8; NONCE_SIZE],
-) -> Result<Vec<u8>, SnellProtocolError> {
-    let mut size_record = vec![0_u8; SIZE_RECORD_LEN];
-    reader.read_exact(&mut size_record).await?;
-    let size_plain = aead.open(nonce, &size_record)?;
-    increment_nonce(nonce);
-    if size_plain.len() != 2 {
-        return Err(SnellProtocolError::Protocol(
-            "Snell AEAD length record was truncated".to_owned(),
-        ));
-    }
-    let size = ((usize::from(size_plain[0]) << 8) | usize::from(size_plain[1])) & PAYLOAD_SIZE_MASK;
-    if size == 0 {
-        return Err(SnellProtocolError::Protocol("Snell zero chunk".to_owned()));
-    }
-    let mut body = vec![0_u8; size + TAG_SIZE];
-    reader.read_exact(&mut body).await?;
-    let plain = aead.open(nonce, &body)?;
-    increment_nonce(nonce);
-    Ok(plain)
-}
-
 #[derive(Debug)]
 enum ReadPhase {
     Salt {
@@ -213,10 +188,14 @@ pub struct SnellStream<S> {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct ReuseFlags {
     peer_closed: bool,
     hold_inner_shutdown: bool,
     zero_chunk_written: bool,
+    /// Set when a write/flush/shutdown error is observed. Failed streams must
+    /// never return to the v2 reuse pool — ciphertext/nonce state may be torn.
+    failed: bool,
 }
 
 impl<S> SnellStream<S> {
@@ -229,10 +208,15 @@ impl<S> SnellStream<S> {
     }
 
     pub(crate) fn can_return_to_pool(&self) -> bool {
-        self.reuse.peer_closed
+        !self.reuse.failed
+            && self.reuse.peer_closed
             && self.reuse.zero_chunk_written
             && self.leftover_off >= self.leftover.len()
             && self.pending_off >= self.pending.len()
+    }
+
+    fn mark_failed(&mut self) {
+        self.reuse.failed = true;
     }
 
     /// Prepares the client stream to consume the next `CommandTunnel` reply.
@@ -328,32 +312,50 @@ where
         })
     }
 
+    /// Reads decrypted plaintext. Cancel-safe: salt / length / ciphertext
+    /// progress lives in `read_phase`, so dropping this future mid-`select!`
+    /// does not lose AEAD framing bytes.
     pub(crate) async fn read_plain(&mut self, max: usize) -> Result<Vec<u8>, SnellProtocolError> {
-        self.ensure_reader().await?;
-        loop {
-            self.consume_reply()
-                .map_err(|error| SnellProtocolError::Protocol(error.to_string()))?;
-            if let Some(available) = self.take_leftover_bytes(max) {
-                return Ok(available);
-            }
-            let aead = self.read_aead.as_ref().ok_or_else(|| {
-                SnellProtocolError::Protocol("Snell reader is not initialized".to_owned())
-            })?;
-            let record = read_record(&mut self.inner, aead, &mut self.read_nonce).await?;
-            self.leftover = record;
-            self.leftover_off = 0;
-        }
+        std::future::poll_fn(|cx| self.poll_read_plain(cx, max)).await
     }
 
-    async fn ensure_reader(&mut self) -> Result<(), SnellProtocolError> {
-        if self.read_aead.is_some() {
-            return Ok(());
+    fn poll_read_plain(
+        &mut self,
+        cx: &mut Context<'_>,
+        max: usize,
+    ) -> Poll<Result<Vec<u8>, SnellProtocolError>> {
+        loop {
+            if self.reuse.peer_closed {
+                return Poll::Ready(Err(SnellProtocolError::Protocol(
+                    "Snell stream is closed".to_owned(),
+                )));
+            }
+            if let Err(error) = self.consume_reply() {
+                return Poll::Ready(Err(SnellProtocolError::Protocol(error.to_string())));
+            }
+            if let Some(available) = self.take_leftover_bytes(max) {
+                return Poll::Ready(Ok(available));
+            }
+            match self.poll_advance_read(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(ReadAdvance::Record)) => {}
+                Poll::Ready(Ok(ReadAdvance::Eof)) => {
+                    // TCP AsyncRead maps zero-chunk to EOF; the UDP framing
+                    // path still surfaces it as a protocol error (Go Snell).
+                    if self.reuse.peer_closed {
+                        return Poll::Ready(Err(SnellProtocolError::Protocol(
+                            "Snell zero chunk".to_owned(),
+                        )));
+                    }
+                    return Poll::Ready(Err(SnellProtocolError::Protocol(
+                        "Snell stream closed before a full record".to_owned(),
+                    )));
+                }
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(SnellProtocolError::Io(error)));
+                }
+            }
         }
-        let mut salt = [0_u8; SALT_SIZE];
-        self.inner.read_exact(&mut salt).await?;
-        self.read_aead = Some(derive_key(&self.psk, &salt, self.kind)?);
-        self.read_phase = ReadPhase::Idle;
-        Ok(())
     }
 
     pub(crate) async fn write_plain(&mut self, payload: &[u8]) -> Result<(), SnellProtocolError> {
@@ -573,11 +575,123 @@ fn poll_fill<S: AsyncRead + Unpin>(
     Poll::Ready(Ok(true))
 }
 
+enum ReadAdvance {
+    Record,
+    Eof,
+}
+
+impl<S> SnellStream<S>
+where
+    S: AsyncRead + Unpin,
+{
+    /// Advances `read_phase` until one decrypted record is buffered in
+    /// `leftover`, or the peer closes. Cancel-safe: partial salt / length /
+    /// ciphertext stay in `read_phase`.
+    fn poll_advance_read(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<ReadAdvance>> {
+        loop {
+            match &mut self.read_phase {
+                ReadPhase::Salt { buf: salt, filled } => {
+                    match poll_fill(&mut self.inner, cx, salt, filled) {
+                        Poll::Ready(Ok(false)) => {
+                            if *filled == 0 {
+                                return Poll::Ready(Ok(ReadAdvance::Eof));
+                            }
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Snell salt ended early",
+                            )));
+                        }
+                        Poll::Ready(Ok(true)) => {
+                            let read_aead = derive_key(&self.psk, salt, self.kind)
+                                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                            self.read_aead = Some(read_aead);
+                            self.read_phase = ReadPhase::Idle;
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                ReadPhase::Idle => {
+                    self.read_phase = ReadPhase::Size {
+                        buf: [0_u8; SIZE_RECORD_LEN],
+                        filled: 0,
+                    };
+                }
+                ReadPhase::Size {
+                    buf: size_buf,
+                    filled,
+                } => match poll_fill(&mut self.inner, cx, size_buf, filled) {
+                    Poll::Ready(Ok(false)) => {
+                        if *filled == 0 {
+                            return Poll::Ready(Ok(ReadAdvance::Eof));
+                        }
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "Snell length record ended early",
+                        )));
+                    }
+                    Poll::Ready(Ok(true)) => {
+                        let aead = self.read_aead.as_ref().ok_or_else(|| {
+                            std::io::Error::other("Snell reader is not initialized")
+                        })?;
+                        let size_plain = aead
+                            .open(&self.read_nonce, size_buf)
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        increment_nonce(&mut self.read_nonce);
+                        if size_plain.len() != 2 {
+                            return Poll::Ready(Err(std::io::Error::other(
+                                "Snell AEAD length record was truncated",
+                            )));
+                        }
+                        let size = ((usize::from(size_plain[0]) << 8) | usize::from(size_plain[1]))
+                            & PAYLOAD_SIZE_MASK;
+                        if size == 0 {
+                            self.reuse.peer_closed = true;
+                            self.read_phase = ReadPhase::Idle;
+                            return Poll::Ready(Ok(ReadAdvance::Eof));
+                        }
+                        self.read_phase = ReadPhase::Payload {
+                            buf: vec![0_u8; size + TAG_SIZE],
+                            filled: 0,
+                        };
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReadPhase::Payload { buf: body, filled } => {
+                    match poll_fill(&mut self.inner, cx, body, filled) {
+                        Poll::Ready(Ok(false)) => {
+                            return Poll::Ready(Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "Snell payload ended early",
+                            )));
+                        }
+                        Poll::Ready(Ok(true)) => {
+                            let aead = self.read_aead.as_ref().ok_or_else(|| {
+                                std::io::Error::other("Snell reader is not initialized")
+                            })?;
+                            let plain = aead
+                                .open(&self.read_nonce, body)
+                                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                            increment_nonce(&mut self.read_nonce);
+                            self.leftover = plain;
+                            self.leftover_off = 0;
+                            self.read_phase = ReadPhase::Idle;
+                            return Poll::Ready(Ok(ReadAdvance::Record));
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<S> AsyncRead for SnellStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    #[allow(clippy::too_many_lines)]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -594,100 +708,11 @@ where
                     return Poll::Ready(Ok(()));
                 }
             }
-            let this = self.as_mut().get_mut();
-            match &mut this.read_phase {
-                ReadPhase::Salt { buf: salt, filled } => {
-                    match poll_fill(&mut this.inner, cx, salt, filled) {
-                        Poll::Ready(Ok(false)) => {
-                            if *filled == 0 {
-                                return Poll::Ready(Ok(()));
-                            }
-                            return Poll::Ready(Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Snell salt ended early",
-                            )));
-                        }
-                        Poll::Ready(Ok(true)) => {
-                            let read_aead = derive_key(&this.psk, salt, this.kind)
-                                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                            this.read_aead = Some(read_aead);
-                            this.read_phase = ReadPhase::Idle;
-                        }
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
-                ReadPhase::Idle => {
-                    this.read_phase = ReadPhase::Size {
-                        buf: [0_u8; SIZE_RECORD_LEN],
-                        filled: 0,
-                    };
-                }
-                ReadPhase::Size {
-                    buf: size_buf,
-                    filled,
-                } => match poll_fill(&mut this.inner, cx, size_buf, filled) {
-                    Poll::Ready(Ok(false)) => {
-                        if *filled == 0 {
-                            return Poll::Ready(Ok(()));
-                        }
-                        return Poll::Ready(Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "Snell length record ended early",
-                        )));
-                    }
-                    Poll::Ready(Ok(true)) => {
-                        let aead = this.read_aead.as_ref().ok_or_else(|| {
-                            std::io::Error::other("Snell reader is not initialized")
-                        })?;
-                        let size_plain = aead
-                            .open(&this.read_nonce, size_buf)
-                            .map_err(|error| std::io::Error::other(error.to_string()))?;
-                        increment_nonce(&mut this.read_nonce);
-                        if size_plain.len() != 2 {
-                            return Poll::Ready(Err(std::io::Error::other(
-                                "Snell AEAD length record was truncated",
-                            )));
-                        }
-                        let size = ((usize::from(size_plain[0]) << 8) | usize::from(size_plain[1]))
-                            & PAYLOAD_SIZE_MASK;
-                        if size == 0 {
-                            this.reuse.peer_closed = true;
-                            this.read_phase = ReadPhase::Idle;
-                            return Poll::Ready(Ok(()));
-                        }
-                        this.read_phase = ReadPhase::Payload {
-                            buf: vec![0_u8; size + TAG_SIZE],
-                            filled: 0,
-                        };
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Pending => return Poll::Pending,
-                },
-                ReadPhase::Payload { buf: body, filled } => {
-                    match poll_fill(&mut this.inner, cx, body, filled) {
-                        Poll::Ready(Ok(false)) => {
-                            return Poll::Ready(Err(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "Snell payload ended early",
-                            )));
-                        }
-                        Poll::Ready(Ok(true)) => {
-                            let aead = this.read_aead.as_ref().ok_or_else(|| {
-                                std::io::Error::other("Snell reader is not initialized")
-                            })?;
-                            let plain = aead
-                                .open(&this.read_nonce, body)
-                                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                            increment_nonce(&mut this.read_nonce);
-                            this.leftover = plain;
-                            this.leftover_off = 0;
-                            this.read_phase = ReadPhase::Idle;
-                        }
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
+            match self.as_mut().get_mut().poll_advance_read(cx) {
+                Poll::Ready(Ok(ReadAdvance::Record)) => {}
+                Poll::Ready(Ok(ReadAdvance::Eof)) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
             }
         }
     }
@@ -705,59 +730,111 @@ where
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if self.as_mut().flush_pending(cx).is_pending() {
-            return Poll::Pending;
+        match self.as_mut().flush_pending(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                self.as_mut().get_mut().mark_failed();
+                return Poll::Ready(Err(error));
+            }
+            Poll::Ready(Ok(())) => {}
         }
-        let pending = self
-            .as_mut()
-            .get_mut()
-            .encrypt_payload(buf)
-            .map_err(std::io::Error::other)?;
+        let pending = match self.as_mut().get_mut().encrypt_payload(buf) {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.as_mut().get_mut().mark_failed();
+                return Poll::Ready(Err(error));
+            }
+        };
         let this = self.as_mut().get_mut();
         this.pending = pending;
         this.pending_off = 0;
-        match Pin::new(this).flush_pending(cx) {
-            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+        match Pin::new(&mut *this).flush_pending(cx) {
+            Poll::Ready(Err(error)) => {
+                this.mark_failed();
+                Poll::Ready(Err(error))
+            }
             Poll::Ready(Ok(())) | Poll::Pending => Poll::Ready(Ok(buf.len())),
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let mut this = self;
-        if this.as_mut().flush_pending(cx).is_pending() {
-            return Poll::Pending;
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.as_mut().flush_pending(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                self.as_mut().get_mut().mark_failed();
+                return Poll::Ready(Err(error));
+            }
+            Poll::Ready(Ok(())) => {}
         }
-        Pin::new(&mut this.inner).poll_flush(cx)
+        match Pin::new(&mut self.inner).poll_flush(cx) {
+            Poll::Ready(Err(error)) => {
+                self.as_mut().get_mut().mark_failed();
+                Poll::Ready(Err(error))
+            }
+            other => other,
+        }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        if self.as_mut().flush_pending(cx).is_pending() {
-            return Poll::Pending;
+        match self.as_mut().flush_pending(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                self.as_mut().get_mut().mark_failed();
+                return Poll::Ready(Err(error));
+            }
+            Poll::Ready(Ok(())) => {}
         }
         if self.reuse.hold_inner_shutdown {
             if !self.reuse.zero_chunk_written {
-                let pending = self
-                    .as_mut()
-                    .get_mut()
-                    .encrypt_zero_chunk()
-                    .map_err(std::io::Error::other)?;
+                let pending = match self.as_mut().get_mut().encrypt_zero_chunk() {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        self.as_mut().get_mut().mark_failed();
+                        return Poll::Ready(Err(error));
+                    }
+                };
                 let this = self.as_mut().get_mut();
                 this.pending = pending;
                 this.pending_off = 0;
                 this.reuse.zero_chunk_written = true;
-                if Pin::new(this).flush_pending(cx).is_pending() {
-                    return Poll::Pending;
+                match Pin::new(&mut *this).flush_pending(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        this.mark_failed();
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(())) => {}
                 }
             }
-            return Pin::new(&mut self.inner).poll_flush(cx);
+            return match Pin::new(&mut self.inner).poll_flush(cx) {
+                Poll::Ready(Err(error)) => {
+                    self.as_mut().get_mut().mark_failed();
+                    Poll::Ready(Err(error))
+                }
+                other => other,
+            };
         }
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        match Pin::new(&mut self.inner).poll_shutdown(cx) {
+            Poll::Ready(Err(error)) => {
+                self.as_mut().get_mut().mark_failed();
+                Poll::Ready(Err(error))
+            }
+            other => other,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CipherKind, derive_key};
+    use std::cell::Cell;
+    use std::io::Cursor;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+
+    use super::{CipherKind, SALT_SIZE, SnellStream, derive_key};
 
     #[test]
     fn argon2id_key_is_deterministic() {
@@ -777,5 +854,157 @@ mod tests {
         let sealed = first.seal(&nonce, b"ping").expect("seal");
         let opened = second.open(&nonce, &sealed).expect("open");
         assert_eq!(opened, b"ping");
+    }
+
+    /// Reader that yields at most `budget` bytes, then Pending until budget grows.
+    struct BudgetReader {
+        data: Cursor<Vec<u8>>,
+        budget: Rc<Cell<usize>>,
+        given: usize,
+    }
+
+    impl AsyncRead for BudgetReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let budget = self.budget.get();
+            if self.given >= budget {
+                return Poll::Pending;
+            }
+            let allow = budget - self.given;
+            let take = allow.min(buf.remaining());
+            if take == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let mut scratch = vec![0_u8; take];
+            let mut tmp = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut self.data).poll_read(cx, &mut tmp) {
+                Poll::Ready(Ok(())) => {
+                    let n = tmp.filled().len();
+                    if n == 0 {
+                        return Poll::Ready(Ok(()));
+                    }
+                    buf.put_slice(tmp.filled());
+                    self.given += n;
+                    Poll::Ready(Ok(()))
+                }
+                other => other,
+            }
+        }
+    }
+
+    impl AsyncWrite for BudgetReader {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_plain_keeps_progress_across_cancel() {
+        let psk = b"psk-cancel";
+        let kind = CipherKind::Aes128Gcm;
+        let mut write_salt = [0_u8; SALT_SIZE];
+        write_salt.fill(7);
+        let aead = derive_key(psk, &write_salt, kind).expect("kdf");
+        let mut nonce = [0_u8; 12];
+        let size = aead.seal(&nonce, &[0, 4]).expect("size");
+        nonce[0] = 1;
+        let body = aead.seal(&nonce, b"ping").expect("body");
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&write_salt);
+        wire.extend_from_slice(&size);
+        wire.extend_from_slice(&body);
+
+        let budget = Rc::new(Cell::new(SALT_SIZE + 4));
+        let reader = BudgetReader {
+            data: Cursor::new(wire),
+            budget: budget.clone(),
+            given: 0,
+        };
+        let mut stream = SnellStream::server(reader, psk, kind)
+            .await
+            .expect("server");
+        // Mid-length-record cancel: drop the future while Pending.
+        {
+            let mut pending = std::pin::pin!(stream.read_plain(64));
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(pending.as_mut().poll(&mut cx).is_pending());
+        }
+        // Unlock the rest of the record and complete.
+        budget.set(usize::MAX);
+        let plain = stream.read_plain(64).await.expect("plain");
+        assert_eq!(plain, b"ping");
+    }
+
+    #[tokio::test]
+    async fn write_flush_error_marks_stream_failed_for_pool() {
+        struct FailAfter {
+            remain: usize,
+        }
+
+        impl AsyncRead for FailAfter {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        impl AsyncWrite for FailAfter {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if self.remain == 0 {
+                    return Poll::Ready(Err(std::io::Error::other("injected write failure")));
+                }
+                let n = buf.len().min(self.remain);
+                self.remain -= n;
+                Poll::Ready(Ok(n))
+            }
+
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut stream =
+            SnellStream::open_client(FailAfter { remain: 16 }, b"psk", CipherKind::Aes128Gcm)
+                .await
+                .expect("open");
+        stream.set_hold_inner_shutdown(true);
+        let err = stream.write_all(b"hello-world-payload").await;
+        assert!(err.is_err(), "write must surface the transport failure");
+        assert!(
+            !stream.can_return_to_pool(),
+            "failed streams must not re-enter the reuse pool"
+        );
     }
 }

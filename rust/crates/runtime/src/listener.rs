@@ -420,6 +420,7 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         | ProxyKind::Tuic
         | ProxyKind::WireGuard
         | ProxyKind::Snell
+        | ProxyKind::Ssh
         | ProxyKind::Reject
         | ProxyKind::Rematch => None,
     }
@@ -750,16 +751,23 @@ pub(super) async fn run_snell_udp_session(
     loop {
         if let Some(request) = current.take() {
             let destination = udp_proxy_destination(&request);
-            if association
-                .send(&destination, &request.payload)
-                .await
-                .is_err()
-            {
-                break;
+            // Keep send cancellable: a blocked TCP write must still honor
+            // shutdown, tracker cancel, and the idle timeout. Cancellation
+            // drops the association (half-written AEAD must not be reused).
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                () = tracker.cancelled() => break,
+                () = &mut idle => break,
+                result = association.send(&destination, &request.payload) => {
+                    if result.is_err() {
+                        break;
+                    }
+                    uploaded = uploaded.saturating_add(request.payload.len() as u64);
+                    idle.as_mut()
+                        .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+                }
             }
-            uploaded = uploaded.saturating_add(request.payload.len() as u64);
-            idle.as_mut()
-                .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            continue;
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
