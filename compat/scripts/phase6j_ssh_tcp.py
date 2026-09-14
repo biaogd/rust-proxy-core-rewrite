@@ -32,6 +32,7 @@ from phase5b1a import connect_domain, debug_files
 from phase5d_proxies import request
 from phase5d_streams import SECRET, wait_controller
 from phase6e_vless_tcp import rejected_exchange
+from ssh_review_support import exercise_review
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase6j-ssh-tcp-diff.json"
@@ -382,6 +383,8 @@ rules:
             controller_port, "GET", f"/group/ssh-health/delay?{health_query}"
         )
         health_ok = health_status == 200 and b"inline-ssh" in health_body
+        if not health_ok:
+            raise AssertionError(f"SSH health failed: {health_status} {health_body!r}")
 
         reload_via_controller(process, controller_port, config, secret=SECRET)
         after_reload = wait_exchange(
@@ -434,10 +437,24 @@ def main() -> int:
         if not authority.exists():
             raise RuntimeError(f"rewrite-ssh-authority was not built: {authority}")
         try:
+            exercise_review(binaries, root)
             for name in ["rust", "go"]:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], authority, scratch)
+                for case, extra in {
+                    "blank-host-key": "    host-key: ['']\n",
+                    "comment-host-key": "    host-key: ['# comment']\n",
+                    "invalid-host-key": "    host-key: ['not-a-key']\n",
+                    "missing-private-key": "    private-key: nonexistent-ssh-key\n",
+                    "invalid-private-key": "    private-key: '-----BEGIN PRIVATE KEY-----broken'\n",
+                }.items():
+                    accepted = config_validation(
+                        binaries[name], root / f"{name}-validate-{case}",
+                        "proxies:\n" + ssh_record("invalid-ssh", 22, extra=extra),
+                    )
+                    if accepted:
+                        raise AssertionError(f"{name} accepted {case}")
             observations["rust-udp-rejected"] = not config_validation(
                 binaries["rust"],
                 root / "rust-validate-udp",

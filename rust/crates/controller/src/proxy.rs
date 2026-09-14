@@ -34,6 +34,10 @@ pub(super) const PROXY_NAMES: [&str; 7] = [
     "REJECT-DROP",
 ];
 
+#[cfg(test)]
+#[path = "proxy_tests.rs"]
+mod zero_delay_tests;
+
 pub(super) async fn proxies(State(state): State<ControllerState>) -> Response {
     let config = state.current_config();
     let mut proxies: serde_json::Map<String, serde_json::Value> = PROXY_NAMES
@@ -167,7 +171,7 @@ pub(super) async fn proxy_delay(
     )
     .await;
     match result {
-        Ok(Ok(measurement)) if measurement.delay > 0 => {
+        Ok(Ok(measurement)) => {
             state
                 .runtime
                 .record_proxy_delay(&name, url, measurement.delay, measurement.satisfied);
@@ -247,7 +251,7 @@ pub(super) async fn group_delay(
         let mut delays = BTreeMap::new();
         for (member, result) in results {
             match result {
-                Ok(Ok(measurement)) if measurement.delay > 0 => {
+                Ok(Ok(measurement)) => {
                     state.runtime.record_proxy_delay(
                         member,
                         url,
@@ -274,7 +278,7 @@ pub(super) async fn group_delay(
     )
     .await;
     match result {
-        Ok(Ok(measurement)) if measurement.delay > 0 => {
+        Ok(Ok(measurement)) => {
             state.runtime.record_proxy_delay(
                 "DIRECT",
                 url,
@@ -1578,7 +1582,7 @@ pub async fn healthcheck_proxy_provider_config(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(measurement)) if measurement.delay > 0 => {
+            Ok(Ok(measurement)) => {
                 state.record_proxy_delay(
                     member,
                     &provider.health_check.url,
@@ -1613,7 +1617,7 @@ pub async fn healthcheck_proxy_group(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(measurement)) if measurement.delay > 0 => {
+            Ok(Ok(measurement)) => {
                 state.record_proxy_delay(
                     member,
                     &group.test_url,

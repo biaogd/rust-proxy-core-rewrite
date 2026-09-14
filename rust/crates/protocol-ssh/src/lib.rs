@@ -9,7 +9,7 @@ mod authority;
 mod client;
 
 pub use authority::{AuthorityOptions, TestAuthority, spawn_authority};
-pub use client::{Client, ClientOptions};
+pub use client::{Client, ClientOptions, validate_material};
 
 use thiserror::Error;
 

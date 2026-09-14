@@ -509,16 +509,11 @@ fn ssh_configuration_is_supported_and_scoped() {
 
     let key = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: ssh-key\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    private-key: |\n      -----BEGIN OPENSSH PRIVATE KEY-----\n      test\n      -----END OPENSSH PRIVATE KEY-----\n    private-key-passphrase: phrase\n"
-    ))
-    .expect("6J SSH private-key config");
-    let key_opts = key.proxies[0].ssh.as_ref().expect("key options");
+    ));
     assert!(
-        key_opts
-            .private_key
-            .as_deref()
-            .is_some_and(|value| value.contains("PRIVATE KEY"))
+        key.is_err(),
+        "invalid private key must fail config validation"
     );
-    assert_eq!(key_opts.private_key_passphrase.as_deref(), Some("phrase"));
 
     for unsupported in [
         "udp: true",
@@ -527,6 +522,11 @@ fn ssh_configuration_is_supported_and_scoped() {
         "mptcp: true",
         "tls: true",
         "sni: example.com",
+        "host-key: ['']",
+        "host-key: ['# comment']",
+        "host-key: ['not-a-key']",
+        "private-key: /nonexistent/rewrite-ssh-private-key",
+        "host-key-algorithms: ['not-an-algorithm']",
     ] {
         let source = format!(
             "{MINIMAL}\nproxies:\n  - name: bad\n    type: ssh\n    server: 127.0.0.1\n    port: 22\n    username: alice\n    password: secret\n    {unsupported}\n"

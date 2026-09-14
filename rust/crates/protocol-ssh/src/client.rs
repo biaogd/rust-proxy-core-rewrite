@@ -1,7 +1,9 @@
 use std::borrow::Cow;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rand::RngExt;
 use rewrite_model::Destination;
@@ -10,13 +12,38 @@ use russh::client::{self, AuthResult, Handle};
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKey, decode_secret_key};
 use russh::{Preferred, SshId};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::SshProtocolError;
 
 /// Long-lived SSH client matching Go `adapter/outbound.Ssh` session reuse.
 pub struct Client {
     options: ClientOptions,
-    session: Mutex<Option<Handle<HostKeyHandler>>>,
+    session: Mutex<Option<Arc<ConnectedSession>>>,
+    shutdown: CancellationToken,
+}
+
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct ConnectedSession {
+    handle: Handle<HostKeyHandler>,
+    _socket: DisconnectOnDrop,
+}
+
+// russh detaches its task during key exchange. Closing the shared transport
+// also wakes that task if connect_stream is cancelled before it returns a handle.
+struct DisconnectOnDrop(socket2::Socket);
+
+impl Drop for DisconnectOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
 }
 
 /// Clash `type: ssh` options accepted in 6J-A/B.
@@ -71,14 +98,16 @@ impl Client {
     /// Returns when a configured private key, host key, or host-key algorithm
     /// cannot be parsed.
     pub fn new(options: ClientOptions) -> Result<Self, SshProtocolError> {
-        if let Some(material) = options.private_key.as_deref() {
-            let _ = load_private_key(material, options.private_key_passphrase.as_deref())?;
-        }
-        let _ = parse_host_keys(&options.host_keys)?;
-        let _ = preferred_host_keys(&options.host_key_algorithms)?;
+        validate_material(
+            options.private_key.as_deref(),
+            options.private_key_passphrase.as_deref(),
+            &options.host_keys,
+            &options.host_key_algorithms,
+        )?;
         Ok(Self {
             options,
             session: Mutex::new(None),
+            shutdown: CancellationToken::new(),
         })
     }
 
@@ -93,48 +122,59 @@ impl Client {
         &self,
         destination: &Destination,
     ) -> Result<rewrite_io::BoxedStream, SshProtocolError> {
-        let mut guard = self.session.lock().await;
-        if guard.as_ref().is_some_and(Handle::is_closed) {
-            *guard = None;
-        }
-        if guard.is_none() {
-            *guard = Some(self.handshake().await?);
-        }
-        let Some(handle) = guard.as_ref() else {
-            return Err(SshProtocolError::Protocol(
-                "SSH session was not established".to_owned(),
-            ));
-        };
-        match open_direct_tcpip(handle, destination).await {
-            Ok(stream) => Ok(stream),
-            Err(error) if session_is_dead(&error) => {
-                *guard = Some(self.handshake().await?);
-                let Some(handle) = guard.as_ref() else {
-                    return Err(SshProtocolError::Protocol(
-                        "SSH session was not re-established".to_owned(),
-                    ));
-                };
-                open_direct_tcpip(handle, destination).await
+        self.bounded(async {
+            let handle = self.connected_session().await?;
+            match open_direct_tcpip(&handle.handle, destination).await {
+                Ok(stream) => Ok(stream),
+                Err(_) if handle.handle.is_closed() => {
+                    let replacement = self.connected_session().await?;
+                    open_direct_tcpip(&replacement.handle, destination).await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        })
+        .await
+    }
+
+    async fn connected_session(&self) -> Result<Arc<ConnectedSession>, SshProtocolError> {
+        let mut guard = self.session.lock().await;
+        if let Some(handle) = guard.as_ref().filter(|handle| !handle.handle.is_closed()) {
+            return Ok(Arc::clone(handle));
+        }
+        let handle = Arc::new(self.handshake().await?);
+        *guard = Some(Arc::clone(&handle));
+        Ok(handle)
+    }
+
+    async fn bounded<T>(
+        &self,
+        operation: impl Future<Output = Result<T, SshProtocolError>>,
+    ) -> Result<T, SshProtocolError> {
+        tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => Err(SshProtocolError::Protocol("SSH client retired".to_owned())),
+            result = tokio::time::timeout(OPERATION_TIMEOUT, operation) => result.unwrap_or_else(|_| Err(SshProtocolError::Protocol("SSH operation timed out".to_owned()))),
         }
     }
 
     /// Disconnects the reused SSH client.
     pub async fn close(&self) {
+        self.shutdown.cancel();
         let handle = self.session.lock().await.take();
         if let Some(handle) = handle {
-            let _ = handle
-                .disconnect(
+            let _ = tokio::time::timeout(
+                OPERATION_TIMEOUT,
+                handle.handle.disconnect(
                     russh::Disconnect::ByApplication,
                     "rewrite ssh outbound closed",
                     "",
-                )
-                .await;
+                ),
+            )
+            .await;
         }
     }
 
-    async fn handshake(&self) -> Result<Handle<HostKeyHandler>, SshProtocolError> {
+    async fn handshake(&self) -> Result<ConnectedSession, SshProtocolError> {
         let address = resolve_server(&self.options).await?;
         let config = Arc::new(client::Config {
             nodelay: true,
@@ -157,6 +197,7 @@ impl Client {
             },
         )
         .await?;
+        let socket = DisconnectOnDrop(socket2::SockRef::from(&stream).try_clone()?);
         let mut handle = client::connect_stream(config, stream, handler)
             .await
             .map_err(|error| {
@@ -167,7 +208,10 @@ impl Client {
                 "SSH authentication rejected".to_owned(),
             ));
         }
-        Ok(handle)
+        Ok(ConnectedSession {
+            handle,
+            _socket: socket,
+        })
     }
 }
 
@@ -177,7 +221,14 @@ async fn authenticate(
 ) -> Result<bool, SshProtocolError> {
     if let Some(material) = options.private_key.as_deref() {
         let key = load_private_key(material, options.private_key_passphrase.as_deref())?;
-        let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        let hash = if key.algorithm().is_rsa() {
+            // Match Go's key-format fallback for servers without EXT_INFO;
+            // advertised RSA SHA-2 algorithms are preferred when available.
+            handle.best_supported_rsa_hash().await?.flatten()
+        } else {
+            None
+        };
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
         if matches!(
             handle
                 .authenticate_publickey(&options.username, key)
@@ -208,15 +259,6 @@ async fn open_direct_tcpip(
         .await
         .map_err(|error| SshProtocolError::Protocol(format!("SSH direct-tcpip failed: {error}")))?;
     Ok(Box::new(channel.into_stream()))
-}
-
-fn session_is_dead(error: &SshProtocolError) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    text.contains("disconnect")
-        || text.contains("not authenticated")
-        || text.contains("connection reset")
-        || text.contains("broken pipe")
-        || text.contains("eof")
 }
 
 async fn resolve_server(options: &ClientOptions) -> Result<SocketAddr, SshProtocolError> {
@@ -275,6 +317,11 @@ fn preferred_host_keys(names: &[String]) -> Result<Preferred, SshProtocolError> 
                 "unsupported SSH host-key-algorithm {trimmed}: {error}"
             ))
         })?;
+        if matches!(algorithm, Algorithm::Other(_)) {
+            return Err(SshProtocolError::Protocol(format!(
+                "unsupported SSH host-key-algorithm {trimmed}"
+            )));
+        }
         key.push(algorithm);
     }
     Ok(Preferred {
@@ -286,16 +333,37 @@ fn preferred_host_keys(names: &[String]) -> Result<Preferred, SshProtocolError> 
 pub(crate) fn parse_host_keys(lines: &[String]) -> Result<Vec<PublicKey>, SshProtocolError> {
     lines
         .iter()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
         .map(|line| parse_authorized_key(line))
         .collect()
 }
 
+/// Validates SSH configuration before accepting a configuration or reload.
+///
+/// # Errors
+///
+/// Rejects unreadable/invalid private keys, incorrect passphrases, malformed
+/// host keys (including blank/comment entries), and unknown host algorithms.
+pub fn validate_material(
+    private_key: Option<&str>,
+    passphrase: Option<&str>,
+    host_keys: &[String],
+    algorithms: &[String],
+) -> Result<(), SshProtocolError> {
+    if let Some(material) = private_key {
+        let _ = load_private_key(material, passphrase)?;
+    }
+    let _ = parse_host_keys(host_keys)?;
+    let _ = preferred_host_keys(algorithms)?;
+    Ok(())
+}
+
 fn parse_authorized_key(line: &str) -> Result<PublicKey, SshProtocolError> {
     let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Err(SshProtocolError::Protocol(
+            "empty/comment SSH host-key entry".to_owned(),
+        ));
+    }
     if let Ok(key) = PublicKey::from_openssh(trimmed) {
         return Ok(key);
     }

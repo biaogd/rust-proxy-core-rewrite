@@ -11,8 +11,10 @@ rewrite-io = { path = "../io" }
 rewrite-model = { path = "../model" }
 rewrite-platform = { path = "../platform" }
 russh.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true

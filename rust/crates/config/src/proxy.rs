@@ -1056,6 +1056,13 @@ fn parse_ssh_proxy(
     let host_keys = parse_ssh_string_list(&mut proxy.extra, "host-key", &name)?;
     let host_key_algorithms =
         parse_ssh_string_list(&mut proxy.extra, "host-key-algorithms", &name)?;
+    rewrite_protocol_ssh::validate_material(
+        private_key.as_deref(),
+        private_key_passphrase.as_deref(),
+        &host_keys,
+        &host_key_algorithms,
+    )
+    .map_err(|_| ConfigError::UnsupportedProxy(name.clone()))?;
     if !proxy.extra.is_empty() {
         return Err(ConfigError::UnsupportedProxy(name));
     }

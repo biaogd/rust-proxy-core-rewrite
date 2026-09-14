@@ -1,6 +1,37 @@
 # Rust rewrite status
 
-Last updated: 2026-09-12
+Last updated: 2026-09-14
+
+### PR 19 SSH review corrections — 2026-09-14
+
+SSH now rejects blank/comment host-key entries instead of silently disabling
+verification, validates private keys/passphrases during config loading, selects
+RSA signature hashes using the server's `server-sig-algs`, and releases the
+shared session lock before waiting for a `direct-tcpip` confirmation. Retirement
+cancels pending connection setup; new dials on retired clients fail. SSH setup
+and channel open have a Rust-specific 10-second upper bound (caller cancellation
+can be earlier); exact Go deadline identity is not claimed.
+
+Controller health checks accept successful zero-millisecond measurements, as
+Go does, instead of treating those measurements as timeouts. This affects SSH
+pooled-connection probes as well as the shared probe path.
+
+Review regression coverage: `protocol-ssh/tests/lifecycle.rs`, config SSH
+rejection tests, a fixed-clock controller group probe, and
+`phase6j_ssh_tcp.py` with `ssh_review_support.py`. The development-only Go SSH
+authority rejects RSA/SHA-1 and independently delays one channel confirmation
+while another channel must complete. Blank/comment/invalid host keys and bad
+private keys must fail both Go and Rust `-t`. Go product sources are unchanged.
+Local evidence so far: `cargo fmt --all --check`, Python syntax and the Go
+authority build pass; all 133 `rewrite-config` unit tests pass. Go-only RSA
+SHA-2, encrypted-key passphrase and delayed confirmation contracts pass with a
+diagnostic-only 600s process-start budget
+on this slow host; wire/exchange deadlines were unchanged. Rust checks and
+Go/Rust differential execution remain pending; three-platform CI remains
+required. Nine SSH lifecycle tests passed before handoff; RSA relay, remaining
+SSH tests, controller regression, Clippy and full differential checks had not
+completed. The user requested push/merge without waiting for these gates.
+Still Partial, not Parity or a production-readiness claim.
 
 ### 6J-B SSH outbound lifecycle — 2026-09-12
 

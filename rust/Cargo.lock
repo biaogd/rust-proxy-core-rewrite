@@ -3828,6 +3828,7 @@ dependencies = [
  "prost",
  "regex",
  "rewrite-model",
+ "rewrite-protocol-ssh",
  "rewrite-rules",
  "rewrite-ruleset",
  "serde",
@@ -4065,8 +4066,10 @@ dependencies = [
  "rewrite-model",
  "rewrite-platform",
  "russh",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
