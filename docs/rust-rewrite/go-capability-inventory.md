@@ -158,7 +158,7 @@ The product parser enumerates outbound types in
 | OUT-18 | OpenVPN and Gost relay | Not started | 7I–7J |
 | OUT-19 | Tailscale/tsnet and Tailscale DNS | Not started | 7K plus `with_gvisor` |
 | OUT-20 | ZeroTier network lifecycle, state and managed DNS | Not started | 7L |
-| OUT-21 | Per-proxy dialer-proxy chains and sing-mux | Not started | 7T1 |
+| OUT-21 | Per-proxy dialer-proxy chains and sing-mux | Partial: 7T1-A TCP `dialer-proxy` chains (HTTP/SOCKS5 first slice, then existing TCP protocols); UDP chains and sing-mux remain | 7T1 |
 | OUT-22 | Shared transports/security: WebSocket, HTTP/2, gRPC/Gun, xHTTP/H3, mKCP, Mekya, simple-obfs, v2ray-plugin, ShadowTLS, ReSTLS, JLS, TLSMirror, Reality and ECH | Partial: Phase 6C-M1–N and Phase 6D-F–J retain the documented obfs/plugin/TLS/HTTP/Gun slices. Phase 6D-K/L adds VMess TCP over byte-compatible V2Ray mKCP and Hyper-backed TLS Mekya HTTP/1.1/H2, including authentication/headers, packet bundles/polling/pool, Go-contract congestion/RTO and deterministic impairment plus close lifecycle | Randomized long-duration impairment, UDP/non-VMess consumers, xHTTP/H3, exact Gun frame-idle ping timing, advanced security transports, exact Chrome fingerprint and remaining inbound layers stay separate gates |
 | OUT-23 | Common adapter JSON, delay/history, liveness, UDP support, unwrap and lifecycle | Not started | Repeated adapter contract gate |
 

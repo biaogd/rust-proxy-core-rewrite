@@ -83,6 +83,33 @@ pub async fn connect_http_with_options(
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream = connect_with_options(server, allow_ipv6, options).await?;
+    connect_http_on_stream(
+        Box::new(stream),
+        destination,
+        credentials,
+        headers,
+        tls,
+        clock,
+    )
+    .await
+}
+
+/// Completes HTTP CONNECT (and optional proxy TLS) on an established stream.
+///
+/// Used by dialer-proxy chains: the outer TCP hop may already come from another
+/// proxy while TLS identity and CONNECT still follow this adapter's options.
+///
+/// # Errors
+///
+/// Returns [`HttpProxyError`] when TLS or CONNECT fails.
+pub async fn connect_http_on_stream(
+    stream: BoxedOutboundStream,
+    destination: &Destination,
+    credentials: Option<(&str, &str)>,
+    headers: &BTreeMap<String, String>,
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<BoxedOutboundStream, HttpProxyError> {
     let stream: BoxedOutboundStream = if let Some(tls) = tls {
         let config = client_config(tls, clock)?;
         let server_name = ServerName::try_from(tls.server_name.to_owned())
@@ -96,7 +123,7 @@ pub async fn connect_http_with_options(
         .map_err(TlsClientError::Handshake)?;
         Box::new(stream)
     } else {
-        Box::new(stream)
+        stream
     };
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(async move {

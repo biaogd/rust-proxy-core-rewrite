@@ -14,7 +14,7 @@ mod auth;
 mod tcp;
 mod udp;
 
-pub use tcp::{connect_socks5, connect_socks5_with_options};
+pub use tcp::{connect_socks5, connect_socks5_on_stream, connect_socks5_with_options};
 pub use udp::{Socks5UdpAssociation, associate_socks5_udp_with_options};
 
 #[derive(Debug, Error)]

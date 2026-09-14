@@ -465,7 +465,6 @@ fn snell_configuration_is_supported_and_scoped() {
         "psk: password\n    version: 4",
         "psk: password\n    version: 5",
         "psk: password\n    obfs-opts:\n      mode: shadow-tls",
-        "psk: password\n    dialer-proxy: DIRECT",
         "password: password",
     ] {
         let source = format!(
@@ -476,6 +475,15 @@ fn snell_configuration_is_supported_and_scoped() {
             "accepted {unsupported}"
         );
     }
+
+    let with_dialer = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 2\n  - name: snell-via\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    dialer-proxy: hop-a\n"
+    ))
+    .expect("Snell dialer-proxy");
+    assert_eq!(
+        with_dialer.proxies[1].dialer_proxy.as_deref(),
+        Some("hop-a")
+    );
 }
 
 #[test]
@@ -2077,6 +2085,7 @@ fn expands_filtered_provider_members_in_pattern_order() {
                 wireguard: None,
                 snell: None,
                 ssh: None,
+                dialer_proxy: None,
                 headers: BTreeMap::new(),
             })
             .collect(),
@@ -2165,6 +2174,7 @@ fn filtered_empty_provider_uses_configured_fallback() {
             wireguard: None,
             snell: None,
             ssh: None,
+            dialer_proxy: None,
             headers: BTreeMap::new(),
         }],
     };
@@ -4115,4 +4125,55 @@ fn parses_phase6e_h_vless_reality_scope() {
             "expected rejection for {body}"
         );
     }
+}
+
+#[test]
+fn dialer_proxy_configuration_contract() {
+    let ok = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: hop-a\n"
+    ))
+    .expect("http via socks5 dialer-proxy");
+    assert_eq!(ok.proxies[1].dialer_proxy.as_deref(), Some("hop-a"));
+
+    let chain = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: proxy-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: proxy-b\n    type: socks5\n    server: 127.0.0.1\n    port: 1081\n    dialer-proxy: proxy-a\n  - name: proxy-c\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: proxy-b\n"
+    ))
+    .expect("valid chain");
+    assert_eq!(chain.proxies[2].dialer_proxy.as_deref(), Some("proxy-b"));
+
+    let missing = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: missing\n"
+    ));
+    let missing_err = missing.expect_err("missing dialer").to_string();
+    assert!(missing_err.contains("not found"), "{missing_err}");
+
+    let self_ref = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: self-proxy\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n    dialer-proxy: self-proxy\n"
+    ));
+    let self_err = self_ref.expect_err("self dialer").to_string();
+    assert!(self_err.contains("circular"), "{self_err}");
+
+    let cycle = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: proxy-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n    dialer-proxy: proxy-c\n  - name: proxy-b\n    type: socks5\n    server: 127.0.0.1\n    port: 1081\n    dialer-proxy: proxy-a\n  - name: proxy-c\n    type: socks5\n    server: 127.0.0.1\n    port: 1082\n    dialer-proxy: proxy-a\n"
+    ));
+    let cycle_err = cycle.expect_err("cycle").to_string();
+    assert!(cycle_err.contains("circular"), "{cycle_err}");
+
+    let via_group = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: dialer-group\nproxy-groups:\n  - name: dialer-group\n    type: select\n    proxies: [hop-a]\n"
+    ))
+    .expect("dialer-proxy may name a group");
+    assert_eq!(
+        via_group.proxies[1].dialer_proxy.as_deref(),
+        Some("dialer-group")
+    );
+
+    let via_direct = Config::from_yaml(&format!(
+        "{MINIMAL}\nproxies:\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: DIRECT\n"
+    ))
+    .expect("dialer-proxy DIRECT");
+    assert_eq!(
+        via_direct.proxies[0].dialer_proxy.as_deref(),
+        Some("DIRECT")
+    );
 }

@@ -446,12 +446,42 @@ pub(super) async fn connect_configured_proxy(
     state: &RuntimeState,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let mut chain = crate::dialer_proxy::DialChain::new();
+    connect_configured_proxy_with_chain(
+        proxy,
+        destination,
+        config,
+        state,
+        socket_options,
+        &mut chain,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn connect_configured_proxy_with_chain(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    config: &Config,
+    state: &RuntimeState,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    chain: &mut crate::dialer_proxy::DialChain,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let clock = state.clock();
     let allow_ipv6 = config.ipv6;
     let custom_roots = config.trust_certificates.as_slice();
     let dns = config.dns.as_ref();
-    let server =
-        resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6).await?;
+    if proxy
+        .dialer_proxy
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+        && !matches!(proxy.kind, ProxyKind::Http | ProxyKind::Socks5)
+    {
+        return Err(format!(
+            "proxy [{}] dialer-proxy is not supported for {:?} yet (7T1-A wires HTTP/SOCKS5 first)",
+            proxy.name, proxy.kind
+        ));
+    }
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -465,15 +495,16 @@ pub(super) async fn connect_configured_proxy(
             let tls = proxy
                 .tls
                 .then(|| proxy_tls_options(proxy, server_name, custom_roots));
-            rewrite_outbound::connect_http_with_options(
-                &server,
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            rewrite_outbound::connect_http_on_stream(
+                transport,
                 destination,
-                allow_ipv6,
                 credentials,
                 &proxy.headers,
                 tls,
                 Some(clock),
-                socket_options,
             )
             .await
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
@@ -482,19 +513,23 @@ pub(super) async fn connect_configured_proxy(
             let tls = proxy
                 .tls
                 .then(|| proxy_tls_options(proxy, &proxy.server, custom_roots));
-            rewrite_outbound::connect_socks5_with_options(
-                &server,
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            rewrite_outbound::connect_socks5_on_stream(
+                transport,
                 destination,
-                allow_ipv6,
                 proxy.socks5_credentials(),
                 tls,
                 Some(clock),
-                socket_options,
             )
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
         }
         ProxyKind::Shadowsocks => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_shadowsocks_proxy(
                 proxy,
                 &server,
@@ -508,6 +543,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::ShadowsocksR => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_ssr_proxy(
                 proxy,
                 &server,
@@ -519,6 +557,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Vmess => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_vmess_proxy(
                 proxy,
                 &server,
@@ -531,6 +572,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Vless => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_vless_proxy(
                 proxy,
                 &server,
@@ -543,6 +587,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Trojan => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_trojan_proxy(
                 proxy,
                 &server,
@@ -555,6 +602,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::AnyTls => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_anytls_proxy(
                 proxy,
                 &server,
@@ -570,6 +620,9 @@ pub(super) async fn connect_configured_proxy(
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Snell => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_snell_proxy(
                 proxy,
                 &server,
@@ -1049,7 +1102,7 @@ async fn connect_trojan_physical_outer(
     Ok(outer)
 }
 
-fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
+pub(super) fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
     Destination {
         host: proxy
             .server

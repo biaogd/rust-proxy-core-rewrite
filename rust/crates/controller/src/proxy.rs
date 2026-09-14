@@ -1243,7 +1243,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
     };
     json!({
         "alive": health.alive,
-        "dialer-proxy": "",
+        "dialer-proxy": proxy.dialer_proxy.clone().unwrap_or_default(),
         "extra": health.extra,
         "history": health.history,
         "id": "00000000-0000-4000-8000-000000000100",

@@ -2,6 +2,15 @@
 
 Last updated: 2026-09-14
 
+### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14
+
+OUT-21 TCP proxy chains started: Go contract documented in
+`OUT-21-dialer-proxy-chains.md`, config accepts `dialer-proxy` on supported
+TCP leaf proxies with missing/self/cycle fail-closed validation, shared
+runtime dial entry, and HTTP↔SOCKS5 path-proving differentials first. SSH /
+Hysteria2 / TUIC / WireGuard keep rejecting the field. UDP chains and
+sing-mux stay later. Not Parity.
+
 ### PR 20 Snell review corrections — 2026-09-14
 
 Snell AEAD `read_plain` now advances through the cancel-safe `read_phase`

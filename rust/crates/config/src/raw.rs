@@ -313,6 +313,7 @@ pub(crate) struct RawProxy {
     #[serde(rename = "jls-opts")]
     pub(crate) jls_opts: Option<RawAnyTlsJlsOptions>,
     pub(crate) headers: Option<BTreeMap<String, String>>,
+    pub(crate) dialer_proxy: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

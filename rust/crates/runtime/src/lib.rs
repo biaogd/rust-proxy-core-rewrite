@@ -1,3 +1,4 @@
+mod dialer_proxy;
 mod generation;
 mod lifecycle;
 mod listener;

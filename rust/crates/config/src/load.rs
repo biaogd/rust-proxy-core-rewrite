@@ -21,6 +21,7 @@ use crate::named_listeners::{parse_shadowsocks_listeners, validate_shadowsocks_l
 use crate::proxy::{
     expand_proxy_group, load_proxy_provider_file, parse_proxies, parse_proxy_groups,
     parse_proxy_provider_source, parse_proxy_providers, proxy_member_types,
+    validate_dialer_proxies,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
 use crate::tun::parse_tun;
@@ -124,6 +125,7 @@ impl ConfigSpec {
             &proxies,
             &proxy_providers,
         )?;
+        validate_dialer_proxies(&proxies, &proxy_groups, &proxy_providers)?;
         let rule_providers =
             parse_rule_providers(raw.rule_providers.unwrap_or_default(), provider_directory)?;
         let proxy_targets = proxies

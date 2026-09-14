@@ -7,10 +7,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::BoxedOutboundStream;
 use crate::direct::{DirectError, DirectTcpOptions};
-use rewrite_transport::ClientTlsOptions as HttpProxyTls;
+use rewrite_transport::{ClientTlsOptions as HttpProxyTls, client_config};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::pki_types::ServerName;
 
+use super::Socks5ProxyError;
 use super::auth::password_auth;
-use super::{Socks5ProxyError, connect_control};
 
 /// Opens a TCP stream through a SOCKS5 proxy using remote target addressing.
 ///
@@ -50,7 +52,38 @@ pub async fn connect_socks5_with_options(
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
     options: DirectTcpOptions<'_>,
 ) -> Result<BoxedOutboundStream, Socks5ProxyError> {
-    let mut stream = connect_control(server, allow_ipv6, tls, clock, options).await?;
+    let stream = crate::direct::connect_with_options(server, allow_ipv6, options).await?;
+    connect_socks5_on_stream(Box::new(stream), destination, credentials, tls, clock).await
+}
+
+/// Completes optional proxy TLS plus SOCKS5 method/auth/CONNECT on a stream.
+///
+/// # Errors
+///
+/// Returns [`Socks5ProxyError`] when TLS, authentication or CONNECT fails.
+pub async fn connect_socks5_on_stream(
+    stream: BoxedOutboundStream,
+    destination: &Destination,
+    credentials: Option<(&str, &str)>,
+    tls: Option<HttpProxyTls<'_>>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<BoxedOutboundStream, Socks5ProxyError> {
+    let mut stream = if let Some(tls) = tls {
+        let config =
+            client_config(tls, clock).map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        let server_name = ServerName::try_from(tls.server_name.to_owned())
+            .map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            TlsConnector::from(Arc::new(config)).connect(server_name, stream),
+        )
+        .await
+        .map_err(|_| Socks5ProxyError::HandshakeTimeout)?
+        .map_err(|error| Socks5ProxyError::Tls(error.to_string()))?;
+        Box::new(stream) as BoxedOutboundStream
+    } else {
+        stream
+    };
     tokio::time::timeout(
         Duration::from_secs(5),
         command_handshake(&mut stream, destination, 1, credentials),

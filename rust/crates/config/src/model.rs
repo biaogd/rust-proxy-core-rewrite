@@ -234,6 +234,11 @@ pub struct ProxyConfig {
     pub wireguard: Option<WireGuardProxyConfig>,
     pub snell: Option<SnellProxyConfig>,
     pub ssh: Option<SshProxyConfig>,
+    /// Optional upstream used only to reach this proxy's `server:port`.
+    ///
+    /// Empty / `None` keeps the historical DIRECT dial. Phase 7T1-A accepts
+    /// the field on TCP leaf adapters; SSH and UDP-server protocols reject it.
+    pub dialer_proxy: Option<String>,
     pub headers: BTreeMap<String, String>,
 }
 
