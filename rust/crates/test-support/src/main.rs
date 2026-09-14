@@ -199,7 +199,7 @@ fn classify_config_error(error: &ConfigError) -> &'static str {
         ConfigError::InvalidMode => "invalid-mode",
         ConfigError::InvalidLogLevel => "invalid-log-level",
         ConfigError::Rule(error) => classify_rule_error(error),
-        ConfigError::UnsupportedProxy(_) => "unsupported-proxy",
+        ConfigError::UnsupportedProxy(_) | ConfigError::DialerProxy(_) => "unsupported-proxy",
         ConfigError::Io(_)
         | ConfigError::UnsupportedKey(_)
         | ConfigError::InvalidRuntimePort(_)
