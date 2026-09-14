@@ -35,7 +35,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
-        ListenerKind::Shadowsocks => return,
+        ListenerKind::Shadowsocks | ListenerKind::Trojan => return,
     };
     let authentication = if config.skips_inbound_auth(peer.ip()) {
         &[]
@@ -77,7 +77,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => "DEFAULT-HTTP",
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
-        ListenerKind::Shadowsocks => return,
+        ListenerKind::Shadowsocks | ListenerKind::Trojan => return,
     }
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
@@ -182,6 +182,7 @@ pub(super) async fn serve_stream_session(
     if metadata.inbound_name.is_empty() {
         let name = match metadata.inbound {
             InboundProtocol::Shadowsocks => "DEFAULT-SHADOWSOCKS",
+            InboundProtocol::Trojan => "DEFAULT-TROJAN",
             InboundProtocol::Tun => "DEFAULT-TUN",
             InboundProtocol::Http
             | InboundProtocol::Https

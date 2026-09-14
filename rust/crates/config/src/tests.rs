@@ -3786,6 +3786,50 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn loads_named_trojan_tls_listener_and_rejects_carriers() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: trojan-tls
+    type: trojan
+    listen: 127.0.0.1
+    port: 18420
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - username: alice
+        password: phase-inc-password
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named trojan tls listener");
+    assert_eq!(config.trojan_listeners.len(), 1);
+    let inbound = &config.trojan_listeners[0];
+    assert_eq!(inbound.name, "trojan-tls");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(inbound.users[0].username, "alice");
+    assert_eq!(inbound.users[0].password, "phase-inc-password");
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Trojan, 18420)));
+
+    for unsupported in [
+        "ws-path: /trojan",
+        "grpc-service-name: GunService",
+        "ss-option:\n      enabled: true\n      method: aes-128-gcm\n      password: nested",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: trojan-bad\n    type: trojan\n    listen: 127.0.0.1\n    port: 18421\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - password: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+}
+
+#[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"

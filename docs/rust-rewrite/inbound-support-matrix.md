@@ -96,13 +96,14 @@ SSR inbound.
 | Shadowsocks | **Partial — 6C-N + IN-B SS2022 UDP** | `config/shadowsocks_inbound.rs`, `named_listeners.rs`, `runtime/shadowsocks_listener.rs` | Yes | Pre-2022 + standard SS2022 (not ChaCha8) | Shared password; AES-2022 EIH colon split | simple-obfs http/tls; ShadowTLS **v3 only** | EIH (AES); ShadowTLS users | Legacy `ss-config` + named `type: shadowsocks` |
 | TUN | **Partial — Phase 8A/B/C/F** | `runtime/tun.rs`, `rewrite-tun`, platform | L3 | L3 | N/A | `stack: smoltcp` only | N/A | Go stacks rejected without remap |
 | Redir / TProxy / Tunnel | Missing | — | — | — | — | — | — | `IN-03`/`IN-04`/`IN-05` |
-| Snell / VMess / VLESS / Trojan / Hy2 / realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented | — | — | — | — | — | Server gates = IN-B…IN-G |
-| Inbound Reality / ReSTLS / JLS / WS / H2 / gRPC / xHTTP / mKCP / Mekya / mux | Missing as inbound | — | — | — | — | ShadowTLS v3 on SS only | — | `IN-13` |
+| Trojan | **Partial — IN-C TLS** | `named_listeners.rs`, `runtime/trojan_listener.rs`, `protocol-trojan` | Yes | UDP-over-TLS | Password users (SHA-224) | Native TLS only | Yes | Named `type: trojan`; WS/gRPC/Reality/`ss-option` rejected |
+| Snell / VMess / VLESS / Hy2 / realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented | — | — | — | — | — | Server gates = IN-D…IN-G |
+| Inbound Reality / ReSTLS / JLS / WS / H2 / gRPC / xHTTP / mKCP / Mekya / mux | Missing as inbound | — | — | — | — | ShadowTLS v3 on SS; Trojan TLS (no WS/gRPC yet) | — | `IN-13` |
 | WG / SSH / SSR inbound | Missing | — | — | — | — | — | — | Same as Go (no server) |
 
-`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks`
+`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks | Trojan`
 (`rust/crates/config/src/model.rs`). `InboundProtocol` today:
-`Http | Https | Socks4 | Socks5 | Shadowsocks | Tun | Inner`.
+`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Tun | Inner`.
 
 ## C. Shadowsocks inbound deep-dive (Rust vs Go)
 
@@ -167,7 +168,7 @@ Use these labels in later IN phases:
 | IN-06 | TUN | Partial smoltcp 8A/B/C/F | Phase 8 (preserve; do not duplicate) |
 | IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |
 | IN-08 | VMess + VLESS server | Not started | **IN-D**, **IN-E** |
-| IN-09 | Trojan server | Not started | **IN-C** |
+| IN-09 | Trojan server | **Partial — IN-C** named TLS TCP+UDP UoT; WS/gRPC deferred | **IN-C** (TLS done); carriers later |
 | IN-10 | Hysteria2 (+ realm) server | Not started | **IN-F** (Hy2 portion) |
 | IN-11 | TUIC + ShadowQUIC server | Not started | **IN-F** (TUIC v5); ShadowQUIC later |
 | IN-12 | AnyTLS (+ Mieru/Sudoku/TrustTunnel) | Not started | **IN-G** (AnyTLS); others deferred |

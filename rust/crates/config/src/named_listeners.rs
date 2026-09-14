@@ -3,7 +3,8 @@ use serde_yaml_ng::{Mapping, Value};
 use crate::ConfigError;
 use crate::model::{
     ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
-    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig,
+    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
+    TrojanInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -11,113 +12,258 @@ use crate::proxy::{
 };
 use crate::shadowsocks_inbound::resolve_ss_listen_host;
 
-pub(crate) fn parse_shadowsocks_listeners(
+pub(crate) struct NamedListeners {
+    pub shadowsocks: Vec<ShadowsocksInboundConfig>,
+    pub trojan: Vec<TrojanInboundConfig>,
+}
+
+pub(crate) fn parse_named_listeners(
     listeners: Option<Vec<Mapping>>,
     allow_lan: bool,
     bind_address: &str,
-) -> Result<Vec<ShadowsocksInboundConfig>, ConfigError> {
+) -> Result<NamedListeners, ConfigError> {
     let Some(listeners) = listeners else {
-        return Ok(Vec::new());
+        return Ok(NamedListeners {
+            shadowsocks: Vec::new(),
+            trojan: Vec::new(),
+        });
     };
-    let mut parsed = Vec::with_capacity(listeners.len());
+    let mut shadowsocks = Vec::new();
+    let mut trojan = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
-        validate_mapping_keys(
-            &mapping,
-            &[
-                "name",
-                "type",
-                "listen",
-                "port",
-                "cipher",
-                "password",
-                "udp",
-                "simple-obfs",
-                "shadow-tls",
-            ],
-            &format!("listener {index}"),
-        )?;
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
             ConfigError::InvalidInbound(format!("listener {index} is missing type"))
         })?;
-        if listener_type != "shadowsocks" {
-            return Err(ConfigError::InvalidInbound(format!(
-                "listener {index} has unsupported type: {listener_type}"
-            )));
-        }
-        let name = mapping_string(&mapping, "name").ok_or_else(|| {
-            ConfigError::InvalidInbound(format!("listener {index} is missing name"))
-        })?;
-        if !names.insert(name.clone()) {
-            return Err(ConfigError::InvalidInbound(format!(
-                "listener name is duplicated: {name}"
-            )));
-        }
-        let cipher = mapping_string(&mapping, "cipher").ok_or_else(|| {
-            ConfigError::InvalidInbound(format!("listener {name} is missing cipher"))
-        })?;
-        let password = mapping_string(&mapping, "password").ok_or_else(|| {
-            ConfigError::InvalidInbound(format!("listener {name} is missing password"))
-        })?;
-        if !supported_shadowsocks_cipher(&cipher) {
-            return Err(ConfigError::InvalidInbound(format!(
-                "listener {name} has unsupported cipher: {cipher}"
-            )));
-        }
-        validate_shadowsocks_inbound_key(&cipher, &password)?;
-        let listen_host = mapping_string(&mapping, "listen").unwrap_or_else(|| {
-            if allow_lan {
-                "0.0.0.0".to_owned()
-            } else {
-                "127.0.0.1".to_owned()
+        match listener_type.as_str() {
+            "shadowsocks" => {
+                shadowsocks.push(parse_shadowsocks_listener(
+                    mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
             }
-        });
-        let port = mapping
-            .get(Value::from("port"))
-            .and_then(Value::as_u64)
-            .and_then(|port| u16::try_from(port).ok())
-            .ok_or_else(|| {
-                ConfigError::InvalidInbound(format!("listener {name} is missing port"))
-            })?;
-        let listen =
-            resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
-        let requested_udp = mapping
-            .get(Value::from("udp"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        if shadowsocks_2022_cipher(&cipher) && !shadowsocks_2022_udp_cipher(&cipher) {
-            if requested_udp
-                && mapping
-                    .get(Value::from("udp"))
-                    .and_then(Value::as_bool)
-                    .is_some_and(|enabled| enabled)
-            {
+            "trojan" => {
+                trojan.push(parse_trojan_listener(
+                    mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
+            other => {
                 return Err(ConfigError::InvalidInbound(format!(
-                    "listener {name} cannot enable UDP for Shadowsocks 2022 cipher {cipher}"
+                    "listener {index} has unsupported type: {other}"
                 )));
             }
         }
-        let udp = if shadowsocks_2022_cipher(&cipher) {
-            requested_udp && shadowsocks_2022_udp_cipher(&cipher)
+    }
+    Ok(NamedListeners {
+        shadowsocks,
+        trojan,
+    })
+}
+
+fn parse_shadowsocks_listener(
+    mapping: Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<ShadowsocksInboundConfig, ConfigError> {
+    validate_mapping_keys(
+        &mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "cipher",
+            "password",
+            "udp",
+            "simple-obfs",
+            "shadow-tls",
+        ],
+        &format!("listener {index}"),
+    )?;
+    let name = mapping_string(&mapping, "name").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {index} is missing name"))
+    })?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let cipher = mapping_string(&mapping, "cipher").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing cipher"))
+    })?;
+    let password = mapping_string(&mapping, "password").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing password"))
+    })?;
+    if !supported_shadowsocks_cipher(&cipher) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has unsupported cipher: {cipher}"
+        )));
+    }
+    validate_shadowsocks_inbound_key(&cipher, &password)?;
+    let listen_host = mapping_string(&mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
         } else {
-            requested_udp
-        };
-        let simple_obfs = parse_simple_obfs(&mapping, &name)?;
-        let shadow_tls = parse_shadow_tls(&mapping, &name)?;
-        if simple_obfs.is_some() && shadow_tls.is_some() {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let requested_udp = mapping
+        .get(Value::from("udp"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if shadowsocks_2022_cipher(&cipher) && !shadowsocks_2022_udp_cipher(&cipher) {
+        if requested_udp
+            && mapping
+                .get(Value::from("udp"))
+                .and_then(Value::as_bool)
+                .is_some_and(|enabled| enabled)
+        {
             return Err(ConfigError::InvalidInbound(format!(
-                "listener {name} cannot enable both simple-obfs and shadow-tls"
+                "listener {name} cannot enable UDP for Shadowsocks 2022 cipher {cipher}"
             )));
         }
-        parsed.push(ShadowsocksInboundConfig {
-            name,
-            cipher,
-            password,
-            listen,
-            udp,
-            simple_obfs,
-            shadow_tls,
-        });
+    }
+    let udp = if shadowsocks_2022_cipher(&cipher) {
+        requested_udp && shadowsocks_2022_udp_cipher(&cipher)
+    } else {
+        requested_udp
+    };
+    let simple_obfs = parse_simple_obfs(&mapping, &name)?;
+    let shadow_tls = parse_shadow_tls(&mapping, &name)?;
+    if simple_obfs.is_some() && shadow_tls.is_some() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} cannot enable both simple-obfs and shadow-tls"
+        )));
+    }
+    Ok(ShadowsocksInboundConfig {
+        name,
+        cipher,
+        password,
+        listen,
+        udp,
+        simple_obfs,
+        shadow_tls,
+    })
+}
+
+fn parse_trojan_listener(
+    mapping: Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<TrojanInboundConfig, ConfigError> {
+    validate_mapping_keys(
+        &mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+        ],
+        &format!("listener {index}"),
+    )?;
+    let name = mapping_string(&mapping, "name").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {index} is missing name"))
+    })?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(&mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let certificate = mapping_string(&mapping, "certificate").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
+    })?;
+    let private_key = mapping_string(&mapping, "private-key").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
+    })?;
+    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires non-empty certificate and private-key"
+        )));
+    }
+    let users = parse_trojan_users(&mapping, &name)?;
+    if users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires at least one user password"
+        )));
+    }
+    Ok(TrojanInboundConfig {
+        name,
+        listen,
+        users,
+        certificate,
+        private_key,
+    })
+}
+
+fn parse_trojan_users(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Vec<TrojanInboundUser>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(users) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(users.len());
+    for (index, user) in users.iter().enumerate() {
+        let Some(user) = user.as_mapping() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} is invalid"
+            )));
+        };
+        validate_mapping_keys(
+            user,
+            &["username", "password"],
+            &format!("listener {name} user {index}"),
+        )?;
+        let password = mapping_string(user, "password").ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} is missing password"
+            ))
+        })?;
+        if password.is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} password must not be empty"
+            )));
+        }
+        let username = mapping_string(user, "username").unwrap_or_default();
+        parsed.push(TrojanInboundUser { username, password });
     }
     Ok(parsed)
 }
@@ -326,6 +472,42 @@ pub(crate) fn validate_shadowsocks_listener_ports(
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "shadowsocks listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_trojan_listener_ports(
+    listeners: &[TrojanInboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "trojan listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_named_listener_ports(
+    shadowsocks: &[ShadowsocksInboundConfig],
+    trojan: &[TrojanInboundConfig],
+) -> Result<(), ConfigError> {
+    validate_shadowsocks_listener_ports(shadowsocks)?;
+    validate_trojan_listener_ports(trojan)?;
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in shadowsocks {
+        ports.insert((listener.listen.ip(), listener.listen.port()));
+    }
+    for listener in trojan {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
                 listener.listen
             )));
         }

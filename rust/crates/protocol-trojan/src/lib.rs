@@ -1,5 +1,6 @@
-//! Transport-independent Trojan framing shared by outbound and future inbound adapters.
+//! Transport-independent Trojan framing shared by outbound and inbound adapters.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -7,14 +8,18 @@ use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
 use sha2::{Digest as _, Sha224};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 
 mod packet;
 
-pub use packet::{TrojanUdpAssociation, associate_trojan_udp_on_stream};
+pub use packet::{
+    TrojanUdpAssociation, associate_trojan_udp_on_stream, read_trojan_udp_packet,
+    write_trojan_udp_packet,
+};
 
 const COMMAND_TCP: u8 = 1;
 const COMMAND_UDP: u8 = 3;
+const PASSWORD_HEX_LEN: usize = 56;
 
 #[derive(Debug, Error)]
 pub enum TrojanProtocolError {
@@ -24,6 +29,39 @@ pub enum TrojanProtocolError {
     Io(#[from] std::io::Error),
     #[error("Trojan protocol failed: {0}")]
     Protocol(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrojanCommand {
+    Tcp,
+    Udp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrojanServerRequest {
+    pub command: TrojanCommand,
+    pub destination: Destination,
+    pub username: String,
+}
+
+/// Hex-encoded SHA-224 password digest used as the Trojan authentication key.
+#[must_use]
+pub fn password_key(password: &str) -> [u8; PASSWORD_HEX_LEN] {
+    let digest = hex::encode(Sha224::digest(password.as_bytes()));
+    let mut key = [0_u8; PASSWORD_HEX_LEN];
+    key.copy_from_slice(digest.as_bytes());
+    key
+}
+
+/// Builds a password→username lookup table for Trojan inbound authentication.
+#[must_use]
+pub fn password_table(
+    users: impl IntoIterator<Item = (impl AsRef<str>, impl Into<String>)>,
+) -> HashMap<[u8; PASSWORD_HEX_LEN], String> {
+    users
+        .into_iter()
+        .map(|(password, username)| (password_key(password.as_ref()), username.into()))
+        .collect()
 }
 
 /// Wraps an established carrier with a lazy Trojan TCP request.
@@ -44,6 +82,57 @@ pub fn connect_trojan_on_stream(
     }))
 }
 
+/// Reads and authenticates one Trojan request from an accepted server stream.
+///
+/// Wrong passwords fail closed with [`TrojanProtocolError::Protocol`] and leave
+/// no application reply on the wire, matching the Go oracle.
+///
+/// # Errors
+///
+/// Returns I/O or protocol errors for truncated headers, unknown commands, bad
+/// addresses, or authentication failure.
+pub async fn accept_trojan_request<S>(
+    stream: &mut S,
+    passwords: &HashMap<[u8; PASSWORD_HEX_LEN], String>,
+) -> Result<TrojanServerRequest, TrojanProtocolError>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut key = [0_u8; PASSWORD_HEX_LEN];
+    stream.read_exact(&mut key).await?;
+    let username = passwords.get(&key).cloned().ok_or_else(|| {
+        TrojanProtocolError::Protocol("Trojan authentication rejected".to_owned())
+    })?;
+    let mut crlf = [0_u8; 2];
+    stream.read_exact(&mut crlf).await?;
+    if &crlf != b"\r\n" {
+        return Err(TrojanProtocolError::Protocol(
+            "invalid Trojan header delimiter".to_owned(),
+        ));
+    }
+    let command = match stream.read_u8().await? {
+        COMMAND_TCP => TrojanCommand::Tcp,
+        COMMAND_UDP => TrojanCommand::Udp,
+        value => {
+            return Err(TrojanProtocolError::Protocol(format!(
+                "unsupported Trojan command {value}"
+            )));
+        }
+    };
+    let destination = packet::read_socks_address(stream).await?;
+    stream.read_exact(&mut crlf).await?;
+    if &crlf != b"\r\n" {
+        return Err(TrojanProtocolError::Protocol(
+            "invalid Trojan address delimiter".to_owned(),
+        ));
+    }
+    Ok(TrojanServerRequest {
+        command,
+        destination,
+        username,
+    })
+}
+
 fn request_header(
     destination: &Destination,
     password: &str,
@@ -57,7 +146,7 @@ fn request_header_with_command(
     command: u8,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
     let mut request = Vec::with_capacity(80);
-    request.extend_from_slice(hex::encode(Sha224::digest(password.as_bytes())).as_bytes());
+    request.extend_from_slice(&password_key(password));
     request.extend_from_slice(b"\r\n");
     request.push(command);
     append_socks_address(&mut request, destination)?;
@@ -144,6 +233,7 @@ impl AsyncWrite for TrojanStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn header_matches_go_trojan_wire_format() {
@@ -180,5 +270,29 @@ mod tests {
             &ipv6[56..],
             b"\r\n\x01\x04\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x1f\x90\r\n"
         );
+    }
+
+    #[tokio::test]
+    async fn accepts_authenticated_tcp_request_and_rejects_bad_password() {
+        let destination = Destination {
+            host: Host::Domain("example.com".to_owned()),
+            port: 443,
+        };
+        let passwords = password_table([("password", "alice")]);
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let header = request_header(&destination, "password").expect("header");
+        client.write_all(&header).await.expect("write");
+        let accepted = accept_trojan_request(&mut server, &passwords)
+            .await
+            .expect("accept");
+        assert_eq!(accepted.command, TrojanCommand::Tcp);
+        assert_eq!(accepted.destination, destination);
+        assert_eq!(accepted.username, "alice");
+
+        let (mut bad_client, mut bad_server) = tokio::io::duplex(256);
+        let bad = request_header(&destination, "wrong").expect("header");
+        bad_client.write_all(&bad).await.expect("write");
+        let rejected = accept_trojan_request(&mut bad_server, &passwords).await;
+        assert!(rejected.is_err());
     }
 }

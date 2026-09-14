@@ -4,6 +4,7 @@ mod lifecycle;
 mod listener;
 mod services;
 mod shadowsocks_listener;
+mod trojan_listener;
 mod tcp;
 mod tun;
 mod types;

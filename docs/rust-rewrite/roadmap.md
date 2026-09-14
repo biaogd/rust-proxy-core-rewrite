@@ -1454,12 +1454,13 @@ Out of IN-B: Snell server, SSR inbound, full camouflage carrier zoo.
 
 ### IN-C — Trojan inbound
 
-First standard TLS TCP+UDP using `protocol-trojan` plus runtime listener
-assembly; then WS/gRPC via shared transport. Prove password auth, certificate
-load/update/error paths, bidirectional relay, multi-destination UDP, correct
-half-close. This is the first expected point to extract a thin shared remote
-TCP/UDP accept→Metadata→`serve_stream_session` helper if duplication with SS
-hurts clarity.
+**TLS slice complete (2026-09-14):** named `type: trojan` with certificate /
+private-key, password users, TCP via `serve_stream_session`, UDP-over-TLS
+command 3 (Direct). Evidence `phase_inc_trojan_tls.py`. WS/gRPC/Reality /
+`ss-option` stay fail-closed at parse. Certificate rotation and a thinner shared
+remote accept helper remain optional follow-ups; Python TLS write-shutdown
+half-close matches Go (both false) under the current probe. Remaining IN-C work:
+WS/gRPC carriers via shared transport.
 
 ### IN-D — VLESS inbound
 
