@@ -89,6 +89,10 @@ protocol work when the environment can tolerate their runtime and network use.
   Run the existing slice differential before removing the old implementation,
   and retain explicit custom logic where the library's behavior differs from
   the Go oracle.
+- Dual RustCrypto dependency generations in the lockfile are an accepted state
+  while first-party protocols and third-party crates disagree on majors; see
+  `docs/rust-rewrite/crypto-deps.md`. Do not force a tree-wide crypto bump only
+  for cosmetic uniqueness.
 - Do not introduce a Rust dependency only because a Go dependency has a similar
   name. Record protocol coverage, maintenance, licensing, and platform support.
 

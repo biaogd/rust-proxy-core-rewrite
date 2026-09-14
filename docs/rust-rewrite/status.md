@@ -2,6 +2,16 @@
 
 Last updated: 2026-09-14
 
+### Crypto dependency generations — 2026-09-14
+
+Dual RustCrypto majors in the lockfile (`aes` 0.8/0.9, `aes-gcm` 0.10/0.11,
+`chacha20poly1305` 0.10/0.11, `cipher` 0.4/0.5, `digest` 0.10/0.11) are an
+accepted state. Shadowsocks/`shadowsocks-crypto` 0.8 already uses the newer
+generation; VMess, Snell, SSR, and transitive SSH/`age` paths still use the
+older one. First-party call sites may migrate gradually behind differentials;
+do not force a tree-wide bump just for cosmetic uniqueness. See
+`docs/rust-rewrite/crypto-deps.md`.
+
 ### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14
 
 OUT-21 TCP proxy chains: Go contract in `OUT-21-dialer-proxy-chains.md`, config

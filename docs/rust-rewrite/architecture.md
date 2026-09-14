@@ -781,6 +781,11 @@ not used to replace the existing resolver/cache/transport implementation.
 boundary; it is still not a general TUN/routing implementation.
 The current workspace uses these ownership boundaries:
 
+RustCrypto crate majors may coexist in the lockfile (for example `aes` 0.8
+alongside 0.9). That split is documented and accepted in
+`docs/rust-rewrite/crypto-deps.md`; collapsing it is not a standing cleanup
+goal.
+
 ```text
 rust/
   Cargo.toml                 workspace policy and shared dependency versions

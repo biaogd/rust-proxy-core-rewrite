@@ -42,6 +42,9 @@ publish = false
 
 [workspace.dependencies]
 age = { version = "0.12.1", features = ["armor"] }
+# Older RustCrypto generation for first-party VMess/Snell/SSR/transport call
+# sites. shadowsocks-crypto 0.8 pulls the newer generation transitively; dual
+# majors are accepted — see docs/rust-rewrite/crypto-deps.md.
 aes = "0.8.4"
 aes-gcm = "0.10.3"
 argon2 = "0.5.3"
