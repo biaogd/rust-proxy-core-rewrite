@@ -41,14 +41,16 @@ normal TCP destination:
 
 | B \ A | HTTP | SOCKS5 | SS | SSR | VMess | VLESS | Trojan | AnyTLS | Snell | SSH | Hy2/TUIC/WG | DIRECT |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| HTTP / SOCKS5 | yes | yes | yes* | yes* | yes* | yes* | yes* | yes* | yes* | no | no | yes |
-| SS / SSR / VMess / VLESS / Trojan / AnyTLS / Snell | yes* | yes* | yes* | yes* | yes* | yes* | yes* | yes* | yes* | no | no | yes |
+| HTTP / SOCKS5 | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
+| SS / SSR / Snell | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
+| VMess / VLESS / Trojan | later | later | later | later | later | later | later | no* | later | no | no | later |
+| AnyTLS | no* | no* | no* | no* | no* | no* | no* | no* | no* | no | no | no* |
 | SSH | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 | Hy2 / TUIC / WG | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 
-\* Differential evidence lands as each protocol is wired through the shared
-TCP dial entry. First acceptance slice is **HTTP↔SOCKS5** with path-proving
-fixtures.
+\* AnyTLS dialer-proxy stays deferred until the pooled DialOut path can carry
+chain context without silent DIRECT fallback. VMess/VLESS/Trojan TCP carriers
+are next on this PR.
 
 ## Explicit rejects
 

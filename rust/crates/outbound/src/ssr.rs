@@ -72,30 +72,65 @@ pub async fn connect_ssr_with_options(
 ) -> Result<BoxedOutboundStream, SsrProxyError> {
     let dial = async {
         let stream = connect_with_options(server, allow_ipv6, options).await?;
-        let options = ssr_client_options(
-            server_host,
-            server.port,
+        connect_ssr_on_stream(
+            Box::new(stream),
+            destination,
             password,
             cipher,
             protocol,
             protocol_param,
             obfs,
             obfs_param,
-        );
-        rewrite_protocol_shadowsocksr::connect_tcp_on_stream_with_state(
-            Box::new(stream),
-            destination,
-            &options,
+            server_host,
+            server.port,
             client_state,
         )
         .await
-        .map_err(SsrProxyError::from)
     };
     // Match Go tunnel DefaultTCPTimeout (5s) covering TCP + StreamConn setup.
     match tokio::time::timeout(Duration::from_secs(5), dial).await {
         Ok(result) => result,
         Err(_) => Err(SsrProxyError::Timeout),
     }
+}
+
+/// Completes SSR obfs → cipher → protocol on an established TCP stream.
+///
+/// # Errors
+///
+/// Returns when SSR options are unimplemented or the stream handshake fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_ssr_on_stream(
+    stream: BoxedOutboundStream,
+    destination: &Destination,
+    password: &str,
+    cipher: &str,
+    protocol: &str,
+    protocol_param: &str,
+    obfs: &str,
+    obfs_param: &str,
+    server_host: &str,
+    server_port: u16,
+    client_state: &SsrClientState,
+) -> Result<BoxedOutboundStream, SsrProxyError> {
+    let options = ssr_client_options(
+        server_host,
+        server_port,
+        password,
+        cipher,
+        protocol,
+        protocol_param,
+        obfs,
+        obfs_param,
+    );
+    rewrite_protocol_shadowsocksr::connect_tcp_on_stream_with_state(
+        stream,
+        destination,
+        &options,
+        client_state,
+    )
+    .await
+    .map_err(SsrProxyError::from)
 }
 
 /// Opens an SSR UDP association (cipher → protocol packet layering).

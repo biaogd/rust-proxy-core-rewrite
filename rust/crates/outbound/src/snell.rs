@@ -65,6 +65,28 @@ pub async fn connect_snell_with_options(
     Ok(Box::new(wrapped))
 }
 
+/// Completes Snell obfs + AEAD connect on an established stream (no pool take).
+///
+/// # Errors
+///
+/// Returns when the Snell handshake cannot start.
+pub async fn connect_snell_on_stream(
+    stream: BoxedOutboundStream,
+    destination: &Destination,
+    psk: &[u8],
+    version: u8,
+    obfs: Option<&SnellObfs>,
+    server: &Destination,
+) -> Result<BoxedOutboundStream, SnellProxyError> {
+    let client = rewrite_protocol_snell::ClientOptions {
+        psk: psk.to_vec(),
+        version,
+    };
+    let stream = apply_snell_obfs(stream, server, obfs);
+    let wrapped = rewrite_protocol_snell::connect_tcp(stream, destination, &client).await?;
+    Ok(Box::new(wrapped))
+}
+
 /// Opens the upstream TCP socket, then writes the Snell v3 UDP association header.
 ///
 /// # Errors

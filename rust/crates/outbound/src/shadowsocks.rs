@@ -89,6 +89,31 @@ pub async fn connect_shadowsocks_with_plugin_options(
     .map_err(Into::into)
 }
 
+/// Completes Shadowsocks plugin wrap + SIP004 framing on an established stream.
+///
+/// # Errors
+///
+/// Returns [`ShadowsocksProxyError`] when the cipher or plugin configuration
+/// is invalid or the encrypted stream cannot be initialized.
+pub async fn connect_shadowsocks_on_stream(
+    stream: BoxedOutboundStream,
+    server: &Destination,
+    destination: &Destination,
+    password: &str,
+    cipher: &str,
+    options: ShadowsocksTcpOptions<'_>,
+) -> Result<BoxedOutboundStream, ShadowsocksProxyError> {
+    let stream = apply_shadowsocks_plugin(stream, server, options).await?;
+    rewrite_protocol_shadowsocks::connect_tcp_on_stream(
+        stream,
+        server,
+        destination,
+        password,
+        cipher,
+    )
+    .map_err(Into::into)
+}
+
 async fn apply_v2ray_websocket_plugin(
     stream: BoxedOutboundStream,
     server: &Destination,
