@@ -623,6 +623,10 @@ impl Config {
         for group in &mut next.proxy_groups {
             group.proxies = expand_proxy_group(group, &providers, &proxy_types)?;
         }
+        // Same dialer-proxy graph checks as initial load: missing/self/cycle and
+        // dialer-proxy+udp must fail closed so a bad provider refresh cannot
+        // commit a generation the cold path would reject.
+        validate_dialer_proxies(&next.proxies, &next.proxy_groups, &next.proxy_providers)?;
         Ok(next)
     }
 

@@ -25,13 +25,26 @@ import time
 from pathlib import Path
 from typing import Any
 
-from phase1 import EchoHandler, IO_DEADLINE, ROOT, recv_exact, recv_until, reserve_port, start_server, wait_ready
+from phase1 import (
+    EchoHandler,
+    HalfCloseHandler,
+    IO_DEADLINE,
+    ROOT,
+    cargo_target_path,
+    recv_exact,
+    recv_until,
+    reserve_port,
+    start_server,
+    wait_ready,
+)
 from phase3 import launch, stop
 from phase5b1a import build_binaries, connect_domain, debug_files
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase7t1-dialer-proxy-tcp-diff.json"
 HTTP_AUTH = "Basic " + base64.b64encode(b"http-user:http-pass").decode()
+SNELL_PSK = "phase7t1-snell-psk"
+HALF_CLOSE_PAYLOAD = b"phase7t1-snell-half-close"
 
 
 def relay(left: socket.socket, right: socket.socket) -> None:
@@ -176,6 +189,55 @@ def proxied_echo(mixed_port: int, echo_port: int, payload: bytes) -> bool:
             return False
 
 
+def proxied_half_close(mixed_port: int, echo_port: int, payload: bytes) -> bool:
+    with connect_domain(mixed_port, "localhost", echo_port) as stream:
+        stream.sendall(payload)
+        stream.shutdown(socket.SHUT_WR)
+        expected = b"after:" + payload
+        try:
+            return recv_exact(stream, len(expected)) == expected
+        except (EOFError, ConnectionResetError, TimeoutError):
+            return False
+
+
+def snell_authority_binary() -> Path:
+    import os
+
+    target = cargo_target_path("PHASE7T1_DIALER_PROXY_CARGO_TARGET", "phase7t1-dialer-proxy")
+    profile = os.environ.get("HY2_BUILD_PROFILE", "debug")
+    suffix = ".exe" if os.name == "nt" else ""
+    return target / profile / f"rewrite-snell-authority{suffix}"
+
+
+def start_snell_authority(
+    binary: Path, scratch: Path, listen_port: int, psk: str, version: int
+) -> tuple[subprocess.Popen[bytes], Any, Any]:
+    scratch.mkdir(parents=True, exist_ok=True)
+    stdout_path = scratch / "authority-stdout.log"
+    stderr_path = scratch / "authority-stderr.log"
+    stdout = stdout_path.open("wb")
+    stderr = stderr_path.open("wb")
+    process = subprocess.Popen(
+        [str(binary), f"127.0.0.1:{listen_port}", psk, str(version)],
+        cwd=scratch,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + IO_DEADLINE
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            logs = ""
+            for path in (stdout_path, stderr_path):
+                if path.exists():
+                    logs += f"\n[{path.name}]\n{path.read_text(errors='replace')[-4000:]}"
+            raise RuntimeError(f"Snell authority exited with {process.returncode}:{logs}")
+        if stdout_path.exists() and "READY" in stdout_path.read_text(errors="replace"):
+            return process, stdout, stderr
+        time.sleep(0.02)
+    raise TimeoutError("Snell authority did not become ready")
+
+
 def wait_proxy_route(process, mixed_port: int, echo_port: int) -> None:
     deadline = time.monotonic() + IO_DEADLINE
     while time.monotonic() < deadline:
@@ -288,6 +350,81 @@ rules:
         stderr.close()
 
 
+def run_socks5_snell_half_close(
+    binary,
+    scratch: Path,
+    hop_a: RecordingSocks5Proxy,
+    snell_port: int,
+    half_close_port: int,
+) -> dict[str, Any]:
+    """SOCKS5 A → Snell v2 B (dialer-proxy) → EOF-waiting destination."""
+    mixed_port = reserve_port()
+    config = scratch / "socks5-snell-half-close.yaml"
+    config.write_text(
+        f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: hop-a
+    type: socks5
+    server: 127.0.0.1
+    port: {hop_a.port}
+    username: socks-user
+    password: socks-pass
+  - name: hop-b
+    type: snell
+    server: 127.0.0.1
+    port: {snell_port}
+    psk: {SNELL_PSK}
+    version: 2
+    dialer-proxy: hop-a
+rules:
+  - DOMAIN,localhost,hop-b
+  - MATCH,REJECT
+"""
+    )
+    hop_a.observations.clear()
+    run_scratch = scratch / "socks5-snell-half-close"
+    run_scratch.mkdir(parents=True, exist_ok=True)
+    process, stdout, stderr = launch(binary, config, run_scratch)
+    try:
+        wait_ready(process, mixed_port)
+        # Warm the route with a normal echo-style readiness check first; the
+        # half-close destination only replies after SHUT_WR.
+        deadline = time.monotonic() + IO_DEADLINE
+        ready = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                if proxied_half_close(mixed_port, half_close_port, b"ready"):
+                    ready = True
+                    break
+            except (AssertionError, OSError, EOFError, TimeoutError):
+                pass
+            time.sleep(0.05)
+        if not ready:
+            raise TimeoutError("socks5→snell half-close route did not become ready")
+        hop_a.observations.clear()
+        half_ok = proxied_half_close(mixed_port, half_close_port, HALF_CLOSE_PAYLOAD)
+        a_saw_snell = any(
+            item.get("target_host") == "127.0.0.1"
+            and item.get("kind") == "socks5"
+            for item in hop_a.observations
+        )
+        survived = process.poll() is None
+        return {
+            "half-close": half_ok,
+            "a-saw-snell-server": a_saw_snell,
+            "survived": survived,
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+
+
 def path_proves_chain(chain: str, hop_a: list[dict[str, Any]], hop_b: list[dict[str, Any]]) -> bool:
     if not hop_a or not hop_b:
         return False
@@ -308,13 +445,25 @@ def path_proves_chain(chain: str, hop_a: list[dict[str, Any]], hop_b: list[dict[
     )
 
 
-def exercise(binary, scratch: Path) -> dict[str, Any]:
+def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
+    half_close = start_server(HalfCloseHandler)
     socks_a = RecordingSocks5Proxy("hop-a-socks")
     http_b = RecordingHttpProxy("hop-b-http")
     http_a = RecordingHttpProxy("hop-a-http")
     socks_b = RecordingSocks5Proxy("hop-b-socks")
+    snell_port = reserve_port()
+    authority_process = None
+    authority_stdout = None
+    authority_stderr = None
     try:
+        authority_process, authority_stdout, authority_stderr = start_snell_authority(
+            snell_authority,
+            scratch / "snell-authority",
+            snell_port,
+            SNELL_PSK,
+            2,
+        )
         return {
             "socks5-http": run_chain(
                 binary,
@@ -332,14 +481,28 @@ def exercise(binary, scratch: Path) -> dict[str, Any]:
                 hop_b=socks_b,
                 echo_port=echo.port,
             ),
+            "socks5-snell-half-close": run_socks5_snell_half_close(
+                binary,
+                scratch,
+                hop_a=socks_a,
+                snell_port=snell_port,
+                half_close_port=half_close.port,
+            ),
             "reject-missing-ref": ConfigReject.check(binary, scratch),
         }
     finally:
+        if authority_process is not None:
+            stop(authority_process)
+        if authority_stdout is not None:
+            authority_stdout.close()
+        if authority_stderr is not None:
+            authority_stderr.close()
         socks_a.close()
         http_b.close()
         http_a.close()
         socks_b.close()
         echo.close()
+        half_close.close()
 
 
 class ConfigReject:
@@ -384,11 +547,14 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="phase7t1-dialer-proxy-") as temporary:
         root = Path(temporary)
         binaries = build_binaries(root, "PHASE7T1_DIALER_PROXY_CARGO_TARGET", "phase7t1-dialer-proxy")
+        authority = snell_authority_binary()
+        if not authority.exists():
+            raise RuntimeError(f"rewrite-snell-authority was not built: {authority}")
         try:
             for name, binary in binaries.items():
                 scratch = root / name
                 scratch.mkdir()
-                observations[name] = exercise(binary, scratch)
+                observations[name] = exercise(binary, scratch, authority)
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
@@ -421,6 +587,13 @@ def main() -> int:
                 FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
                 FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
                 return 1
+        half = observations[side]["socks5-snell-half-close"]
+        if not (
+            half["half-close"] and half["a-saw-snell-server"] and half["survived"]
+        ):
+            FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+            FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
+            return 1
         if not observations[side]["reject-missing-ref"]["exit-nonzero"]:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))

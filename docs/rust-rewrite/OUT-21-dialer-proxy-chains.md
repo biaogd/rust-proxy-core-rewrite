@@ -32,7 +32,8 @@ path (no ordinary business-rule rematch on B's server address).
 | Reload | New generation uses new graph; existing sockets are not rewritten | Same lifecycle as other outbound reloads |
 | UDP server dial | Some adapters use dialer-proxy for UDP/WG | **Not in 7T1-A** — `dialer-proxy` + `udp: true` / `udp-over-tcp` is rejected at load; UDP session mode also refuses chained leaves |
 | Health / delay | Go delay uses the same dialer stack as traffic | Rust delay/health uses the shared runtime dial entry when installed |
-| Snell v2 pool | Unchained v2 reuses `ConnectV2` pool | Unchained Snell keeps the pool; chained Snell dials on-stream (no pool share across dialer identities) |
+| Snell v2 pool | Unchained v2 reuses `ConnectV2` pool | Unchained Snell keeps the pool; chained Snell dials on-stream (no pool share across dialer identities) but still enables ConnectV2 zero-chunk half-close |
+| Provider refresh | Provider payloads re-enter validation | `replace_proxy_provider` re-runs `validate_dialer_proxies` before commit; failures keep the previous generation |
 | sing-mux | Separate composition | **Not in 7T1-A** |
 
 ## Supported combinations (7T1-A)

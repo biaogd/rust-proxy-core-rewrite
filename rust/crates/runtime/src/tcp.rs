@@ -2122,7 +2122,8 @@ async fn connect_snell_proxy_on_stream(
         .as_ref()
         .ok_or_else(|| "Snell proxy missing snell options".to_owned())?;
     // Chained dials stay outside the v2 pool so a changed dialer-proxy cannot
-    // reclaim a socket that was opened on a different upstream path.
+    // reclaim a socket that was opened on a different upstream path. ConnectV2
+    // half-close (zero-chunk) is still enabled inside connect_snell_on_stream.
     let _ = state;
     rewrite_outbound::connect_snell_on_stream(
         stream,

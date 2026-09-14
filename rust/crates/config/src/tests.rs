@@ -4185,3 +4185,43 @@ fn dialer_proxy_configuration_contract() {
         .to_string();
     assert!(udp_err.contains("cannot be combined with udp"), "{udp_err}");
 }
+
+#[test]
+fn provider_replace_revalidates_dialer_proxies() {
+    let path = std::env::temp_dir().join("mihomo-dialer-provider-config.yaml");
+    let source = "mixed-port: 7890\nmode: rule\nlog-level: info\nipv6: false\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\nproxy-providers:\n  remote:\n    type: http\n    url: http://127.0.0.1:18080/provider.yaml\n    path: providers/remote.yaml\n    interval: 60\nproxy-groups:\n  - name: provider-group\n    type: select\n    proxies: [hop-a]\n    use: [remote]\nrules:\n  - MATCH,provider-group\n";
+    let config =
+        Config::from_yaml_at_path_with_geodata_mode(source, &path, false).expect("provider shell");
+
+    let ok = config
+        .replace_proxy_provider_source(
+            "remote",
+            "proxies:\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: hop-a\n",
+        )
+        .expect("valid dialer-proxy through provider");
+    assert_eq!(
+        ok.proxy_providers[0].proxies[0].dialer_proxy.as_deref(),
+        Some("hop-a")
+    );
+
+    let missing = config.replace_proxy_provider_source(
+        "remote",
+        "proxies:\n  - name: hop-b\n    type: http\n    server: 127.0.0.1\n    port: 8080\n    dialer-proxy: missing\n",
+    );
+    let missing_err = missing
+        .expect_err("missing dialer via provider")
+        .to_string();
+    assert!(missing_err.contains("not found"), "{missing_err}");
+
+    let udp = config.replace_proxy_provider_source(
+        "remote",
+        "proxies:\n  - name: hop-b\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n    dialer-proxy: hop-a\n",
+    );
+    let udp_err = udp
+        .expect_err("dialer-proxy + udp via provider")
+        .to_string();
+    assert!(udp_err.contains("cannot be combined with udp"), "{udp_err}");
+
+    // Failed replace must leave the caller generation unchanged.
+    assert!(config.proxy_providers[0].proxies.is_empty());
+}

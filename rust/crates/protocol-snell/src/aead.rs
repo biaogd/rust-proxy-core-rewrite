@@ -199,11 +199,11 @@ struct ReuseFlags {
 }
 
 impl<S> SnellStream<S> {
-    pub(crate) fn set_hold_inner_shutdown(&mut self, hold: bool) {
+    pub fn set_hold_inner_shutdown(&mut self, hold: bool) {
         self.reuse.hold_inner_shutdown = hold;
     }
 
-    pub(crate) fn zero_chunk_written(&self) -> bool {
+    pub fn zero_chunk_written(&self) -> bool {
         self.reuse.zero_chunk_written
     }
 
