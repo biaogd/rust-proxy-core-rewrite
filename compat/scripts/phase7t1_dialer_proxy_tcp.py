@@ -248,7 +248,9 @@ rules:
     )
     hop_a.observations.clear()
     hop_b.observations.clear()
-    process, stdout, stderr = launch(binary, config, scratch / chain)
+    run_scratch = scratch / chain
+    run_scratch.mkdir(parents=True, exist_ok=True)
+    process, stdout, stderr = launch(binary, config, run_scratch)
     try:
         wait_ready(process, mixed_port)
         wait_proxy_route(process, mixed_port, echo_port)
@@ -256,6 +258,16 @@ rules:
         hop_b.observations.clear()
         payload = b"phase7t1-dialer-proxy-" + chain.encode()
         echoed = proxied_echo(mixed_port, echo_port, payload)
+        path_ok = path_proves_chain(chain, hop_a.observations, hop_b.observations)
+        a_saw_b_server = any(
+            item.get("target_host") == "127.0.0.1" for item in hop_a.observations
+        )
+        b_saw_echo = any(
+            item.get("target_host") in {"localhost", "127.0.0.1"}
+            for item in hop_b.observations
+        )
+        hop_a.observations.clear()
+        hop_b.observations.clear()
         big = b"Z" * (128 * 1024)
         big_ok = proxied_echo(mixed_port, echo_port, big)
         # Cancel / early client close should not leave the process dead.
@@ -266,9 +278,9 @@ rules:
             "echo": echoed,
             "large-echo": big_ok,
             "survived": survived,
-            "hop-a": list(hop_a.observations),
-            "hop-b": list(hop_b.observations),
-            "path-ok": path_proves_chain(chain, hop_a.observations, hop_b.observations),
+            "path-ok": path_ok,
+            "a-saw-b-server": a_saw_b_server,
+            "b-saw-echo": b_saw_echo,
         }
     finally:
         stop(process)
@@ -398,7 +410,14 @@ def main() -> int:
     for side in ("go", "rust"):
         for chain in ("socks5-http", "http-socks5"):
             result = observations[side][chain]
-            if not result["echo"] or not result["path-ok"] or not result["large-echo"]:
+            if not (
+                result["echo"]
+                and result["path-ok"]
+                and result["large-echo"]
+                and result["a-saw-b-server"]
+                and result["b-saw-echo"]
+                and result["survived"]
+            ):
                 FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
                 FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
                 return 1
