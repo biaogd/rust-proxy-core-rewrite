@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""IN-C Go/Rust differential for Trojan WebSocket (WSS) inbound TCP and UDP.
+"""IN-C Go/Rust differential for Trojan gRPC/Gun inbound TCP and UDP.
 
-Named `type: trojan` listeners with `ws-path` accept TLS + WebSocket upgrade,
-then Trojan auth/relay. Product Trojan outbound (`network: ws`) exercises both
+Named `type: trojan` listeners with `grpc-service-name` accept TLS + HTTP/2 Gun,
+then Trojan auth/relay. Product Trojan outbound (`network: grpc`) exercises both
 Go and Rust inbounds for TCP, UDP multi-dest, and wrong-password fail-closed.
-gRPC remains rejected on Rust. Half-close stays on the native TLS IN-C gate —
-WSS half-close is go-go only under current WS stacks (same omission as 6F-C).
+Combined ws-path+grpc stays rejected until a shared HTTP mux lands.
 """
 
 from __future__ import annotations
@@ -34,10 +33,10 @@ from phase4e2 import SERVER_CERTIFICATE, SERVER_KEY
 from phase5b1a import build_binaries, debug_files
 from phase6e_vless_udp import exchange as socks_udp_exchange
 
-FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-inc-trojan-websocket-diff.json"
-PASSWORD = "phase-inc-trojan-wss-password"
+FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-inc-trojan-grpc-diff.json"
+PASSWORD = "phase-inc-trojan-grpc-password"
 SNI = "dot.phase4.test"
-WS_PATH = "/trojan"
+GRPC_SERVICE = "trojan"
 LARGE_PAYLOAD = bytes(range(256)) * 256
 
 
@@ -53,13 +52,13 @@ def stage_tls_material(scratch: pathlib.Path) -> tuple[pathlib.Path, pathlib.Pat
 
 def inbound_yaml(port: int, certificate: pathlib.Path, private_key: pathlib.Path) -> str:
     return f"""listeners:
-  - name: trojan-wss
+  - name: trojan-grpc
     type: trojan
     listen: 127.0.0.1
     port: {port}
     certificate: {certificate}
     private-key: {private_key}
-    ws-path: {WS_PATH}
+    grpc-service-name: {GRPC_SERVICE}
     users:
       - username: alice
         password: {PASSWORD}
@@ -77,21 +76,21 @@ mode: rule
 log-level: info
 ipv6: false
 proxies:
-  - name: trojan-wss
+  - name: trojan-grpc
     type: trojan
     server: 127.0.0.1
     port: {trojan_port}
     password: {password}
     sni: {SNI}
     skip-cert-verify: true
-    network: ws
-    ws-opts:
-      path: {WS_PATH}
+    network: grpc
+    grpc-opts:
+      grpc-service-name: {GRPC_SERVICE}
     udp: true
 proxy-groups:
   - name: PROXY
     type: select
-    proxies: [trojan-wss]
+    proxies: [trojan-grpc]
 rules:
   - MATCH,PROXY
 """
@@ -114,7 +113,7 @@ def wait_tcp_route(process: Any, mixed_port: int, echo_port: int) -> None:
         except (AssertionError, EOFError, OSError):
             pass
         time.sleep(0.02)
-    raise TimeoutError("Trojan WSS inbound route did not become ready")
+    raise TimeoutError("Trojan gRPC inbound route did not become ready")
 
 
 def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
@@ -129,7 +128,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
     accepted = launch(binary, good, accept_dir)
     try:
         wait_ready(accepted[0], accept_port)
-        observations["accept-named-wss"] = accepted[0].poll() is None
+        observations["accept-named-grpc"] = accepted[0].poll() is None
     finally:
         stop(accepted[0])
         accepted[1].close()
@@ -139,11 +138,11 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
     reject_dir.mkdir()
     reject_certificate, reject_key = stage_tls_material(reject_dir)
     reject_port = reserve_port()
-    bad = scratch / "reject-grpc.yaml"
+    bad = scratch / "reject-ws-plus-grpc.yaml"
     bad.write_text(
         inbound_yaml(reject_port, reject_certificate, reject_key).replace(
-            "ws-path:",
-            "grpc-service-name: GunService\n    ws-path:",
+            "grpc-service-name:",
+            "ws-path: /trojan\n    grpc-service-name:",
         )
     )
     rejected = launch(binary, bad, reject_dir)
@@ -195,8 +194,9 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 
         tunnel = connect_tunnel(mixed_port, "127.0.0.1", tcp_port)
         try:
-            tunnel.sendall(b"inc-wss")
-            small = recv_exact(tunnel, 7) == b"inc-wss"
+            small_payload = b"inc-grpc"
+            tunnel.sendall(small_payload)
+            small = recv_exact(tunnel, len(small_payload)) == small_payload
         finally:
             tunnel.close()
 
@@ -233,14 +233,14 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             wrong_err.close()
 
         first = socks_udp_exchange(
-            udp_client, mixed_port, "127.0.0.1", udp_port, b"inc-wss-udp-1"
+            udp_client, mixed_port, "127.0.0.1", udp_port, b"inc-grpc-udp-1"
         )
         second = socks_udp_exchange(
             udp_client,
             mixed_port,
             "127.0.0.1",
             udp_port,
-            b"inc-wss-udp-2-" + (b"z" * 2048),
+            b"inc-grpc-udp-2-" + (b"z" * 2048),
         )
         return {
             "config": validate_config(binary, scratch / "config-cases"),
@@ -281,16 +281,18 @@ def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     observations: dict[str, Any] = {}
-    with tempfile.TemporaryDirectory(prefix="phase-inc-trojan-wss-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="phase-inc-trojan-grpc-") as temporary:
         root = pathlib.Path(temporary)
-        binaries = build_binaries(root, "PHASE_INC_TROJAN_WS_CARGO_TARGET", "phase-inc-trojan-ws")
+        binaries = build_binaries(root, "PHASE_INC_TROJAN_GRPC_CARGO_TARGET", "phase-inc-trojan-grpc")
         try:
             for name in ["rust", "go"]:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], scratch)
             if not observations["rust"]["config"].get("reject-ws-plus-grpc"):
-                raise AssertionError("Rust IN-C must reject combined Trojan ws-path + grpc-service-name")
+                raise AssertionError(
+                    "Rust IN-C must reject combined Trojan ws-path + grpc-service-name"
+                )
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

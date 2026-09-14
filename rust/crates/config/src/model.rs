@@ -1276,6 +1276,8 @@ pub struct TrojanInboundConfig {
     pub private_key: String,
     /// When set, clients must WebSocket-upgrade on this path before Trojan bytes.
     pub ws_path: Option<String>,
+    /// When set, clients must open a Gun/gRPC stream on this service before Trojan bytes.
+    pub grpc_service_name: Option<String>,
 }
 
 impl TrojanInboundConfig {
@@ -1283,13 +1285,14 @@ impl TrojanInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}",
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
             self.name,
             self.listen,
             self.users,
             self.certificate,
             self.private_key,
-            self.ws_path.as_deref().unwrap_or("")
+            self.ws_path.as_deref().unwrap_or(""),
+            self.grpc_service_name.as_deref().unwrap_or("")
         )
     }
 }

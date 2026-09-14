@@ -14,7 +14,7 @@ use rewrite_protocol_trojan::{
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
-use rewrite_transport::accept_websocket_path;
+use rewrite_transport::{V2rayGrpcServerConnection, accept_websocket_path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
@@ -35,6 +35,7 @@ pub(crate) struct TrojanListener {
     inbound_name: String,
     listen: SocketAddr,
     ws_path: Option<String>,
+    grpc_service_name: Option<String>,
 }
 
 impl TrojanListener {
@@ -68,6 +69,7 @@ impl TrojanListener {
             inbound_name: config.name.clone(),
             listen: config.listen,
             ws_path: config.ws_path.clone(),
+            grpc_service_name: config.grpc_service_name.clone(),
         })
     }
 }
@@ -151,6 +153,7 @@ pub(super) async fn run_trojan_listener(
         inbound_name,
         listen,
         ws_path,
+        grpc_service_name,
     } = listener;
     let mut connections = JoinSet::new();
     loop {
@@ -173,6 +176,7 @@ pub(super) async fn run_trojan_listener(
                 let connection_shutdown = shutdown.child_token();
                 let connection_inbound_name = inbound_name.clone();
                 let connection_ws_path = ws_path.clone();
+                let connection_grpc_service = grpc_service_name.clone();
                 connections.spawn(async move {
                     handle_trojan_inbound(
                         tcp,
@@ -186,6 +190,7 @@ pub(super) async fn run_trojan_listener(
                         connection_shutdown,
                         connection_inbound_name,
                         connection_ws_path,
+                        connection_grpc_service,
                     )
                     .await;
                 });
@@ -214,6 +219,7 @@ async fn handle_trojan_inbound(
     shutdown: CancellationToken,
     inbound_name: String,
     ws_path: Option<String>,
+    grpc_service_name: Option<String>,
 ) {
     let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
         Ok(Ok(stream)) => stream,
@@ -229,6 +235,23 @@ async fn handle_trojan_inbound(
             return;
         }
     };
+
+    if let Some(service_name) = grpc_service_name {
+        serve_trojan_grpc_connection(
+            tls,
+            service_name,
+            peer,
+            local,
+            passwords,
+            config,
+            state,
+            dns_service,
+            shutdown,
+            inbound_name,
+        )
+        .await;
+        return;
+    }
 
     if let Some(path) = ws_path {
         let websocket = match tokio::time::timeout(
@@ -277,6 +300,80 @@ async fn handle_trojan_inbound(
         inbound_name,
     )
     .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_trojan_grpc_connection<S>(
+    stream: S,
+    service_name: String,
+    peer: SocketAddr,
+    local: SocketAddr,
+    passwords: HashMap<[u8; 56], String>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    shutdown: CancellationToken,
+    inbound_name: String,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut connection = match V2rayGrpcServerConnection::handshake(stream, &service_name).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("trojan inbound gRPC handshake failed: {error}"),
+            );
+            return;
+        }
+    };
+    let mut streams = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = connection.accept() => {
+                match accepted {
+                    Some(Ok(stream)) => {
+                        let passwords = passwords.clone();
+                        let config = Arc::clone(&config);
+                        let state = Arc::clone(&state);
+                        let dns_service = Arc::clone(&dns_service);
+                        let shutdown = shutdown.child_token();
+                        let inbound_name = inbound_name.clone();
+                        streams.spawn(async move {
+                            dispatch_trojan_session(
+                                stream,
+                                peer,
+                                local,
+                                passwords,
+                                config,
+                                state,
+                                dns_service,
+                                shutdown,
+                                inbound_name,
+                            )
+                            .await;
+                        });
+                    }
+                    Some(Err(error)) => {
+                        state.log(
+                            "error",
+                            format!("trojan inbound gRPC stream accept failed: {error}"),
+                        );
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            Some(result) = streams.join_next() => {
+                if let Err(error) = result {
+                    state.log("error", format!("trojan inbound gRPC stream task failed: {error}"));
+                }
+            }
+        }
+    }
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
 }
 
 #[allow(clippy::too_many_arguments)]

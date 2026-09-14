@@ -3812,6 +3812,7 @@ rules: ['MATCH,DIRECT']
     assert_eq!(inbound.certificate, "./server.crt");
     assert_eq!(inbound.private_key, "./server.key");
     assert!(inbound.ws_path.is_none());
+    assert!(inbound.grpc_service_name.is_none());
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Trojan, 18420)));
 
@@ -3836,8 +3837,29 @@ rules: ['MATCH,DIRECT']
         Some("/trojan")
     );
 
+    let with_grpc = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: trojan-grpc
+    type: trojan
+    listen: 127.0.0.1
+    port: 18423
+    certificate: ./server.crt
+    private-key: ./server.key
+    grpc-service-name: trojan
+    users:
+      - password: secret
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named trojan grpc listener");
+    assert_eq!(
+        with_grpc.trojan_listeners[0].grpc_service_name.as_deref(),
+        Some("trojan")
+    );
+
     for unsupported in [
-        "grpc-service-name: GunService",
+        "ws-path: /trojan\n    grpc-service-name: GunService",
         "ss-option:\n      enabled: true\n      method: aes-128-gcm\n      password: nested",
     ] {
         let source = format!(
