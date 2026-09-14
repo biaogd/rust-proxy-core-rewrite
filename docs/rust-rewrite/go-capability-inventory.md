@@ -99,14 +99,14 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
-| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N implements the first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 server slice; corrected full differential pending | Remaining Shadowsocks matrix and Snell 6/7 gates |
-| IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | 6 protocol gates |
-| IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Not started | 6 protocol gates |
-| IN-10 | Hysteria2 and Hysteria2-realm server | Not started | 6 protocol gates |
-| IN-11 | TUIC v4/v5 and ShadowQUIC server | Not started | 6/7 protocol gates |
-| IN-12 | AnyTLS, Mieru, Sudoku and TrustTunnel server | Not started | 7 protocol gates |
-| IN-13 | Transport/security extensions used by inbound protocols: Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya | Partial: Phase 6C-N implements Shadowsocks simple-obfs HTTP/TLS and ShadowTLS v3 authentication/fallback; corrected full differential pending | ShadowTLS v1/v2/advanced SNI, ReSTLS, JLS, mux and remaining 7T gates |
-| IN-14 | Listener hot rebind, same-port update, graceful drain and per-listener statistics for every type | Partial: current local listeners plus Phase 6C-N identity-changing same-port Shadowsocks reload and bounded fallback shutdown are implemented | Corrected 6C-N differential and repeated exit gate for every family |
+| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice; Darwin arm64 differential Parity in declared scope; Linux pending; census in `inbound-support-matrix.md` (IN-A) | **IN-B** SS completion (incl. 2022 UDP/replay); Snell server deferred |
+| IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | **IN-D** VLESS, **IN-E** VMess |
+| IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Not started | **IN-C** |
+| IN-10 | Hysteria2 and Hysteria2-realm server | Not started | **IN-F** (Hy2); realm later |
+| IN-11 | TUIC v4/v5 and ShadowQUIC server | Not started | **IN-F** (TUIC v5); v4/ShadowQUIC later |
+| IN-12 | AnyTLS, Mieru, Sudoku and TrustTunnel server | Not started | **IN-G** (AnyTLS); others deferred |
+| IN-13 | Transport/security extensions used by inbound protocols: Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya | Partial: Phase 6C-N Shadowsocks simple-obfs HTTP/TLS and ShadowTLS v3 authentication/fallback | Per-protocol **IN-B…IN-G** plus later carrier gates; mKCP/Mekya not early inbound |
+| IN-14 | Listener hot rebind, same-port update, graceful drain and per-listener statistics for every type | Partial: current local listeners plus Phase 6C-N identity-changing same-port Shadowsocks reload and bounded fallback shutdown are implemented | **IN-H** plus per-family exit gates |
 
 ## Rules, metadata and routing
 
@@ -286,7 +286,9 @@ separate claims.
 3. Phases 5A–5F cover lifecycle/configuration, routing/geodata, groups/providers,
    controller APIs, supporting services and remaining local data-plane behavior.
 4. Every outbound client, inbound server direction and shared transport needs a
-   separate Phase 6/7 interop gate; an aggregate protocol name is insufficient.
+   separate interop gate; an aggregate protocol name is insufficient. Outbound
+   clients stay under Phase 6/7 labels; inbound servers use the **IN-A…IN-H**
+   track documented in `inbound-support-matrix.md` and `roadmap.md`.
 5. Phase 8 must test behavior natively per OS/stack/build profile. Cross-builds
    alone cannot move a runtime row to **Parity**.
 6. Phase 9 is the only replacement gate. It requires every advertised inventory

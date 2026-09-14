@@ -89,6 +89,15 @@ detection, proxy authentication, CONNECT handling, absolute-form rewriting and
 unread preface bytes because those are proxy-product behavior rather than
 generic HTTP server behavior. SOCKS framing is unchanged.
 
+Remote protocol **servers** are a separate roadmap track (**IN-A…IN-H**; see
+`inbound-support-matrix.md`). Today Shadowsocks inbound lives in
+`rewrite-runtime` (`shadowsocks_listener`) and, after auth/decode, joins the
+same `serve_stream_session` path used by local TCP and TUN. Do not grow
+`rewrite-inbound` into a generic remote-server framework; keep crypto/framing in
+`protocol-*`, carriers in `rewrite-transport`, and listener lifecycle in
+runtime. Extract a thin shared accept→Metadata helper only when a second remote
+inbound (expected: Trojan IN-C) needs it.
+
 `rewrite-state` owns bounded log broadcasting, active connection snapshots and
 byte totals. `rewrite-controller` reads that state and current config; its only
 declared mutation path is the Phase 4D4 clear operation on the runtime-owned DNS

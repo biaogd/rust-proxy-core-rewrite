@@ -147,7 +147,7 @@ not remap them to smoltcp.
 | Sudoku | Yes | Yes | Oracle | Not started | Handshake/obfs/mux/replay interop |
 | TrustTunnel | Yes | Yes/ICMP | Oracle | Not started | HTTP/2/TCP/packet/ICMP interop |
 | Legacy fixed VMess/SS/TUIC ports | Yes | Varies | Oracle | Not started | Legacy config and rebind behavior |
-| Shared inbound transport/security variants | Varies | Varies | Oracle | Not started | Reality, ShadowTLS, ReSTLS, JLS, TLSMirror, mux, WebSocket, HTTP/2, gRPC/Gun, xHTTP, mKCP and Mekya fixtures per consuming protocol |
+| Shared inbound transport/security variants | Varies | Varies | Oracle | Partial | Phase 6C-N owns Shadowsocks simple-obfs HTTP/TLS and ShadowTLS v3 on the server path. Remaining Reality/ReSTLS/JLS/TLSMirror/mux/WS/H2/gRPC/xHTTP/mKCP/Mekya inbound carriers stay per-protocol **IN-B…IN-G** / later gates; see `inbound-support-matrix.md` |
 
 ## Rules and routing
 
