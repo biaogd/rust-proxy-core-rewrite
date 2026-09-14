@@ -84,6 +84,7 @@ pub struct RuntimeState {
     tuic_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::TuicClient>)>>,
     wireguard_clients:
         AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::WireGuardClient>)>>,
+    ssh_clients: AsyncMutex<BTreeMap<String, (String, Arc<rewrite_outbound::SshClient>)>>,
     clock: Arc<rewrite_services::AdjustedClock>,
     ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
     network_generation: watch::Sender<u64>,
@@ -123,6 +124,7 @@ impl Default for RuntimeState {
             hysteria2_clients: AsyncMutex::new(BTreeMap::new()),
             tuic_clients: AsyncMutex::new(BTreeMap::new()),
             wireguard_clients: AsyncMutex::new(BTreeMap::new()),
+            ssh_clients: AsyncMutex::new(BTreeMap::new()),
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
             ssr_clients: Mutex::new(BTreeMap::new()),
             network_generation,
@@ -375,6 +377,52 @@ impl RuntimeState {
     pub async fn clear_wireguard_clients(&self) {
         let clients = {
             let mut clients = self.wireguard_clients.lock().await;
+            std::mem::take(&mut *clients)
+        };
+        for (_, client) in clients.into_values() {
+            client.retire().await;
+        }
+    }
+
+    /// Returns a cached SSH client when the adapter identity still matches.
+    pub async fn cached_ssh_client(
+        &self,
+        name: &str,
+        identity: &str,
+    ) -> Option<Arc<rewrite_outbound::SshClient>> {
+        let clients = self.ssh_clients.lock().await;
+        clients
+            .get(name)
+            .and_then(|(current, client)| (current == identity).then(|| Arc::clone(client)))
+    }
+
+    pub async fn ssh_client(
+        &self,
+        name: &str,
+        identity: String,
+        client: rewrite_outbound::SshClient,
+    ) -> Arc<rewrite_outbound::SshClient> {
+        let previous = {
+            let mut clients = self.ssh_clients.lock().await;
+            if let Some((current_identity, client)) = clients.get(name)
+                && current_identity == &identity
+            {
+                return Arc::clone(client);
+            }
+            let previous = clients.remove(name).map(|(_, client)| client);
+            let client = Arc::new(client);
+            clients.insert(name.to_owned(), (identity, Arc::clone(&client)));
+            (client, previous)
+        };
+        if let Some(old) = previous.1 {
+            old.retire().await;
+        }
+        previous.0
+    }
+
+    pub async fn clear_ssh_clients(&self) {
+        let clients = {
+            let mut clients = self.ssh_clients.lock().await;
             std::mem::take(&mut *clients)
         };
         for (_, client) in clients.into_values() {

@@ -465,6 +465,7 @@ async fn apply_network_change(
         state.clear_tuic_clients().await;
         state.clear_hysteria2_clients().await;
         state.clear_wireguard_clients().await;
+        state.clear_ssh_clients().await;
         state.bump_network_generation();
         let rebound = format!("[TUN] rebound QUIC endpoints onto {}", after.display_name());
         eprintln!("{rebound}");

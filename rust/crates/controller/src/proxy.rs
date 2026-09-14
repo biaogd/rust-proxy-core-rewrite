@@ -34,6 +34,10 @@ pub(super) const PROXY_NAMES: [&str; 7] = [
     "REJECT-DROP",
 ];
 
+#[cfg(test)]
+#[path = "proxy_tests.rs"]
+mod zero_delay_tests;
+
 pub(super) async fn proxies(State(state): State<ControllerState>) -> Response {
     let config = state.current_config();
     let mut proxies: serde_json::Map<String, serde_json::Value> = PROXY_NAMES
@@ -167,7 +171,7 @@ pub(super) async fn proxy_delay(
     )
     .await;
     match result {
-        Ok(Ok(measurement)) if measurement.delay > 0 => {
+        Ok(Ok(measurement)) => {
             state
                 .runtime
                 .record_proxy_delay(&name, url, measurement.delay, measurement.satisfied);
@@ -247,7 +251,7 @@ pub(super) async fn group_delay(
         let mut delays = BTreeMap::new();
         for (member, result) in results {
             match result {
-                Ok(Ok(measurement)) if measurement.delay > 0 => {
+                Ok(Ok(measurement)) => {
                     state.runtime.record_proxy_delay(
                         member,
                         url,
@@ -274,7 +278,7 @@ pub(super) async fn group_delay(
     )
     .await;
     match result {
-        Ok(Ok(measurement)) if measurement.delay > 0 => {
+        Ok(Ok(measurement)) => {
             state.runtime.record_proxy_delay(
                 "DIRECT",
                 url,
@@ -910,6 +914,32 @@ pub(super) async fn measure_http_delay(
                         wireguard_health_destination(&client, destination, config).await?;
                     client.create_proxy(&destination).await.map_err(|_| ())?
                 }
+                rewrite_config::ProxyKind::Ssh => {
+                    let dial_server = match &server.host {
+                        Host::Ip(address) => address.to_string(),
+                        Host::Domain(domain) => domain.clone(),
+                    };
+                    let hints = rewrite_outbound::SshTransportHints {
+                        dial_server: &dial_server,
+                        bind_interface: &config.interface_name,
+                        routing_mark: config.routing_mark,
+                        keep_alive_idle: config.keep_alive_idle,
+                        keep_alive_interval: config.keep_alive_interval,
+                        disable_keep_alive: config.disable_keep_alive,
+                    };
+                    let identity = rewrite_outbound::ssh_adapter_identity(proxy, hints);
+                    let client = if let Some(existing) =
+                        state.cached_ssh_client(&proxy.name, &identity).await
+                    {
+                        existing
+                    } else {
+                        let constructed =
+                            rewrite_outbound::SshClient::from_proxy_with_dial_server(proxy, hints)
+                                .map_err(|_| ())?;
+                        state.ssh_client(&proxy.name, identity, constructed).await
+                    };
+                    client.create_proxy(&destination).await.map_err(|_| ())?
+                }
                 rewrite_config::ProxyKind::ShadowsocksR => {
                     let ssr = proxy.ssr.as_ref().ok_or(())?;
                     let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
@@ -1169,6 +1199,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         rewrite_config::ProxyKind::Tuic => "Tuic",
         rewrite_config::ProxyKind::ShadowsocksR => "ShadowsocksR",
         rewrite_config::ProxyKind::WireGuard => "WireGuard",
+        rewrite_config::ProxyKind::Ssh => "Ssh",
         rewrite_config::ProxyKind::Direct => "Direct",
         rewrite_config::ProxyKind::Reject => "Reject",
         rewrite_config::ProxyKind::Dns => "Dns",
@@ -1185,7 +1216,7 @@ pub(super) fn configured_proxy_snapshot_with_provider(
         | rewrite_config::ProxyKind::Tuic
         | rewrite_config::ProxyKind::ShadowsocksR
         | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-        rewrite_config::ProxyKind::Http => false,
+        rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
         rewrite_config::ProxyKind::Direct
         | rewrite_config::ProxyKind::Reject
         | rewrite_config::ProxyKind::Dns
@@ -1348,7 +1379,7 @@ pub(super) fn selector_supports_udp(
             | rewrite_config::ProxyKind::Tuic
             | rewrite_config::ProxyKind::ShadowsocksR
             | rewrite_config::ProxyKind::WireGuard => proxy.udp,
-            rewrite_config::ProxyKind::Http => false,
+            rewrite_config::ProxyKind::Http | rewrite_config::ProxyKind::Ssh => false,
             rewrite_config::ProxyKind::Direct
             | rewrite_config::ProxyKind::Reject
             | rewrite_config::ProxyKind::Dns
@@ -1551,7 +1582,7 @@ pub async fn healthcheck_proxy_provider_config(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(measurement)) if measurement.delay > 0 => {
+            Ok(Ok(measurement)) => {
                 state.record_proxy_delay(
                     member,
                     &provider.health_check.url,
@@ -1586,7 +1617,7 @@ pub async fn healthcheck_proxy_group(
     .await;
     for (member, result) in results {
         match result {
-            Ok(Ok(measurement)) if measurement.delay > 0 => {
+            Ok(Ok(measurement)) => {
                 state.record_proxy_delay(
                     member,
                     &group.test_url,

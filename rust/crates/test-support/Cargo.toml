@@ -45,12 +45,17 @@ path = "src/shadowsocks_websocket_authority.rs"
 name = "rewrite-wireguard-authority"
 path = "src/wireguard_authority.rs"
 
+[[bin]]
+name = "rewrite-ssh-authority"
+path = "src/ssh_authority.rs"
+
 [dependencies]
 rewrite-config = { path = "../config" }
 rewrite-model = { path = "../model" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-protocol-wireguard = { path = "../protocol-wireguard" }
+rewrite-protocol-ssh = { path = "../protocol-ssh" }
 rewrite-rules = { path = "../rules" }
 rewrite-dns = { path = "../dns" }
 serde.workspace = true
