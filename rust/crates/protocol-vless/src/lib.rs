@@ -6,6 +6,7 @@
 
 mod addons;
 mod packet;
+mod server;
 mod stream;
 mod vision;
 
@@ -19,6 +20,10 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
 pub use packet::{VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream};
+pub use server::{
+    VlessCommand, VlessServerRequest, accept_vless_request, map_uuid, read_vless_udp_payload,
+    uuid_table, write_vless_udp_payload,
+};
 
 const VERSION: u8 = 0;
 

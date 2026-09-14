@@ -4130,6 +4130,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -4215,6 +4216,7 @@ dependencies = [
  "rewrite-platform",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",
+ "rewrite-protocol-vless",
  "rewrite-rules",
  "rewrite-services",
  "rewrite-state",

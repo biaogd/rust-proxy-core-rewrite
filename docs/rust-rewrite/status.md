@@ -2,6 +2,19 @@
 
 Last updated: 2026-09-14
 
+### IN-D VLESS TLS inbound — 2026-09-14
+
+Named `type: vless` TLS inbound owns UUID auth, TCP relay through
+`serve_shadowsocks_connection`, and standard-mode UDP (fixed destination per
+association, 2-byte length-prefixed frames) on the Direct path. WS/gRPC
+carriers, Vision flow and REALITY stay rejected at named-listener parse (only
+`name,type,listen,port,users,certificate,private-key` and per-user
+`username,uuid` are accepted). Evidence: `compat/scripts/phase_ind_vless_tls.py`
+(raw VLESS-wire client for TCP small/large and wrong-uuid fail-closed plus
+standard-mode UDP; product VLESS outbound for a plain round trip and
+half-close against the same named inbound; Rust-only reject of `ws-path`,
+`grpc-service-name`, `reality-config` and per-user `flow`).
+
 ### IN-C Trojan gRPC inbound — 2026-09-14
 
 Named `type: trojan` with `grpc-service-name` accepts TLS then HTTP/2 Gun

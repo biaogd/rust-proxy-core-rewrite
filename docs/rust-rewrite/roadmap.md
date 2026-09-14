@@ -1464,9 +1464,15 @@ work: shared mux and Reality/fallback if pulled forward.
 
 ### IN-D — VLESS inbound
 
-Basic TCP/TLS, WS/gRPC and UDP first against `protocol-vless`. Vision and
-REALITY are separate sub-gates with independent security and lifecycle
-acceptance. Do not claim Vision/REALITY from the basic TCP slice.
+**TLS slice complete (2026-09-14):** named `type: vless` with certificate /
+private-key, `users: [{username, uuid}]`, UUID auth (`protocol-vless::server`),
+TCP via `serve_shadowsocks_connection`, and standard-mode UDP (one fixed
+destination per association) on the Direct path. WS/gRPC carriers, Vision flow
+and REALITY are separate sub-gates with independent security and lifecycle
+acceptance; the named-listener allowlist rejects `ws-path`,
+`grpc-service-name`, `reality-config` and per-user `flow` until those slices
+land. Evidence `phase_ind_vless_tls.py`. Remaining IN-D work: WS/gRPC
+carriers, packet-addr/XUDP UDP modes, Vision, REALITY.
 
 ### IN-E — VMess inbound
 

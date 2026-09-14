@@ -88,6 +88,7 @@ pub struct ConfigSpec {
     pub rules: RuleSet,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub trojan_listeners: Vec<TrojanInboundConfig>,
+    pub vless_listeners: Vec<VlessInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -153,6 +154,7 @@ pub struct Config {
     pub(crate) rematches: Vec<RematchSpec>,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub trojan_listeners: Vec<TrojanInboundConfig>,
+    pub vless_listeners: Vec<VlessInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1297,6 +1299,36 @@ impl TrojanInboundConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessInboundUser {
+    pub username: String,
+    pub uuid: String,
+}
+
+/// Named `type: vless` TLS inbound accepted in IN-D.
+///
+/// WS/gRPC transports, Vision flow and REALITY stay rejected at parse until
+/// later slices; see `named_listeners::parse_vless_listener`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessInboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<VlessInboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+}
+
+impl VlessInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}",
+            self.name, self.listen, self.users, self.certificate, self.private_key
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
@@ -1304,6 +1336,7 @@ pub enum ListenerKind {
     Mixed,
     Shadowsocks,
     Trojan,
+    Vless,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {
