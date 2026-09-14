@@ -74,7 +74,7 @@ pub async fn write_connect<S>(
     version: u8,
 ) -> Result<(), SnellProtocolError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin,
 {
     let version = if version == 0 {
         DEFAULT_VERSION
@@ -89,6 +89,16 @@ where
 /// UDP association over one Snell TCP/AEAD session (v3+).
 pub struct SnellUdpAssociation<S> {
     stream: SnellStream<S>,
+}
+
+/// Write half of a split Snell UDP association.
+pub struct SnellUdpSender<W> {
+    stream: SnellStream<W>,
+}
+
+/// Read half of a split Snell UDP association.
+pub struct SnellUdpReceiver<R> {
+    stream: SnellStream<R>,
 }
 
 /// Wraps an established TCP socket with Snell AEAD and writes the UDP header.
@@ -136,6 +146,54 @@ where
         self.stream.write_plain(&packet).await
     }
 
+    /// Receives one Snell UDP response frame, consuming `CommandTunnel` first.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the reply is an error, the frame is truncated, or I/O fails.
+    pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), SnellProtocolError> {
+        let packet = self.stream.read_plain(0x3FFF).await?;
+        parse_udp_response(&packet)
+    }
+
+    /// Split into independently owned send/recv halves for concurrent progress.
+    pub fn into_split(
+        self,
+    ) -> (
+        SnellUdpSender<tokio::io::WriteHalf<S>>,
+        SnellUdpReceiver<tokio::io::ReadHalf<S>>,
+    ) {
+        let (reader, writer) = self.stream.into_split();
+        (
+            SnellUdpSender { stream: writer },
+            SnellUdpReceiver { stream: reader },
+        )
+    }
+}
+
+impl<W> SnellUdpSender<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    /// Sends one Snell UDP request frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the destination cannot be encoded or the AEAD write fails.
+    pub async fn send(
+        &mut self,
+        destination: &Destination,
+        payload: &[u8],
+    ) -> Result<(), SnellProtocolError> {
+        let packet = encode_udp_request(destination, payload)?;
+        self.stream.write_plain(&packet).await
+    }
+}
+
+impl<R> SnellUdpReceiver<R>
+where
+    R: AsyncRead + Unpin,
+{
     /// Receives one Snell UDP response frame, consuming `CommandTunnel` first.
     ///
     /// # Errors

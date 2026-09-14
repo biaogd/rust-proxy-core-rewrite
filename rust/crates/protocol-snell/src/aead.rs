@@ -239,144 +239,6 @@ impl<S> SnellStream<S> {
         self.reuse.peer_closed = false;
         self.reuse.zero_chunk_written = false;
     }
-}
-
-impl<S> SnellStream<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    pub(crate) async fn open_client(
-        mut inner: S,
-        psk: &[u8],
-        kind: CipherKind,
-    ) -> Result<Self, SnellProtocolError> {
-        let mut write_salt = [0_u8; SALT_SIZE];
-        rand::rng().fill(&mut write_salt);
-        let write_aead = derive_key(psk, &write_salt, kind)?;
-        inner.write_all(&write_salt).await?;
-        Ok(Self {
-            inner,
-            psk: psk.to_vec(),
-            kind,
-            write_aead: Some(write_aead),
-            read_aead: None,
-            write_nonce: [0_u8; NONCE_SIZE],
-            read_nonce: [0_u8; NONCE_SIZE],
-            leftover: Vec::new(),
-            leftover_off: 0,
-            pending: Vec::new(),
-            pending_off: 0,
-            read_phase: ReadPhase::Salt {
-                buf: [0_u8; SALT_SIZE],
-                filled: 0,
-            },
-            reply_pending: true,
-            reuse: ReuseFlags::default(),
-        })
-    }
-
-    pub(crate) async fn client(
-        inner: S,
-        psk: &[u8],
-        kind: CipherKind,
-        header: &[u8],
-    ) -> Result<Self, SnellProtocolError> {
-        let mut stream = Self::open_client(inner, psk, kind).await?;
-        stream.write_plain(header).await?;
-        Ok(stream)
-    }
-
-    pub(crate) async fn server(
-        mut inner: S,
-        psk: &[u8],
-        kind: CipherKind,
-    ) -> Result<Self, SnellProtocolError> {
-        let mut read_salt = [0_u8; SALT_SIZE];
-        inner.read_exact(&mut read_salt).await?;
-        let read_aead = derive_key(psk, &read_salt, kind)?;
-        Ok(Self {
-            inner,
-            psk: psk.to_vec(),
-            kind,
-            write_aead: None,
-            read_aead: Some(read_aead),
-            write_nonce: [0_u8; NONCE_SIZE],
-            read_nonce: [0_u8; NONCE_SIZE],
-            leftover: Vec::new(),
-            leftover_off: 0,
-            pending: Vec::new(),
-            pending_off: 0,
-            read_phase: ReadPhase::Idle,
-            reply_pending: false,
-            reuse: ReuseFlags::default(),
-        })
-    }
-
-    /// Reads decrypted plaintext. Cancel-safe: salt / length / ciphertext
-    /// progress lives in `read_phase`, so dropping this future mid-`select!`
-    /// does not lose AEAD framing bytes.
-    pub(crate) async fn read_plain(&mut self, max: usize) -> Result<Vec<u8>, SnellProtocolError> {
-        std::future::poll_fn(|cx| self.poll_read_plain(cx, max)).await
-    }
-
-    fn poll_read_plain(
-        &mut self,
-        cx: &mut Context<'_>,
-        max: usize,
-    ) -> Poll<Result<Vec<u8>, SnellProtocolError>> {
-        loop {
-            if self.reuse.peer_closed {
-                return Poll::Ready(Err(SnellProtocolError::Protocol(
-                    "Snell stream is closed".to_owned(),
-                )));
-            }
-            if let Err(error) = self.consume_reply() {
-                return Poll::Ready(Err(SnellProtocolError::Protocol(error.to_string())));
-            }
-            if let Some(available) = self.take_leftover_bytes(max) {
-                return Poll::Ready(Ok(available));
-            }
-            match self.poll_advance_read(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(ReadAdvance::Record)) => {}
-                Poll::Ready(Ok(ReadAdvance::Eof)) => {
-                    // TCP AsyncRead maps zero-chunk to EOF; the UDP framing
-                    // path still surfaces it as a protocol error (Go Snell).
-                    if self.reuse.peer_closed {
-                        return Poll::Ready(Err(SnellProtocolError::Protocol(
-                            "Snell zero chunk".to_owned(),
-                        )));
-                    }
-                    return Poll::Ready(Err(SnellProtocolError::Protocol(
-                        "Snell stream closed before a full record".to_owned(),
-                    )));
-                }
-                Poll::Ready(Err(error)) => {
-                    return Poll::Ready(Err(SnellProtocolError::Io(error)));
-                }
-            }
-        }
-    }
-
-    pub(crate) async fn write_plain(&mut self, payload: &[u8]) -> Result<(), SnellProtocolError> {
-        self.ensure_writer_async().await?;
-        let aead = self.write_aead.as_ref().ok_or_else(|| {
-            SnellProtocolError::Protocol("Snell writer is not initialized".to_owned())
-        })?;
-        write_record(&mut self.inner, aead, &mut self.write_nonce, payload).await
-    }
-
-    async fn ensure_writer_async(&mut self) -> Result<(), SnellProtocolError> {
-        if self.write_aead.is_some() {
-            return Ok(());
-        }
-        let mut write_salt = [0_u8; SALT_SIZE];
-        rand::rng().fill(&mut write_salt);
-        let write_aead = derive_key(&self.psk, &write_salt, self.kind)?;
-        self.inner.write_all(&write_salt).await?;
-        self.write_aead = Some(write_aead);
-        Ok(())
-    }
 
     fn take_leftover_bytes(&mut self, max: usize) -> Option<Vec<u8>> {
         if self.leftover_off >= self.leftover.len() {
@@ -461,6 +323,171 @@ where
             self.leftover.clear();
             self.leftover_off = 0;
         }
+    }
+}
+impl<S> SnellStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    pub(crate) async fn open_client(
+        mut inner: S,
+        psk: &[u8],
+        kind: CipherKind,
+    ) -> Result<Self, SnellProtocolError> {
+        let mut write_salt = [0_u8; SALT_SIZE];
+        rand::rng().fill(&mut write_salt);
+        let write_aead = derive_key(psk, &write_salt, kind)?;
+        inner.write_all(&write_salt).await?;
+        Ok(Self {
+            inner,
+            psk: psk.to_vec(),
+            kind,
+            write_aead: Some(write_aead),
+            read_aead: None,
+            write_nonce: [0_u8; NONCE_SIZE],
+            read_nonce: [0_u8; NONCE_SIZE],
+            leftover: Vec::new(),
+            leftover_off: 0,
+            pending: Vec::new(),
+            pending_off: 0,
+            read_phase: ReadPhase::Salt {
+                buf: [0_u8; SALT_SIZE],
+                filled: 0,
+            },
+            reply_pending: true,
+            reuse: ReuseFlags::default(),
+        })
+    }
+
+    pub(crate) async fn client(
+        inner: S,
+        psk: &[u8],
+        kind: CipherKind,
+        header: &[u8],
+    ) -> Result<Self, SnellProtocolError> {
+        let mut stream = Self::open_client(inner, psk, kind).await?;
+        stream.write_plain(header).await?;
+        Ok(stream)
+    }
+
+    pub(crate) async fn server(
+        mut inner: S,
+        psk: &[u8],
+        kind: CipherKind,
+    ) -> Result<Self, SnellProtocolError> {
+        let mut read_salt = [0_u8; SALT_SIZE];
+        inner.read_exact(&mut read_salt).await?;
+        let read_aead = derive_key(psk, &read_salt, kind)?;
+        Ok(Self {
+            inner,
+            psk: psk.to_vec(),
+            kind,
+            write_aead: None,
+            read_aead: Some(read_aead),
+            write_nonce: [0_u8; NONCE_SIZE],
+            read_nonce: [0_u8; NONCE_SIZE],
+            leftover: Vec::new(),
+            leftover_off: 0,
+            pending: Vec::new(),
+            pending_off: 0,
+            read_phase: ReadPhase::Idle,
+            reply_pending: false,
+            reuse: ReuseFlags::default(),
+        })
+    }
+
+    /// Split into independently owned halves so UDP sessions can drive send and
+    /// recv concurrently without sharing a single `&mut self`.
+    pub fn into_split(
+        self,
+    ) -> (
+        SnellStream<tokio::io::ReadHalf<S>>,
+        SnellStream<tokio::io::WriteHalf<S>>,
+    ) {
+        let Self {
+            inner,
+            psk,
+            kind,
+            write_aead,
+            read_aead,
+            write_nonce,
+            read_nonce,
+            leftover,
+            leftover_off,
+            pending,
+            pending_off,
+            read_phase,
+            reply_pending,
+            reuse,
+        } = self;
+        let (read_half, write_half) = tokio::io::split(inner);
+        (
+            SnellStream {
+                inner: read_half,
+                psk: psk.clone(),
+                kind,
+                write_aead: None,
+                read_aead,
+                write_nonce: [0_u8; NONCE_SIZE],
+                read_nonce,
+                leftover,
+                leftover_off,
+                pending: Vec::new(),
+                pending_off: 0,
+                read_phase,
+                reply_pending,
+                reuse: ReuseFlags {
+                    peer_closed: reuse.peer_closed,
+                    ..ReuseFlags::default()
+                },
+            },
+            SnellStream {
+                inner: write_half,
+                psk,
+                kind,
+                write_aead,
+                read_aead: None,
+                write_nonce,
+                read_nonce: [0_u8; NONCE_SIZE],
+                leftover: Vec::new(),
+                leftover_off: 0,
+                pending,
+                pending_off,
+                read_phase: ReadPhase::Idle,
+                reply_pending: false,
+                reuse: ReuseFlags {
+                    peer_closed: false,
+                    hold_inner_shutdown: reuse.hold_inner_shutdown,
+                    zero_chunk_written: reuse.zero_chunk_written,
+                    failed: reuse.failed,
+                },
+            },
+        )
+    }
+}
+
+impl<S> SnellStream<S>
+where
+    S: AsyncWrite + Unpin,
+{
+    pub(crate) async fn write_plain(&mut self, payload: &[u8]) -> Result<(), SnellProtocolError> {
+        self.ensure_writer_async().await?;
+        let aead = self.write_aead.as_ref().ok_or_else(|| {
+            SnellProtocolError::Protocol("Snell writer is not initialized".to_owned())
+        })?;
+        write_record(&mut self.inner, aead, &mut self.write_nonce, payload).await
+    }
+
+    async fn ensure_writer_async(&mut self) -> Result<(), SnellProtocolError> {
+        if self.write_aead.is_some() {
+            return Ok(());
+        }
+        let mut write_salt = [0_u8; SALT_SIZE];
+        rand::rng().fill(&mut write_salt);
+        let write_aead = derive_key(&self.psk, &write_salt, self.kind)?;
+        self.inner.write_all(&write_salt).await?;
+        self.write_aead = Some(write_aead);
+        Ok(())
     }
 
     fn encrypt_zero_chunk(&mut self) -> Result<Vec<u8>, std::io::Error> {
@@ -584,6 +611,51 @@ impl<S> SnellStream<S>
 where
     S: AsyncRead + Unpin,
 {
+    /// Reads decrypted plaintext. Cancel-safe: salt / length / ciphertext
+    /// progress lives in `read_phase`, so dropping this future mid-`select!`
+    /// does not lose AEAD framing bytes.
+    pub(crate) async fn read_plain(&mut self, max: usize) -> Result<Vec<u8>, SnellProtocolError> {
+        std::future::poll_fn(|cx| self.poll_read_plain(cx, max)).await
+    }
+
+    fn poll_read_plain(
+        &mut self,
+        cx: &mut Context<'_>,
+        max: usize,
+    ) -> Poll<Result<Vec<u8>, SnellProtocolError>> {
+        loop {
+            if self.reuse.peer_closed {
+                return Poll::Ready(Err(SnellProtocolError::Protocol(
+                    "Snell stream is closed".to_owned(),
+                )));
+            }
+            if let Err(error) = self.consume_reply() {
+                return Poll::Ready(Err(SnellProtocolError::Protocol(error.to_string())));
+            }
+            if let Some(available) = self.take_leftover_bytes(max) {
+                return Poll::Ready(Ok(available));
+            }
+            match self.poll_advance_read(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(ReadAdvance::Record)) => {}
+                Poll::Ready(Ok(ReadAdvance::Eof)) => {
+                    // TCP AsyncRead maps zero-chunk to EOF; the UDP framing
+                    // path still surfaces it as a protocol error (Go Snell).
+                    if self.reuse.peer_closed {
+                        return Poll::Ready(Err(SnellProtocolError::Protocol(
+                            "Snell zero chunk".to_owned(),
+                        )));
+                    }
+                    return Poll::Ready(Err(SnellProtocolError::Protocol(
+                        "Snell stream closed before a full record".to_owned(),
+                    )));
+                }
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(SnellProtocolError::Io(error)));
+                }
+            }
+        }
+    }
     /// Advances `read_phase` until one decrypted record is buffered in
     /// `leftover`, or the peer closes. Cancel-safe: partial salt / length /
     /// ciphertext stay in `read_phase`.
@@ -690,13 +762,18 @@ where
 
 impl<S> AsyncRead for SnellStream<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + Unpin,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        // An empty destination must not advance AEAD framing: doing so would
+        // decrypt the next record into `leftover` and discard unread plaintext.
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         loop {
             {
                 let this = self.as_mut().get_mut();
@@ -720,7 +797,7 @@ where
 
 impl<S> AsyncWrite for SnellStream<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -1006,5 +1083,42 @@ mod tests {
             !stream.can_return_to_pool(),
             "failed streams must not re-enter the reuse pool"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_read_buf_preserves_unread_leftover() {
+        use tokio::io::AsyncReadExt;
+
+        let psk = b"psk-empty-buf";
+        let kind = CipherKind::Aes128Gcm;
+        let (client_raw, server_raw) = tokio::io::duplex(4096);
+        let client_task = tokio::spawn(async move {
+            let mut client = SnellStream::open_client(client_raw, psk, kind)
+                .await
+                .expect("client");
+            client.write_plain(b"hello-world").await.expect("write");
+            client
+        });
+        let mut server = SnellStream::server(server_raw, psk, kind)
+            .await
+            .expect("server");
+        let mut five = [0_u8; 5];
+        server.read_exact(&mut five).await.expect("partial");
+        assert_eq!(&five, b"hello");
+
+        let mut empty = [];
+        let mut buf = ReadBuf::new(&mut empty);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            Pin::new(&mut server)
+                .poll_read(&mut cx, &mut buf)
+                .is_ready(),
+            "empty ReadBuf must return Ready(Ok)"
+        );
+
+        let mut rest = [0_u8; 16];
+        let n = server.read(&mut rest).await.expect("remainder");
+        assert_eq!(&rest[..n], b"-world");
+        client_task.abort();
     }
 }

@@ -697,6 +697,7 @@ pub(super) async fn run_snell_udp_session(
     shutdown: CancellationToken,
 ) {
     const UDP_SESSION_TIMEOUT: Duration = Duration::from_mins(1);
+    const OUTBOUND_QUEUE: usize = 32;
 
     let Some(proxy) = configured_proxy(&config, &proxy_name) else {
         return;
@@ -731,7 +732,7 @@ pub(super) async fn run_snell_udp_session(
         .await
         .map_err(|error| format!("Snell UDP association failed: {error}"))
     };
-    let mut association = match await_udp_setup(&shutdown, setup).await {
+    let association = match await_udp_setup(&shutdown, setup).await {
         Ok(association) => association,
         Err(error) => {
             state.log("error", format!("Snell UDP setup failed: {error}"));
@@ -747,37 +748,108 @@ pub(super) async fn run_snell_udp_session(
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
     tokio::pin!(idle);
-    let mut current = Some(first);
+
+    // Drive send and recv on independent halves so a blocked TCP write cannot
+    // stall draining peer responses (and vice versa). A small outbound queue
+    // absorbs bursts while still applying backpressure to the inbound mux.
+    let (mut sender, mut receiver) = association.into_split();
+    let (outbound_tx, mut outbound_rx) =
+        mpsc::channel::<(rewrite_model::Destination, Vec<u8>)>(OUTBOUND_QUEUE);
+    let (inbound_tx, mut inbound_rx) =
+        mpsc::channel::<(rewrite_model::Destination, Vec<u8>)>(OUTBOUND_QUEUE);
+
+    let send_task = tokio::spawn(async move {
+        while let Some((destination, payload)) = outbound_rx.recv().await {
+            if sender.send(&destination, &payload).await.is_err() {
+                break;
+            }
+        }
+    });
+    let recv_task = tokio::spawn(async move {
+        while let Ok((remote, payload)) = receiver.recv().await {
+            if inbound_tx.send((remote, payload)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let enqueue = |tx: &mpsc::Sender<(rewrite_model::Destination, Vec<u8>)>,
+                   request: &UdpSessionPacket,
+                   uploaded: &mut u64|
+     -> bool {
+        let destination = udp_proxy_destination(request);
+        let len = request.payload.len() as u64;
+        // try_send keeps the select loop responsive; a full queue means the
+        // send task is blocked on TCP write — apply backpressure by waiting.
+        match tx.try_send((destination.clone(), request.payload.clone())) {
+            Ok(()) => {
+                *uploaded = uploaded.saturating_add(len);
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(item)) => {
+                // Fall through to async send in the caller.
+                let _ = item;
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    };
+
+    let mut pending = Some(first);
+    let mut waiting_send: Option<(rewrite_model::Destination, Vec<u8>, u64)> = None;
     loop {
-        if let Some(request) = current.take() {
-            let destination = udp_proxy_destination(&request);
-            // Keep send cancellable: a blocked TCP write must still honor
-            // shutdown, tracker cancel, and the idle timeout. Cancellation
-            // drops the association (half-written AEAD must not be reused).
+        if let Some(request) = pending.take() {
+            if enqueue(&outbound_tx, &request, &mut uploaded) {
+                idle.as_mut()
+                    .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+            } else if outbound_tx.is_closed() {
+                break;
+            } else {
+                let destination = udp_proxy_destination(&request);
+                let len = request.payload.len() as u64;
+                waiting_send = Some((destination, request.payload, len));
+            }
+        }
+
+        if let Some((destination, payload, len)) = waiting_send.take() {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = tracker.cancelled() => break,
                 () = &mut idle => break,
-                result = association.send(&destination, &request.payload) => {
+                result = outbound_tx.send((destination.clone(), payload.clone())) => {
                     if result.is_err() {
                         break;
                     }
-                    uploaded = uploaded.saturating_add(request.payload.len() as u64);
+                    uploaded = uploaded.saturating_add(len);
                     idle.as_mut()
                         .reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
+                }
+                response = inbound_rx.recv() => {
+                    // Keep draining responses while the outbound queue is full.
+                    waiting_send = Some((destination, payload, len));
+                    let Some((remote, payload)) = response else { break };
+                    let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
+                        continue;
+                    };
+                    if reply.send_datagram(source, remote, &payload).await.is_err() {
+                        break;
+                    }
+                    downloaded = downloaded.saturating_add(payload.len() as u64);
+                    idle.as_mut().reset(tokio::time::Instant::now() + UDP_SESSION_TIMEOUT);
                 }
             }
             continue;
         }
+
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
-                current = Some(request);
+                pending = Some(request);
             }
-            response = association.recv() => {
-                let Ok((remote, payload)) = response else { break };
+            response = inbound_rx.recv() => {
+                let Some((remote, payload)) = response else { break };
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
@@ -790,6 +862,9 @@ pub(super) async fn run_snell_udp_session(
             () = &mut idle => break,
         }
     }
+    drop(outbound_tx);
+    send_task.abort();
+    recv_task.abort();
     tracker.finish(uploaded, downloaded);
 }
 

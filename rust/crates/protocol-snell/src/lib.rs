@@ -14,7 +14,8 @@ mod pool;
 pub use aead::SnellStream;
 pub use authority::{Authority, AuthorityObfs, AuthorityOptions, spawn_authority};
 pub use client::{
-    ClientOptions, SnellUdpAssociation, associate_udp, connect_tcp, open_tcp, write_connect,
+    ClientOptions, SnellUdpAssociation, SnellUdpReceiver, SnellUdpSender, associate_udp,
+    connect_tcp, open_tcp, write_connect,
 };
 pub use pool::{PooledSnellStream, SnellSessionPool};
 

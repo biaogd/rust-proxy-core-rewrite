@@ -4068,6 +4068,7 @@ dependencies = [
  "rand 0.10.2",
  "rewrite-model",
  "rewrite-transport",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
 ]

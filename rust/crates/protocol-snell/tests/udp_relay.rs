@@ -138,3 +138,71 @@ async fn spawn_udp_echo() -> UdpEcho {
         },
     }
 }
+
+#[tokio::test]
+async fn split_association_survives_tiny_buffer_bidi_pressure() {
+    use std::time::Duration;
+
+    use rewrite_protocol_snell::{SnellUdpReceiver, SnellUdpSender};
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let echo = spawn_udp_echo().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"bidi-psk".to_vec(),
+        version: 3,
+        obfs: None,
+    })
+    .await
+    .expect("authority");
+
+    // Tiny socket buffers force both TCP directions to apply backpressure so
+    // sequential send-then-recv deadlocks; split halves must progress together.
+    let stream = {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).expect("socket");
+        let _ = socket.set_send_buffer_size(2_048);
+        let _ = socket.set_recv_buffer_size(2_048);
+        socket
+            .connect(&authority.local_addr.into())
+            .expect("connect");
+        socket.set_nonblocking(true).expect("nonblocking");
+        let std_stream: std::net::TcpStream = socket.into();
+        tokio::net::TcpStream::from_std(std_stream).expect("tokio stream")
+    };
+
+    let association = associate_udp(
+        stream,
+        &ClientOptions {
+            psk: b"bidi-psk".to_vec(),
+            version: 3,
+        },
+    )
+    .await
+    .expect("associate");
+    let (mut sender, mut receiver): (SnellUdpSender<_>, SnellUdpReceiver<_>) =
+        association.into_split();
+
+    const COUNT: usize = 48;
+    let payload = vec![0x5a_u8; 512];
+    let dest = echo.destination.clone();
+
+    let send_task = tokio::spawn(async move {
+        for _ in 0..COUNT {
+            sender.send(&dest, &payload).await.expect("send");
+        }
+    });
+    let recv_task = tokio::spawn(async move {
+        for _ in 0..COUNT {
+            let (_, got) = receiver.recv().await.expect("recv");
+            assert_eq!(got.len(), 512);
+            assert!(got.iter().all(|byte| *byte == 0x5a));
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        send_task.await.expect("send join");
+        recv_task.await.expect("recv join");
+    })
+    .await
+    .expect("bidi pressure must not deadlock");
+}

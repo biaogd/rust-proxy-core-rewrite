@@ -16,11 +16,10 @@ use crate::model::{
     AnyTlsCarrier, AnyTlsProxyConfig, GroupHealthConfig, Hysteria2ProxyConfig, LoadBalanceStrategy,
     ProviderHealthConfig, ProxyConfig, ProxyGroupConfig, ProxyGroupKind, ProxyKind,
     ProxyProviderConfig, ProxyProviderTransform, ProxyProviderVehicle, RealityProxyConfig,
-    SnellObfs, SnellProxyConfig, SshProxyConfig, SsrProxyConfig, TrojanProxyConfig, TrojanTransport,
-    TuicProxyConfig, VlessFlow,
-    VlessPacketMode, VlessProxyConfig, VlessTransport, VlessXHttpMode, VlessXHttpReuseOptions,
-    VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode, VmessProxyConfig, VmessSecurity,
-    VmessTransport, WireGuardProxyConfig,
+    SnellObfs, SnellProxyConfig, SshProxyConfig, SsrProxyConfig, TrojanProxyConfig,
+    TrojanTransport, TuicProxyConfig, VlessFlow, VlessPacketMode, VlessProxyConfig, VlessTransport,
+    VlessXHttpMode, VlessXHttpReuseOptions, VmessMekyaOptions, VmessMkcpOptions, VmessPacketMode,
+    VmessProxyConfig, VmessSecurity, VmessTransport, WireGuardProxyConfig,
 };
 use crate::raw::{
     ProviderEtagCache, RawAnyTlsJlsOptions, RawAnyTlsRestlsOptions, RawAnyTlsShadowTlsOptions,

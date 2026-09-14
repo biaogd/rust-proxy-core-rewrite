@@ -135,7 +135,7 @@ async fn serve_connection<S>(
     kind: CipherKind,
 ) -> Result<(), SnellProtocolError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut inbound = SnellStream::server(stream, psk, kind).await?;
     loop {
@@ -173,53 +173,75 @@ where
             }
             ClientCommand::Udp => {
                 inbound.write_plain(&[COMMAND_TUNNEL]).await?;
-                serve_udp(&mut inbound).await?;
+                serve_udp(inbound).await?;
                 return Ok(());
             }
         }
     }
 }
 
-async fn serve_udp<S>(inbound: &mut SnellStream<S>) -> Result<(), SnellProtocolError>
+async fn serve_udp<S>(inbound: SnellStream<S>) -> Result<(), SnellProtocolError>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    loop {
-        let packet = match inbound.read_plain(0x3FFF).await {
-            Ok(packet) => packet,
-            Err(SnellProtocolError::Protocol(message)) if message.contains("zero chunk") => {
-                return Ok(());
+    // Keep request reads and response writes independent so a blocked TCP write
+    // cannot stall draining the next client datagram under backpressure.
+    let (mut reader, mut writer) = inbound.into_split();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let writer_task = tokio::spawn(async move {
+        while let Some(packet) = rx.recv().await {
+            if writer.write_plain(&packet).await.is_err() {
+                break;
             }
-            Err(SnellProtocolError::Io(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        if packet.is_empty() {
-            return Ok(());
         }
-        let (destination, payload) = parse_udp_request(&packet)?;
-        let remote = resolve_udp_destination(&destination).await?;
-        let bind = if remote.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let socket = UdpSocket::bind(bind).await?;
-        socket.send_to(&payload, remote).await?;
-        let mut response = vec![0_u8; 65_536];
-        let (length, source) =
-            tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut response))
-                .await
-                .map_err(|_| {
-                    SnellProtocolError::Protocol("Snell UDP authority dest timed out".to_owned())
-                })??;
-        inbound
-            .write_plain(&encode_udp_response(source, &response[..length])?)
-            .await?;
+    });
+
+    let result = async {
+        loop {
+            let packet = match reader.read_plain(0x3FFF).await {
+                Ok(packet) => packet,
+                Err(SnellProtocolError::Protocol(message)) if message.contains("zero chunk") => {
+                    return Ok(());
+                }
+                Err(SnellProtocolError::Io(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
+            if packet.is_empty() {
+                return Ok(());
+            }
+            let (destination, payload) = parse_udp_request(&packet)?;
+            let remote = resolve_udp_destination(&destination).await?;
+            let bind = if remote.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let socket = UdpSocket::bind(bind).await?;
+            socket.send_to(&payload, remote).await?;
+            let mut response = vec![0_u8; 65_536];
+            let (length, source) =
+                tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut response))
+                    .await
+                    .map_err(|_| {
+                        SnellProtocolError::Protocol(
+                            "Snell UDP authority dest timed out".to_owned(),
+                        )
+                    })??;
+            let encoded = encode_udp_response(source, &response[..length])?;
+            if tx.send(encoded).await.is_err() {
+                return Ok(());
+            }
+        }
     }
+    .await;
+
+    drop(tx);
+    let _ = writer_task.await;
+    result
 }
 
 async fn resolve_udp_destination(
