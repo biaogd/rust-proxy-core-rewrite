@@ -22,8 +22,9 @@ pub use direct::{
     DirectError, DirectTcpOptions, connect, connect_udp_with_options, connect_with_options,
 };
 pub use http::{
-    HttpProxyError, connect_http, connect_http_with_options, wrap_client_tls,
-    wrap_client_tls_with_alpn, wrap_client_tls_with_options, wrap_client_vision_tls_with_options,
+    HttpProxyError, connect_http, connect_http_on_stream, connect_http_with_options,
+    wrap_client_tls, wrap_client_tls_with_alpn, wrap_client_tls_with_options,
+    wrap_client_vision_tls_with_options,
 };
 pub use hysteria2::{
     Hysteria2Client, Hysteria2ProxyError, Hysteria2UdpAssociation, associate_hysteria2_udp,
@@ -56,21 +57,22 @@ pub use rewrite_transport::{
 pub use shadowsocks::{
     ShadowsocksProxyError, ShadowsocksTcpOptions, ShadowsocksUdpAssociation,
     ShadowsocksUotAssociation, associate_shadowsocks_udp_with_options,
-    associate_shadowsocks_uot_with_options, connect_shadowsocks_with_options,
-    connect_shadowsocks_with_plugin_options,
+    associate_shadowsocks_uot_with_options, connect_shadowsocks_on_stream,
+    connect_shadowsocks_with_options, connect_shadowsocks_with_plugin_options,
 };
 pub use snell::{
     BoxedSnellSessionPool, PooledSnellStream, SnellProxyError, SnellSessionPool,
-    SnellUdpAssociation, associate_snell_udp_with_options, connect_snell_with_options,
+    SnellUdpAssociation, associate_snell_udp_with_options, connect_snell_on_stream,
+    connect_snell_with_options,
 };
 pub use socks5::{
     Socks5ProxyError, Socks5UdpAssociation, associate_socks5_udp_with_options, connect_socks5,
-    connect_socks5_with_options,
+    connect_socks5_on_stream, connect_socks5_with_options,
 };
 pub use ssh::{SshClient, SshProxyError, SshTransportHints, ssh_adapter_identity};
 pub use ssr::{
     SsrClientState, SsrProxyError, SsrUdpAssociation, associate_ssr_udp_with_options,
-    connect_ssr_with_options,
+    connect_ssr_on_stream, connect_ssr_with_options,
 };
 pub use trojan::{
     TrojanProxyError, TrojanUdpAssociation, associate_trojan_udp_on_stream,

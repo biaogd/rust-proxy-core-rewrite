@@ -342,6 +342,7 @@ jobs:
       PHASE6HTUIC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6IWG_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7ESNELL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7T1_DIALER_PROXY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6JSSH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7A_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7B_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
@@ -406,7 +407,7 @@ jobs:
             cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
             rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
-            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d)_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
@@ -476,6 +477,7 @@ jobs:
             compat/scripts/phase6b_http.py \
             compat/scripts/phase6b_http_tls.py \
             compat/scripts/phase6b_http_contract.py \
+            compat/scripts/phase7t1_dialer_proxy_tcp.py \
             compat/scripts/phase6c_shadowsocks.py \
             compat/scripts/phase6c_shadowsocks_ciphers.py \
             compat/scripts/phase6c_shadowsocks_udp.py \

@@ -158,6 +158,7 @@ fn parse_anytls_proxy(
     mut proxy: RawProxy,
     home_directory: Option<&Path>,
 ) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     let shadow_tls_opts = proxy.shadow_tls_opts.take();
     let restls_opts = proxy.restls_opts.take();
     let jls_opts = proxy.jls_opts.take();
@@ -306,6 +307,7 @@ fn parse_anytls_proxy(
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
@@ -341,6 +343,8 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         "recv-window-conn",
         "recv-window",
     ];
+
+    reject_unsupported_dialer_proxy(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -537,6 +541,7 @@ fn parse_hysteria2_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy: None,
         headers: BTreeMap::new(),
     })
 }
@@ -572,6 +577,8 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         "max-connection-receive-window",
         "max-udp-relay-packet-size",
     ];
+
+    reject_unsupported_dialer_proxy(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -749,6 +756,7 @@ fn parse_tuic_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Co
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy: None,
         headers: BTreeMap::new(),
     })
 }
@@ -775,6 +783,8 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         "dns",
         "refresh-server-ip-interval",
     ];
+
+    reject_unsupported_dialer_proxy(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -955,6 +965,7 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
         }),
         snell: None,
         ssh: None,
+        dialer_proxy: None,
         headers: BTreeMap::new(),
     })
 }
@@ -962,6 +973,8 @@ fn parse_wireguard_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfi
 #[allow(clippy::too_many_lines)]
 fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     const ACCEPTED_EXTRA: &[&str] = &["psk", "version", "reuse", "obfs-opts"];
+
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -1071,6 +1084,7 @@ fn parse_snell_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
             obfs,
             reuse,
         }),
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
@@ -1134,6 +1148,8 @@ fn parse_ssh_proxy(
         "ip-version",
     ];
     const ACCEPTED_EXTRA: &[&str] = &["private-key-passphrase", "host-key", "host-key-algorithms"];
+
+    reject_unsupported_dialer_proxy(&proxy, &name)?;
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.cipher.is_some()
@@ -1270,6 +1286,7 @@ fn parse_ssh_proxy(
             host_keys,
             host_key_algorithms,
         }),
+        dialer_proxy: None,
         headers: BTreeMap::new(),
     })
 }
@@ -1676,7 +1693,8 @@ fn parse_anytls_carrier(
 }
 
 #[allow(clippy::too_many_lines)]
-fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+fn parse_trojan_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let udp = proxy.udp.unwrap_or(false);
     let reality = parse_vless_reality_options(&proxy, &name)?;
@@ -1838,17 +1856,20 @@ fn parse_trojan_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Conf
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_remote_proxy(
     name: String,
     kind: ProxyKind,
-    proxy: RawProxy,
+    mut proxy: RawProxy,
     allow_tls: bool,
     home_directory: Option<&Path>,
 ) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     let is_http = kind == ProxyKind::Http;
     let has_tls_options = proxy.tls.is_some()
         || proxy.sni.is_some()
@@ -1946,11 +1967,13 @@ fn parse_remote_proxy(
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: proxy.headers.unwrap_or_default(),
     })
 }
 
-fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+fn parse_shadowsocks_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     if proxy.target_rematch_name.is_some()
         || proxy.target_sub_rule.is_some()
         || proxy.username.is_some()
@@ -2047,6 +2070,7 @@ fn parse_shadowsocks_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig,
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
@@ -2083,6 +2107,7 @@ const SSR_OBFS: [&str; 6] = [
 
 #[allow(clippy::too_many_lines)]
 fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     // SSR-A/B/C: stream ciphers + none/dummy; protocols through auth_chain_*;
     // obfs through random_head; UDP outbound allowed. AEAD/SS2022 remain rejected.
     if proxy.target_rematch_name.is_some()
@@ -2198,12 +2223,14 @@ fn parse_ssr_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, Con
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
 
 #[allow(clippy::too_many_lines)]
 fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     strip_ignored_proxy_metadata(&mut proxy.extra);
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let tls = proxy.tls.unwrap_or(false);
@@ -2307,12 +2334,14 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
 
 #[allow(clippy::too_many_lines)]
-fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+fn parse_vless_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
+    let dialer_proxy = take_dialer_proxy(&mut proxy);
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let encryption = proxy.encryption.as_deref().unwrap_or("");
     let tls = proxy.tls.unwrap_or(false);
@@ -2423,6 +2452,7 @@ fn parse_vless_proxy(name: String, proxy: RawProxy) -> Result<ProxyConfig, Confi
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy,
         headers: BTreeMap::new(),
     })
 }
@@ -3472,8 +3502,115 @@ fn simple_proxy(name: String, kind: ProxyKind) -> ProxyConfig {
         wireguard: None,
         snell: None,
         ssh: None,
+        dialer_proxy: None,
         headers: BTreeMap::new(),
     }
+}
+
+fn take_dialer_proxy(proxy: &mut RawProxy) -> Option<String> {
+    proxy
+        .dialer_proxy
+        .take()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+fn reject_unsupported_dialer_proxy(proxy: &RawProxy, name: &str) -> Result<(), ConfigError> {
+    if proxy
+        .dialer_proxy
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(ConfigError::UnsupportedProxy(name.to_owned()));
+    }
+    Ok(())
+}
+
+/// Validates dialer-proxy references and static cycles (Go `validateDialerProxies`).
+pub(crate) fn validate_dialer_proxies(
+    proxies: &[ProxyConfig],
+    groups: &[ProxyGroupConfig],
+    providers: &[ProxyProviderConfig],
+) -> Result<(), ConfigError> {
+    let mut known: BTreeSet<String> = [
+        "DIRECT",
+        "REJECT",
+        "REJECT-DROP",
+        "COMPATIBLE",
+        "PASS",
+        "PASS-RULE",
+        "GLOBAL",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for proxy in proxies.iter().chain(
+        providers
+            .iter()
+            .flat_map(|provider| provider.proxies.iter()),
+    ) {
+        known.insert(proxy.name.clone());
+    }
+    for group in groups {
+        known.insert(group.name.clone());
+    }
+
+    let mut graph = BTreeMap::new();
+    for proxy in proxies.iter().chain(
+        providers
+            .iter()
+            .flat_map(|provider| provider.proxies.iter()),
+    ) {
+        let Some(dialer) = proxy.dialer_proxy.as_deref() else {
+            continue;
+        };
+        if proxy.udp || proxy.udp_over_tcp {
+            return Err(ConfigError::DialerProxy(format!(
+                "proxy [{}] dialer-proxy cannot be combined with udp (UDP chains are not supported in 7T1-A)",
+                proxy.name
+            )));
+        }
+        if !known.contains(dialer) {
+            return Err(ConfigError::DialerProxy(format!(
+                "proxy [{}] dialer-proxy [{}] not found",
+                proxy.name, dialer
+            )));
+        }
+        graph.insert(proxy.name.clone(), dialer.to_owned());
+    }
+
+    for name in graph.keys() {
+        let mut visited = BTreeSet::new();
+        let mut path = Vec::new();
+        if dialer_proxy_has_cycle(name, &graph, &mut visited, &mut path) {
+            return Err(ConfigError::DialerProxy(format!(
+                "proxy [{name}] has circular dialer-proxy dependency"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn dialer_proxy_has_cycle(
+    current: &str,
+    graph: &BTreeMap<String, String>,
+    visited: &mut BTreeSet<String>,
+    path: &mut Vec<String>,
+) -> bool {
+    if path.iter().any(|name| name == current) {
+        return true;
+    }
+    if !visited.insert(current.to_owned()) {
+        return false;
+    }
+    path.push(current.to_owned());
+    if let Some(dialer) = graph.get(current)
+        && dialer_proxy_has_cycle(dialer, graph, visited, path)
+    {
+        return true;
+    }
+    path.pop();
+    false
 }
 
 pub(crate) fn parse_proxy_groups(

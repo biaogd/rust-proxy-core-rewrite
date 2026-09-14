@@ -2,6 +2,7 @@ mod connections;
 mod dns_state;
 mod groups;
 mod model;
+mod proxy_dial;
 mod storage;
 #[cfg(test)]
 mod ssr_identity_tests {
@@ -66,10 +67,12 @@ pub use model::{
     ConnectionInfo, ConnectionSnapshot, LogEvent, MetadataSnapshot, ProxyDelayHistory,
     ProxyHealthSnapshot, ProxyUrlHealth, TrafficSnapshot,
 };
+pub use proxy_dial::{ProxyTcpDialFuture, ProxyTcpDialer};
 
 use connections::ActiveConnection;
 use dns_state::{DnsMappingCache, FakeIpRegistry};
 use groups::{GroupDialHealth, ProxyHealth, StickySession};
+use proxy_dial::ProxyTcpDialerSlot;
 use storage::StorageEntry;
 
 #[derive(Debug)]
@@ -109,6 +112,7 @@ pub struct RuntimeState {
     clock: Arc<rewrite_services::AdjustedClock>,
     ssr_clients: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::SsrClientState>)>>,
     snell_pools: Mutex<BTreeMap<String, (String, Arc<rewrite_outbound::BoxedSnellSessionPool>)>>,
+    proxy_tcp_dialer: ProxyTcpDialerSlot,
     network_generation: watch::Sender<u64>,
 }
 
@@ -150,12 +154,24 @@ impl Default for RuntimeState {
             clock: Arc::new(rewrite_services::AdjustedClock::default()),
             ssr_clients: Mutex::new(BTreeMap::new()),
             snell_pools: Mutex::new(BTreeMap::new()),
+            proxy_tcp_dialer: ProxyTcpDialerSlot::default(),
             network_generation,
         }
     }
 }
 
 impl RuntimeState {
+    /// Installs the shared TCP dial entry used by delay / health probes.
+    pub fn set_proxy_tcp_dialer(&self, dialer: Option<Arc<dyn ProxyTcpDialer>>) {
+        self.proxy_tcp_dialer.set(dialer);
+    }
+
+    /// Returns the installed TCP dial entry, when the runtime has registered one.
+    #[must_use]
+    pub fn proxy_tcp_dialer(&self) -> Option<Arc<dyn ProxyTcpDialer>> {
+        self.proxy_tcp_dialer.get()
+    }
+
     /// Reuses SSR authentication identity until the configured adapter changes.
     pub fn ssr_client(
         &self,

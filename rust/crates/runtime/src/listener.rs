@@ -389,6 +389,15 @@ pub(super) fn udp_session_mode(target: &str, config: &Config) -> Option<UdpSessi
         return Some(UdpSessionMode::Direct);
     }
     let proxy = configured_proxy(config, target)?;
+    // 7T1-A has no UDP dialer-proxy chains; never fall through to a DIRECT
+    // dial of B's server when a chain was configured.
+    if proxy
+        .dialer_proxy
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+    {
+        return None;
+    }
     match proxy.kind {
         ProxyKind::Direct => Some(UdpSessionMode::Direct),
         ProxyKind::Dns => Some(UdpSessionMode::Dns),

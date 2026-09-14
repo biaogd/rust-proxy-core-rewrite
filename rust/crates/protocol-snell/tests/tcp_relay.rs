@@ -273,6 +273,76 @@ async fn concurrent_sessions_stay_isolated() {
     }
 }
 
+#[tokio::test]
+async fn v2_unpooled_half_close_reaches_eof_waiting_destination() {
+    let half = spawn_half_close().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"password".to_vec(),
+        version: 2,
+        obfs: None,
+    })
+    .await
+    .expect("authority");
+    let mut stream = connect_tcp(
+        TcpStream::connect(authority.local_addr)
+            .await
+            .expect("dial"),
+        &half.destination,
+        &ClientOptions {
+            psk: b"password".to_vec(),
+            version: 2,
+        },
+    )
+    .await
+    .expect("client");
+    // Same half-close contract as chained dials: ConnectV2 without pool reuse.
+    stream.set_hold_inner_shutdown(true);
+    stream.write_all(b"snell-half").await.expect("write");
+    stream.shutdown().await.expect("protocol half-close");
+    assert!(
+        stream.zero_chunk_written(),
+        "ConnectV2 half-close must send the zero-chunk end record"
+    );
+    let mut got = Vec::new();
+    stream
+        .read_to_end(&mut got)
+        .await
+        .expect("read after half-close");
+    assert_eq!(got, b"after:snell-half");
+}
+
+#[tokio::test]
+async fn v2_plain_shutdown_skips_zero_chunk_end_record() {
+    let echo = spawn_echo().await;
+    let authority = spawn_authority(AuthorityOptions {
+        listen: "127.0.0.1:0".parse().expect("listen"),
+        psk: b"password".to_vec(),
+        version: 2,
+        obfs: None,
+    })
+    .await
+    .expect("authority");
+    let mut stream = connect_tcp(
+        TcpStream::connect(authority.local_addr)
+            .await
+            .expect("dial"),
+        &echo.destination,
+        &ClientOptions {
+            psk: b"password".to_vec(),
+            version: 2,
+        },
+    )
+    .await
+    .expect("client");
+    stream.write_all(b"plain").await.expect("write");
+    stream.shutdown().await.expect("tcp shutdown");
+    assert!(
+        !stream.zero_chunk_written(),
+        "without hold_inner_shutdown, ConnectV2 must not emit a zero-chunk end record"
+    );
+}
+
 async fn relay_echo(version: u8, psk: &[u8], payload: &[u8]) {
     let echo = spawn_echo().await;
     let authority = spawn_authority(AuthorityOptions {
@@ -327,6 +397,44 @@ async fn spawn_echo() -> EchoServer {
         }
     });
     EchoServer {
+        destination: Destination {
+            host: Host::Ip(local.ip()),
+            port: local.port(),
+        },
+    }
+}
+
+struct HalfCloseServer {
+    destination: Destination,
+}
+
+async fn spawn_half_close() -> HalfCloseServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("half-close bind");
+    let local = listener.local_addr().expect("half-close addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut received = Vec::new();
+                let mut buf = vec![0_u8; 65_536];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => received.extend_from_slice(&buf[..n]),
+                        Err(_) => return,
+                    }
+                }
+                let mut reply = b"after:".to_vec();
+                reply.extend_from_slice(&received);
+                let _ = stream.write_all(&reply).await;
+            });
+        }
+    });
+    HalfCloseServer {
         destination: Destination {
             host: Host::Ip(local.ip()),
             port: local.port(),

@@ -3114,6 +3114,26 @@ are superseded. AnyTLS belongs to 6G, Hysteria2 to HY2, TUIC to 6H, WireGuard
 to 6I and SSH to 6J, even where a grouped inventory row mentions them
 alongside a deferred protocol.
 
+### Phase 7T1-A — TCP `dialer-proxy` chains (OUT-21)
+
+Cross-cutting TCP outbound chaining only. See
+`docs/rust-rewrite/OUT-21-dialer-proxy-chains.md`.
+
+- **Semantics:** selected outbound B with `dialer-proxy: A` means local → A →
+  B's server → final destination. A dials B's `server:port`; B keeps its own
+  handshake, TLS/SNI and destination request. No ordinary rule rematch on the
+  intermediate hop. Failures must not fall back to DIRECT.
+- **Order:** (1) Go contract + config validation, (2) shared TCP dial entry,
+  (3) HTTP↔SOCKS5 path-proving slice, (4) wire existing TCP protocols through
+  the same dial entry, (5) dynamic group/provider/lifecycle acceptance.
+- **In scope:** HTTP, SOCKS5, SS/SSR, VMess, VLESS, Trojan, AnyTLS, Snell as
+  chain members on TCP. Groups/providers as dialer-proxy **targets**.
+- **Out of scope:** UDP chains, sing-mux, SSH forced reuse (session-owned
+  dial stays rejected until separately assessed), Hy2/TUIC/WG UDP server dial,
+  NTP `dialer-proxy`.
+- **Evidence:** `compat/scripts/phase7t1_dialer_proxy_tcp.py` plus config
+  contract tests. Hop fixtures must prove B reached its server via A.
+
 ### Phase 7E — Snell outbound acceptance plan
 
 Snell is a Clash-specific Shadowsocks-like stream. Product 7E is **outbound

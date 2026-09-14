@@ -19,6 +19,8 @@ pub enum ConfigError {
     UnsupportedKey(String),
     #[error("unsupported Phase 2 proxy specification: {0}")]
     UnsupportedProxy(String),
+    #[error("{0}")]
+    DialerProxy(String),
     #[error("invalid mixed-port for listener: {0}")]
     InvalidRuntimePort(i64),
     #[error("invalid external-controller address: {0}")]

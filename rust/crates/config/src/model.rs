@@ -234,6 +234,11 @@ pub struct ProxyConfig {
     pub wireguard: Option<WireGuardProxyConfig>,
     pub snell: Option<SnellProxyConfig>,
     pub ssh: Option<SshProxyConfig>,
+    /// Optional upstream used only to reach this proxy's `server:port`.
+    ///
+    /// Empty / `None` keeps the historical DIRECT dial. Phase 7T1-A accepts
+    /// the field on TCP leaf adapters; SSH and UDP-server protocols reject it.
+    pub dialer_proxy: Option<String>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -289,9 +294,10 @@ pub struct WireGuardProxyConfig {
 /// Clash `type: snell` options accepted in 7E-A/B/C/D (versions 1–3 TCP, v3 UDP,
 /// simple-obfs HTTP/TLS, v2 `ConnectV2` reuse).
 ///
-/// Remaining `obfs-opts` (shadow-tls/restls/jls), v4/v5, `dialer-proxy` and
-/// inbound remain rejected. `reuse: true` is stored on any version; pooling
-/// is only enabled when `version == 2` (Go: v2 always pools).
+/// Remaining `obfs-opts` (shadow-tls/restls/jls), v4/v5 and inbound remain
+/// rejected. `dialer-proxy` is accepted for TCP; combining it with `udp: true`
+/// fails closed in 7T1-A. `reuse: true` is stored on any version; pooling is
+/// only enabled when `version == 2` (Go: v2 always pools).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnellProxyConfig {
     pub psk: String,

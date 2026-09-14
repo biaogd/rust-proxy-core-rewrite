@@ -446,12 +446,49 @@ pub(super) async fn connect_configured_proxy(
     state: &RuntimeState,
     socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let mut chain = crate::dialer_proxy::DialChain::new();
+    connect_configured_proxy_with_chain(
+        proxy,
+        destination,
+        config,
+        state,
+        socket_options,
+        &mut chain,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn connect_configured_proxy_with_chain(
+    proxy: &rewrite_config::ProxyConfig,
+    destination: &Destination,
+    config: &Config,
+    state: &RuntimeState,
+    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    chain: &mut crate::dialer_proxy::DialChain,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let clock = state.clock();
     let allow_ipv6 = config.ipv6;
     let custom_roots = config.trust_certificates.as_slice();
     let dns = config.dns.as_ref();
-    let server =
-        resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6).await?;
+    if proxy
+        .dialer_proxy
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+        && !matches!(
+            proxy.kind,
+            ProxyKind::Http
+                | ProxyKind::Socks5
+                | ProxyKind::Shadowsocks
+                | ProxyKind::ShadowsocksR
+                | ProxyKind::Snell
+        )
+    {
+        return Err(format!(
+            "proxy [{}] dialer-proxy is not supported for {:?} yet",
+            proxy.name, proxy.kind
+        ));
+    }
     match proxy.kind {
         ProxyKind::Direct => {
             rewrite_outbound::connect_with_options(destination, allow_ipv6, socket_options)
@@ -465,15 +502,16 @@ pub(super) async fn connect_configured_proxy(
             let tls = proxy
                 .tls
                 .then(|| proxy_tls_options(proxy, server_name, custom_roots));
-            rewrite_outbound::connect_http_with_options(
-                &server,
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            rewrite_outbound::connect_http_on_stream(
+                transport,
                 destination,
-                allow_ipv6,
                 credentials,
                 &proxy.headers,
                 tls,
                 Some(clock),
-                socket_options,
             )
             .await
             .map_err(|error| format!("HTTP proxy connection failed: {error}"))
@@ -482,43 +520,46 @@ pub(super) async fn connect_configured_proxy(
             let tls = proxy
                 .tls
                 .then(|| proxy_tls_options(proxy, &proxy.server, custom_roots));
-            rewrite_outbound::connect_socks5_with_options(
-                &server,
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            rewrite_outbound::connect_socks5_on_stream(
+                transport,
                 destination,
-                allow_ipv6,
                 proxy.socks5_credentials(),
                 tls,
                 Some(clock),
-                socket_options,
             )
             .await
             .map_err(|error| format!("SOCKS5 proxy connection failed: {error}"))
         }
         ProxyKind::Shadowsocks => {
-            connect_shadowsocks_proxy(
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            let configured = proxy_server(proxy);
+            connect_shadowsocks_proxy_on_stream(
                 proxy,
-                &server,
+                transport,
+                &configured,
                 destination,
-                allow_ipv6,
                 clock,
                 custom_roots,
                 dns,
-                socket_options,
             )
             .await
         }
         ProxyKind::ShadowsocksR => {
-            connect_ssr_proxy(
-                proxy,
-                &server,
-                destination,
-                allow_ipv6,
-                socket_options,
-                state,
-            )
-            .await
+            let transport =
+                crate::dialer_proxy::dial_proxy_server(proxy, config, state, socket_options, chain)
+                    .await?;
+            let configured = proxy_server(proxy);
+            connect_ssr_proxy_on_stream(proxy, transport, &configured, destination, state).await
         }
         ProxyKind::Vmess => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_vmess_proxy(
                 proxy,
                 &server,
@@ -531,6 +572,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Vless => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_vless_proxy(
                 proxy,
                 &server,
@@ -543,6 +587,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::Trojan => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_trojan_proxy(
                 proxy,
                 &server,
@@ -555,6 +602,9 @@ pub(super) async fn connect_configured_proxy(
             .await
         }
         ProxyKind::AnyTls => {
+            let server =
+                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                    .await?;
             connect_anytls_proxy(
                 proxy,
                 &server,
@@ -570,15 +620,36 @@ pub(super) async fn connect_configured_proxy(
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Snell => {
-            connect_snell_proxy(
-                proxy,
-                &server,
-                destination,
-                allow_ipv6,
-                socket_options,
-                state,
-            )
-            .await
+            if proxy
+                .dialer_proxy
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+            {
+                let transport = crate::dialer_proxy::dial_proxy_server(
+                    proxy,
+                    config,
+                    state,
+                    socket_options,
+                    chain,
+                )
+                .await?;
+                let configured = proxy_server(proxy);
+                connect_snell_proxy_on_stream(proxy, transport, &configured, destination, state)
+                    .await
+            } else {
+                let server =
+                    resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                        .await?;
+                connect_snell_proxy(
+                    proxy,
+                    &server,
+                    destination,
+                    allow_ipv6,
+                    socket_options,
+                    state,
+                )
+                .await
+            }
         }
         ProxyKind::Ssh => connect_ssh_proxy(proxy, destination, config, state).await,
         ProxyKind::Reject | ProxyKind::Dns | ProxyKind::Rematch => {
@@ -1049,7 +1120,7 @@ async fn connect_trojan_physical_outer(
     Ok(outer)
 }
 
-fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
+pub(super) fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
     Destination {
         host: proxy
             .server
@@ -1959,16 +2030,14 @@ async fn wrap_vmess_transport(
     Ok(outer)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn connect_shadowsocks_proxy(
+async fn connect_shadowsocks_proxy_on_stream(
     proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
     server: &Destination,
     destination: &Destination,
-    allow_ipv6: bool,
     clock: Arc<rewrite_services::AdjustedClock>,
     custom_roots: &[String],
     dns: Option<&rewrite_config::DnsConfig>,
-    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let resolved_ech = match proxy.shadowsocks_plugin.as_ref() {
         Some(rewrite_model::ShadowsocksPluginConfig::V2rayWebSocket {
@@ -1995,19 +2064,19 @@ async fn connect_shadowsocks_proxy(
         }) => Some(bytes.as_slice()),
         _ => None,
     };
-    rewrite_outbound::connect_shadowsocks_with_plugin_options(
+    rewrite_outbound::connect_shadowsocks_on_stream(
+        stream,
         server,
         destination,
-        allow_ipv6,
         proxy.password.as_deref().unwrap_or_default(),
         proxy.cipher.as_deref().unwrap_or_default(),
         rewrite_outbound::ShadowsocksTcpOptions {
-            socket: socket_options,
             plugin: proxy.shadowsocks_plugin.as_ref(),
             clock: Some(clock),
             custom_roots,
             ech_config: resolved_ech.as_deref().or(inline_ech),
             client_fingerprint: proxy.client_fingerprint.as_deref(),
+            ..rewrite_outbound::ShadowsocksTcpOptions::default()
         },
     )
     .await
@@ -2041,12 +2110,38 @@ async fn connect_snell_proxy(
     .map_err(|error| format!("Snell proxy connection failed: {error}"))
 }
 
-async fn connect_ssr_proxy(
+async fn connect_snell_proxy_on_stream(
     proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
     server: &Destination,
     destination: &Destination,
-    allow_ipv6: bool,
-    socket_options: rewrite_outbound::DirectTcpOptions<'_>,
+    state: &RuntimeState,
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let snell = proxy
+        .snell
+        .as_ref()
+        .ok_or_else(|| "Snell proxy missing snell options".to_owned())?;
+    // Chained dials stay outside the v2 pool so a changed dialer-proxy cannot
+    // reclaim a socket that was opened on a different upstream path. ConnectV2
+    // half-close (zero-chunk) is still enabled inside connect_snell_on_stream.
+    let _ = state;
+    rewrite_outbound::connect_snell_on_stream(
+        stream,
+        destination,
+        snell.psk.as_bytes(),
+        snell.version,
+        snell.obfs.as_ref(),
+        server,
+    )
+    .await
+    .map_err(|error| format!("Snell proxy connection failed: {error}"))
+}
+
+async fn connect_ssr_proxy_on_stream(
+    proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
+    server: &Destination,
+    destination: &Destination,
     state: &RuntimeState,
 ) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let ssr = proxy
@@ -2054,10 +2149,9 @@ async fn connect_ssr_proxy(
         .as_ref()
         .ok_or_else(|| "ShadowsocksR proxy missing ssr options".to_owned())?;
     let client_state = state.ssr_client(&proxy.name, format!("{proxy:?}"));
-    rewrite_outbound::connect_ssr_with_options(
-        server,
+    rewrite_outbound::connect_ssr_on_stream(
+        stream,
         destination,
-        allow_ipv6,
         proxy.password.as_deref().unwrap_or_default(),
         proxy.cipher.as_deref().unwrap_or_default(),
         &ssr.protocol,
@@ -2065,7 +2159,7 @@ async fn connect_ssr_proxy(
         &ssr.obfs,
         &ssr.obfs_param,
         &proxy.server,
-        socket_options,
+        server.port,
         &client_state,
     )
     .await
