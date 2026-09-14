@@ -6,7 +6,8 @@ use crate::model::{
     ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig,
 };
 use crate::proxy::{
-    shadowsocks_2022_cipher, supported_shadowsocks_cipher, validate_shadowsocks_inbound_key,
+    shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
+    validate_shadowsocks_inbound_key,
 };
 use crate::shadowsocks_inbound::resolve_ss_listen_host;
 
@@ -80,18 +81,27 @@ pub(crate) fn parse_shadowsocks_listeners(
             })?;
         let listen =
             resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
-        if shadowsocks_2022_cipher(&cipher)
-            && mapping.get(Value::from("udp")).and_then(Value::as_bool) == Some(true)
-        {
-            return Err(ConfigError::InvalidInbound(format!(
-                "listener {name} cannot enable UDP for Shadowsocks 2022"
-            )));
-        }
-        let udp = mapping
+        let requested_udp = mapping
             .get(Value::from("udp"))
             .and_then(Value::as_bool)
-            .unwrap_or(true)
-            && !shadowsocks_2022_cipher(&cipher);
+            .unwrap_or(true);
+        if shadowsocks_2022_cipher(&cipher) && !shadowsocks_2022_udp_cipher(&cipher) {
+            if requested_udp
+                && mapping
+                    .get(Value::from("udp"))
+                    .and_then(Value::as_bool)
+                    .is_some_and(|enabled| enabled)
+            {
+                return Err(ConfigError::InvalidInbound(format!(
+                    "listener {name} cannot enable UDP for Shadowsocks 2022 cipher {cipher}"
+                )));
+            }
+        }
+        let udp = if shadowsocks_2022_cipher(&cipher) {
+            requested_udp && shadowsocks_2022_udp_cipher(&cipher)
+        } else {
+            requested_udp
+        };
         let simple_obfs = parse_simple_obfs(&mapping, &name)?;
         let shadow_tls = parse_shadow_tls(&mapping, &name)?;
         if simple_obfs.is_some() && shadow_tls.is_some() {

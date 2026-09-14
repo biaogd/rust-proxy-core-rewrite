@@ -3545,7 +3545,7 @@ fn loads_shadowsocks_2022_inbound_from_ss_config() {
         .first()
         .expect("shadowsocks inbound");
     assert_eq!(inbound.cipher, "2022-blake3-aes-128-gcm");
-    assert!(!inbound.udp);
+    assert!(inbound.udp);
 }
 
 #[test]

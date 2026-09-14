@@ -192,7 +192,9 @@ mod tests {
                 else {
                     continue;
                 };
-                let reply = sessions.prepare_reply(peer, control.as_ref());
+                let Ok(reply) = sessions.prepare_reply(peer, control.as_ref()) else {
+                    continue;
+                };
                 let _ = proxy
                     .send_to_with_ctrl(peer, &destination, &reply, &buffer[..length])
                     .await;

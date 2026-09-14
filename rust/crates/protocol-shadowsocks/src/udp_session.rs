@@ -184,7 +184,20 @@ pub(crate) enum ClientUdpReject {
     Replay,
 }
 
-/// Per-peer SIP022 server counters used by the test authority and later inbound.
+/// Why an inbound SIP022 datagram was dropped by the server session table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerUdpReject {
+    /// AEAD-2022 datagram lacked a control block.
+    MissingControl,
+    /// Client session identifier was zero.
+    ClientSession,
+    /// Packet identifier was zero.
+    PacketId,
+    /// Duplicate or too-old client packet identifier.
+    Replay,
+}
+
+/// Per-peer SIP022 server counters used by the test authority and product inbound.
 #[derive(Debug, Default)]
 pub struct Aead2022ServerSessions {
     entries: HashMap<SocketAddr, ServerUdpSession>,
@@ -195,21 +208,44 @@ struct ServerUdpSession {
     client_session_id: u64,
     server_session_id: u64,
     next_packet_id: u64,
+    incoming_window: ReplayWindow,
+    last_user: Option<std::sync::Arc<shadowsocks::config::ServerUser>>,
     last_seen: Instant,
 }
 
 impl Aead2022ServerSessions {
-    /// Builds reply control data for `peer`, creating or rotating the server
-    /// session when the client session identifier changes.
-    pub fn prepare_reply(
+    /// Accepts one inbound SIP022 datagram for `peer`.
+    ///
+    /// Creates or rotates the server session when the client session id changes,
+    /// and rejects missing control, zero ids, and replayed client packet ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerUdpReject`] when the datagram must be dropped.
+    pub fn accept_incoming(
         &mut self,
         peer: SocketAddr,
         incoming: Option<&UdpSocketControlData>,
-    ) -> UdpSocketControlData {
-        self.reap(Instant::now());
+    ) -> Result<(), ServerUdpReject> {
+        self.accept_incoming_at(peer, incoming, Instant::now())
+    }
+
+    fn accept_incoming_at(
+        &mut self,
+        peer: SocketAddr,
+        incoming: Option<&UdpSocketControlData>,
+        now: Instant,
+    ) -> Result<(), ServerUdpReject> {
+        self.reap(now);
         let Some(incoming) = incoming else {
-            return UdpSocketControlData::default();
+            return Err(ServerUdpReject::MissingControl);
         };
+        if incoming.client_session_id == 0 {
+            return Err(ServerUdpReject::ClientSession);
+        }
+        if incoming.packet_id == 0 {
+            return Err(ServerUdpReject::PacketId);
+        }
         if self.entries.len() >= SERVER_SESSION_CAP && !self.entries.contains_key(&peer) {
             self.evict_oldest();
         }
@@ -222,14 +258,49 @@ impl Aead2022ServerSessions {
                 }
             })
             .or_insert_with(|| ServerUdpSession::new(incoming.client_session_id));
+        if !session.incoming_window.accept(incoming.packet_id) {
+            return Err(ServerUdpReject::Replay);
+        }
+        session.last_user.clone_from(&incoming.user);
+        session.last_seen = now;
+        Ok(())
+    }
+
+    /// Builds the next reply control for a peer that previously passed
+    /// [`Self::accept_incoming`]. Returns the all-zero default when the peer has
+    /// no live AEAD-2022 session (pre-2022 callers).
+    pub fn next_reply(&mut self, peer: SocketAddr) -> UdpSocketControlData {
+        self.reap(Instant::now());
+        let Some(session) = self.entries.get_mut(&peer) else {
+            return UdpSocketControlData::default();
+        };
         session.last_seen = Instant::now();
         session.next_packet_id = next_packet_id(session.next_packet_id);
         let mut control = UdpSocketControlData::default();
         control.client_session_id = session.client_session_id;
         control.server_session_id = session.server_session_id;
         control.packet_id = session.next_packet_id;
-        control.user.clone_from(&incoming.user);
+        control.user.clone_from(&session.last_user);
         control
+    }
+
+    /// Accepts `incoming` then builds one reply control. Echo authorities and
+    /// unit tests use this one-shot helper. Missing control is treated as a
+    /// pre-2022 datagram and yields the all-zero default reply block.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::accept_incoming`] failures for AEAD-2022 datagrams.
+    pub fn prepare_reply(
+        &mut self,
+        peer: SocketAddr,
+        incoming: Option<&UdpSocketControlData>,
+    ) -> Result<UdpSocketControlData, ServerUdpReject> {
+        if incoming.is_none() {
+            return Ok(UdpSocketControlData::default());
+        }
+        self.accept_incoming(peer, incoming)?;
+        Ok(self.next_reply(peer))
     }
 
     /// Drops idle peer sessions so the table stays bounded.
@@ -269,6 +340,8 @@ impl ServerUdpSession {
             client_session_id,
             server_session_id: random_session_id(),
             next_packet_id: 0,
+            incoming_window: ReplayWindow::default(),
+            last_user: None,
             last_seen: Instant::now(),
         }
     }
@@ -454,21 +527,51 @@ mod tests {
         let peer_a: SocketAddr = "127.0.0.1:1000".parse().unwrap();
         let peer_b: SocketAddr = "127.0.0.1:1001".parse().unwrap();
         let incoming_a = control(11, 1);
-        let first_a = sessions.prepare_reply(peer_a, Some(&incoming_a));
-        let second_a = sessions.prepare_reply(peer_a, Some(&incoming_a));
+        let first_a = sessions
+            .prepare_reply(peer_a, Some(&incoming_a))
+            .expect("first a");
+        let second_a = sessions
+            .prepare_reply(peer_a, Some(&control(11, 2)))
+            .expect("second a");
         assert_eq!(first_a.client_session_id, 11);
         assert_ne!(first_a.server_session_id, 0);
         assert_eq!(first_a.packet_id, 1);
         assert_eq!(second_a.server_session_id, first_a.server_session_id);
         assert_eq!(second_a.packet_id, 2);
+        assert_eq!(
+            sessions.prepare_reply(peer_a, Some(&incoming_a)).err(),
+            Some(ServerUdpReject::Replay)
+        );
         let incoming_b = control(22, 1);
-        let first_b = sessions.prepare_reply(peer_b, Some(&incoming_b));
+        let first_b = sessions
+            .prepare_reply(peer_b, Some(&incoming_b))
+            .expect("first b");
         assert_ne!(first_b.server_session_id, first_a.server_session_id);
         let rebuilt = control(33, 1);
-        let rotated = sessions.prepare_reply(peer_a, Some(&rebuilt));
+        let rotated = sessions
+            .prepare_reply(peer_a, Some(&rebuilt))
+            .expect("rotated");
         assert_eq!(rotated.client_session_id, 33);
         assert_ne!(rotated.server_session_id, first_a.server_session_id);
         assert_eq!(rotated.packet_id, 1);
+    }
+
+    #[test]
+    fn server_sessions_reject_missing_control_and_zero_ids() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        assert_eq!(
+            sessions.accept_incoming(peer, None),
+            Err(ServerUdpReject::MissingControl)
+        );
+        assert_eq!(
+            sessions.accept_incoming(peer, Some(&control(0, 1))),
+            Err(ServerUdpReject::ClientSession)
+        );
+        assert_eq!(
+            sessions.accept_incoming(peer, Some(&control(9, 0))),
+            Err(ServerUdpReject::PacketId)
+        );
     }
 
     #[test]
@@ -476,7 +579,9 @@ mod tests {
         let mut sessions = Aead2022ServerSessions::default();
         let peer: SocketAddr = "127.0.0.1:2000".parse().unwrap();
         let incoming = control(1, 1);
-        sessions.prepare_reply(peer, Some(&incoming));
+        sessions
+            .prepare_reply(peer, Some(&incoming))
+            .expect("prepare");
         assert_eq!(sessions.len(), 1);
         sessions.reap(Instant::now() + SERVER_SESSION_TTL + Duration::from_secs(1));
         assert_eq!(sessions.len(), 0);
@@ -488,11 +593,30 @@ mod tests {
         for index in 0..SERVER_SESSION_CAP {
             let port = u16::try_from(index + 1).expect("port");
             let peer = SocketAddr::from(([127, 0, 0, 1], port));
-            sessions.prepare_reply(peer, Some(&control(u64::from(port), 1)));
+            sessions
+                .prepare_reply(peer, Some(&control(u64::from(port), 1)))
+                .expect("prepare");
         }
         assert_eq!(sessions.len(), SERVER_SESSION_CAP);
         let extra = SocketAddr::from(([127, 0, 0, 1], 60_000));
-        sessions.prepare_reply(extra, Some(&control(60_000, 1)));
+        sessions
+            .prepare_reply(extra, Some(&control(60_000, 1)))
+            .expect("evict prepare");
         assert_eq!(sessions.len(), SERVER_SESSION_CAP);
+    }
+
+    #[test]
+    fn server_sessions_next_reply_after_accept() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        sessions
+            .accept_incoming(peer, Some(&control(44, 1)))
+            .expect("accept");
+        let first = sessions.next_reply(peer);
+        let second = sessions.next_reply(peer);
+        assert_eq!(first.client_session_id, 44);
+        assert_eq!(first.packet_id, 1);
+        assert_eq!(second.server_session_id, first.server_session_id);
+        assert_eq!(second.packet_id, 2);
     }
 }

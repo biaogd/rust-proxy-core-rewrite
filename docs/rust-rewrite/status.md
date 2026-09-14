@@ -2,6 +2,16 @@
 
 Last updated: 2026-09-14
 
+### IN-B Shadowsocks 2022 UDP inbound — 2026-09-14
+
+SS2022 UDP inbound is enabled for the three standard methods on `ss-config` and
+named listeners. Product UDP uses `recv_from_with_ctrl` /
+`send_to_with_ctrl` with `Aead2022ServerSessions` client `packet_id` replay
+checks. ChaCha8 UDP stays rejected. Evidence:
+`compat/scripts/phase_inb_shadowsocks_2022_udp.py` plus
+`protocol-shadowsocks` `udp_session` tests. Three-platform Parity not claimed.
+Next inbound product slice: **IN-C** Trojan.
+
 ### IN-A inbound census — 2026-09-14
 
 Inbound server work is now a separate roadmap track **IN-A…IN-H** (does not
@@ -11,10 +21,10 @@ listeners from `listener/parse.go`, Rust fixed HTTP/SOCKS/mixed + Phase 6C-N
 Shadowsocks + partial TUN, SS in-scope vs deferred vs Rust-extension rows, and
 the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
-framework and no re-implementation of mixed/SS/TUN. Next product inbound slice:
-**IN-B** Shadowsocks server completion, then Trojan (**IN-C**), then VLESS
-(**IN-D**). Explicit non-goals: SSR/Snell/SSH/WG servers, early mKCP/Mekya,
-panels/billing, public test authorities.
+framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP inbound
+is implemented in this checkout (see above). Next inbound product slice:
+**IN-C** Trojan, then VLESS (**IN-D**). Explicit non-goals: SSR/Snell/SSH/WG
+servers, early mKCP/Mekya, panels/billing, public test authorities.
 
 ### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14
 

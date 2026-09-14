@@ -93,7 +93,7 @@ SSR inbound.
 | Type | Status | Paths | TCP | UDP | Auth | Carriers | Multi-user | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | HTTP / SOCKS / Mixed | **Implemented** (fixed ports) | `rewrite-inbound`, `runtime` local listeners | Yes | SOCKS UDP | users / USERID | None on listener | Local auth lists | Named `type: http\|socks\|mixed` **missing**; no listener TLS/Reality |
-| Shadowsocks | **Partial — Phase 6C-N** | `config/shadowsocks_inbound.rs`, `named_listeners.rs`, `runtime/shadowsocks_listener.rs` | Yes | Pre-2022 only | Shared password; AES-2022 EIH colon split | simple-obfs http/tls; ShadowTLS **v3 only** | EIH (AES); ShadowTLS users | Legacy `ss-config` + named `type: shadowsocks` |
+| Shadowsocks | **Partial — 6C-N + IN-B SS2022 UDP** | `config/shadowsocks_inbound.rs`, `named_listeners.rs`, `runtime/shadowsocks_listener.rs` | Yes | Pre-2022 + standard SS2022 (not ChaCha8) | Shared password; AES-2022 EIH colon split | simple-obfs http/tls; ShadowTLS **v3 only** | EIH (AES); ShadowTLS users | Legacy `ss-config` + named `type: shadowsocks` |
 | TUN | **Partial — Phase 8A/B/C/F** | `runtime/tun.rs`, `rewrite-tun`, platform | L3 | L3 | N/A | `stack: smoltcp` only | N/A | Go stacks rejected without remap |
 | Redir / TProxy / Tunnel | Missing | — | — | — | — | — | — | `IN-03`/`IN-04`/`IN-05` |
 | Snell / VMess / VLESS / Trojan / Hy2 / realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented | — | — | — | — | — | Server gates = IN-B…IN-G |
@@ -124,8 +124,8 @@ SSR inbound.
 
 | Item | Classification |
 | --- | --- |
-| SS2022 UDP inbound | Deferred → **IN-B** |
-| Complete inbound cipher matrix | Deferred → **IN-B** |
+| SS2022 UDP inbound | **IN-B (this checkout):** three standard methods + replay on product path; ChaCha8 UDP still rejected |
+| Complete inbound cipher matrix | Partial — config accepts many; exercised differential matrix still representative |
 | UoT v2 connect mode | Rejected |
 | ShadowTLS v1/v2, advanced SNI map, wildcard-sni | Deferred / reject |
 | `mux-option`, `res-tls`, `jls-config`, `kcp-tun` | Go-compatible gap; reject today |
@@ -140,7 +140,7 @@ SSR inbound.
 | --- | --- | --- |
 | Auth | Shared password; 2022 multi-user via sing EIH | Shared password; AES-2022 EIH colon split (Rust-only evidence) |
 | TCP | Yes | Yes |
-| UDP | Opt-in including 2022 where library allows | Pre-2022 only; `udp: true` on 2022 fails closed |
+| UDP | Opt-in including 2022 where library allows | Pre-2022 + three standard SS2022 methods; ChaCha8 UDP fail-closed |
 | Users | ShadowTLS users; password EIH | ShadowTLS v3 users required; EIH for AES-2022 |
 | Listen | Base listen/port ranges + legacy URI | Single listen + port; URI or named allowlist |
 
@@ -165,7 +165,7 @@ Use these labels in later IN phases:
 | IN-04 | TProxy | Not started | Phase 8A |
 | IN-05 | Static tunnel | Not started | 5B6 / later |
 | IN-06 | TUN | Partial smoltcp 8A/B/C/F | Phase 8 (preserve; do not duplicate) |
-| IN-07 | Shadowsocks + Snell server | SS first slice done; Snell open | **IN-B** (SS complete); Snell deferred |
+| IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |
 | IN-08 | VMess + VLESS server | Not started | **IN-D**, **IN-E** |
 | IN-09 | Trojan server | Not started | **IN-C** |
 | IN-10 | Hysteria2 (+ realm) server | Not started | **IN-F** (Hy2 portion) |

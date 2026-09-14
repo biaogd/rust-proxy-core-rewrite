@@ -1426,20 +1426,29 @@ status and inventory planned gates point at IN-B…IN-H.
 
 ### IN-B — Shadowsocks server completion
 
+**Status: implemented in this checkout (2026-09-14) for the declared SS2022 UDP
+inbound slice; three-platform Parity not claimed.**
+
 Builds on Phase 6C-N. Do not reopen local mixed/TUN work.
 
-Declared product goals:
+Declared product goals (this slice):
 
-- Complete the common AEAD and SS2022 inbound matrix left open after 6C-N,
-  including **SS2022 UDP inbound** with replay defense on the product path.
-- Keep single-password vs multi-user (EIH / ShadowTLS users) scope explicit;
-  mark Rust-only surfaces as interop/extension, not Go parity.
-- Expand only Go-compatible listener options that are still rejected when they
-  are required for the declared matrix (still fail-closed for mux/res-tls/jls/
-  kcp-tun until separately scheduled).
-- Evidence: Go client → Go/Rust SS inbound differentials; replay, wrong
-  credential (no target dial), fragmentation, half-close, reload rollback and
-  bounded sessions.
+- Enable **SS2022 UDP inbound** for the three standard methods
+  (`2022-blake3-aes-128/256-gcm`, `2022-blake3-chacha20-poly1305`) on
+  `ss-config` and named listeners; ChaCha8 UDP stays fail-closed (matches
+  outbound 6C-O).
+- Wire product UDP through `recv_from_with_ctrl` /
+  `send_to_with_ctrl` plus `Aead2022ServerSessions::{accept_incoming,next_reply}`
+  so client `packet_id` replay is rejected on the production path.
+- Keep AES-2022 EIH and ShadowTLS `IN-USER` as Rust extensions (not Go parity).
+- Evidence: `compat/scripts/phase_inb_shadowsocks_2022_udp.py` (Go/Rust inbound
+  differential for the three standard methods; Rust-only ChaCha8 reject, EIH
+  config and capture/replay probe) plus `protocol-shadowsocks` `udp_session`
+  unit tests.
+
+Still deferred under IN-B / later SS inbound work: complete inbound cipher
+matrix beyond the exercised methods, ShadowTLS v1/v2, mux/res-tls/jls/kcp-tun,
+UoT v2 connect, Snell server.
 
 Out of IN-B: Snell server, SSR inbound, full camouflage carrier zoo.
 

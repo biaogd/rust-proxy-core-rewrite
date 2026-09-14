@@ -5,7 +5,8 @@ use url::Url;
 use crate::ConfigError;
 use crate::model::ShadowsocksInboundConfig;
 use crate::proxy::{
-    shadowsocks_2022_cipher, supported_shadowsocks_cipher, validate_shadowsocks_inbound_key,
+    shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
+    validate_shadowsocks_inbound_key,
 };
 
 impl ShadowsocksInboundConfig {
@@ -53,7 +54,8 @@ impl ShadowsocksInboundConfig {
             )));
         }
         validate_shadowsocks_inbound_key(&cipher, &password)?;
-        let udp = !shadowsocks_2022_cipher(&cipher);
+        // Match outbound 6C-O: standard 2022 methods may listen for UDP; ChaCha8 stays TCP-only.
+        let udp = !shadowsocks_2022_cipher(&cipher) || shadowsocks_2022_udp_cipher(&cipher);
         Ok(Self {
             name: "DEFAULT-SHADOWSOCKS".to_owned(),
             cipher,
@@ -176,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_2022_ss_config_uri_without_udp() {
+    fn parses_2022_ss_config_uri_with_udp() {
         let config = ShadowsocksInboundConfig::parse_ss_url(
             "ss://2022-blake3-aes-128-gcm:AAECAwQFBgcICQoLDA0ODw==@127.0.0.1:18392",
             false,
@@ -185,6 +187,17 @@ mod tests {
         .expect("parse");
         assert_eq!(config.cipher, "2022-blake3-aes-128-gcm");
         assert_eq!(config.password, "AAECAwQFBgcICQoLDA0ODw==");
+        assert!(config.udp);
+    }
+
+    #[test]
+    fn parses_2022_chacha8_ss_config_uri_without_udp() {
+        let config = ShadowsocksInboundConfig::parse_ss_url(
+            "ss://2022-blake3-chacha8-poly1305:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=@127.0.0.1:18394",
+            false,
+            "*",
+        )
+        .expect("parse");
         assert!(!config.udp);
     }
 

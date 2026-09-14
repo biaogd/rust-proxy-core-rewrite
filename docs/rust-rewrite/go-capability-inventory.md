@@ -99,7 +99,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
 | IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
-| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice; Darwin arm64 differential Parity in declared scope; Linux pending; census in `inbound-support-matrix.md` (IN-A) | **IN-B** SS completion (incl. 2022 UDP/replay); Snell server deferred |
+| IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice plus **IN-B** standard SS2022 UDP inbound with product-path replay; Darwin arm64 6C-N differential Parity in declared scope; Linux pending | Remaining SS cipher matrix; Snell server deferred |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | **IN-D** VLESS, **IN-E** VMess |
 | IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Not started | **IN-C** |
 | IN-10 | Hysteria2 and Hysteria2-realm server | Not started | **IN-F** (Hy2); realm later |
