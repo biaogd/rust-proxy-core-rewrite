@@ -187,7 +187,9 @@ where
     // Keep request reads and response writes independent so a blocked TCP write
     // cannot stall draining the next client datagram under backpressure.
     let (mut reader, mut writer) = inbound.into_split();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    // Keep this small so concurrent client floods exercise write-side
+    // backpressure instead of buffering an entire burst in memory.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
     let writer_task = tokio::spawn(async move {
         while let Some(packet) = rx.recv().await {
             if writer.write_plain(&packet).await.is_err() {

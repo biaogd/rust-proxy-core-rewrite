@@ -182,7 +182,9 @@ async fn split_association_survives_tiny_buffer_bidi_pressure() {
     let (mut sender, mut receiver): (SnellUdpSender<_>, SnellUdpReceiver<_>) =
         association.into_split();
 
-    const COUNT: usize = 48;
+    // Exceed the authority response queue (8) and the runtime outbound queue
+    // (32) so concurrent progress is required under real backpressure.
+    const COUNT: usize = 128;
     let payload = vec![0x5a_u8; 512];
     let dest = echo.destination.clone();
 
@@ -199,7 +201,7 @@ async fn split_association_survives_tiny_buffer_bidi_pressure() {
         }
     });
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(20), async {
         send_task.await.expect("send join");
         recv_task.await.expect("recv join");
     })
