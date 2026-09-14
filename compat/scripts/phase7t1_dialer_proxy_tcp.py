@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import os
 import selectors
 import socket
 import socketserver
@@ -25,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hy2_support import build_binaries
 from phase1 import (
     EchoHandler,
     HalfCloseHandler,
@@ -38,13 +40,15 @@ from phase1 import (
     wait_ready,
 )
 from phase3 import launch, stop
-from phase5b1a import build_binaries, connect_domain, debug_files
+from phase5b1a import connect_domain, debug_files
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase7t1-dialer-proxy-tcp-diff.json"
 HTTP_AUTH = "Basic " + base64.b64encode(b"http-user:http-pass").decode()
 SNELL_PSK = "phase7t1-snell-psk"
 HALF_CLOSE_PAYLOAD = b"phase7t1-snell-half-close"
+CARGO_TARGET_ENV = "PHASE7T1_DIALER_PROXY_CARGO_TARGET"
+CARGO_TARGET_NAME = "phase7t1-dialer-proxy"
 
 
 def relay(left: socket.socket, right: socket.socket) -> None:
@@ -200,13 +204,16 @@ def proxied_half_close(mixed_port: int, echo_port: int, payload: bytes) -> bool:
             return False
 
 
-def snell_authority_binary() -> Path:
-    import os
+def build_profile() -> str:
+    """Same profile used by `hy2_support.build_binaries` and authority lookup."""
+    return os.environ.get("HY2_BUILD_PROFILE", "debug")
 
-    target = cargo_target_path("PHASE7T1_DIALER_PROXY_CARGO_TARGET", "phase7t1-dialer-proxy")
-    profile = os.environ.get("HY2_BUILD_PROFILE", "debug")
+
+def snell_authority_binary(profile: str | None = None) -> Path:
+    target = cargo_target_path(CARGO_TARGET_ENV, CARGO_TARGET_NAME)
+    resolved = profile or build_profile()
     suffix = ".exe" if os.name == "nt" else ""
-    return target / profile / f"rewrite-snell-authority{suffix}"
+    return target / resolved / f"rewrite-snell-authority{suffix}"
 
 
 def start_snell_authority(
@@ -546,10 +553,14 @@ def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase7t1-dialer-proxy-") as temporary:
         root = Path(temporary)
-        binaries = build_binaries(root, "PHASE7T1_DIALER_PROXY_CARGO_TARGET", "phase7t1-dialer-proxy")
-        authority = snell_authority_binary()
+        profile = build_profile()
+        binaries = build_binaries(root, CARGO_TARGET_ENV, CARGO_TARGET_NAME)
+        authority = snell_authority_binary(profile)
         if not authority.exists():
-            raise RuntimeError(f"rewrite-snell-authority was not built: {authority}")
+            raise RuntimeError(
+                "rewrite-snell-authority was not built: "
+                f"{authority} (profile={profile})"
+            )
         try:
             for name, binary in binaries.items():
                 scratch = root / name

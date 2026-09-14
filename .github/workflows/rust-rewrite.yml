@@ -342,6 +342,7 @@ jobs:
       PHASE6HTUIC_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6IWG_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7ESNELL_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
+      PHASE7T1_DIALER_PROXY_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE6JSSH_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7A_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
       PHASE7B_SSR_CARGO_TARGET: ${{ github.workspace }}/../mihomo-rust-target
