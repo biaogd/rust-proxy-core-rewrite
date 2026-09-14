@@ -31,11 +31,10 @@ listeners from `listener/parse.go`, Rust fixed HTTP/SOCKS/mixed + Phase 6C-N
 Shadowsocks + partial TUN, SS in-scope vs deferred vs Rust-extension rows, and
 the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
-framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP inbound
-is implemented in this checkout (see above). **IN-C** Trojan TLS inbound is
-implemented (see above). Next inbound product slice: VLESS (**IN-D**). Explicit
-non-goals: SSR/Snell/SSH/WG servers, early mKCP/Mekya, panels/billing, public
-test authorities.
+framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP and
+**IN-C** Trojan TLS inbound are implemented in this checkout (see above). Next
+inbound product slice: VLESS (**IN-D**). Explicit non-goals: SSR/Snell/SSH/WG
+servers, early mKCP/Mekya, panels/billing, public test authorities.
 
 ### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14
 
