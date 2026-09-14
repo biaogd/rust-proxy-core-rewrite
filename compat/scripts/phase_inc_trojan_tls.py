@@ -2,8 +2,10 @@
 """IN-C Go/Rust differential for Trojan TLS inbound TCP and UDP-over-TLS.
 
 Both products expose a named `type: trojan` TLS listener. A shared Python
-Trojan TLS client proves password auth, TCP relay, half-close, UDP multi-dest
-echo and wrong-password fail-closed behavior against Go and Rust inbounds.
+Trojan TLS client proves password auth, TCP relay, UDP multi-dest echo and
+wrong-password fail-closed behavior. Half-close is proven through the same
+product binary as a Trojan outbound client (Python SSLSocket write-shutdown is
+not a reliable TLS half-close probe).
 """
 
 from __future__ import annotations
@@ -21,7 +23,15 @@ import threading
 import time
 from typing import Any
 
-from phase1 import IO_DEADLINE, ROOT, EchoHandler, recv_exact, reserve_port, wait_ready
+from phase1 import (
+    IO_DEADLINE,
+    ROOT,
+    EchoHandler,
+    connect_tunnel,
+    recv_exact,
+    reserve_port,
+    wait_ready,
+)
 from phase3 import UdpEchoHandler, launch, stop
 from phase4e2 import ROOT_CERTIFICATE, SERVER_CERTIFICATE, SERVER_KEY
 from phase5b1a import build_binaries, debug_files
@@ -77,6 +87,28 @@ rules:
 """
 
 
+def outbound_client_yaml(mixed_port: int, trojan_port: int) -> str:
+    return f"""mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: trojan-out
+    type: trojan
+    server: 127.0.0.1
+    port: {trojan_port}
+    password: {PASSWORD}
+    sni: {SNI}
+    skip-cert-verify: true
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [trojan-out]
+rules:
+  - MATCH,PROXY
+"""
+
+
 def connect_tls(port: int) -> ssl.SSLSocket:
     context = ssl.create_default_context(cafile=str(ROOT_CERTIFICATE))
     context.check_hostname = True
@@ -94,17 +126,44 @@ def trojan_tcp_exchange(
     payload: bytes,
     *,
     password: str = PASSWORD,
-    half_close: bool = False,
 ) -> bool:
     stream = connect_tls(port)
     try:
         header = password_key(password) + b"\r\n\x01" + encode_address(host, target_port) + b"\r\n"
         stream.sendall(header + payload)
-        if half_close:
-            stream.shutdown(socket.SHUT_WR)
         return recv_exact(stream, len(payload)) == payload
     finally:
         stream.close()
+
+
+def product_half_close(
+    binary: pathlib.Path,
+    scratch: pathlib.Path,
+    trojan_port: int,
+    echo_port: int,
+) -> bool:
+    """Half-close via product Trojan outbound → named Trojan TLS inbound."""
+    client_dir = scratch / "half-close-client"
+    client_dir.mkdir(parents=True, exist_ok=True)
+    mixed_port = reserve_port()
+    config = client_dir / "client.yaml"
+    config.write_text(outbound_client_yaml(mixed_port, trojan_port))
+    process, stdout, stderr = launch(binary, config, client_dir)
+    try:
+        wait_ready(process, mixed_port)
+        tunnel = connect_tunnel(mixed_port, "127.0.0.1", echo_port)
+        try:
+            tunnel.sendall(b"half-close")
+            tunnel.shutdown(socket.SHUT_WR)
+            return recv_exact(tunnel, 10) == b"half-close"
+        finally:
+            tunnel.close()
+    except (AssertionError, EOFError, OSError):
+        return False
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
 
 
 def trojan_udp_exchange(
@@ -223,13 +282,7 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         wait_tcp_route(process, trojan_port, tcp_port)
         small = trojan_tcp_exchange(trojan_port, "127.0.0.1", tcp_port, b"inc-trojan")
         large = trojan_tcp_exchange(trojan_port, "127.0.0.1", tcp_port, LARGE_PAYLOAD)
-        half_close = trojan_tcp_exchange(
-            trojan_port,
-            "127.0.0.1",
-            tcp_port,
-            b"half-close",
-            half_close=True,
-        )
+        half_close = product_half_close(binary, scratch, trojan_port, tcp_port)
         wrong_password = False
         try:
             wrong_password = not trojan_tcp_exchange(

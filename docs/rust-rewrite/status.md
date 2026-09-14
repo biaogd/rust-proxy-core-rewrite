@@ -7,10 +7,9 @@ Last updated: 2026-09-14
 Named `type: trojan` TLS inbound owns password (SHA-224 hex) auth, TCP relay
 through `serve_stream_session`, and UDP-over-TLS (command 3) on the Direct path.
 WS/gRPC/Reality/`ss-option` stay rejected at named-listener parse. Evidence:
-`compat/scripts/phase_inc_trojan_tls.py` (Go/Rust TCP small/large, wrong-password
-fail-closed, UDP multi-dest; Rust-only `ws-path` reject). Python `SSLSocket`
-write-shutdown half-close is false on both products under this probe. Next:
-Trojan WS/gRPC carriers or **IN-D** VLESS.
+`compat/scripts/phase_inc_trojan_tls.py` (Go/Rust TCP small/large, product-client
+half-close, wrong-password fail-closed, UDP multi-dest; Rust-only `ws-path`
+reject). Next: Trojan WS/gRPC carriers or **IN-D** VLESS.
 
 ### IN-B Shadowsocks 2022 UDP inbound — 2026-09-14
 
