@@ -20,6 +20,7 @@ rewrite-platform = { path = "../platform" }
 rewrite-protocol-anytls = { path = "../protocol-anytls" }
 rewrite-protocol-hysteria2 = { path = "../protocol-hysteria2" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-snell = { path = "../protocol-snell" }
 rewrite-protocol-shadowsocksr = { path = "../protocol-shadowsocksr" }
 rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-protocol-tuic = { path = "../protocol-tuic" }

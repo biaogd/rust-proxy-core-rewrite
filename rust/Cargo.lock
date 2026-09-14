@@ -3957,6 +3957,7 @@ dependencies = [
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-shadowsocksr",
+ "rewrite-protocol-snell",
  "rewrite-protocol-ssh",
  "rewrite-protocol-trojan",
  "rewrite-protocol-tuic",
@@ -4053,6 +4054,21 @@ dependencies = [
  "rewrite-model",
  "sha1 0.10.7",
  "shadowsocks-crypto",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rewrite-protocol-snell"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.10.3",
+ "argon2",
+ "chacha20poly1305 0.10.1",
+ "rand 0.10.2",
+ "rewrite-model",
+ "rewrite-transport",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -4268,6 +4284,7 @@ dependencies = [
  "rewrite-model",
  "rewrite-outbound",
  "rewrite-protocol-shadowsocks",
+ "rewrite-protocol-snell",
  "rewrite-protocol-ssh",
  "rewrite-protocol-wireguard",
  "rewrite-rules",

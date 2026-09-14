@@ -206,6 +206,7 @@ async fn apply_generation_inner(
     state.clear_xhttp_clients().await;
     state.clear_anytls_clients().await;
     state.clear_ssr_clients();
+    state.clear_snell_pools();
     state.clear_hysteria2_clients().await;
     state.clear_tuic_clients().await;
     state.clear_wireguard_clients().await;
