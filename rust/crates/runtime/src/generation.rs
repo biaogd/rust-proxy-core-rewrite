@@ -5,7 +5,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rewrite_config::{Config, ConfigError, ListenerKind, ProxyGroupKind, ShadowsocksInboundConfig, TrojanInboundConfig};
+use rewrite_config::{
+    Config, ConfigError, ListenerKind, ProxyGroupKind, ShadowsocksInboundConfig,
+    TrojanInboundConfig,
+};
 use rewrite_state::RuntimeState;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, watch};

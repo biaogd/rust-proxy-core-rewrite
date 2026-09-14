@@ -16,7 +16,7 @@ use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
 use rewrite_transport::accept_websocket_path;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -27,6 +27,8 @@ use crate::tcp::{
     apply_host_mapping, mode_decision, resolve_rematch_target, serve_shadowsocks_connection,
 };
 use crate::types::RuntimeError;
+
+const TROJAN_MAX_INBOUND_CONNECTIONS: usize = 1024;
 
 pub(crate) struct TrojanListener {
     listener: TcpListener,
@@ -109,10 +111,7 @@ where
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
@@ -163,6 +162,15 @@ pub(super) async fn run_trojan_listener(
                 };
                 let connection_config = Arc::clone(&*config.borrow());
                 if !connection_config.permits_inbound(peer.ip()) {
+                    continue;
+                }
+                if connections.len() >= TROJAN_MAX_INBOUND_CONNECTIONS {
+                    state.log(
+                        "warning",
+                        format!(
+                            "trojan inbound connection limit reached ({TROJAN_MAX_INBOUND_CONNECTIONS})"
+                        ),
+                    );
                     continue;
                 }
                 let local = tcp.local_addr().unwrap_or(listen);
@@ -231,25 +239,23 @@ async fn handle_trojan_inbound(
     };
 
     if let Some(path) = ws_path {
-        let websocket = match tokio::time::timeout(
-            Duration::from_secs(10),
-            accept_websocket_path(tls, &path),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => {
-                state.log(
-                    "error",
-                    format!("trojan inbound WebSocket upgrade failed: {error}"),
-                );
-                return;
-            }
-            Err(_) => {
-                state.log("error", "trojan inbound WebSocket upgrade timed out");
-                return;
-            }
-        };
+        let websocket =
+            match tokio::time::timeout(Duration::from_secs(10), accept_websocket_path(tls, &path))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("trojan inbound WebSocket upgrade failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "trojan inbound WebSocket upgrade timed out");
+                    return;
+                }
+            };
         dispatch_trojan_session(
             websocket,
             peer,
@@ -378,11 +384,13 @@ async fn serve_trojan_udp<S>(
     _dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Some((first_destination, first_payload)) =
-        read_trojan_udp_frame(&mut stream, shutdown).await
-    else {
+    let first_frame = tokio::select! {
+        () = shutdown.cancelled() => None,
+        result = read_trojan_udp_packet(&mut stream) => result.ok(),
+    };
+    let Some((first_destination, first_payload)) = first_frame else {
         return;
     };
     let mut packet_metadata = Metadata::new(first_destination, InboundProtocol::Trojan);
@@ -428,7 +436,7 @@ async fn serve_trojan_udp<S>(
     match mode {
         UdpSessionMode::Direct => {
             serve_trojan_udp_direct(
-                &mut stream,
+                stream,
                 packet_metadata,
                 fake_host,
                 first_payload,
@@ -451,22 +459,8 @@ async fn serve_trojan_udp<S>(
     }
 }
 
-async fn read_trojan_udp_frame<S>(
-    stream: &mut S,
-    shutdown: &CancellationToken,
-) -> Option<(Destination, Vec<u8>)>
-where
-    S: AsyncRead + Unpin,
-{
-    tokio::select! {
-        () = shutdown.cancelled() => None,
-        result = read_trojan_udp_packet(stream) => result.ok(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn serve_trojan_udp_direct<S>(
-    stream: &mut S,
+    stream: S,
     first_metadata: Metadata,
     first_fake_host: Option<String>,
     first_payload: Vec<u8>,
@@ -475,7 +469,7 @@ async fn serve_trojan_udp_direct<S>(
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let target = match resolve_udp_target(&first_metadata, first_fake_host.as_deref(), config).await
     {
@@ -488,19 +482,10 @@ async fn serve_trojan_udp_direct<S>(
             return;
         }
     };
-    let outbound = match UdpSocket::bind(if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    })
-    .await
-    {
+    let outbound = match crate::listener::bind_direct_udp_socket(target, config) {
         Ok(socket) => socket,
         Err(error) => {
-            state.log(
-                "error",
-                format!("trojan inbound UDP bind failed: {error}"),
-            );
+            state.log("error", format!("trojan inbound UDP bind failed: {error}"));
             return;
         }
     };
@@ -515,6 +500,31 @@ async fn serve_trojan_udp_direct<S>(
         tracker.finish(uploaded, downloaded);
         return;
     }
+
+    // Complete frames are read on a dedicated task so a select! branch that
+    // observes an outbound datagram cannot cancel a half-parsed client frame.
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(Destination, Vec<u8>)>(16);
+    let reader_shutdown = shutdown.child_token();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = reader_shutdown.cancelled() => break,
+                frame = read_trojan_udp_packet(&mut reader) => {
+                    match frame {
+                        Ok(packet) => {
+                            if frame_tx.send(packet).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
     loop {
         let mut response = vec![0_u8; 65_536];
         tokio::select! {
@@ -526,7 +536,7 @@ async fn serve_trojan_udp_direct<S>(
                     host: Host::Ip(unmap_ip(source.ip())),
                     port: source.port(),
                 };
-                if write_trojan_udp_packet(stream, &destination, &response[..length])
+                if write_trojan_udp_packet(&mut writer, &destination, &response[..length])
                     .await
                     .is_err()
                 {
@@ -534,7 +544,7 @@ async fn serve_trojan_udp_direct<S>(
                 }
                 downloaded = downloaded.saturating_add(length as u64);
             }
-            packet = read_trojan_udp_frame(stream, shutdown) => {
+            packet = frame_rx.recv() => {
                 let Some((destination, payload)) = packet else { break };
                 let mut packet_metadata = first_metadata.clone();
                 packet_metadata.destination = destination;
@@ -561,5 +571,7 @@ async fn serve_trojan_udp_direct<S>(
             }
         }
     }
+    reader_task.abort();
+    let _ = reader_task.await;
     tracker.finish(uploaded, downloaded);
 }

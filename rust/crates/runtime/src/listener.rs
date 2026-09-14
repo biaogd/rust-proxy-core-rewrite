@@ -1509,7 +1509,10 @@ pub(super) async fn run_direct_udp_session(
     tracker.finish(uploaded, downloaded);
 }
 
-fn bind_direct_udp_socket(target: SocketAddr, config: &Config) -> std::io::Result<UdpSocket> {
+pub(crate) fn bind_direct_udp_socket(
+    target: SocketAddr,
+    config: &Config,
+) -> std::io::Result<UdpSocket> {
     let family: SocketAddr = if target.is_ipv6() {
         "[::]:0".parse().expect("static IPv6 wildcard")
     } else {
