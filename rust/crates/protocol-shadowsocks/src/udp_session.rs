@@ -200,7 +200,23 @@ pub enum ServerUdpReject {
 /// Per-peer SIP022 server counters used by the test authority and product inbound.
 #[derive(Debug, Default)]
 pub struct Aead2022ServerSessions {
-    entries: HashMap<SocketAddr, ServerUdpSession>,
+    /// Replay windows keyed by authenticated identity + client session id.
+    /// Peer addresses are only routing hints via [`Self::peer_index`].
+    sessions: HashMap<SessionKey, ServerUdpSession>,
+    /// Last session observed from each peer, used to build replies.
+    peer_index: HashMap<SocketAddr, SessionKey>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum AuthKey {
+    Default,
+    User(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SessionKey {
+    auth: AuthKey,
+    client_session_id: u64,
 }
 
 #[derive(Debug)]
@@ -216,8 +232,10 @@ struct ServerUdpSession {
 impl Aead2022ServerSessions {
     /// Accepts one inbound SIP022 datagram for `peer`.
     ///
-    /// Creates or rotates the server session when the client session id changes,
-    /// and rejects missing control, zero ids, and replayed client packet ids.
+    /// Keys the replay window by authenticated identity + client session id so
+    /// source-port changes cannot bypass replay, and alternating sessions from
+    /// one peer cannot wipe each other's windows. Rejects missing control, zero
+    /// ids, and replayed client packet ids.
     ///
     /// # Errors
     ///
@@ -246,23 +264,23 @@ impl Aead2022ServerSessions {
         if incoming.packet_id == 0 {
             return Err(ServerUdpReject::PacketId);
         }
-        if self.entries.len() >= SERVER_SESSION_CAP && !self.entries.contains_key(&peer) {
+        let key = SessionKey {
+            auth: auth_key(&incoming.user),
+            client_session_id: incoming.client_session_id,
+        };
+        if self.sessions.len() >= SERVER_SESSION_CAP && !self.sessions.contains_key(&key) {
             self.evict_oldest();
         }
         let session = self
-            .entries
-            .entry(peer)
-            .and_modify(|session| {
-                if session.client_session_id != incoming.client_session_id {
-                    *session = ServerUdpSession::new(incoming.client_session_id);
-                }
-            })
+            .sessions
+            .entry(key.clone())
             .or_insert_with(|| ServerUdpSession::new(incoming.client_session_id));
         if !session.incoming_window.accept(incoming.packet_id) {
             return Err(ServerUdpReject::Replay);
         }
         session.last_user.clone_from(&incoming.user);
         session.last_seen = now;
+        self.peer_index.insert(peer, key);
         Ok(())
     }
 
@@ -271,7 +289,11 @@ impl Aead2022ServerSessions {
     /// no live AEAD-2022 session (pre-2022 callers).
     pub fn next_reply(&mut self, peer: SocketAddr) -> UdpSocketControlData {
         self.reap(Instant::now());
-        let Some(session) = self.entries.get_mut(&peer) else {
+        let Some(key) = self.peer_index.get(&peer).cloned() else {
+            return UdpSocketControlData::default();
+        };
+        let Some(session) = self.sessions.get_mut(&key) else {
+            self.peer_index.remove(&peer);
             return UdpSocketControlData::default();
         };
         session.last_seen = Instant::now();
@@ -303,34 +325,44 @@ impl Aead2022ServerSessions {
         Ok(self.next_reply(peer))
     }
 
-    /// Drops idle peer sessions so the table stays bounded.
+    /// Drops idle sessions so the table stays bounded.
     pub fn reap(&mut self, now: Instant) {
-        self.entries.retain(|_, session| {
+        self.sessions.retain(|_, session| {
             now.saturating_duration_since(session.last_seen) < SERVER_SESSION_TTL
         });
+        self.peer_index
+            .retain(|_, key| self.sessions.contains_key(key));
     }
 
-    /// Number of live peer sessions.
+    /// Number of live identity/session replay windows.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.sessions.len()
     }
 
-    /// Returns whether the table currently holds no peer sessions.
+    /// Returns whether the table currently holds no sessions.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.sessions.is_empty()
     }
 
     fn evict_oldest(&mut self) {
         let oldest = self
-            .entries
+            .sessions
             .iter()
             .min_by_key(|(_, session)| session.last_seen)
-            .map(|(peer, _)| *peer);
-        if let Some(peer) = oldest {
-            self.entries.remove(&peer);
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest {
+            self.sessions.remove(&key);
+            self.peer_index.retain(|_, bound| bound != &key);
         }
+    }
+}
+
+fn auth_key(user: &Option<std::sync::Arc<shadowsocks::config::ServerUser>>) -> AuthKey {
+    match user {
+        Some(user) => AuthKey::User(user.name().to_owned()),
+        None => AuthKey::Default,
     }
 }
 
@@ -554,6 +586,53 @@ mod tests {
         assert_eq!(rotated.client_session_id, 33);
         assert_ne!(rotated.server_session_id, first_a.server_session_id);
         assert_eq!(rotated.packet_id, 1);
+        // Rebuilding must not wipe the prior session window.
+        assert_eq!(
+            sessions.prepare_reply(peer_a, Some(&incoming_a)).err(),
+            Some(ServerUdpReject::Replay)
+        );
+        assert_eq!(sessions.len(), 3);
+    }
+
+    #[test]
+    fn server_sessions_reject_cross_port_replay_of_same_session() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer_a: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let peer_b: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+        let packet = control(77, 1);
+        sessions
+            .prepare_reply(peer_a, Some(&packet))
+            .expect("first delivery");
+        assert_eq!(
+            sessions.prepare_reply(peer_b, Some(&packet)).err(),
+            Some(ServerUdpReject::Replay),
+            "same ciphertext from another source port must stay rejected"
+        );
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn server_sessions_keep_windows_when_sessions_alternate_on_one_peer() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:6000".parse().unwrap();
+        let session_a = control(11, 1);
+        let session_b = control(22, 1);
+        sessions
+            .prepare_reply(peer, Some(&session_a))
+            .expect("session a first");
+        sessions
+            .prepare_reply(peer, Some(&session_b))
+            .expect("session b first");
+        assert_eq!(
+            sessions.prepare_reply(peer, Some(&session_a)).err(),
+            Some(ServerUdpReject::Replay),
+            "alternating sessions must not clear the earlier window"
+        );
+        assert_eq!(
+            sessions.prepare_reply(peer, Some(&session_b)).err(),
+            Some(ServerUdpReject::Replay)
+        );
+        assert_eq!(sessions.len(), 2);
     }
 
     #[test]

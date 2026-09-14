@@ -89,17 +89,15 @@ fn parse_shadowsocks_listener(
         ],
         &format!("listener {index}"),
     )?;
-    let name = mapping_string(&mapping, "name").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {index} is missing name"))
-    })?;
+    let name = mapping_string(&mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
     if !names.insert(name.clone()) {
         return Err(ConfigError::InvalidInbound(format!(
             "listener name is duplicated: {name}"
         )));
     }
-    let cipher = mapping_string(&mapping, "cipher").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {name} is missing cipher"))
-    })?;
+    let cipher = mapping_string(&mapping, "cipher")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing cipher")))?;
     let password = mapping_string(&mapping, "password").ok_or_else(|| {
         ConfigError::InvalidInbound(format!("listener {name} is missing password"))
     })?;
@@ -183,9 +181,8 @@ fn parse_trojan_listener(
         ],
         &format!("listener {index}"),
     )?;
-    let name = mapping_string(&mapping, "name").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {index} is missing name"))
-    })?;
+    let name = mapping_string(&mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
     if !names.insert(name.clone()) {
         return Err(ConfigError::InvalidInbound(format!(
             "listener name is duplicated: {name}"
@@ -270,9 +267,7 @@ fn parse_trojan_users(
             &format!("listener {name} user {index}"),
         )?;
         let password = mapping_string(user, "password").ok_or_else(|| {
-            ConfigError::InvalidInbound(format!(
-                "listener {name} user {index} is missing password"
-            ))
+            ConfigError::InvalidInbound(format!("listener {name} user {index} is missing password"))
         })?;
         if password.is_empty() {
             return Err(ConfigError::InvalidInbound(format!(
