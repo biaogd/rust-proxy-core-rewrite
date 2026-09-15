@@ -1473,8 +1473,10 @@ Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and
 
 **Vision slice complete (2026-09-15):** per-user `flow: xtls-rprx-vision` on
 native TLS; `accept_vision_tls` + `VisionStream` on the server path. Evidence
-`phase_ind_vless_vision.py`. REALITY remains a separate IN-D sub-gate; combined
-ws+grpc and `reality-config` stay rejected at parse.
+`phase_ind_vless_vision.py`. REALITY inbound is deferred: Go uses
+`utls.RealityServer`, while Rust `shadow-rustls` exposes client REALITY only —
+no server Accept API yet — so `reality-config` stays rejected at parse.
+Combined ws+grpc stays rejected.
 
 
 ### IN-E — VMess inbound
