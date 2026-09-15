@@ -8,7 +8,9 @@ outbound client (the same style `phase_ind_vless_tls.py` uses for TCP product
 round-trips).
 
 Scope: native TLS carrier only; Vision / REALITY remain deferred. Standard
-fixed-destination UDP stays covered by `phase_ind_vless_tls.py`.
+fixed-destination UDP stays covered by `phase_ind_vless_tls.py`. Subsequent
+XUDP destinations are re-matched against rules on Rust (allow→reject must not
+leak); that check is asserted on Rust and recorded for Go outside shared parity.
 """
 
 from __future__ import annotations
@@ -57,6 +59,8 @@ def inbound_yaml(
     port: int,
     certificate: pathlib.Path,
     private_key: pathlib.Path,
+    *,
+    extra_rules: str = "",
 ) -> str:
     return f"""listeners:
   - name: vless-xudp
@@ -72,7 +76,7 @@ mode: rule
 log-level: info
 ipv6: false
 rules:
-  - MATCH,DIRECT
+{extra_rules}  - MATCH,DIRECT
 """
 
 
@@ -220,6 +224,78 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         thread_b.join(timeout=1)
 
 
+def exercise_allow_then_reject(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
+    """First destination DIRECT, second DST-PORT REJECT on the same XUDP assoc."""
+    echo_allow = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    echo_allow.allow_reuse_address = True
+    thread_allow = threading.Thread(target=echo_allow.serve_forever, daemon=True)
+    thread_allow.start()
+    allow_port = int(echo_allow.server_address[1])
+
+    echo_reject = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    echo_reject.allow_reuse_address = True
+    thread_reject = threading.Thread(target=echo_reject.serve_forever, daemon=True)
+    thread_reject.start()
+    reject_port = int(echo_reject.server_address[1])
+
+    certificate, private_key = stage_tls_material(scratch)
+    vless_port = reserve_port()
+    server_cfg = scratch / "server.yaml"
+    server_cfg.write_text(
+        inbound_yaml(
+            vless_port,
+            certificate,
+            private_key,
+            extra_rules=f"  - DST-PORT,{reject_port},REJECT\n",
+        )
+    )
+    server, server_out, server_err = launch(binary, server_cfg, scratch)
+
+    client_dir = scratch / "client"
+    client_dir.mkdir()
+    mixed_port = reserve_port()
+    client_cfg = client_dir / "client.yaml"
+    client_cfg.write_text(outbound_client_yaml(mixed_port, vless_port))
+    client, client_out, client_err = launch(binary, client_cfg, client_dir)
+
+    association: socket.socket | None = None
+    try:
+        wait_udp_route(client, mixed_port, allow_port)
+        association = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        association.bind(("127.0.0.1", 0))
+        association.settimeout(IO_DEADLINE)
+        allow_ok = socks_udp_exchange(
+            mixed_port, allow_port, b"xudp-allow", client=association
+        )
+        association.settimeout(0.75)
+        reject_leaked = False
+        try:
+            reject_leaked = socks_udp_exchange(
+                mixed_port, reject_port, b"xudp-reject", client=association
+            )
+        except (AssertionError, OSError, TimeoutError, socket.timeout):
+            reject_leaked = False
+        return {
+            "allow-ok": allow_ok,
+            "reject-second-dest-blocked": allow_ok and not reject_leaked,
+        }
+    finally:
+        if association is not None:
+            association.close()
+        stop(client)
+        client_out.close()
+        client_err.close()
+        stop(server)
+        server_out.close()
+        server_err.close()
+        echo_allow.shutdown()
+        echo_allow.server_close()
+        thread_allow.join(timeout=1)
+        echo_reject.shutdown()
+        echo_reject.server_close()
+        thread_reject.join(timeout=1)
+
+
 def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
     return {
         "small": observations["small"],
@@ -241,6 +317,23 @@ def main() -> int:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], scratch)
+            # Allow→reject must be enforced per destination on Rust. Go may still
+            # pin the first-frame route; keep that outside shared parity.
+            rust_reject = exercise_allow_then_reject(
+                binaries["rust"], root / "rust-allow-reject"
+            )
+            go_reject = exercise_allow_then_reject(
+                binaries["go"], root / "go-allow-reject"
+            )
+            observations["rust"]["allow-then-reject"] = rust_reject
+            observations["go"]["allow-then-reject"] = go_reject
+            if not rust_reject.get("reject-second-dest-blocked"):
+                FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+                FAILURE_ARTIFACT.write_text(
+                    json.dumps(observations, indent=2, sort_keys=True)
+                )
+                print(json.dumps(observations, indent=2, sort_keys=True))
+                return 1
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

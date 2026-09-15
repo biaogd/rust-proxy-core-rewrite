@@ -512,13 +512,17 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, VlessProtocolError> {
 
 /// Reads one client→server XUDP mux frame (NEW or KEEP with payload).
 ///
+/// Returns `(session_id, destination, payload)`. `session_id` is the mux
+/// channel id from the frame header and must be echoed on server replies for
+/// that logical session.
+///
 /// # Errors
 ///
 /// Returns protocol or I/O errors for truncated/invalid frames, END/ERROR
 /// status, or non-UDP network markers.
 pub async fn read_xudp_client_packet<S>(
     stream: &mut S,
-) -> Result<(Destination, Vec<u8>), VlessProtocolError>
+) -> Result<(u16, Destination, Vec<u8>), VlessProtocolError>
 where
     S: AsyncRead + Unpin,
 {
@@ -532,6 +536,7 @@ where
     }
     let mut header = vec![0_u8; header_length];
     stream.read_exact(&mut header).await?;
+    let session_id = u16::from_be_bytes([header[0], header[1]]);
     let status = header[2];
     let option = header[3];
     if option & XUDP_OPTION_ERROR != 0 {
@@ -571,7 +576,7 @@ where
                 "truncated XUDP global id".to_owned(),
             ));
         }
-        // Global id is session metadata; inbound does not need to persist it.
+        // Global id is association metadata; replies key off session_id instead.
     } else if !rest.is_empty() {
         return Err(VlessProtocolError::Protocol(
             "unexpected XUDP keep header extension".to_owned(),
@@ -587,16 +592,20 @@ where
     let payload_length = usize::from(u16::from_be_bytes(payload_length_bytes));
     let mut payload = vec![0_u8; payload_length];
     stream.read_exact(&mut payload).await?;
-    Ok((destination, payload))
+    Ok((session_id, destination, payload))
 }
 
 /// Writes one server→client XUDP KEEP frame carrying `payload` from `source`.
+///
+/// `session_id` must match the client mux channel that originated the datagram
+/// so multi-session associations demux replies correctly.
 ///
 /// # Errors
 ///
 /// Returns protocol or I/O errors when the frame cannot be encoded or written.
 pub async fn write_xudp_server_packet<S>(
     stream: &mut S,
+    session_id: u16,
     source: &Destination,
     payload: &[u8],
 ) -> Result<(), VlessProtocolError>
@@ -614,7 +623,7 @@ where
         .map_err(|_| VlessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
     let mut frame = Vec::with_capacity(2 + usize::from(header_length) + 2 + payload.len());
     frame.extend_from_slice(&header_length.to_be_bytes());
-    frame.extend_from_slice(&0_u16.to_be_bytes());
+    frame.extend_from_slice(&session_id.to_be_bytes());
     frame.push(XUDP_STATUS_KEEP);
     frame.push(XUDP_OPTION_DATA);
     frame.push(XUDP_NETWORK_UDP);
@@ -623,4 +632,71 @@ where
     frame.extend_from_slice(payload);
     stream.write_all(&frame).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod xudp_session_tests {
+    use super::*;
+    use rewrite_model::{Destination, Host};
+    use tokio::io::duplex;
+
+    fn dest(port: u16) -> Destination {
+        Destination {
+            host: Host::Ip("192.0.2.10".parse().expect("ip")),
+            port,
+        }
+    }
+
+    #[tokio::test]
+    async fn read_preserves_nonzero_session_id() {
+        let (mut client, mut server) = duplex(1024);
+        let destination = dest(53);
+        let mut address = Vec::new();
+        encode_xudp_address(&mut address, &destination).expect("addr");
+        let global_id = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+        let header_length = u16::try_from(5 + address.len() + global_id.len()).expect("hlen");
+        let payload = b"session-7";
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&header_length.to_be_bytes());
+        frame.extend_from_slice(&7_u16.to_be_bytes());
+        frame.push(XUDP_STATUS_NEW);
+        frame.push(XUDP_OPTION_DATA);
+        frame.push(XUDP_NETWORK_UDP);
+        frame.extend_from_slice(&address);
+        frame.extend_from_slice(&global_id);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame.extend_from_slice(payload);
+        client.write_all(&frame).await.expect("write");
+
+        let (session_id, got_dest, got_payload) =
+            read_xudp_client_packet(&mut server).await.expect("read");
+        assert_eq!(session_id, 7);
+        assert_eq!(got_dest, destination);
+        assert_eq!(got_payload, payload);
+    }
+
+    #[tokio::test]
+    async fn write_echoes_session_id_for_multiple_sessions() {
+        let (mut client, mut server) = duplex(2048);
+        for session_id in [1_u16, 42, 65535] {
+            write_xudp_server_packet(&mut server, session_id, &dest(9), b"pong")
+                .await
+                .expect("write");
+            let mut length_bytes = [0_u8; 2];
+            client.read_exact(&mut length_bytes).await.expect("len");
+            let header_length = usize::from(u16::from_be_bytes(length_bytes));
+            let mut header = vec![0_u8; header_length];
+            client.read_exact(&mut header).await.expect("header");
+            assert_eq!(u16::from_be_bytes([header[0], header[1]]), session_id);
+            let mut payload_length_bytes = [0_u8; 2];
+            client
+                .read_exact(&mut payload_length_bytes)
+                .await
+                .expect("plen");
+            let payload_length = usize::from(u16::from_be_bytes(payload_length_bytes));
+            let mut payload = vec![0_u8; payload_length];
+            client.read_exact(&mut payload).await.expect("payload");
+            assert_eq!(payload, b"pong");
+        }
+    }
 }

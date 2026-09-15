@@ -8,6 +8,7 @@
 //! certificate TLS; REALITY is native-TCP only in this slice (no Vision).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use rewrite_transport::{
     reality_acceptor,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -45,6 +46,9 @@ use crate::types::RuntimeError;
 const VLESS_MAX_INBOUND_CONNECTIONS: usize = 1024;
 const VLESS_MAX_GRPC_STREAMS: usize = 256;
 const VLESS_GRPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound client-side UDP writes so a stalled reader cannot pin the select loop
+/// past connection cancel / controller close.
+const VLESS_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 enum VlessTlsAcceptor {
@@ -81,14 +85,10 @@ impl VlessListener {
             VlessTlsAcceptor::Reality(acceptor)
         } else {
             let certificate = config.certificate.clone().ok_or_else(|| {
-                RuntimeError::Listener(std::io::Error::other(
-                    "vless inbound missing certificate",
-                ))
+                RuntimeError::Listener(std::io::Error::other("vless inbound missing certificate"))
             })?;
             let private_key = config.private_key.clone().ok_or_else(|| {
-                RuntimeError::Listener(std::io::Error::other(
-                    "vless inbound missing private-key",
-                ))
+                RuntimeError::Listener(std::io::Error::other("vless inbound missing private-key"))
             })?;
             let tls = rewrite_controller::prepare_tls_config(
                 &ControllerTls {
@@ -106,9 +106,10 @@ impl VlessListener {
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;
-        let vision_capable = config.users.iter().any(|user| {
-            user.flow == Some(rewrite_config::VlessFlow::XtlsRprxVision)
-        });
+        let vision_capable = config
+            .users
+            .iter()
+            .any(|user| user.flow == Some(rewrite_config::VlessFlow::XtlsRprxVision));
         Ok(Self {
             listener,
             acceptor,
@@ -118,9 +119,7 @@ impl VlessListener {
                     VlessUserEntry {
                         username: user.username.clone(),
                         flow: user.flow.map(|flow| match flow {
-                            rewrite_config::VlessFlow::XtlsRprxVision => {
-                                VlessFlow::XtlsRprxVision
-                            }
+                            rewrite_config::VlessFlow::XtlsRprxVision => VlessFlow::XtlsRprxVision,
                         }),
                     },
                 )
@@ -295,10 +294,7 @@ async fn handle_vless_inbound(
     let tls: BoxedStream = match acceptor {
         VlessTlsAcceptor::Reality(reality_acceptor) => {
             if vision_capable {
-                state.log(
-                    "error",
-                    "vless inbound REALITY does not support Vision yet",
-                );
+                state.log("error", "vless inbound REALITY does not support Vision yet");
                 return;
             }
             match accept_reality(&reality_acceptor, tcp).await {
@@ -642,7 +638,7 @@ async fn serve_vless_tcp<S>(
 /// [`serve_vless_xudp`] instead.
 #[allow(clippy::too_many_arguments)]
 async fn serve_vless_udp<S>(
-    mut stream: S,
+    stream: S,
     peer: SocketAddr,
     local: SocketAddr,
     destination: Destination,
@@ -652,7 +648,7 @@ async fn serve_vless_udp<S>(
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut metadata = Metadata::new(destination, InboundProtocol::Vless);
     metadata.network = Network::Udp;
@@ -696,13 +692,7 @@ async fn serve_vless_udp<S>(
     match mode {
         UdpSessionMode::Direct => {
             serve_vless_udp_direct(
-                &mut stream,
-                metadata,
-                fake_host,
-                decision,
-                config,
-                state,
-                shutdown,
+                stream, metadata, fake_host, decision, config, state, shutdown,
             )
             .await;
         }
@@ -720,7 +710,7 @@ async fn serve_vless_udp<S>(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn serve_vless_udp_direct<S>(
-    stream: &mut S,
+    stream: S,
     metadata: Metadata,
     fake_host: Option<String>,
     decision: rewrite_rules::Decision,
@@ -728,7 +718,7 @@ async fn serve_vless_udp_direct<S>(
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let target = match resolve_udp_target(&metadata, fake_host.as_deref(), config).await {
         Ok(target) => target,
@@ -740,13 +730,7 @@ async fn serve_vless_udp_direct<S>(
             return;
         }
     };
-    let outbound = match UdpSocket::bind(if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    })
-    .await
-    {
+    let outbound = match crate::listener::bind_direct_udp_socket(target, config) {
         Ok(socket) => socket,
         Err(error) => {
             state.log("error", format!("vless inbound UDP bind failed: {error}"));
@@ -760,6 +744,31 @@ async fn serve_vless_udp_direct<S>(
     );
     let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
+
+    // Complete frames are read on a dedicated task so a select! branch that
+    // observes an outbound datagram cannot cancel a half-parsed client frame.
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    let reader_shutdown = shutdown.child_token();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = reader_shutdown.cancelled() => break,
+                frame = read_vless_udp_payload(&mut reader) => {
+                    match frame {
+                        Ok(payload) => {
+                            if frame_tx.send(payload).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
     loop {
         let mut response = vec![0_u8; 65_536];
         tokio::select! {
@@ -767,12 +776,19 @@ async fn serve_vless_udp_direct<S>(
             () = tracker.cancelled() => break,
             received = outbound.recv_from(&mut response) => {
                 let Ok((length, _source)) = received else { break };
-                if write_vless_udp_payload(stream, &response[..length]).await.is_err() {
+                if !write_vless_udp_to_client(
+                    &mut writer,
+                    &response[..length],
+                    shutdown,
+                    tracker.cancelled(),
+                )
+                .await
+                {
                     break;
                 }
                 downloaded = downloaded.saturating_add(length as u64);
             }
-            payload = read_udp_frame(stream, shutdown) => {
+            payload = frame_rx.recv() => {
                 let Some(payload) = payload else { break };
                 if outbound.send_to(&payload, target).await.is_ok() {
                     uploaded = uploaded.saturating_add(payload.len() as u64);
@@ -780,21 +796,61 @@ async fn serve_vless_udp_direct<S>(
             }
         }
     }
+    reader_task.abort();
+    let _ = reader_task.await;
     tracker.finish(uploaded, downloaded);
 }
 
-async fn read_udp_frame<S>(stream: &mut S, shutdown: &CancellationToken) -> Option<Vec<u8>>
+/// Writes one standard VLESS UDP frame to the client, aborting on cancel or
+/// write timeout.
+async fn write_vless_udp_to_client<W, C>(
+    writer: &mut W,
+    payload: &[u8],
+    shutdown: &CancellationToken,
+    tracker_cancelled: C,
+) -> bool
 where
-    S: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    C: Future<Output = ()>,
 {
     tokio::select! {
-        () = shutdown.cancelled() => None,
-        result = read_vless_udp_payload(stream) => result.ok(),
+        biased;
+        () = shutdown.cancelled() => false,
+        () = tracker_cancelled => false,
+        result = tokio::time::timeout(
+            VLESS_UDP_CLIENT_WRITE_TIMEOUT,
+            write_vless_udp_payload(writer, payload),
+        ) => matches!(result, Ok(Ok(()))),
+    }
+}
+
+/// Writes one XUDP KEEP frame to the client, aborting on cancel or write timeout.
+async fn write_vless_xudp_to_client<W, C>(
+    writer: &mut W,
+    session_id: u16,
+    destination: &Destination,
+    payload: &[u8],
+    shutdown: &CancellationToken,
+    tracker_cancelled: C,
+) -> bool
+where
+    W: AsyncWrite + Unpin,
+    C: Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => false,
+        () = tracker_cancelled => false,
+        result = tokio::time::timeout(
+            VLESS_UDP_CLIENT_WRITE_TIMEOUT,
+            write_xudp_server_packet(writer, session_id, destination, payload),
+        ) => matches!(result, Ok(Ok(()))),
     }
 }
 
 /// Mux/XUDP VLESS UDP: each frame carries its own destination (product VLESS
-/// outbound defaults to this mode).
+/// outbound defaults to this mode). Subsequent destinations are re-evaluated
+/// against the rule engine so an allow→reject switch cannot leak past DIRECT.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn serve_vless_xudp<S>(
     mut stream: S,
@@ -808,7 +864,7 @@ async fn serve_vless_xudp<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Ok(Ok((first_destination, first_payload))) = tokio::time::timeout(
+    let Ok(Ok((first_session_id, first_destination, first_payload))) = tokio::time::timeout(
         Duration::from_secs(10),
         read_xudp_client_packet(&mut stream),
     )
@@ -893,6 +949,9 @@ async fn serve_vless_xudp<S>(
     );
     let mut uploaded = first_payload.len() as u64;
     let mut downloaded = 0_u64;
+    // Map reply source addresses back to the mux session that sent there.
+    let mut session_by_target: HashMap<SocketAddr, u16> = HashMap::new();
+    session_by_target.insert(first_target, first_session_id);
     if outbound
         .send_to(&first_payload, first_target)
         .await
@@ -903,7 +962,7 @@ async fn serve_vless_xudp<S>(
     }
 
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(Destination, Vec<u8>)>(16);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u16, Destination, Vec<u8>)>(16);
     let reader_shutdown = shutdown.child_token();
     let reader_task = tokio::spawn(async move {
         loop {
@@ -935,19 +994,56 @@ async fn serve_vless_xudp<S>(
                     host: Host::Ip(unmap_ip(source.ip())),
                     port: source.port(),
                 };
-                if write_xudp_server_packet(&mut writer, &destination, &response[..length])
-                    .await
-                    .is_err()
+                let session_id = session_by_target
+                    .get(&source)
+                    .copied()
+                    .unwrap_or(first_session_id);
+                if !write_vless_xudp_to_client(
+                    &mut writer,
+                    session_id,
+                    &destination,
+                    &response[..length],
+                    shutdown,
+                    tracker.cancelled(),
+                )
+                .await
                 {
                     break;
                 }
                 downloaded = downloaded.saturating_add(length as u64);
             }
             packet = frame_rx.recv() => {
-                let Some((destination, payload)) = packet else { break };
+                let Some((session_id, destination, payload)) = packet else { break };
                 let mut packet_metadata = first_metadata.clone();
                 packet_metadata.destination = destination;
                 let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                let decision = mode_decision(config, state)
+                    .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
+                let Some((decision, outbound_target, _)) =
+                    resolve_rematch_target(decision, &mut packet_metadata, config, state)
+                else {
+                    continue;
+                };
+                let route = resolved_route(&outbound_target, config);
+                if matches!(route, Route::Reject | Route::RejectDrop) {
+                    state.log(
+                        "info",
+                        format!(
+                            "[UDP] {} --> {} match {} using {} (VLESS XUDP)",
+                            packet_metadata.source_port,
+                            packet_metadata.destination.authority(),
+                            decision.matched_kind.as_deref().unwrap_or("none"),
+                            decision.target
+                        ),
+                    );
+                    continue;
+                }
+                let Some(mode) = udp_session_mode(&outbound_target, config) else {
+                    continue;
+                };
+                if !matches!(mode, UdpSessionMode::Direct) {
+                    continue;
+                }
                 let target = match resolve_udp_target(
                     &packet_metadata,
                     fake_host.as_deref(),
@@ -964,6 +1060,7 @@ async fn serve_vless_xudp<S>(
                         continue;
                     }
                 };
+                session_by_target.insert(target, session_id);
                 if outbound.send_to(&payload, target).await.is_ok() {
                     uploaded = uploaded.saturating_add(payload.len() as u64);
                 }
@@ -971,5 +1068,61 @@ async fn serve_vless_xudp<S>(
         }
     }
     reader_task.abort();
+    let _ = reader_task.await;
     tracker.finish(uploaded, downloaded);
+}
+
+#[cfg(test)]
+mod udp_write_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn client_udp_write_aborts_when_peer_stops_reading() {
+        let (client, server) = tokio::io::duplex(8);
+        let (_reader, mut writer) = tokio::io::split(server);
+        let client = client;
+        let shutdown = CancellationToken::new();
+        let tracker = CancellationToken::new();
+        let payload = vec![0_u8; 4096];
+        let write = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let tracker = tracker.clone();
+            async move {
+                write_vless_udp_to_client(&mut writer, &payload, &shutdown, tracker.cancelled())
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert!(
+            !write.is_finished(),
+            "write should still be blocked on a full window"
+        );
+        tracker.cancel();
+        let finished = tokio::time::timeout(Duration::from_secs(1), write)
+            .await
+            .expect("write must observe cancel")
+            .expect("join");
+        assert!(!finished, "cancel must abort the client write");
+        drop(client);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn client_udp_write_times_out_when_peer_never_reads() {
+        let (_client, server) = tokio::io::duplex(8);
+        let (_reader, mut writer) = tokio::io::split(server);
+        let shutdown = CancellationToken::new();
+        let tracker = CancellationToken::new();
+        let payload = vec![0_u8; 4096];
+        let write = tokio::spawn(async move {
+            write_vless_udp_to_client(&mut writer, &payload, &shutdown, tracker.cancelled()).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(VLESS_UDP_CLIENT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        let finished = tokio::time::timeout(Duration::from_secs(1), write)
+            .await
+            .expect("write must observe timeout")
+            .expect("join");
+        assert!(!finished, "timeout must abort the stalled client write");
+    }
 }
