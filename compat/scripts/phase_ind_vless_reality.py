@@ -5,7 +5,8 @@ Both products expose a named `type: vless` listener with `reality-config` (Go:
 `listener/inbound/reality.go` + sing-vless; Rust: `named_listeners` +
 `accept_reality`). Product VLESS outbound with `reality-opts` dials each named
 inbound and proves TCP relay / half-close. Dest camouflage fallback is out of
-scope for this slice (auth-fail aborts).
+scope for this slice (auth-fail aborts). PEM certificate + reality-config is a
+Rust-only rejection (same posture as `phase_ind_vless_tls.py`).
 """
 
 from __future__ import annotations
@@ -166,7 +167,9 @@ def config_validation(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, 
     port = reserve_port()
     good = scratch / "accept.yaml"
     good.write_text(inbound_yaml(port))
-    accepted = launch(binary, good, scratch / "accept-run")
+    accept_run = scratch / "accept-run"
+    accept_run.mkdir(parents=True, exist_ok=True)
+    accepted = launch(binary, good, accept_run)
     try:
         wait_ready(accepted[0], port)
         ok = accepted[0].poll() is None
@@ -175,7 +178,13 @@ def config_validation(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, 
         accepted[1].close()
         accepted[2].close()
 
-    reject = scratch / "reject.yaml"
+    return {"accept-named-reality": ok}
+
+
+def assert_rust_only_rejections(binary: pathlib.Path, scratch: pathlib.Path) -> None:
+    """PEM certificate + reality-config stays mutually exclusive on Rust."""
+    scratch.mkdir(parents=True, exist_ok=True)
+    reject = scratch / "reject-cert-reality.yaml"
     reject.write_text(
         inbound_yaml(reserve_port()).replace(
             "reality-config:",
@@ -190,10 +199,8 @@ def config_validation(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, 
         check=False,
         timeout=IO_DEADLINE,
     )
-    return {
-        "accept-named-reality": ok,
-        "reject-cert-plus-reality": result.returncode != 0,
-    }
+    if result.returncode == 0:
+        raise AssertionError("Rust must reject certificate + reality-config")
 
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
@@ -275,6 +282,10 @@ def main() -> int:
             )
             raise
 
+        assert_rust_only_rejections(
+            binaries["rust"], root / "rust-only-rejections"
+        )
+
         rust_view = parity_view(observations["rust"])
         go_view = parity_view(observations["go"])
         if rust_view != go_view:
@@ -298,7 +309,6 @@ def main() -> int:
                 rust_view["product-outbound-large"],
                 rust_view["product-outbound-half-close"],
                 rust_view["config"]["accept-named-reality"],
-                rust_view["config"]["reject-cert-plus-reality"],
                 rust_view["process-alive"],
             ]
         ):
