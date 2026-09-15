@@ -301,7 +301,17 @@ fn parse_vless_listener(
 ) -> Result<VlessInboundConfig, ConfigError> {
     validate_mapping_keys(
         &mapping,
-        &["name", "type", "listen", "port", "users", "certificate", "private-key"],
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+            "ws-path",
+            "grpc-service-name",
+        ],
         &format!("listener {index}"),
     )?;
     let name = mapping_string(&mapping, "name").ok_or_else(|| {
@@ -336,6 +346,19 @@ fn parse_vless_listener(
             "listener {name} requires non-empty certificate and private-key"
         )));
     }
+    let ws_path = mapping_string(&mapping, "ws-path").and_then(|path| {
+        let trimmed = path.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let grpc_service_name = mapping_string(&mapping, "grpc-service-name").and_then(|name| {
+        let trimmed = name.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    if ws_path.is_some() && grpc_service_name.is_some() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} cannot combine ws-path and grpc-service-name until shared HTTP mux"
+        )));
+    }
     let users = parse_vless_users(&mapping, &name)?;
     if users.is_empty() {
         return Err(ConfigError::InvalidInbound(format!(
@@ -348,6 +371,8 @@ fn parse_vless_listener(
         users,
         certificate,
         private_key,
+        ws_path,
+        grpc_service_name,
     })
 }
 

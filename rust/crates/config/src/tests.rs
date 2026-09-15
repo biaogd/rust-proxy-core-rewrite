@@ -3898,6 +3898,8 @@ rules: ['MATCH,DIRECT']
     assert_eq!(inbound.users[0].uuid, "b831381d-6324-4d53-ad4f-8cda48b30811");
     assert_eq!(inbound.certificate, "./server.crt");
     assert_eq!(inbound.private_key, "./server.key");
+    assert!(inbound.ws_path.is_none());
+    assert!(inbound.grpc_service_name.is_none());
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Vless, 18430)));
 
@@ -3921,9 +3923,50 @@ rules: ['MATCH,DIRECT']
         "b831381d-6324-4d53-ad4f-8cda48b30811"
     );
 
+    let with_ws = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-wss
+    type: vless
+    listen: 127.0.0.1
+    port: 18435
+    certificate: ./server.crt
+    private-key: ./server.key
+    ws-path: /vless
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless wss listener");
+    assert_eq!(
+        with_ws.vless_listeners[0].ws_path.as_deref(),
+        Some("/vless")
+    );
+
+    let with_grpc = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-grpc
+    type: vless
+    listen: 127.0.0.1
+    port: 18436
+    certificate: ./server.crt
+    private-key: ./server.key
+    grpc-service-name: GunService
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless grpc listener");
+    assert_eq!(
+        with_grpc.vless_listeners[0].grpc_service_name.as_deref(),
+        Some("GunService")
+    );
+
     for unsupported in [
-        "ws-path: /vless",
-        "grpc-service-name: GunService",
+        "ws-path: /vless\n    grpc-service-name: GunService",
         "reality-config:\n      public-key: aaaa\n      short-id: bb",
     ] {
         let source = format!(

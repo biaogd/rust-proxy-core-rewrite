@@ -1,9 +1,9 @@
-//! IN-D named `type: vless` TLS inbound.
+//! IN-D named `type: vless` inbound (TLS, optional WSS / gRPC Gun).
 //!
-//! This slice only owns the TLS carrier (no WS/gRPC/Vision/REALITY). After
-//! the TLS handshake, `accept_vless_request` authenticates the UUID and
-//! decodes the destination; TCP joins the shared `serve_shadowsocks_connection`
-//! boundary and UDP uses the standard fixed-destination framing.
+//! After the TLS handshake (and optional WebSocket upgrade or Gun stream),
+//! `accept_vless_request` authenticates the UUID and decodes the destination;
+//! TCP joins the shared `serve_shadowsocks_connection` boundary and UDP uses
+//! the standard fixed-destination framing. Vision / REALITY stay out of scope.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -21,6 +21,7 @@ use rewrite_protocol_vless::{
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
+use rewrite_transport::{V2rayGrpcServerConnection, accept_websocket_path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
@@ -34,12 +35,18 @@ use crate::tcp::{
 };
 use crate::types::RuntimeError;
 
+const VLESS_MAX_INBOUND_CONNECTIONS: usize = 1024;
+const VLESS_MAX_GRPC_STREAMS: usize = 256;
+const VLESS_GRPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) struct VlessListener {
     listener: TcpListener,
     acceptor: TlsAcceptor,
     users: HashMap<[u8; 16], String>,
     inbound_name: String,
     listen: SocketAddr,
+    ws_path: Option<String>,
+    grpc_service_name: Option<String>,
 }
 
 impl VlessListener {
@@ -72,6 +79,8 @@ impl VlessListener {
             ),
             inbound_name: config.name.clone(),
             listen: config.listen,
+            ws_path: config.ws_path.clone(),
+            grpc_service_name: config.grpc_service_name.clone(),
         })
     }
 }
@@ -154,6 +163,8 @@ pub(super) async fn run_vless_listener(
         users,
         inbound_name,
         listen,
+        ws_path,
+        grpc_service_name,
     } = listener;
     let mut connections = JoinSet::new();
     loop {
@@ -168,6 +179,15 @@ pub(super) async fn run_vless_listener(
                 if !connection_config.permits_inbound(peer.ip()) {
                     continue;
                 }
+                if connections.len() >= VLESS_MAX_INBOUND_CONNECTIONS {
+                    state.log(
+                        "warning",
+                        format!(
+                            "vless inbound connection limit reached ({VLESS_MAX_INBOUND_CONNECTIONS})"
+                        ),
+                    );
+                    continue;
+                }
                 let local = tcp.local_addr().unwrap_or(listen);
                 let acceptor = acceptor.clone();
                 let users = users.clone();
@@ -175,6 +195,8 @@ pub(super) async fn run_vless_listener(
                 let connection_dns = Arc::clone(&dns_service);
                 let connection_shutdown = shutdown.child_token();
                 let connection_inbound_name = inbound_name.clone();
+                let connection_ws_path = ws_path.clone();
+                let connection_grpc_service = grpc_service_name.clone();
                 connections.spawn(async move {
                     handle_vless_inbound(
                         tcp,
@@ -187,6 +209,8 @@ pub(super) async fn run_vless_listener(
                         connection_dns,
                         connection_shutdown,
                         connection_inbound_name,
+                        connection_ws_path,
+                        connection_grpc_service,
                     )
                     .await;
                 });
@@ -214,8 +238,10 @@ async fn handle_vless_inbound(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
     inbound_name: String,
+    ws_path: Option<String>,
+    grpc_service_name: Option<String>,
 ) {
-    let mut tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+    let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             state.log(
@@ -230,9 +256,182 @@ async fn handle_vless_inbound(
         }
     };
 
+    if let Some(service_name) = grpc_service_name {
+        serve_vless_grpc_connection(
+            tls,
+            service_name,
+            peer,
+            local,
+            users,
+            config,
+            state,
+            dns_service,
+            shutdown,
+            inbound_name,
+        )
+        .await;
+        return;
+    }
+
+    if let Some(path) = ws_path {
+        let websocket = match tokio::time::timeout(
+            Duration::from_secs(10),
+            accept_websocket_path(tls, &path),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                state.log(
+                    "error",
+                    format!("vless inbound WebSocket upgrade failed: {error}"),
+                );
+                return;
+            }
+            Err(_) => {
+                state.log("error", "vless inbound WebSocket upgrade timed out");
+                return;
+            }
+        };
+        dispatch_vless_session(
+            websocket,
+            peer,
+            local,
+            users,
+            config,
+            state,
+            dns_service,
+            shutdown,
+            inbound_name,
+        )
+        .await;
+        return;
+    }
+
+    dispatch_vless_session(
+        tls,
+        peer,
+        local,
+        users,
+        config,
+        state,
+        dns_service,
+        shutdown,
+        inbound_name,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_vless_grpc_connection<S>(
+    stream: S,
+    service_name: String,
+    peer: SocketAddr,
+    local: SocketAddr,
+    users: HashMap<[u8; 16], String>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    shutdown: CancellationToken,
+    inbound_name: String,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut connection = tokio::select! {
+        () = shutdown.cancelled() => return,
+        result = tokio::time::timeout(
+            VLESS_GRPC_HANDSHAKE_TIMEOUT,
+            V2rayGrpcServerConnection::handshake(stream, &service_name),
+        ) => match result {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                state.log(
+                    "error",
+                    format!("vless inbound gRPC handshake failed: {error}"),
+                );
+                return;
+            }
+            Err(_) => {
+                state.log("error", "vless inbound gRPC handshake timed out");
+                return;
+            }
+        },
+    };
+    let mut streams = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            accepted = connection.accept() => {
+                match accepted {
+                    Some(Ok(stream)) => {
+                        if streams.len() >= VLESS_MAX_GRPC_STREAMS {
+                            state.log(
+                                "warning",
+                                format!(
+                                    "vless inbound gRPC stream limit reached ({VLESS_MAX_GRPC_STREAMS})"
+                                ),
+                            );
+                            continue;
+                        }
+                        let users = users.clone();
+                        let config = Arc::clone(&config);
+                        let state = Arc::clone(&state);
+                        let dns_service = Arc::clone(&dns_service);
+                        let shutdown = shutdown.child_token();
+                        let inbound_name = inbound_name.clone();
+                        streams.spawn(async move {
+                            dispatch_vless_session(
+                                stream,
+                                peer,
+                                local,
+                                users,
+                                config,
+                                state,
+                                dns_service,
+                                shutdown,
+                                inbound_name,
+                            )
+                            .await;
+                        });
+                    }
+                    Some(Err(error)) => {
+                        state.log(
+                            "error",
+                            format!("vless inbound gRPC stream accept failed: {error}"),
+                        );
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            Some(result) = streams.join_next() => {
+                if let Err(error) = result {
+                    state.log("error", format!("vless inbound gRPC stream task failed: {error}"));
+                }
+            }
+        }
+    }
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_vless_session<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    local: SocketAddr,
+    users: HashMap<[u8; 16], String>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    shutdown: CancellationToken,
+    inbound_name: String,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let request = match tokio::time::timeout(
         Duration::from_secs(10),
-        accept_vless_request(&mut tls, &users),
+        accept_vless_request(&mut stream, &users),
     )
     .await
     {
@@ -247,7 +446,7 @@ async fn handle_vless_inbound(
     match request.command {
         VlessCommand::Tcp => {
             serve_vless_tcp(
-                tls,
+                stream,
                 peer,
                 local,
                 request.destination,
@@ -262,7 +461,7 @@ async fn handle_vless_inbound(
         }
         VlessCommand::Udp => {
             serve_vless_udp(
-                tls,
+                stream,
                 peer,
                 local,
                 request.destination,

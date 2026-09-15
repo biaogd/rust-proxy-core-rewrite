@@ -11,12 +11,12 @@ and one plain round trip are additionally proven through the product's own
 VLESS *outbound* client dialing the same named inbound, matching the task's
 "Product VLESS outbound vs Go/Rust named vless TLS inbound" requirement.
 
-Scope for this slice (see `docs/rust-rewrite/roadmap.md` IN-D): TLS carrier
-only (no WS/gRPC), no Vision/REALITY, and UDP is standard mode with one fixed
-destination per association (no packet-addr / XUDP multi-destination). The
-Rust listener additionally rejects `ws-path`, `grpc-service-name`,
-`reality-config` and per-user `flow` at parse time; those checks are Rust-only
-and excluded from the Go/Rust parity view below.
+Scope for this slice (see `docs/rust-rewrite/roadmap.md` IN-D): native TLS
+carrier only (WS/gRPC covered by sibling IN-D scripts), no Vision/REALITY, and
+UDP is standard mode with one fixed destination per association (no packet-addr
+/ XUDP multi-destination). The Rust listener still rejects `reality-config` and
+per-user `flow` at parse time; those checks are Rust-only and excluded from the
+Go/Rust parity view below.
 """
 
 from __future__ import annotations
@@ -313,12 +313,11 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
 
 
 def assert_rust_only_rejections(binary: pathlib.Path, scratch: pathlib.Path) -> None:
-    """Deferred IN-D keys (WS/gRPC/REALITY/Vision flow) must fail closed."""
+    """Deferred IN-D keys (combined WS+gRPC / REALITY / Vision flow) must fail closed."""
     certificate, private_key = stage_tls_material(scratch)
     base_port = reserve_port()
     cases = {
-        "ws-path": "    ws-path: /vless\n",
-        "grpc-service-name": "    grpc-service-name: GunService\n",
+        "ws-path+grpc-service-name": "    ws-path: /vless\n    grpc-service-name: GunService\n",
         "reality-config": "    reality-config:\n      public-key: aaaa\n      short-id: bb\n",
     }
     for label, extra in cases.items():

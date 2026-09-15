@@ -1307,8 +1307,9 @@ pub struct VlessInboundUser {
 
 /// Named `type: vless` TLS inbound accepted in IN-D.
 ///
-/// WS/gRPC transports, Vision flow and REALITY stay rejected at parse until
-/// later slices; see `named_listeners::parse_vless_listener`.
+/// Optional `ws-path` / `grpc-service-name` select the Trojan-style carriers.
+/// Vision flow and REALITY stay rejected at parse; see
+/// `named_listeners::parse_vless_listener`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessInboundConfig {
     pub name: String,
@@ -1316,6 +1317,10 @@ pub struct VlessInboundConfig {
     pub users: Vec<VlessInboundUser>,
     pub certificate: String,
     pub private_key: String,
+    /// When set, clients must WebSocket-upgrade on this path before VLESS bytes.
+    pub ws_path: Option<String>,
+    /// When set, clients must open a Gun/gRPC stream on this service before VLESS bytes.
+    pub grpc_service_name: Option<String>,
 }
 
 impl VlessInboundConfig {
@@ -1323,8 +1328,14 @@ impl VlessInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}",
-            self.name, self.listen, self.users, self.certificate, self.private_key
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.ws_path.as_deref().unwrap_or(""),
+            self.grpc_service_name.as_deref().unwrap_or("")
         )
     }
 }

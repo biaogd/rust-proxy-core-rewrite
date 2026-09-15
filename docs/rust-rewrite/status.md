@@ -2,18 +2,15 @@
 
 Last updated: 2026-09-14
 
-### IN-D VLESS TLS inbound — 2026-09-14
+### IN-D VLESS TLS + WSS + gRPC inbound — 2026-09-15
 
-Named `type: vless` TLS inbound owns UUID auth, TCP relay through
-`serve_shadowsocks_connection`, and standard-mode UDP (fixed destination per
-association, 2-byte length-prefixed frames) on the Direct path. WS/gRPC
-carriers, Vision flow and REALITY stay rejected at named-listener parse (only
-`name,type,listen,port,users,certificate,private-key` and per-user
-`username,uuid` are accepted). Evidence: `compat/scripts/phase_ind_vless_tls.py`
-(raw VLESS-wire client for TCP small/large and wrong-uuid fail-closed plus
-standard-mode UDP; product VLESS outbound for a plain round trip and
-half-close against the same named inbound; Rust-only reject of `ws-path`,
-`grpc-service-name`, `reality-config` and per-user `flow`).
+Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
+`grpc-service-name` (Gun). TCP and standard fixed-destination UDP are covered.
+Evidence: `phase_ind_vless_tls.py`, `phase_ind_vless_websocket.py`,
+`phase_ind_vless_grpc.py`. Combined ws+grpc, `reality-config`, and per-user
+`flow` (Vision) stay rejected. Packet-addr/XUDP, Vision, and REALITY remain
+later IN-D sub-gates.
+
 
 ### IN-C Trojan gRPC inbound — 2026-09-14
 
@@ -22,7 +19,7 @@ Named `type: trojan` with `grpc-service-name` accepts TLS then HTTP/2 Gun
 `compat/scripts/phase_inc_trojan_grpc.py` (product gRPC outbound vs Go/Rust
 inbounds: TCP small/large, UDP multi-dest, wrong-password; Rust-only reject of
 combined `ws-path` + `grpc-service-name`). Reality/`ss-option` stay rejected.
-Shared HTTP mux for WS+gRPC together remains open. Next: mux or **IN-D** VLESS.
+Shared HTTP mux for WS+gRPC together remains open. Shared HTTP mux for WS+gRPC together remains open.
 
 ### IN-C Trojan WebSocket inbound — 2026-09-14
 
@@ -64,7 +61,7 @@ the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP and
 **IN-C** Trojan TLS/WSS/gRPC inbound are implemented in this checkout (see
-above). Next inbound product slice: VLESS (**IN-D**). Explicit non-goals:
+above). Next inbound product slice: VMess (**IN-E**) or Vision/REALITY sub-gates. Explicit non-goals:
 SSR/Snell/SSH/WG servers, early mKCP/Mekya, panels/billing, public test
 authorities.
 
@@ -622,6 +619,9 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; `phase_inc_trojan_tls.py` |
 | IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; `phase_inc_trojan_websocket.py` |
 | IN-C Trojan gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+UDP UoT; combined ws+grpc rejected; `phase_inc_trojan_grpc.py` |
+| IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
+| IN-D VLESS WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+standard UDP; `phase_ind_vless_websocket.py` |
+| IN-D VLESS gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+standard UDP; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |
