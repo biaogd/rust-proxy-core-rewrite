@@ -23,7 +23,7 @@ mod udp_session;
 
 pub use shadowsocks::relay::udprelay::options::UdpSocketControlData;
 pub use udp::{ShadowsocksUdpAssociation, aead_2022_cipher};
-pub use udp_session::{Aead2022ServerSessions, ServerUdpReject};
+pub use udp_session::{Aead2022ReplyHandle, Aead2022ServerSessions, ServerUdpReject};
 
 #[derive(Debug, Error)]
 pub enum ShadowsocksProtocolError {
