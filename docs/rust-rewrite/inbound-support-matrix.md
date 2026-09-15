@@ -97,7 +97,7 @@ SSR inbound.
 | TUN | **Partial — Phase 8A/B/C/F** | `runtime/tun.rs`, `rewrite-tun`, platform | L3 | L3 | N/A | `stack: smoltcp` only | N/A | Go stacks rejected without remap |
 | Redir / TProxy / Tunnel | Missing | — | — | — | — | — | — | `IN-03`/`IN-04`/`IN-05` |
 | Trojan | **Partial — IN-C TLS + WSS + gRPC** | `named_listeners.rs`, `runtime/trojan_listener.rs`, `protocol-trojan`, `transport` `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | UDP-over-TLS | Password users (SHA-224) | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: trojan`; combined ws+grpc / Reality / `ss-option` rejected |
-| VLESS | **Partial — IN-D TLS + WSS + gRPC** | `named_listeners.rs`, `runtime/vless_listener.rs`, `protocol-vless::server`, `transport` `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | Standard-mode UDP on TLS (fixed dest); XUDP deferred | UUID users | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vless`; combined ws+grpc / `reality-config` / per-user `flow` rejected |
+| VLESS | **Partial — IN-D TLS + WSS + gRPC + XUDP** | `named_listeners.rs`, `runtime/vless_listener.rs`, `protocol-vless::server`, `transport` `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | Standard-mode UDP on TLS; Mux/XUDP multi-dest on TLS | UUID users | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vless`; combined ws+grpc / `reality-config` / per-user `flow` rejected |
 | Snell / VMess / Hy2 / realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented | — | — | — | — | — | Server gates = IN-E…IN-G |
 | Inbound Reality / ReSTLS / JLS / WS / H2 / gRPC / xHTTP / mKCP / Mekya / mux | Missing as inbound | — | — | — | — | ShadowTLS v3 on SS; Trojan TLS + WS + Gun; VLESS TLS + WS + Gun (no shared mux / Reality / Vision) | — | `IN-13` |
 | WG / SSH / SSR inbound | Missing | — | — | — | — | — | — | Same as Go (no server) |
@@ -168,7 +168,7 @@ Use these labels in later IN phases:
 | IN-05 | Static tunnel | Not started | 5B6 / later |
 | IN-06 | TUN | Partial smoltcp 8A/B/C/F | Phase 8 (preserve; do not duplicate) |
 | IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |
-| IN-08 | VMess + VLESS server | VLESS **Partial — IN-D** TLS+WSS+gRPC TCP+standard UDP; VMess not started | **IN-D** (VLESS TLS/WSS/gRPC done; Vision/REALITY/XUDP open), **IN-E** (VMess) |
+| IN-08 | VMess + VLESS server | VLESS **Partial — IN-D** TLS+WSS+gRPC TCP+standard/XUDP; VMess not started | **IN-D** (VLESS TLS/WSS/gRPC/XUDP done; Vision/REALITY open), **IN-E** (VMess) |
 | IN-09 | Trojan server | **Partial — IN-C** named TLS + WSS + gRPC TCP/UDP UoT; Reality/mux open | **IN-C** (TLS+WSS+gRPC done); Reality/mux later |
 | IN-10 | Hysteria2 (+ realm) server | Not started | **IN-F** (Hy2 portion) |
 | IN-11 | TUIC + ShadowQUIC server | Not started | **IN-F** (TUIC v5); ShadowQUIC later |

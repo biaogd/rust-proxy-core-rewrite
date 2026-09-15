@@ -3,7 +3,8 @@
 //! After the TLS handshake (and optional WebSocket upgrade or Gun stream),
 //! `accept_vless_request` authenticates the UUID and decodes the destination;
 //! TCP joins the shared `serve_shadowsocks_connection` boundary and UDP uses
-//! the standard fixed-destination framing. Vision / REALITY stay out of scope.
+//! the standard fixed-destination framing or Mux/XUDP multi-destination
+//! frames. Vision / REALITY stay out of scope.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,9 +15,10 @@ use std::time::Duration;
 
 use rewrite_config::{Config, ControllerTls, VlessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
-use rewrite_model::{Destination, InboundProtocol, Metadata, Network, unmap_ip};
+use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vless::{
-    VlessCommand, accept_vless_request, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
+    VlessCommand, accept_vless_request, read_vless_udp_payload, read_xudp_client_packet,
+    uuid_table, write_vless_udp_payload, write_xudp_server_packet,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
@@ -467,6 +469,19 @@ async fn dispatch_vless_session<S>(
             )
             .await;
         }
+        VlessCommand::Mux => {
+            serve_vless_xudp(
+                stream,
+                peer,
+                local,
+                request.username,
+                inbound_name,
+                &config,
+                &state,
+                &shutdown,
+            )
+            .await;
+        }
     }
 }
 
@@ -497,8 +512,8 @@ async fn serve_vless_tcp<S>(
 }
 
 /// Standard-mode VLESS UDP: one fixed destination per association, framed as
-/// a 2-byte big-endian length prefix followed by the payload (packet-addr and
-/// XUDP multi-destination modes stay out of this slice).
+/// a 2-byte big-endian length prefix followed by the payload. Mux/XUDP uses
+/// [`serve_vless_xudp`] instead.
 #[allow(clippy::too_many_arguments)]
 async fn serve_vless_udp<S>(
     mut stream: S,
@@ -650,4 +665,185 @@ where
         () = shutdown.cancelled() => None,
         result = read_vless_udp_payload(stream) => result.ok(),
     }
+}
+
+/// Mux/XUDP VLESS UDP: each frame carries its own destination (product VLESS
+/// outbound defaults to this mode).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_vless_xudp<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    local: SocketAddr,
+    username: String,
+    inbound_name: String,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    shutdown: &CancellationToken,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(Ok((first_destination, first_payload))) = tokio::time::timeout(
+        Duration::from_secs(10),
+        read_xudp_client_packet(&mut stream),
+    )
+    .await
+    else {
+        return;
+    };
+
+    let mut first_metadata = Metadata::new(first_destination.clone(), InboundProtocol::Vless);
+    first_metadata.network = Network::Udp;
+    first_metadata.source_ip = Some(unmap_ip(peer.ip()));
+    first_metadata.source_port = peer.port();
+    first_metadata.inbound_port = local.port();
+    inbound_name.clone_into(&mut first_metadata.inbound_name);
+    first_metadata.inbound_user = username;
+
+    let first_fake_host = apply_host_mapping(&mut first_metadata, config, state);
+    let decision =
+        mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(&first_metadata));
+    let Some((decision, outbound_target, _)) =
+        resolve_rematch_target(decision, &mut first_metadata, config, state)
+    else {
+        return;
+    };
+    let route = resolved_route(&outbound_target, config);
+    if matches!(route, Route::Reject | Route::RejectDrop) {
+        return;
+    }
+    let Some(mode) = udp_session_mode(&outbound_target, config) else {
+        state.log(
+            "error",
+            format!(
+                "vless inbound XUDP target {} is unsupported",
+                decision.target
+            ),
+        );
+        return;
+    };
+    if !matches!(mode, UdpSessionMode::Direct) {
+        state.log(
+            "error",
+            format!(
+                "vless inbound XUDP target {} is unsupported in IN-D",
+                decision.target
+            ),
+        );
+        return;
+    }
+    state.log(
+        "info",
+        format!(
+            "[UDP] {} --> {} match {} using {} (VLESS XUDP)",
+            first_metadata.source_port,
+            first_metadata.destination.authority(),
+            decision.matched_kind.as_deref().unwrap_or("none"),
+            decision.target
+        ),
+    );
+
+    let first_target =
+        match resolve_udp_target(&first_metadata, first_fake_host.as_deref(), config).await {
+            Ok(target) => target,
+            Err(error) => {
+                state.log(
+                    "error",
+                    format!("vless inbound XUDP resolution failed: {error}"),
+                );
+                return;
+            }
+        };
+    let outbound = match crate::listener::bind_direct_udp_socket(first_target, config) {
+        Ok(socket) => socket,
+        Err(error) => {
+            state.log("error", format!("vless inbound XUDP bind failed: {error}"));
+            return;
+        }
+    };
+    let tracker = state.register(
+        &first_metadata,
+        &decision.target,
+        decision.matched_kind.as_deref(),
+    );
+    let mut uploaded = first_payload.len() as u64;
+    let mut downloaded = 0_u64;
+    if outbound
+        .send_to(&first_payload, first_target)
+        .await
+        .is_err()
+    {
+        tracker.finish(uploaded, downloaded);
+        return;
+    }
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(Destination, Vec<u8>)>(16);
+    let reader_shutdown = shutdown.child_token();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = reader_shutdown.cancelled() => break,
+                frame = read_xudp_client_packet(&mut reader) => {
+                    match frame {
+                        Ok(packet) => {
+                            if frame_tx.send(packet).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
+    loop {
+        let mut response = vec![0_u8; 65_536];
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tracker.cancelled() => break,
+            received = outbound.recv_from(&mut response) => {
+                let Ok((length, source)) = received else { break };
+                let destination = Destination {
+                    host: Host::Ip(unmap_ip(source.ip())),
+                    port: source.port(),
+                };
+                if write_xudp_server_packet(&mut writer, &destination, &response[..length])
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                downloaded = downloaded.saturating_add(length as u64);
+            }
+            packet = frame_rx.recv() => {
+                let Some((destination, payload)) = packet else { break };
+                let mut packet_metadata = first_metadata.clone();
+                packet_metadata.destination = destination;
+                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
+                let target = match resolve_udp_target(
+                    &packet_metadata,
+                    fake_host.as_deref(),
+                    config,
+                )
+                .await
+                {
+                    Ok(target) => target,
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!("vless inbound XUDP resolution failed: {error}"),
+                        );
+                        continue;
+                    }
+                };
+                if outbound.send_to(&payload, target).await.is_ok() {
+                    uploaded = uploaded.saturating_add(payload.len() as u64);
+                }
+            }
+        }
+    }
+    reader_task.abort();
+    tracker.finish(uploaded, downloaded);
 }

@@ -1,10 +1,8 @@
-//! IN-D basic VLESS server-side request decoding.
+//! IN-D VLESS server-side request decoding.
 //!
-//! Vision, REALITY, and any XUDP/packet-addr UDP packet mode stay out of this
-//! slice: only the version-zero, no-addon TCP/UDP request shapes that
-//! `stream.rs` / `packet.rs` already produce on the client side are accepted
-//! here. A non-empty addon list is rejected rather than silently accepted,
-//! since Vision negotiation is deferred.
+//! Accepts version-zero TCP, standard UDP, and mux/XUDP commands. Vision
+//! addons remain deferred: a non-empty addon list is still rejected until the
+//! Vision inbound slice lands. REALITY stays out of the request decoder.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -19,6 +17,7 @@ use crate::VlessProtocolError;
 const VERSION: u8 = 0;
 const COMMAND_TCP: u8 = 1;
 const COMMAND_UDP: u8 = 2;
+const COMMAND_MUX: u8 = 3;
 const ADDRESS_IPV4: u8 = 1;
 const ADDRESS_DOMAIN: u8 = 2;
 const ADDRESS_IPV6: u8 = 3;
@@ -27,6 +26,8 @@ const ADDRESS_IPV6: u8 = 3;
 pub enum VlessCommand {
     Tcp,
     Udp,
+    /// XUDP / mux UDP association (no address in the VLESS request header).
+    Mux,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,6 +109,7 @@ where
     let command = match command[0] {
         COMMAND_TCP => VlessCommand::Tcp,
         COMMAND_UDP => VlessCommand::Udp,
+        COMMAND_MUX => VlessCommand::Mux,
         other => {
             return Err(VlessProtocolError::Protocol(format!(
                 "unsupported VLESS command {other}"
@@ -115,45 +117,55 @@ where
         }
     };
 
-    let mut port = [0_u8; 2];
-    stream.read_exact(&mut port).await?;
-    let port = u16::from_be_bytes(port);
+    let destination = if command == VlessCommand::Mux {
+        // XUDP carries destinations inside mux frames; the request header has
+        // no address field (matching Go sing-vless CommandMux).
+        Destination {
+            host: Host::Ip(Ipv4Addr::UNSPECIFIED.into()),
+            port: 0,
+        }
+    } else {
+        let mut port = [0_u8; 2];
+        stream.read_exact(&mut port).await?;
+        let port = u16::from_be_bytes(port);
 
-    let mut address_type = [0_u8; 1];
-    stream.read_exact(&mut address_type).await?;
-    let host = match address_type[0] {
-        ADDRESS_IPV4 => {
-            let mut octets = [0_u8; 4];
-            stream.read_exact(&mut octets).await?;
-            Host::Ip(Ipv4Addr::from(octets).into())
-        }
-        ADDRESS_IPV6 => {
-            let mut octets = [0_u8; 16];
-            stream.read_exact(&mut octets).await?;
-            Host::Ip(Ipv6Addr::from(octets).into())
-        }
-        ADDRESS_DOMAIN => {
-            let mut length = [0_u8; 1];
-            stream.read_exact(&mut length).await?;
-            let mut domain = vec![0_u8; usize::from(length[0])];
-            stream.read_exact(&mut domain).await?;
-            let domain = String::from_utf8(domain).map_err(|_| {
-                VlessProtocolError::Protocol("VLESS request domain is not UTF-8".to_owned())
-            })?;
-            Host::Domain(domain)
-        }
-        other => {
-            return Err(VlessProtocolError::Protocol(format!(
-                "unsupported VLESS address type {other}"
-            )));
-        }
+        let mut address_type = [0_u8; 1];
+        stream.read_exact(&mut address_type).await?;
+        let host = match address_type[0] {
+            ADDRESS_IPV4 => {
+                let mut octets = [0_u8; 4];
+                stream.read_exact(&mut octets).await?;
+                Host::Ip(Ipv4Addr::from(octets).into())
+            }
+            ADDRESS_IPV6 => {
+                let mut octets = [0_u8; 16];
+                stream.read_exact(&mut octets).await?;
+                Host::Ip(Ipv6Addr::from(octets).into())
+            }
+            ADDRESS_DOMAIN => {
+                let mut length = [0_u8; 1];
+                stream.read_exact(&mut length).await?;
+                let mut domain = vec![0_u8; usize::from(length[0])];
+                stream.read_exact(&mut domain).await?;
+                let domain = String::from_utf8(domain).map_err(|_| {
+                    VlessProtocolError::Protocol("VLESS request domain is not UTF-8".to_owned())
+                })?;
+                Host::Domain(domain)
+            }
+            other => {
+                return Err(VlessProtocolError::Protocol(format!(
+                    "unsupported VLESS address type {other}"
+                )));
+            }
+        };
+        Destination { host, port }
     };
 
     stream.write_all(&[VERSION, 0]).await?;
 
     Ok(VlessServerRequest {
         command,
-        destination: Destination { host, port },
+        destination,
         username,
     })
 }
@@ -348,19 +360,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_unsupported_command() {
+    async fn accepts_mux_command_without_address() {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let uuid = map_uuid(UUID_TEXT);
         tokio::spawn(async move {
             let mut request = vec![VERSION];
             request.extend_from_slice(&uuid);
             request.push(0);
-            request.push(3); // COMMAND_MUX
+            request.push(COMMAND_MUX);
+            let _ = client.write_all(&request).await;
+            let mut response = [0_u8; 2];
+            let _ = client.read_exact(&mut response).await;
+        });
+        let request = accept_vless_request(&mut server, &users())
+            .await
+            .expect("mux must be accepted for XUDP");
+        assert_eq!(request.command, VlessCommand::Mux);
+        assert_eq!(request.destination.port, 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_command() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let uuid = map_uuid(UUID_TEXT);
+        tokio::spawn(async move {
+            let mut request = vec![VERSION];
+            request.extend_from_slice(&uuid);
+            request.push(0);
+            request.push(9);
             let _ = client.write_all(&request).await;
         });
         let error = accept_vless_request(&mut server, &users())
             .await
-            .expect_err("mux must be rejected in this slice");
+            .expect_err("unknown commands must be rejected");
         assert!(matches!(error, VlessProtocolError::Protocol(_)));
     }
 

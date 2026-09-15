@@ -2,14 +2,15 @@
 
 Last updated: 2026-09-14
 
-### IN-D VLESS TLS + WSS + gRPC inbound — 2026-09-15
+### IN-D VLESS TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
 Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
-`grpc-service-name` (Gun). TCP is covered on TLS/WSS/gRPC; standard fixed-destination UDP is covered on TLS (product VLESS outbound defaults to XUDP, deferred).
-Evidence: `phase_ind_vless_tls.py`, `phase_ind_vless_websocket.py`,
-`phase_ind_vless_grpc.py`. Combined ws+grpc, `reality-config`, and per-user
-`flow` (Vision) stay rejected. Packet-addr/XUDP, Vision, and REALITY remain
-later IN-D sub-gates.
+`grpc-service-name` (Gun). TCP is covered on TLS/WSS/gRPC; UDP covers standard
+fixed-destination framing on TLS plus Mux/XUDP multi-destination (product VLESS
+outbound default). Evidence: `phase_ind_vless_tls.py`,
+`phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`,
+`phase_ind_vless_xudp.py`. Combined ws+grpc, `reality-config`, and per-user
+`flow` (Vision) stay rejected. Vision and REALITY remain later IN-D sub-gates.
 
 
 ### IN-C Trojan gRPC inbound — 2026-09-14
@@ -61,7 +62,7 @@ the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP and
 **IN-C** Trojan TLS/WSS/gRPC inbound are implemented in this checkout (see
-above). Next inbound product slice: VMess (**IN-E**) or Vision/REALITY sub-gates. Explicit non-goals:
+above). Next inbound product slice: Vision/REALITY (**IN-D** sub-gates) or VMess (**IN-E**). Explicit non-goals:
 SSR/Snell/SSH/WG servers, early mKCP/Mekya, panels/billing, public test
 authorities.
 
@@ -622,6 +623,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
 | IN-D VLESS WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; standard UDP remains on TLS evidence; `phase_ind_vless_websocket.py` |
 | IN-D VLESS gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; standard UDP remains on TLS evidence; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |
+| IN-D VLESS XUDP inbound | Complete (declared Mux/XUDP UDP scope) | Named TLS Mux/XUDP multi-destination UDP via product outbound; `phase_ind_vless_xudp.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |

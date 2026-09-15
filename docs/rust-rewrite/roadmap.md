@@ -1471,7 +1471,7 @@ destination per association) on the Direct path. WS/gRPC carriers, Vision flow
 and REALITY are separate sub-gates with independent security and lifecycle
 acceptance; the named-listener allowlist rejects `ws-path`,
 `grpc-service-name`, `reality-config` and per-user `flow` until those slices
-land. Evidence `phase_ind_vless_tls.py`. Evidence also `phase_ind_vless_websocket.py` and `phase_ind_vless_grpc.py`. Remaining IN-D work: Vision/REALITY/XUDP with separate security/lifecycle gates.
+land. Evidence `phase_ind_vless_tls.py`. Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and `phase_ind_vless_xudp.py` (Mux/XUDP multi-destination UDP). Remaining IN-D work: Vision/REALITY with separate security/lifecycle gates.
 
 
 ### IN-E — VMess inbound

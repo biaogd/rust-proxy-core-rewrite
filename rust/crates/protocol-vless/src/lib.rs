@@ -19,7 +19,10 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
-pub use packet::{VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream};
+pub use packet::{
+    VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream, read_xudp_client_packet,
+    write_xudp_server_packet,
+};
 pub use server::{
     VlessCommand, VlessServerRequest, accept_vless_request, map_uuid, read_vless_udp_payload,
     uuid_table, write_vless_udp_payload,

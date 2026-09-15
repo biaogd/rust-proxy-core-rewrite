@@ -14,9 +14,9 @@ VLESS *outbound* client dialing the same named inbound, matching the task's
 Scope for this slice (see `docs/rust-rewrite/roadmap.md` IN-D): native TLS
 carrier only (WS/gRPC covered by sibling IN-D scripts), no Vision/REALITY, and
 UDP is standard mode with one fixed destination per association (no packet-addr
-/ XUDP multi-destination). The Rust listener still rejects `reality-config` and
-per-user `flow` at parse time; those checks are Rust-only and excluded from the
-Go/Rust parity view below.
+). Mux/XUDP multi-destination is covered by `phase_ind_vless_xudp.py`. The
+Rust listener still rejects `reality-config` and per-user `flow` at parse time;
+those checks are Rust-only and excluded from the Go/Rust parity view below.
 """
 
 from __future__ import annotations

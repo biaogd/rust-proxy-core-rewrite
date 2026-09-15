@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{VlessClientOptions, VlessProtocolError};
 
@@ -508,4 +508,119 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, VlessProtocolError> {
         .and_then(|slice| <[u8; 2]>::try_from(slice).ok())
         .ok_or_else(|| VlessProtocolError::Protocol("truncated integer".to_owned()))?;
     Ok(u16::from_be_bytes(bytes))
+}
+
+/// Reads one client→server XUDP mux frame (NEW or KEEP with payload).
+///
+/// # Errors
+///
+/// Returns protocol or I/O errors for truncated/invalid frames, END/ERROR
+/// status, or non-UDP network markers.
+pub async fn read_xudp_client_packet<S>(
+    stream: &mut S,
+) -> Result<(Destination, Vec<u8>), VlessProtocolError>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut length_bytes = [0_u8; 2];
+    stream.read_exact(&mut length_bytes).await?;
+    let header_length = usize::from(u16::from_be_bytes(length_bytes));
+    if header_length < 5 {
+        return Err(VlessProtocolError::Protocol(
+            "invalid XUDP client frame header length".to_owned(),
+        ));
+    }
+    let mut header = vec![0_u8; header_length];
+    stream.read_exact(&mut header).await?;
+    let status = header[2];
+    let option = header[3];
+    if option & XUDP_OPTION_ERROR != 0 {
+        return Err(VlessProtocolError::Protocol(
+            "client closed XUDP association".to_owned(),
+        ));
+    }
+    match status {
+        XUDP_STATUS_NEW | XUDP_STATUS_KEEP => {}
+        XUDP_STATUS_END => {
+            return Err(VlessProtocolError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "XUDP association ended",
+            )));
+        }
+        XUDP_STATUS_KEEPALIVE => {
+            return Err(VlessProtocolError::Protocol(
+                "unexpected XUDP keepalive from client".to_owned(),
+            ));
+        }
+        _ => {
+            return Err(VlessProtocolError::Protocol(
+                "invalid XUDP client status".to_owned(),
+            ));
+        }
+    }
+    if header[4] != XUDP_NETWORK_UDP {
+        return Err(VlessProtocolError::Protocol(
+            "invalid XUDP client network".to_owned(),
+        ));
+    }
+    let (destination, consumed) = decode_xudp_address(&header[5..])?;
+    let rest = &header[5 + consumed..];
+    if status == XUDP_STATUS_NEW {
+        if rest.len() < 8 {
+            return Err(VlessProtocolError::Protocol(
+                "truncated XUDP global id".to_owned(),
+            ));
+        }
+        // Global id is session metadata; inbound does not need to persist it.
+    } else if !rest.is_empty() {
+        return Err(VlessProtocolError::Protocol(
+            "unexpected XUDP keep header extension".to_owned(),
+        ));
+    }
+    if option & XUDP_OPTION_DATA == 0 {
+        return Err(VlessProtocolError::Protocol(
+            "XUDP client frame missing data option".to_owned(),
+        ));
+    }
+    let mut payload_length_bytes = [0_u8; 2];
+    stream.read_exact(&mut payload_length_bytes).await?;
+    let payload_length = usize::from(u16::from_be_bytes(payload_length_bytes));
+    let mut payload = vec![0_u8; payload_length];
+    stream.read_exact(&mut payload).await?;
+    Ok((destination, payload))
+}
+
+/// Writes one server→client XUDP KEEP frame carrying `payload` from `source`.
+///
+/// # Errors
+///
+/// Returns protocol or I/O errors when the frame cannot be encoded or written.
+pub async fn write_xudp_server_packet<S>(
+    stream: &mut S,
+    source: &Destination,
+    payload: &[u8],
+) -> Result<(), VlessProtocolError>
+where
+    S: AsyncWrite + Unpin,
+{
+    let payload_length = u16::try_from(payload.len())
+        .map_err(|_| VlessProtocolError::Protocol("XUDP payload exceeds 65535 bytes".to_owned()))?;
+    let mut address = Vec::with_capacity(20);
+    encode_xudp_address(&mut address, source)?;
+    let header_length = 5_usize
+        .checked_add(address.len())
+        .ok_or_else(|| VlessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
+    let header_length = u16::try_from(header_length)
+        .map_err(|_| VlessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
+    let mut frame = Vec::with_capacity(2 + usize::from(header_length) + 2 + payload.len());
+    frame.extend_from_slice(&header_length.to_be_bytes());
+    frame.extend_from_slice(&0_u16.to_be_bytes());
+    frame.push(XUDP_STATUS_KEEP);
+    frame.push(XUDP_OPTION_DATA);
+    frame.push(XUDP_NETWORK_UDP);
+    frame.extend_from_slice(&address);
+    frame.extend_from_slice(&payload_length.to_be_bytes());
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame).await?;
+    Ok(())
 }
