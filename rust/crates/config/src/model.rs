@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use ipnet::IpNet;
 use rewrite_model::{AuthUser, ShadowsocksPluginConfig};
@@ -1306,18 +1306,36 @@ pub struct VlessInboundUser {
     pub flow: Option<VlessFlow>,
 }
 
+/// Named `reality-config` for VLESS REALITY inbound (mutually exclusive with PEM TLS).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RealityInboundConfig {
+    /// Camouflage dial target (`host:port`); required for Go parity, used later for fallback.
+    pub dest: String,
+    /// X25519 private key (32 bytes).
+    pub private_key: [u8; 32],
+    /// Accepted short IDs (at most 8 bytes each, zero-padded).
+    pub short_ids: Vec<[u8; 8]>,
+    /// Accepted TLS SNI values.
+    pub server_names: Vec<String>,
+    /// Optional absolute timestamp skew bound (from `max-time-difference` microseconds).
+    pub max_time_difference: Option<Duration>,
+    /// Optional inner dialer proxy name for dest fallback (stored; dial path TBD).
+    pub proxy: Option<String>,
+}
+
 /// Named `type: vless` TLS inbound accepted in IN-D.
 ///
 /// Optional `ws-path` / `grpc-service-name` select the Trojan-style carriers.
-/// Per-user `flow: xtls-rprx-vision` is accepted; REALITY stays rejected at parse;
-/// see `named_listeners::parse_vless_listener`.
+/// Per-user `flow: xtls-rprx-vision` is accepted on certificate TLS.
+/// `reality-config` selects REALITY (XOR with `certificate` / `private-key`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessInboundConfig {
     pub name: String,
     pub listen: SocketAddr,
     pub users: Vec<VlessInboundUser>,
-    pub certificate: String,
-    pub private_key: String,
+    pub certificate: Option<String>,
+    pub private_key: Option<String>,
+    pub reality: Option<RealityInboundConfig>,
     /// When set, clients must WebSocket-upgrade on this path before VLESS bytes.
     pub ws_path: Option<String>,
     /// When set, clients must open a Gun/gRPC stream on this service before VLESS bytes.
@@ -1329,12 +1347,13 @@ impl VlessInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|reality={:?}|ws-path={}|grpc-service-name={}",
             self.name,
             self.listen,
             self.users,
-            self.certificate,
-            self.private_key,
+            self.certificate.as_deref().unwrap_or(""),
+            self.private_key.as_deref().unwrap_or(""),
+            self.reality,
             self.ws_path.as_deref().unwrap_or(""),
             self.grpc_service_name.as_deref().unwrap_or("")
         )

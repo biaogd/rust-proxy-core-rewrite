@@ -519,6 +519,7 @@ jobs:
             compat/scripts/phase_ind_vless_websocket.py \
             compat/scripts/phase_ind_vless_grpc.py \
             compat/scripts/phase_ind_vless_xudp.py \
+            compat/scripts/phase_ind_vless_reality.py \
             compat/scripts/phase6g_anytls_tcp.py \
             compat/scripts/phase6g_anytls_mux.py \
             compat/scripts/phase6g_anytls_udp.py \

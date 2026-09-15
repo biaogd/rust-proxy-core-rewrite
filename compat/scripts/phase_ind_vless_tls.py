@@ -15,9 +15,9 @@ Scope for this slice (see `docs/rust-rewrite/roadmap.md` IN-D): native TLS
 carrier only (WS/gRPC covered by sibling IN-D scripts), no Vision/REALITY, and
 UDP is standard mode with one fixed destination per association (no packet-addr
 ). Mux/XUDP multi-destination is covered by `phase_ind_vless_xudp.py`; Vision
-is covered by `phase_ind_vless_vision.py`. The Rust listener still rejects
-`reality-config` at parse time; that check is Rust-only and excluded from the
-Go/Rust parity view below.
+is covered by `phase_ind_vless_vision.py`. Certificate TLS remains the scope of this script; REALITY inbound is covered by
+`phase_ind_vless_reality.py`. Combined ws+grpc and certificate+reality-config
+stay rejected.
 """
 
 from __future__ import annotations
@@ -314,12 +314,18 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
 
 
 def assert_rust_only_rejections(binary: pathlib.Path, scratch: pathlib.Path) -> None:
-    """Deferred IN-D keys (combined WS+gRPC / REALITY) must fail closed."""
+    """Combined WS+gRPC stays rejected; cert+reality-config remains mutually exclusive."""
     certificate, private_key = stage_tls_material(scratch)
     base_port = reserve_port()
     cases = {
         "ws-path+grpc-service-name": "    ws-path: /vless\n    grpc-service-name: GunService\n",
-        "reality-config": "    reality-config:\n      public-key: aaaa\n      short-id: bb\n",
+        "certificate+reality-config": (
+            "    reality-config:\n"
+            "      dest: itunes.apple.com:443\n"
+            "      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw\n"
+            "      short-id: [10f897e26c4b9478]\n"
+            "      server-names: [itunes.apple.com]\n"
+        ),
     }
     for label, extra in cases.items():
         accepted = config_validation(

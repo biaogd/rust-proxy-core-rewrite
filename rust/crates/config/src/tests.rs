@@ -3900,8 +3900,9 @@ rules: ['MATCH,DIRECT']
         inbound.users[0].uuid,
         "b831381d-6324-4d53-ad4f-8cda48b30811"
     );
-    assert_eq!(inbound.certificate, "./server.crt");
-    assert_eq!(inbound.private_key, "./server.key");
+    assert_eq!(inbound.certificate.as_deref(), Some("./server.crt"));
+    assert_eq!(inbound.private_key.as_deref(), Some("./server.key"));
+    assert!(inbound.reality.is_none());
     assert!(inbound.ws_path.is_none());
     assert!(inbound.grpc_service_name.is_none());
     let listeners = config.listener_ports().expect("listener ports");
@@ -3999,6 +4000,39 @@ rules: ['MATCH,DIRECT']
         Config::from_yaml(unknown_flow).is_err(),
         "unknown user flow must be rejected"
     );
+
+    let with_reality = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-reality
+    type: vless
+    listen: 127.0.0.1
+    port: 18437
+    reality-config:
+      dest: itunes.apple.com:443
+      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw
+      short-id:
+        - 10f897e26c4b9478
+      server-names:
+        - itunes.apple.com
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless reality listener");
+    let reality = with_reality.vless_listeners[0]
+        .reality
+        .as_ref()
+        .expect("reality-config");
+    assert_eq!(reality.dest, "itunes.apple.com:443");
+    assert_eq!(reality.server_names, vec!["itunes.apple.com".to_owned()]);
+    let short_id: [u8; 8] = hex::decode("10f897e26c4b9478")
+        .expect("short id hex")
+        .try_into()
+        .expect("8-byte short id");
+    assert_eq!(reality.short_ids, vec![short_id]);
+    assert!(with_reality.vless_listeners[0].certificate.is_none());
 }
 
 #[test]

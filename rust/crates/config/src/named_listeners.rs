@@ -2,7 +2,7 @@ use serde_yaml_ng::{Mapping, Value};
 
 use crate::ConfigError;
 use crate::model::{
-    ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
+    RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
     ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
     TrojanInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser,
 };
@@ -309,6 +309,7 @@ fn parse_vless_listener(
             "users",
             "certificate",
             "private-key",
+            "reality-config",
             "ws-path",
             "grpc-service-name",
         ],
@@ -334,15 +335,34 @@ fn parse_vless_listener(
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
     let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
-    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
-    })?;
-    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
-    })?;
-    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+    let certificate = mapping_string(mapping, "certificate").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let private_key = mapping_string(mapping, "private-key").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let reality = parse_reality_config(mapping, &name)?;
+    match (
+        certificate.is_some() && private_key.is_some(),
+        reality.is_some(),
+    ) {
+        (true, true) => {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} cannot combine certificate/private-key with reality-config"
+            )));
+        }
+        (false, false) => {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} requires certificate and private-key, or reality-config"
+            )));
+        }
+        _ => {}
+    }
+    if certificate.is_some() ^ private_key.is_some() {
         return Err(ConfigError::InvalidInbound(format!(
-            "listener {name} requires non-empty certificate and private-key"
+            "listener {name} requires both certificate and private-key together"
         )));
     }
     let ws_path = mapping_string(mapping, "ws-path").and_then(|path| {
@@ -364,15 +384,186 @@ fn parse_vless_listener(
             "listener {name} requires at least one user uuid"
         )));
     }
+    if reality.is_some()
+        && users
+            .iter()
+            .any(|user| user.flow == Some(VlessFlow::XtlsRprxVision))
+    {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} does not support xtls-rprx-vision with reality-config yet"
+        )));
+    }
     Ok(VlessInboundConfig {
         name,
         listen,
         users,
         certificate,
         private_key,
+        reality,
         ws_path,
         grpc_service_name,
     })
+}
+
+fn parse_reality_config(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Option<RealityInboundConfig>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("reality-config")) else {
+        return Ok(None);
+    };
+    let Some(reality) = value.as_mapping() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid reality-config"
+        )));
+    };
+    validate_mapping_keys(
+        reality,
+        &[
+            "dest",
+            "private-key",
+            "short-id",
+            "server-names",
+            "max-time-difference",
+            "proxy",
+        ],
+        &format!("listener {name} reality-config"),
+    )?;
+    let dest = mapping_string(reality, "dest")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ConfigError::InvalidInbound(format!("listener {name} reality-config is missing dest"))
+        })?;
+    let private_key_text = mapping_string(reality, "private-key")
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config is missing private-key"
+            ))
+        })?;
+    let private_key = decode_reality_private_key(&private_key_text, name)?;
+    let short_ids = parse_reality_short_ids(reality, name)?;
+    if short_ids.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} reality-config requires at least one short-id"
+        )));
+    }
+    let server_names = parse_reality_server_names(reality, name)?;
+    if server_names.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} reality-config requires at least one server-names entry"
+        )));
+    }
+    let max_time_difference = reality
+        .get(Value::from("max-time-difference"))
+        .and_then(Value::as_u64)
+        .map(std::time::Duration::from_micros);
+    let proxy = mapping_string(reality, "proxy").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    Ok(Some(RealityInboundConfig {
+        dest,
+        private_key,
+        short_ids,
+        server_names,
+        max_time_difference,
+        proxy,
+    }))
+}
+
+fn decode_reality_private_key(text: &str, name: &str) -> Result<[u8; 32], ConfigError> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(text))
+        .map_err(|_| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config private-key is not valid URL-safe base64"
+            ))
+        })?;
+    decoded.try_into().map_err(|_| {
+        ConfigError::InvalidInbound(format!(
+            "listener {name} reality-config private-key must be 32 bytes"
+        ))
+    })
+}
+
+fn parse_reality_short_ids(mapping: &Mapping, name: &str) -> Result<Vec<[u8; 8]>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("short-id")) else {
+        return Ok(Vec::new());
+    };
+    let texts = match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Sequence(items) => {
+            let mut texts = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Some(text) = item.as_str() else {
+                    return Err(ConfigError::InvalidInbound(format!(
+                        "listener {name} reality-config short-id {index} is invalid"
+                    )));
+                };
+                texts.push(text.to_owned());
+            }
+            texts
+        }
+        _ => {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config short-id is invalid"
+            )));
+        }
+    };
+    let mut short_ids = Vec::with_capacity(texts.len());
+    for (index, text) in texts.into_iter().enumerate() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            short_ids.push([0_u8; 8]);
+            continue;
+        }
+        let decoded = hex::decode(trimmed).map_err(|_| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config short-id {index} is not valid hex"
+            ))
+        })?;
+        if decoded.len() > 8 {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config short-id {index} must be at most 8 bytes"
+            )));
+        }
+        let mut short_id = [0_u8; 8];
+        short_id[..decoded.len()].copy_from_slice(&decoded);
+        short_ids.push(short_id);
+    }
+    Ok(short_ids)
+}
+
+fn parse_reality_server_names(mapping: &Mapping, name: &str) -> Result<Vec<String>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("server-names")) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} reality-config server-names is invalid"
+        )));
+    };
+    let mut names = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Some(text) = item.as_str() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config server-names[{index}] is invalid"
+            )));
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} reality-config server-names[{index}] must not be empty"
+            )));
+        }
+        names.push(trimmed.to_owned());
+    }
+    Ok(names)
 }
 
 fn parse_vless_users(mapping: &Mapping, name: &str) -> Result<Vec<VlessInboundUser>, ConfigError> {

@@ -1,11 +1,11 @@
-//! IN-D named `type: vless` inbound (TLS, optional WSS / gRPC Gun).
+//! IN-D named `type: vless` inbound (TLS / REALITY, optional WSS / gRPC Gun).
 //!
-//! After the TLS handshake (and optional WebSocket upgrade or Gun stream),
-//! `accept_vless_request` authenticates the UUID and decodes the destination;
-//! TCP joins the shared `serve_shadowsocks_connection` boundary and UDP uses
-//! the standard fixed-destination framing or Mux/XUDP multi-destination
-//! frames. Vision (`flow: xtls-rprx-vision`) is supported on native TLS;
-//! REALITY stays out of scope.
+//! After the TLS or REALITY handshake (and optional WebSocket upgrade or Gun
+//! stream), `accept_vless_request` authenticates the UUID and decodes the
+//! destination; TCP joins the shared `serve_shadowsocks_connection` boundary
+//! and UDP uses the standard fixed-destination framing or Mux/XUDP
+//! multi-destination frames. Vision (`flow: xtls-rprx-vision`) is supported on
+//! certificate TLS; REALITY is native-TCP only in this slice (no Vision).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -26,8 +26,9 @@ use rewrite_protocol_vless::{
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
 use rewrite_transport::{
-    BoxedStream, V2rayGrpcServerConnection, VisionDirectControl, accept_vision_tls,
-    accept_websocket_path,
+    BoxedStream, RealityAcceptOptions, RealityTlsAcceptor, V2rayGrpcServerConnection,
+    VisionDirectControl, accept_reality, accept_vision_tls, accept_websocket_path,
+    reality_acceptor,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -230,9 +231,15 @@ async fn ensure_xudp_session(
     Some(table.insert_session(session_id, socket, reply_tx.clone()))
 }
 
+#[derive(Clone)]
+enum VlessTlsAcceptor {
+    Certificate(TlsAcceptor),
+    Reality(RealityTlsAcceptor),
+}
+
 pub(crate) struct VlessListener {
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: VlessTlsAcceptor,
     users: HashMap<[u8; 16], VlessUserEntry>,
     vision_capable: bool,
     inbound_name: String,
@@ -246,17 +253,37 @@ impl VlessListener {
         config: &VlessInboundConfig,
         clock: Arc<rewrite_services::AdjustedClock>,
     ) -> Result<Self, RuntimeError> {
-        let tls = rewrite_controller::prepare_tls_config(
-            &ControllerTls {
-                certificate: config.certificate.clone(),
-                private_key: config.private_key.clone(),
-                client_auth_type: String::new(),
-                client_auth_cert: String::new(),
-                ech_key: String::new(),
-            },
-            clock,
-        )
-        .map_err(RuntimeError::Listener)?;
+        let acceptor = if let Some(reality) = config.reality.as_ref() {
+            let options = RealityAcceptOptions {
+                private_key: reality.private_key,
+                short_ids: reality.short_ids.clone(),
+                server_names: reality.server_names.clone(),
+                max_time_difference: reality.max_time_difference,
+            };
+            let acceptor = reality_acceptor(&options).map_err(|error| {
+                RuntimeError::Listener(std::io::Error::other(error.to_string()))
+            })?;
+            VlessTlsAcceptor::Reality(acceptor)
+        } else {
+            let certificate = config.certificate.clone().ok_or_else(|| {
+                RuntimeError::Listener(std::io::Error::other("vless inbound missing certificate"))
+            })?;
+            let private_key = config.private_key.clone().ok_or_else(|| {
+                RuntimeError::Listener(std::io::Error::other("vless inbound missing private-key"))
+            })?;
+            let tls = rewrite_controller::prepare_tls_config(
+                &ControllerTls {
+                    certificate,
+                    private_key,
+                    client_auth_type: String::new(),
+                    client_auth_cert: String::new(),
+                    ech_key: String::new(),
+                },
+                clock,
+            )
+            .map_err(RuntimeError::Listener)?;
+            VlessTlsAcceptor::Certificate(TlsAcceptor::from(Arc::new(tls)))
+        };
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;
@@ -266,7 +293,7 @@ impl VlessListener {
             .any(|user| user.flow == Some(rewrite_config::VlessFlow::XtlsRprxVision));
         Ok(Self {
             listener,
-            acceptor: TlsAcceptor::from(Arc::new(tls)),
+            acceptor,
             users: uuid_table(config.users.iter().map(|user| {
                 (
                     user.uuid.as_str(),
@@ -433,7 +460,7 @@ async fn handle_vless_inbound(
     tcp: TcpStream,
     peer: SocketAddr,
     local: SocketAddr,
-    acceptor: TlsAcceptor,
+    acceptor: VlessTlsAcceptor,
     users: HashMap<[u8; 16], VlessUserEntry>,
     vision_capable: bool,
     config: Arc<Config>,
@@ -445,43 +472,62 @@ async fn handle_vless_inbound(
     grpc_service_name: Option<String>,
 ) {
     let vision_control = vision_capable.then(VisionDirectControl::default);
-    let tls: BoxedStream = if vision_capable {
-        let control = vision_control
-            .as_ref()
-            .expect("vision control is present when vision_capable")
-            .clone();
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            accept_vision_tls(Box::new(tcp), acceptor, control),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => {
-                state.log(
-                    "error",
-                    format!("vless inbound Vision TLS handshake failed: {error}"),
-                );
+    let tls: BoxedStream = match acceptor {
+        VlessTlsAcceptor::Reality(reality_acceptor) => {
+            if vision_capable {
+                state.log("error", "vless inbound REALITY does not support Vision yet");
                 return;
             }
-            Err(_) => {
-                state.log("error", "vless inbound Vision TLS handshake timed out");
-                return;
+            match accept_reality(&reality_acceptor, tcp).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("vless inbound REALITY handshake failed: {error}"),
+                    );
+                    return;
+                }
             }
         }
-    } else {
-        match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
-            Ok(Ok(stream)) => Box::new(stream),
-            Ok(Err(error)) => {
-                state.log(
-                    "error",
-                    format!("vless inbound TLS handshake failed: {error}"),
-                );
-                return;
+        VlessTlsAcceptor::Certificate(acceptor) if vision_capable => {
+            let control = vision_control
+                .as_ref()
+                .expect("vision control is present when vision_capable")
+                .clone();
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                accept_vision_tls(Box::new(tcp), acceptor, control),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("vless inbound Vision TLS handshake failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "vless inbound Vision TLS handshake timed out");
+                    return;
+                }
             }
-            Err(_) => {
-                state.log("error", "vless inbound TLS handshake timed out");
-                return;
+        }
+        VlessTlsAcceptor::Certificate(acceptor) => {
+            match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+                Ok(Ok(stream)) => Box::new(stream),
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("vless inbound TLS handshake failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "vless inbound TLS handshake timed out");
+                    return;
+                }
             }
         }
     };
