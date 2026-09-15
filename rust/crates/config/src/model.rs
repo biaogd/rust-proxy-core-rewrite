@@ -1303,13 +1303,14 @@ impl TrojanInboundConfig {
 pub struct VlessInboundUser {
     pub username: String,
     pub uuid: String,
+    pub flow: Option<VlessFlow>,
 }
 
 /// Named `type: vless` TLS inbound accepted in IN-D.
 ///
 /// Optional `ws-path` / `grpc-service-name` select the Trojan-style carriers.
-/// Vision flow and REALITY stay rejected at parse; see
-/// `named_listeners::parse_vless_listener`.
+/// Per-user `flow: xtls-rprx-vision` is accepted; REALITY stays rejected at parse;
+/// see `named_listeners::parse_vless_listener`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessInboundConfig {
     pub name: String,

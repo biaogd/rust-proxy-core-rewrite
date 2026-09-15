@@ -515,6 +515,7 @@ jobs:
             compat/scripts/phase_inc_trojan_websocket.py \
             compat/scripts/phase_inc_trojan_grpc.py \
             compat/scripts/phase_ind_vless_tls.py \
+            compat/scripts/phase_ind_vless_vision.py \
             compat/scripts/phase_ind_vless_websocket.py \
             compat/scripts/phase_ind_vless_grpc.py \
             compat/scripts/phase_ind_vless_xudp.py \

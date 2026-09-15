@@ -4,7 +4,7 @@ use crate::ConfigError;
 use crate::model::{
     ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
     ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
-    TrojanInboundUser, VlessInboundConfig, VlessInboundUser,
+    TrojanInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -393,7 +393,7 @@ fn parse_vless_users(mapping: &Mapping, name: &str) -> Result<Vec<VlessInboundUs
         };
         validate_mapping_keys(
             user,
-            &["username", "uuid"],
+            &["username", "uuid", "flow"],
             &format!("listener {name} user {index}"),
         )?;
         let uuid = mapping_string(user, "uuid").ok_or_else(|| {
@@ -405,9 +405,39 @@ fn parse_vless_users(mapping: &Mapping, name: &str) -> Result<Vec<VlessInboundUs
             )));
         }
         let username = mapping_string(user, "username").unwrap_or_else(|| uuid.clone());
-        parsed.push(VlessInboundUser { username, uuid });
+        let flow = parse_vless_inbound_flow(user, name, index)?;
+        parsed.push(VlessInboundUser {
+            username,
+            uuid,
+            flow,
+        });
     }
     Ok(parsed)
+}
+
+fn parse_vless_inbound_flow(
+    user: &Mapping,
+    name: &str,
+    index: usize,
+) -> Result<Option<VlessFlow>, ConfigError> {
+    let Some(flow) = mapping_string(user, "flow") else {
+        return Ok(None);
+    };
+    if flow.is_empty() {
+        return Ok(None);
+    }
+    let truncated = if flow.len() >= 16 {
+        &flow[..16]
+    } else {
+        flow.as_str()
+    };
+    if truncated == "xtls-rprx-vision" {
+        Ok(Some(VlessFlow::XtlsRprxVision))
+    } else {
+        Err(ConfigError::InvalidInbound(format!(
+            "listener {name} user {index} has unsupported flow: {flow}"
+        )))
+    }
 }
 
 fn parse_simple_obfs(

@@ -3988,10 +3988,16 @@ rules: ['MATCH,DIRECT']
         "uuid is required per user"
     );
 
-    let flow_rejected = "mode: rule\nlisteners:\n  - name: vless-bad\n    type: vless\n    listen: 127.0.0.1\n    port: 18434\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        flow: xtls-rprx-vision\nrules: ['MATCH,DIRECT']\n";
+    let flow_accepted = "mode: rule\nlisteners:\n  - name: vless-vision\n    type: vless\n    listen: 127.0.0.1\n    port: 18434\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        flow: xtls-rprx-vision\nrules: ['MATCH,DIRECT']\n";
+    let vision_config = Config::from_yaml(flow_accepted).expect("Vision flow must parse");
+    let vless = &vision_config.vless_listeners[0];
+    assert_eq!(vless.users.len(), 1);
+    assert_eq!(vless.users[0].flow, Some(VlessFlow::XtlsRprxVision));
+
+    let unknown_flow = "mode: rule\nlisteners:\n  - name: vless-bad\n    type: vless\n    listen: 127.0.0.1\n    port: 18435\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        flow: unknown-flow\nrules: ['MATCH,DIRECT']\n";
     assert!(
-        Config::from_yaml(flow_rejected).is_err(),
-        "user flow (Vision) stays rejected in this slice"
+        Config::from_yaml(unknown_flow).is_err(),
+        "unknown user flow must be rejected"
     );
 }
 

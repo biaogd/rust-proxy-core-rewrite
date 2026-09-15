@@ -2,6 +2,15 @@
 
 Last updated: 2026-09-14
 
+### IN-D VLESS Vision TLS inbound — 2026-09-15
+
+Named `type: vless` accepts per-user `flow: xtls-rprx-vision` on native TLS.
+`accept_vision_tls` wraps the server TLS carrier for DIRECT promotion;
+`accept_vless_request` decodes flow addons and wraps TCP with `VisionStream`.
+Evidence: `phase_ind_vless_vision.py` (product Vision outbound vs Go/Rust
+named inbound: TCP small/large, half-close, nested TLS DIRECT). REALITY
+inbound stays a later IN-D sub-gate.
+
 ### IN-D VLESS TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
 Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
@@ -9,8 +18,7 @@ Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
 fixed-destination framing on TLS plus Mux/XUDP multi-destination (product VLESS
 outbound default). Evidence: `phase_ind_vless_tls.py`,
 `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`,
-`phase_ind_vless_xudp.py`. Combined ws+grpc, `reality-config`, and per-user
-`flow` (Vision) stay rejected. Vision and REALITY remain later IN-D sub-gates.
+`phase_ind_vless_xudp.py`. Combined ws+grpc and `reality-config` stay rejected.
 
 
 ### IN-C Trojan gRPC inbound — 2026-09-14
@@ -620,6 +628,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; `phase_inc_trojan_tls.py` |
 | IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; `phase_inc_trojan_websocket.py` |
 | IN-C Trojan gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+UDP UoT; combined ws+grpc rejected; `phase_inc_trojan_grpc.py` |
+| IN-D VLESS Vision inbound | Complete (declared native TLS scope) | Per-user `flow: xtls-rprx-vision`; `phase_ind_vless_vision.py` |
 | IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
 | IN-D VLESS WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; standard UDP remains on TLS evidence; `phase_ind_vless_websocket.py` |
 | IN-D VLESS gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; standard UDP remains on TLS evidence; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |

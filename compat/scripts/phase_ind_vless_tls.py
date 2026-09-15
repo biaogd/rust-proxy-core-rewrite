@@ -14,9 +14,10 @@ VLESS *outbound* client dialing the same named inbound, matching the task's
 Scope for this slice (see `docs/rust-rewrite/roadmap.md` IN-D): native TLS
 carrier only (WS/gRPC covered by sibling IN-D scripts), no Vision/REALITY, and
 UDP is standard mode with one fixed destination per association (no packet-addr
-). Mux/XUDP multi-destination is covered by `phase_ind_vless_xudp.py`. The
-Rust listener still rejects `reality-config` and per-user `flow` at parse time;
-those checks are Rust-only and excluded from the Go/Rust parity view below.
+). Mux/XUDP multi-destination is covered by `phase_ind_vless_xudp.py`; Vision
+is covered by `phase_ind_vless_vision.py`. The Rust listener still rejects
+`reality-config` at parse time; that check is Rust-only and excluded from the
+Go/Rust parity view below.
 """
 
 from __future__ import annotations
@@ -313,7 +314,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
 
 
 def assert_rust_only_rejections(binary: pathlib.Path, scratch: pathlib.Path) -> None:
-    """Deferred IN-D keys (combined WS+gRPC / REALITY / Vision flow) must fail closed."""
+    """Deferred IN-D keys (combined WS+gRPC / REALITY) must fail closed."""
     certificate, private_key = stage_tls_material(scratch)
     base_port = reserve_port()
     cases = {
@@ -328,26 +329,6 @@ def assert_rust_only_rejections(binary: pathlib.Path, scratch: pathlib.Path) -> 
         )
         if accepted:
             raise AssertionError(f"Rust must reject named VLESS field: {label}")
-
-    flow_yaml = f"""listeners:
-  - name: vless-flow
-    type: vless
-    listen: 127.0.0.1
-    port: {base_port}
-    certificate: {certificate}
-    private-key: {private_key}
-    users:
-      - username: alice
-        uuid: {UUID}
-        flow: xtls-rprx-vision
-mode: rule
-log-level: info
-ipv6: false
-rules:
-  - MATCH,DIRECT
-"""
-    if config_validation(binary, scratch, flow_yaml):
-        raise AssertionError("Rust must reject named VLESS user flow (Vision deferred)")
 
 
 def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:

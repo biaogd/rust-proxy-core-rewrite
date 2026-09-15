@@ -1395,7 +1395,7 @@ IN-A/IN-B.
 | **IN-A** | Census + shared access boundary | Keep mixed/SS/TUN behavior; document config-compat edges |
 | **IN-B** | Shadowsocks server completion | Common AEAD, SS2022, TCP/UDP; single/multi-user scope explicit; Go client ↔ Rust inbound; auth + replay |
 | **IN-C** | Trojan inbound | Standard TLS TCP+UDP first, then WS/gRPC; auth, certs, bidirectional relay, multi-dest UDP, half-close |
-| **IN-D** | VLESS inbound | Basic TCP/TLS, WS/gRPC, UDP first; Vision + REALITY later with separate security/lifecycle gates |
+| **IN-D** | VLESS inbound | Basic TCP/TLS, WS/gRPC, UDP, Vision done; REALITY later with separate security/lifecycle gate |
 | **IN-E** | VMess inbound | Prefer AEAD `alterId: 0`; TCP/TLS, WS/gRPC, UDP; address, security mode, time window, replay, carriers |
 | **IN-F** | QUIC servers | Hysteria2 and TUIC v5 separately; auth, TCP/UDP, stream caps, congestion knobs, recovery, resource pressure |
 | **IN-G** | AnyTLS inbound | TLS, padding, session reuse, multi-stream, UDP/UoT; isolation, close, heartbeat, idle reclaim, malicious-frame limits |
@@ -1467,11 +1467,14 @@ work: shared mux and Reality/fallback if pulled forward.
 **TLS slice complete (2026-09-14):** named `type: vless` with certificate /
 private-key, `users: [{username, uuid}]`, UUID auth (`protocol-vless::server`),
 TCP via `serve_shadowsocks_connection`, and standard-mode UDP (one fixed
-destination per association) on the Direct path. WS/gRPC carriers, Vision flow
-and REALITY are separate sub-gates with independent security and lifecycle
-acceptance; the named-listener allowlist rejects `ws-path`,
-`grpc-service-name`, `reality-config` and per-user `flow` until those slices
-land. Evidence `phase_ind_vless_tls.py`. Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and `phase_ind_vless_xudp.py` (Mux/XUDP multi-destination UDP). Remaining IN-D work: Vision/REALITY with separate security/lifecycle gates.
+destination per association) on the Direct path. Evidence `phase_ind_vless_tls.py`.
+Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and
+`phase_ind_vless_xudp.py` (Mux/XUDP multi-destination UDP).
+
+**Vision slice complete (2026-09-15):** per-user `flow: xtls-rprx-vision` on
+native TLS; `accept_vision_tls` + `VisionStream` on the server path. Evidence
+`phase_ind_vless_vision.py`. REALITY remains a separate IN-D sub-gate; combined
+ws+grpc and `reality-config` stay rejected at parse.
 
 
 ### IN-E — VMess inbound

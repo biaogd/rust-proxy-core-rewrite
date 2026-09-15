@@ -4,7 +4,8 @@
 //! `accept_vless_request` authenticates the UUID and decodes the destination;
 //! TCP joins the shared `serve_shadowsocks_connection` boundary and UDP uses
 //! the standard fixed-destination framing or Mux/XUDP multi-destination
-//! frames. Vision / REALITY stay out of scope.
+//! frames. Vision (`flow: xtls-rprx-vision`) is supported on native TLS;
+//! REALITY stays out of scope.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,12 +18,16 @@ use rewrite_config::{Config, ControllerTls, VlessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vless::{
-    VlessCommand, accept_vless_request, read_vless_udp_payload, read_xudp_client_packet,
-    uuid_table, write_vless_udp_payload, write_xudp_server_packet,
+    VisionStream, VlessCommand, VlessFlow, VlessUserEntry, accept_vless_request,
+    read_vless_udp_payload, read_xudp_client_packet, uuid_table, write_vless_udp_payload,
+    write_xudp_server_packet,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
-use rewrite_transport::{V2rayGrpcServerConnection, accept_websocket_path};
+use rewrite_transport::{
+    BoxedStream, V2rayGrpcServerConnection, VisionDirectControl, accept_vision_tls,
+    accept_websocket_path,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
@@ -43,7 +48,8 @@ const VLESS_GRPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct VlessListener {
     listener: TcpListener,
     acceptor: TlsAcceptor,
-    users: HashMap<[u8; 16], String>,
+    users: HashMap<[u8; 16], VlessUserEntry>,
+    vision_capable: bool,
     inbound_name: String,
     listen: SocketAddr,
     ws_path: Option<String>,
@@ -69,15 +75,26 @@ impl VlessListener {
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;
+        let vision_capable = config.users.iter().any(|user| {
+            user.flow == Some(rewrite_config::VlessFlow::XtlsRprxVision)
+        });
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(Arc::new(tls)),
-            users: uuid_table(
-                config
-                    .users
-                    .iter()
-                    .map(|user| (user.uuid.as_str(), user.username.clone())),
-            ),
+            users: uuid_table(config.users.iter().map(|user| {
+                (
+                    user.uuid.as_str(),
+                    VlessUserEntry {
+                        username: user.username.clone(),
+                        flow: user.flow.map(|flow| match flow {
+                            rewrite_config::VlessFlow::XtlsRprxVision => {
+                                VlessFlow::XtlsRprxVision
+                            }
+                        }),
+                    },
+                )
+            })),
+            vision_capable,
             inbound_name: config.name.clone(),
             listen: config.listen,
             ws_path: config.ws_path.clone(),
@@ -159,6 +176,7 @@ pub(super) async fn run_vless_listener(
         listener,
         acceptor,
         users,
+        vision_capable,
         inbound_name,
         listen,
         ws_path,
@@ -189,6 +207,7 @@ pub(super) async fn run_vless_listener(
                 let local = tcp.local_addr().unwrap_or(listen);
                 let acceptor = acceptor.clone();
                 let users = users.clone();
+                let connection_vision_capable = vision_capable;
                 let connection_state = Arc::clone(&state);
                 let connection_dns = Arc::clone(&dns_service);
                 let connection_shutdown = shutdown.child_token();
@@ -202,6 +221,7 @@ pub(super) async fn run_vless_listener(
                         local,
                         acceptor,
                         users,
+                        connection_vision_capable,
                         connection_config,
                         connection_state,
                         connection_dns,
@@ -224,13 +244,14 @@ pub(super) async fn run_vless_listener(
     while connections.join_next().await.is_some() {}
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_vless_inbound(
     tcp: TcpStream,
     peer: SocketAddr,
     local: SocketAddr,
     acceptor: TlsAcceptor,
-    users: HashMap<[u8; 16], String>,
+    users: HashMap<[u8; 16], VlessUserEntry>,
+    vision_capable: bool,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -239,18 +260,45 @@ async fn handle_vless_inbound(
     ws_path: Option<String>,
     grpc_service_name: Option<String>,
 ) {
-    let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            state.log(
-                "error",
-                format!("vless inbound TLS handshake failed: {error}"),
-            );
-            return;
+    let vision_control = vision_capable.then(VisionDirectControl::default);
+    let tls: BoxedStream = if vision_capable {
+        let control = vision_control
+            .as_ref()
+            .expect("vision control is present when vision_capable")
+            .clone();
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            accept_vision_tls(Box::new(tcp), acceptor, control),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                state.log(
+                    "error",
+                    format!("vless inbound Vision TLS handshake failed: {error}"),
+                );
+                return;
+            }
+            Err(_) => {
+                state.log("error", "vless inbound Vision TLS handshake timed out");
+                return;
+            }
         }
-        Err(_) => {
-            state.log("error", "vless inbound TLS handshake timed out");
-            return;
+    } else {
+        match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+            Ok(Ok(stream)) => Box::new(stream),
+            Ok(Err(error)) => {
+                state.log(
+                    "error",
+                    format!("vless inbound TLS handshake failed: {error}"),
+                );
+                return;
+            }
+            Err(_) => {
+                state.log("error", "vless inbound TLS handshake timed out");
+                return;
+            }
         }
     };
 
@@ -261,6 +309,7 @@ async fn handle_vless_inbound(
             peer,
             local,
             users,
+            None,
             config,
             state,
             dns_service,
@@ -294,6 +343,7 @@ async fn handle_vless_inbound(
             peer,
             local,
             users,
+            None,
             config,
             state,
             dns_service,
@@ -309,6 +359,7 @@ async fn handle_vless_inbound(
         peer,
         local,
         users,
+        vision_control,
         config,
         state,
         dns_service,
@@ -324,7 +375,8 @@ async fn serve_vless_grpc_connection<S>(
     service_name: String,
     peer: SocketAddr,
     local: SocketAddr,
-    users: HashMap<[u8; 16], String>,
+    users: HashMap<[u8; 16], VlessUserEntry>,
+    vision_control: Option<VisionDirectControl>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -370,6 +422,7 @@ async fn serve_vless_grpc_connection<S>(
                             continue;
                         }
                         let users = users.clone();
+                        let connection_vision_control = vision_control.clone();
                         let config = Arc::clone(&config);
                         let state = Arc::clone(&state);
                         let dns_service = Arc::clone(&dns_service);
@@ -381,6 +434,7 @@ async fn serve_vless_grpc_connection<S>(
                                 peer,
                                 local,
                                 users,
+                                connection_vision_control,
                                 config,
                                 state,
                                 dns_service,
@@ -413,10 +467,11 @@ async fn serve_vless_grpc_connection<S>(
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_vless_session<S>(
-    mut stream: S,
+    stream: S,
     peer: SocketAddr,
     local: SocketAddr,
-    users: HashMap<[u8; 16], String>,
+    users: HashMap<[u8; 16], VlessUserEntry>,
+    vision_control: Option<VisionDirectControl>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -425,6 +480,7 @@ async fn dispatch_vless_session<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let mut stream = stream;
     let request = match tokio::time::timeout(
         Duration::from_secs(10),
         accept_vless_request(&mut stream, &users),
@@ -441,19 +497,36 @@ async fn dispatch_vless_session<S>(
 
     match request.command {
         VlessCommand::Tcp => {
-            serve_vless_tcp(
-                stream,
-                peer,
-                local,
-                request.destination,
-                request.username,
-                inbound_name,
-                &config,
-                &state,
-                &dns_service,
-                &shutdown,
-            )
-            .await;
+            if request.flow == Some(VlessFlow::XtlsRprxVision) {
+                let vision = VisionStream::new(Box::new(stream), request.uuid, vision_control);
+                serve_vless_tcp(
+                    vision,
+                    peer,
+                    local,
+                    request.destination,
+                    request.username,
+                    inbound_name,
+                    &config,
+                    &state,
+                    &dns_service,
+                    &shutdown,
+                )
+                .await;
+            } else {
+                serve_vless_tcp(
+                    stream,
+                    peer,
+                    local,
+                    request.destination,
+                    request.username,
+                    inbound_name,
+                    &config,
+                    &state,
+                    &dns_service,
+                    &shutdown,
+                )
+                .await;
+            }
         }
         VlessCommand::Udp => {
             serve_vless_udp(

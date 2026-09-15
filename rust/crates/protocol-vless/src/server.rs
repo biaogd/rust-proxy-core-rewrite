@@ -1,8 +1,7 @@
 //! IN-D VLESS server-side request decoding.
 //!
-//! Accepts version-zero TCP, standard UDP, and mux/XUDP commands. Vision
-//! addons remain deferred: a non-empty addon list is still rejected until the
-//! Vision inbound slice lands. REALITY stays out of the request decoder.
+//! Accepts version-zero TCP, standard UDP, and mux/XUDP commands with optional
+//! Vision flow addons. REALITY stays out of the request decoder.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -12,7 +11,9 @@ use rewrite_model::{Destination, Host};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use uuid::Uuid;
 
+use crate::VlessFlow;
 use crate::VlessProtocolError;
+use crate::addons::decode_flow_addon;
 
 const VERSION: u8 = 0;
 const COMMAND_TCP: u8 = 1;
@@ -21,6 +22,7 @@ const COMMAND_MUX: u8 = 3;
 const ADDRESS_IPV4: u8 = 1;
 const ADDRESS_DOMAIN: u8 = 2;
 const ADDRESS_IPV6: u8 = 3;
+const VISION_FLOW: &str = "xtls-rprx-vision";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VlessCommand {
@@ -31,10 +33,18 @@ pub enum VlessCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VlessUserEntry {
+    pub username: String,
+    pub flow: Option<VlessFlow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessServerRequest {
     pub command: VlessCommand,
     pub destination: Destination,
     pub username: String,
+    pub uuid: [u8; 16],
+    pub flow: Option<VlessFlow>,
 }
 
 /// Maps a configured `uuid` field to the 16-byte VLESS identifier.
@@ -49,14 +59,35 @@ pub fn map_uuid(text: &str) -> [u8; 16] {
         .into_bytes()
 }
 
+fn user_flow_str(flow: Option<VlessFlow>) -> &'static str {
+    match flow {
+        Some(VlessFlow::XtlsRprxVision) => VISION_FLOW,
+        None => "",
+    }
+}
+
+fn parse_request_flow(flow: &str) -> Result<Option<VlessFlow>, VlessProtocolError> {
+    if flow.is_empty() {
+        return Ok(None);
+    }
+    let truncated = if flow.len() >= 16 { &flow[..16] } else { flow };
+    if truncated == VISION_FLOW {
+        Ok(Some(VlessFlow::XtlsRprxVision))
+    } else {
+        Err(VlessProtocolError::Protocol(format!(
+            "unknown VLESS flow: {flow}"
+        )))
+    }
+}
+
 /// Builds a lookup table from configured users to their 16-byte VLESS UUIDs.
 #[must_use]
 pub fn uuid_table<'a>(
-    users: impl IntoIterator<Item = (&'a str, String)>,
-) -> HashMap<[u8; 16], String> {
+    users: impl IntoIterator<Item = (&'a str, VlessUserEntry)>,
+) -> HashMap<[u8; 16], VlessUserEntry> {
     users
         .into_iter()
-        .map(|(uuid, username)| (map_uuid(uuid), username))
+        .map(|(uuid, entry)| (map_uuid(uuid), entry))
         .collect()
 }
 
@@ -67,12 +98,11 @@ pub fn uuid_table<'a>(
 /// # Errors
 ///
 /// Returns [`VlessProtocolError::Protocol`] for an unsupported version,
-/// non-empty addons (Vision deferred), unknown UUID, unsupported command, or
-/// malformed address; returns [`VlessProtocolError::Io`] for transport
-/// failures.
+/// flow mismatch, unknown UUID, unsupported command, or malformed address;
+/// returns [`VlessProtocolError::Io`] for transport failures.
 pub async fn accept_vless_request<S, H>(
     stream: &mut S,
-    users: &HashMap<[u8; 16], String, H>,
+    users: &HashMap<[u8; 16], VlessUserEntry, H>,
 ) -> Result<VlessServerRequest, VlessProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -89,20 +119,28 @@ where
 
     let mut uuid = [0_u8; 16];
     stream.read_exact(&mut uuid).await?;
-    let username = users
+    let user = users
         .get(&uuid)
         .cloned()
         .ok_or_else(|| VlessProtocolError::Protocol("unknown VLESS uuid".to_owned()))?;
 
     let mut addon_length = [0_u8; 1];
     stream.read_exact(&mut addon_length).await?;
-    if addon_length[0] != 0 {
-        let mut discard = vec![0_u8; usize::from(addon_length[0])];
-        stream.read_exact(&mut discard).await?;
-        return Err(VlessProtocolError::Protocol(
-            "VLESS request addons are not supported (Vision deferred)".to_owned(),
-        ));
+    let request_flow = if addon_length[0] == 0 {
+        None
+    } else {
+        let mut addon_bytes = vec![0_u8; usize::from(addon_length[0])];
+        stream.read_exact(&mut addon_bytes).await?;
+        decode_flow_addon(&addon_bytes).map_err(VlessProtocolError::Protocol)?
+    };
+    let request_flow_str = request_flow.as_deref().unwrap_or("");
+    let configured_flow_str = user_flow_str(user.flow);
+    if request_flow_str != configured_flow_str && !request_flow_str.is_empty() {
+        return Err(VlessProtocolError::Protocol(format!(
+            "flow mismatch: expected {configured_flow_str}, but got {request_flow_str}"
+        )));
     }
+    let effective_flow = parse_request_flow(request_flow_str)?;
 
     let mut command = [0_u8; 1];
     stream.read_exact(&mut command).await?;
@@ -116,6 +154,14 @@ where
             )));
         }
     };
+
+    if effective_flow == Some(VlessFlow::XtlsRprxVision)
+        && matches!(command, VlessCommand::Udp | VlessCommand::Mux)
+    {
+        return Err(VlessProtocolError::Protocol(format!(
+            "{VISION_FLOW} flow does not support UDP"
+        )));
+    }
 
     let destination = if command == VlessCommand::Mux {
         // XUDP carries destinations inside mux frames; the request header has
@@ -166,7 +212,9 @@ where
     Ok(VlessServerRequest {
         command,
         destination,
-        username,
+        username: user.username,
+        uuid,
+        flow: effective_flow,
     })
 }
 
@@ -214,11 +262,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addons::encode_flow_addon;
 
     const UUID_TEXT: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
-    fn users() -> HashMap<[u8; 16], String> {
-        uuid_table([(UUID_TEXT, "alice".to_owned())])
+    fn users(flow: Option<VlessFlow>) -> HashMap<[u8; 16], VlessUserEntry> {
+        uuid_table([(
+            UUID_TEXT,
+            VlessUserEntry {
+                username: "alice".to_owned(),
+                flow,
+            },
+        )])
     }
 
     #[test]
@@ -253,11 +308,13 @@ mod tests {
             client.read_exact(&mut response).await.unwrap();
             response
         });
-        let request = accept_vless_request(&mut server, &users())
+        let request = accept_vless_request(&mut server, &users(None))
             .await
             .expect("valid request");
         assert_eq!(request.command, VlessCommand::Tcp);
         assert_eq!(request.username, "alice");
+        assert_eq!(request.uuid, uuid);
+        assert_eq!(request.flow, None);
         assert_eq!(
             request.destination,
             Destination {
@@ -267,6 +324,74 @@ mod tests {
         );
         let response = request_task.await.unwrap();
         assert_eq!(response, [0, 0]);
+    }
+
+    #[tokio::test]
+    async fn accepts_vision_flow_when_user_configured() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let uuid = map_uuid(UUID_TEXT);
+        let addons = encode_flow_addon(VISION_FLOW);
+        tokio::spawn(async move {
+            let mut request = vec![VERSION];
+            request.extend_from_slice(&uuid);
+            request.push(u8::try_from(addons.len()).expect("addon length"));
+            request.extend_from_slice(&addons);
+            request.push(COMMAND_TCP);
+            request.extend_from_slice(&443_u16.to_be_bytes());
+            request.push(ADDRESS_IPV4);
+            request.extend_from_slice(&[127, 0, 0, 1]);
+            client.write_all(&request).await.unwrap();
+            let mut response = [0_u8; 2];
+            client.read_exact(&mut response).await.unwrap();
+        });
+        let request = accept_vless_request(&mut server, &users(Some(VlessFlow::XtlsRprxVision)))
+            .await
+            .expect("vision request");
+        assert_eq!(request.flow, Some(VlessFlow::XtlsRprxVision));
+    }
+
+    #[tokio::test]
+    async fn rejects_vision_flow_mismatch() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let uuid = map_uuid(UUID_TEXT);
+        let addons = encode_flow_addon(VISION_FLOW);
+        tokio::spawn(async move {
+            let mut request = vec![VERSION];
+            request.extend_from_slice(&uuid);
+            request.push(u8::try_from(addons.len()).expect("addon length"));
+            request.extend_from_slice(&addons);
+            request.push(COMMAND_TCP);
+            request.extend_from_slice(&443_u16.to_be_bytes());
+            request.push(ADDRESS_IPV4);
+            request.extend_from_slice(&[127, 0, 0, 1]);
+            let _ = client.write_all(&request).await;
+        });
+        let error = accept_vless_request(&mut server, &users(None))
+            .await
+            .expect_err("flow mismatch");
+        assert!(matches!(error, VlessProtocolError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_udp_with_vision_flow() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let uuid = map_uuid(UUID_TEXT);
+        let addons = encode_flow_addon(VISION_FLOW);
+        tokio::spawn(async move {
+            let mut request = vec![VERSION];
+            request.extend_from_slice(&uuid);
+            request.push(u8::try_from(addons.len()).expect("addon length"));
+            request.extend_from_slice(&addons);
+            request.push(COMMAND_UDP);
+            request.extend_from_slice(&53_u16.to_be_bytes());
+            request.push(ADDRESS_IPV4);
+            request.extend_from_slice(&[127, 0, 0, 1]);
+            let _ = client.write_all(&request).await;
+        });
+        let error = accept_vless_request(&mut server, &users(Some(VlessFlow::XtlsRprxVision)))
+            .await
+            .expect_err("vision udp");
+        assert!(matches!(error, VlessProtocolError::Protocol(_)));
     }
 
     #[tokio::test]
@@ -285,7 +410,7 @@ mod tests {
             let mut response = [0_u8; 2];
             client.read_exact(&mut response).await.unwrap();
         });
-        let request = accept_vless_request(&mut server, &users())
+        let request = accept_vless_request(&mut server, &users(None))
             .await
             .expect("valid udp request");
         assert_eq!(request.command, VlessCommand::Udp);
@@ -314,7 +439,7 @@ mod tests {
             let mut response = [0_u8; 2];
             client.read_exact(&mut response).await.unwrap();
         });
-        let request = accept_vless_request(&mut server, &users())
+        let request = accept_vless_request(&mut server, &users(None))
             .await
             .expect("valid ipv6 request");
         assert_eq!(
@@ -336,14 +461,14 @@ mod tests {
             request.extend_from_slice(&[127, 0, 0, 1]);
             let _ = client.write_all(&request).await;
         });
-        let error = accept_vless_request(&mut server, &users())
+        let error = accept_vless_request(&mut server, &users(None))
             .await
             .expect_err("unknown uuid must be rejected");
         assert!(matches!(error, VlessProtocolError::Protocol(_)));
     }
 
     #[tokio::test]
-    async fn rejects_nonempty_addons() {
+    async fn rejects_unknown_addon_fields() {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let uuid = map_uuid(UUID_TEXT);
         tokio::spawn(async move {
@@ -353,9 +478,9 @@ mod tests {
             request.push(0xaa);
             let _ = client.write_all(&request).await;
         });
-        let error = accept_vless_request(&mut server, &users())
+        let error = accept_vless_request(&mut server, &users(None))
             .await
-            .expect_err("addons must be rejected in this slice");
+            .expect_err("unknown addon must be rejected");
         assert!(matches!(error, VlessProtocolError::Protocol(_)));
     }
 
@@ -372,7 +497,7 @@ mod tests {
             let mut response = [0_u8; 2];
             let _ = client.read_exact(&mut response).await;
         });
-        let request = accept_vless_request(&mut server, &users())
+        let request = accept_vless_request(&mut server, &users(None))
             .await
             .expect("mux must be accepted for XUDP");
         assert_eq!(request.command, VlessCommand::Mux);
@@ -390,7 +515,7 @@ mod tests {
             request.push(9);
             let _ = client.write_all(&request).await;
         });
-        let error = accept_vless_request(&mut server, &users())
+        let error = accept_vless_request(&mut server, &users(None))
             .await
             .expect_err("unknown commands must be rejected");
         assert!(matches!(error, VlessProtocolError::Protocol(_)));
