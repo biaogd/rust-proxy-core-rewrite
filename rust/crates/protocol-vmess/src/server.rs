@@ -42,11 +42,6 @@ pub const DEFAULT_AUTH_ID_REPLAY_PER_USER: usize = 65_536;
 /// unbounded TTL map while keeping a hard memory bound.
 pub const DEFAULT_AUTH_ID_REPLAY_GLOBAL: usize = 1_048_576;
 
-/// Deprecated alias kept for call sites that previously passed a single
-/// capacity; prefer [`AuthIdReplayCache::product_default`].
-#[deprecated(note = "use AuthIdReplayCache::product_default or with_limits")]
-pub const DEFAULT_AUTH_ID_REPLAY_CAPACITY: usize = DEFAULT_AUTH_ID_REPLAY_PER_USER;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmessUserEntry {
     pub username: String,
