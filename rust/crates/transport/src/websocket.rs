@@ -64,6 +64,44 @@ where
     Ok(WebSocketIo::new(stream))
 }
 
+/// Accepts a server-side WebSocket upgrade and requires the request path to
+/// match `path` (query string ignored on both sides).
+///
+/// # Errors
+///
+/// Returns a Tungstenite error when the peer violates the handshake or requests
+/// a different path.
+///
+/// The path-check callback returns tungstenite's fixed `ErrorResponse`
+/// (`Response<Option<String>>`). That `Err` variant is larger than Clippy's
+/// threshold and cannot be boxed without changing the handshake callback
+/// contract, so `result_large_err` is allowed here.
+#[allow(clippy::result_large_err)]
+pub async fn accept_websocket_path<S>(stream: S, path: &str) -> Result<WebSocketIo<S>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let expected = websocket_path_only(path).to_owned();
+    let stream =
+        tokio_tungstenite::accept_hdr_async(stream, move |request: &Request<()>, response| {
+            let request_path = websocket_path_only(request.uri().path());
+            if request_path != expected {
+                let mut error = tokio_tungstenite::tungstenite::http::Response::new(Some(format!(
+                    "websocket path {request_path} does not match {expected}"
+                )));
+                *error.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::NOT_FOUND;
+                return Err(error);
+            }
+            Ok(response)
+        })
+        .await?;
+    Ok(WebSocketIo::new(stream))
+}
+
+fn websocket_path_only(path: &str) -> &str {
+    path.split_once('?').map_or(path, |(path, _)| path)
+}
+
 /// Upgrades an established transport using an explicit WebSocket request
 /// path and header set.
 ///

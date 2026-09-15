@@ -3811,11 +3811,32 @@ rules: ['MATCH,DIRECT']
     assert_eq!(inbound.users[0].password, "phase-inc-password");
     assert_eq!(inbound.certificate, "./server.crt");
     assert_eq!(inbound.private_key, "./server.key");
+    assert!(inbound.ws_path.is_none());
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Trojan, 18420)));
 
+    let with_ws = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: trojan-wss
+    type: trojan
+    listen: 127.0.0.1
+    port: 18422
+    certificate: ./server.crt
+    private-key: ./server.key
+    ws-path: /trojan
+    users:
+      - password: secret
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named trojan ws listener");
+    assert_eq!(
+        with_ws.trojan_listeners[0].ws_path.as_deref(),
+        Some("/trojan")
+    );
+
     for unsupported in [
-        "ws-path: /trojan",
         "grpc-service-name: GunService",
         "ss-option:\n      enabled: true\n      method: aes-128-gcm\n      password: nested",
     ] {

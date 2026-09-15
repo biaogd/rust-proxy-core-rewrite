@@ -2,14 +2,24 @@
 
 Last updated: 2026-09-14
 
+### IN-C Trojan WebSocket inbound — 2026-09-14
+
+Named `type: trojan` with `ws-path` accepts TLS then WebSocket upgrade
+(`rewrite_transport::accept_websocket_path`) before Trojan auth/relay. Evidence:
+`compat/scripts/phase_inc_trojan_websocket.py` (product WSS outbound vs Go/Rust
+inbounds: TCP small/large, UDP multi-dest, wrong-password; Rust-only gRPC
+reject). WSS half-close remains go↔go-only (same omission as Phase 6F-C);
+native TLS half-close stays on `phase_inc_trojan_tls.py`. Next: Trojan gRPC
+inbound or **IN-D** VLESS.
+
 ### IN-C Trojan TLS inbound — 2026-09-14
 
 Named `type: trojan` TLS inbound owns password (SHA-224 hex) auth, TCP relay
 through `serve_stream_session`, and UDP-over-TLS (command 3) on the Direct path.
-WS/gRPC/Reality/`ss-option` stay rejected at named-listener parse. Evidence:
+gRPC/Reality/`ss-option` stay rejected at named-listener parse; `ws-path` is
+owned by the WebSocket slice above. Evidence:
 `compat/scripts/phase_inc_trojan_tls.py` (Go/Rust TCP small/large, product-client
-half-close, wrong-password fail-closed, UDP multi-dest; Rust-only `ws-path`
-reject). Next: Trojan WS/gRPC carriers or **IN-D** VLESS.
+half-close, wrong-password fail-closed, UDP multi-dest; Rust-only gRPC reject).
 
 ### IN-B Shadowsocks 2022 UDP inbound — 2026-09-14
 
@@ -586,7 +596,8 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | Phase 6C-N Shadowsocks ss-config inbound | Complete in declared first-server scope | Named `listeners` SS inbound implements TCP/UDP, UoT, simple-obfs and shadow-tls v3 in the roadmap's declared first-server scope. The corrected native differential passes proxy-observed CONNECT, `INNER` discrimination, identity-changing fallback reload and fail-closed fields after the protocol ownership refactor. ShadowTLS `IN-USER` and SS2022 EIH inbound stay Rust-only evidence |
 | IN-A inbound census | Complete (docs) | `inbound-support-matrix.md` plus roadmap **IN-A…IN-H**; preserves mixed/SS/TUN; product gates **IN-B** SS2022 UDP and **IN-C** Trojan TLS follow |
 | IN-B SS2022 UDP inbound | Complete (declared scope) | Three standard methods + product replay; ChaCha8 UDP rejected; `phase_inb_shadowsocks_2022_udp.py` |
-| IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; WS/gRPC deferred/rejected; `phase_inc_trojan_tls.py` |
+| IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; `phase_inc_trojan_tls.py` |
+| IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; gRPC deferred; `phase_inc_trojan_websocket.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |

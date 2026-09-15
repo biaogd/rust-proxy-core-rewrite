@@ -38,8 +38,8 @@ pub use v2ray_http::connect_v2ray_http;
 pub use v2ray_mux::{V2rayMux, V2rayMuxNetwork, V2rayMuxOptions};
 pub use vision_tls::connect_vision_tls;
 pub use websocket::{
-    WebSocketIo, connect_v2ray_websocket, connect_websocket, connect_websocket_with_early_data,
-    connect_websocket_with_headers,
+    WebSocketIo, accept_websocket_path, connect_v2ray_websocket, connect_websocket,
+    connect_websocket_with_early_data, connect_websocket_with_headers,
 };
 pub use xhttp::{
     XHttpClient, XHttpMode, XHttpOptions, XHttpReuseOptions, XHttpStreamOneOptions, connect_xhttp,

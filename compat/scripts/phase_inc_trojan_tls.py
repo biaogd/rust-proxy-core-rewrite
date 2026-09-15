@@ -151,13 +151,21 @@ def product_half_close(
     process, stdout, stderr = launch(binary, config, client_dir)
     try:
         wait_ready(process, mixed_port)
-        tunnel = connect_tunnel(mixed_port, "127.0.0.1", echo_port)
-        try:
-            tunnel.sendall(b"half-close")
-            tunnel.shutdown(socket.SHUT_WR)
-            return recv_exact(tunnel, 10) == b"half-close"
-        finally:
-            tunnel.close()
+        deadline = time.monotonic() + IO_DEADLINE
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return False
+            try:
+                tunnel = connect_tunnel(mixed_port, "127.0.0.1", echo_port)
+                try:
+                    tunnel.sendall(b"half-close")
+                    tunnel.shutdown(socket.SHUT_WR)
+                    return recv_exact(tunnel, 10) == b"half-close"
+                finally:
+                    tunnel.close()
+            except (AssertionError, EOFError, OSError):
+                time.sleep(0.02)
+        return False
     except (AssertionError, EOFError, OSError):
         return False
     finally:
@@ -245,7 +253,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
     bad.write_text(
         inbound_yaml(reject_port, reject_certificate, reject_key).replace(
             "users:",
-            "ws-path: /trojan\n    users:",
+            "grpc-service-name: GunService\n    users:",
         )
     )
     rejected = launch(binary, bad, reject_dir)
@@ -253,7 +261,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
         deadline = time.monotonic() + IO_DEADLINE
         while rejected[0].poll() is None and time.monotonic() < deadline:
             time.sleep(0.02)
-        observations["reject-ws-path"] = rejected[0].poll() is not None
+        observations["reject-grpc"] = rejected[0].poll() is not None
     finally:
         stop(rejected[0])
         rejected[1].close()
@@ -325,7 +333,7 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
     """Shared Go/Rust fields. Rust-only IN-C carrier rejection stays out of equality."""
     config = dict(observations["config"])
-    config.pop("reject-ws-path", None)
+    config.pop("reject-grpc", None)
     return {
         "config": config,
         "small": observations["small"],
@@ -347,8 +355,8 @@ def main() -> int:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], scratch)
-            if not observations["rust"]["config"].get("reject-ws-path"):
-                raise AssertionError("Rust IN-C must reject named Trojan ws-path")
+            if not observations["rust"]["config"].get("reject-grpc"):
+                raise AssertionError("Rust IN-C must reject named Trojan grpc-service-name")
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

@@ -15,12 +15,12 @@ use rewrite_protocol_trojan::{
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
+use rewrite_transport::accept_websocket_path;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::listener::{UdpSessionMode, resolve_udp_target, resolved_route, udp_session_mode};
@@ -40,6 +40,7 @@ pub(crate) struct TrojanListener {
     passwords: HashMap<[u8; 56], String>,
     inbound_name: String,
     listen: SocketAddr,
+    ws_path: Option<String>,
 }
 
 impl TrojanListener {
@@ -72,6 +73,7 @@ impl TrojanListener {
             ),
             inbound_name: config.name.clone(),
             listen: config.listen,
+            ws_path: config.ws_path.clone(),
         })
     }
 }
@@ -151,6 +153,7 @@ pub(super) async fn run_trojan_listener(
         passwords,
         inbound_name,
         listen,
+        ws_path,
     } = listener;
     let mut connections = JoinSet::new();
     loop {
@@ -181,6 +184,7 @@ pub(super) async fn run_trojan_listener(
                 let connection_dns = Arc::clone(&dns_service);
                 let connection_shutdown = shutdown.child_token();
                 let connection_inbound_name = inbound_name.clone();
+                let connection_ws_path = ws_path.clone();
                 connections.spawn(async move {
                     handle_trojan_inbound(
                         tcp,
@@ -193,6 +197,7 @@ pub(super) async fn run_trojan_listener(
                         connection_dns,
                         connection_shutdown,
                         connection_inbound_name,
+                        connection_ws_path,
                     )
                     .await;
                 });
@@ -220,8 +225,9 @@ async fn handle_trojan_inbound(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
     inbound_name: String,
+    ws_path: Option<String>,
 ) {
-    let mut tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+    let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             state.log(
@@ -236,9 +242,70 @@ async fn handle_trojan_inbound(
         }
     };
 
+    if let Some(path) = ws_path {
+        let websocket =
+            match tokio::time::timeout(Duration::from_secs(10), accept_websocket_path(tls, &path))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("trojan inbound WebSocket upgrade failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "trojan inbound WebSocket upgrade timed out");
+                    return;
+                }
+            };
+        dispatch_trojan_session(
+            websocket,
+            peer,
+            local,
+            passwords,
+            config,
+            state,
+            dns_service,
+            shutdown,
+            inbound_name,
+        )
+        .await;
+        return;
+    }
+
+    dispatch_trojan_session(
+        tls,
+        peer,
+        local,
+        passwords,
+        config,
+        state,
+        dns_service,
+        shutdown,
+        inbound_name,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_trojan_session<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    local: SocketAddr,
+    passwords: HashMap<[u8; 56], String>,
+    config: Arc<Config>,
+    state: Arc<RuntimeState>,
+    dns_service: Arc<rewrite_dns::DnsService>,
+    shutdown: CancellationToken,
+    inbound_name: String,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let request = match tokio::time::timeout(
         Duration::from_secs(10),
-        accept_trojan_request(&mut tls, &passwords),
+        accept_trojan_request(&mut stream, &passwords),
     )
     .await
     {
@@ -253,7 +320,7 @@ async fn handle_trojan_inbound(
     match request.command {
         TrojanCommand::Tcp => {
             serve_trojan_tcp(
-                tls,
+                stream,
                 peer,
                 local,
                 request.destination,
@@ -268,7 +335,7 @@ async fn handle_trojan_inbound(
         }
         TrojanCommand::Udp => {
             serve_trojan_udp(
-                tls,
+                stream,
                 peer,
                 local,
                 request.username,
@@ -284,8 +351,8 @@ async fn handle_trojan_inbound(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn serve_trojan_tcp(
-    tls: TlsStream<TcpStream>,
+async fn serve_trojan_tcp<S>(
+    stream: S,
     peer: SocketAddr,
     local: SocketAddr,
     destination: Destination,
@@ -295,7 +362,9 @@ async fn serve_trojan_tcp(
     state: &Arc<RuntimeState>,
     dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let mut metadata = Metadata::new(destination, InboundProtocol::Trojan);
     metadata.network = Network::Tcp;
     metadata.source_ip = Some(unmap_ip(peer.ip()));
@@ -303,13 +372,13 @@ async fn serve_trojan_tcp(
     metadata.inbound_port = local.port();
     inbound_name.clone_into(&mut metadata.inbound_name);
     metadata.inbound_user = username;
-    let client: BoxedInboundStream = Box::new(TrojanInboundStream::new(tls, local, peer));
+    let client: BoxedInboundStream = Box::new(TrojanInboundStream::new(stream, local, peer));
     serve_shadowsocks_connection(client, metadata, config, state, dns_service, shutdown).await;
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn serve_trojan_udp(
-    mut tls: TlsStream<TcpStream>,
+async fn serve_trojan_udp<S>(
+    mut stream: S,
     peer: SocketAddr,
     local: SocketAddr,
     username: String,
@@ -318,10 +387,12 @@ async fn serve_trojan_udp(
     state: &Arc<RuntimeState>,
     _dns_service: &Arc<rewrite_dns::DnsService>,
     shutdown: &CancellationToken,
-) {
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let first_frame = tokio::select! {
         () = shutdown.cancelled() => None,
-        result = read_trojan_udp_packet(&mut tls) => result.ok(),
+        result = read_trojan_udp_packet(&mut stream) => result.ok(),
     };
     let Some((first_destination, first_payload)) = first_frame else {
         return;
@@ -369,7 +440,7 @@ async fn serve_trojan_udp(
     match mode {
         UdpSessionMode::Direct => {
             serve_trojan_udp_direct(
-                tls,
+                stream,
                 packet_metadata,
                 fake_host,
                 first_payload,
