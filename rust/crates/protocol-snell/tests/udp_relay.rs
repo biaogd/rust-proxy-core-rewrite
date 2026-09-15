@@ -146,6 +146,10 @@ async fn split_association_survives_tiny_buffer_bidi_pressure() {
     use rewrite_protocol_snell::{SnellUdpReceiver, SnellUdpSender};
     use socket2::{Domain, Protocol, Socket, Type};
 
+    // Exceed the authority response queue (8) and the runtime outbound queue
+    // (32) so concurrent progress is required under real backpressure.
+    const COUNT: usize = 128;
+
     let echo = spawn_udp_echo().await;
     let authority = spawn_authority(AuthorityOptions {
         listen: "127.0.0.1:0".parse().expect("listen"),
@@ -182,9 +186,6 @@ async fn split_association_survives_tiny_buffer_bidi_pressure() {
     let (mut sender, mut receiver): (SnellUdpSender<_>, SnellUdpReceiver<_>) =
         association.into_split();
 
-    // Exceed the authority response queue (8) and the runtime outbound queue
-    // (32) so concurrent progress is required under real backpressure.
-    const COUNT: usize = 128;
     let payload = vec![0x5a_u8; 512];
     let dest = echo.destination.clone();
 

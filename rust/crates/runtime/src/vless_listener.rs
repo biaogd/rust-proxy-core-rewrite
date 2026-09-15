@@ -16,8 +16,7 @@ use rewrite_config::{Config, ControllerTls, VlessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vless::{
-    VlessCommand, accept_vless_request, read_vless_udp_payload, uuid_table,
-    write_vless_udp_payload,
+    VlessCommand, accept_vless_request, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
@@ -122,10 +121,7 @@ where
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
@@ -198,7 +194,7 @@ pub(super) async fn run_vless_listener(
                 let connection_ws_path = ws_path.clone();
                 let connection_grpc_service = grpc_service_name.clone();
                 connections.spawn(async move {
-                    handle_vless_inbound(
+                    Box::pin(handle_vless_inbound(
                         tcp,
                         peer,
                         local,
@@ -211,7 +207,7 @@ pub(super) async fn run_vless_listener(
                         connection_inbound_name,
                         connection_ws_path,
                         connection_grpc_service,
-                    )
+                    ))
                     .await;
                 });
             }
@@ -274,26 +270,24 @@ async fn handle_vless_inbound(
     }
 
     if let Some(path) = ws_path {
-        let websocket = match tokio::time::timeout(
-            Duration::from_secs(10),
-            accept_websocket_path(tls, &path),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(error)) => {
-                state.log(
-                    "error",
-                    format!("vless inbound WebSocket upgrade failed: {error}"),
-                );
-                return;
-            }
-            Err(_) => {
-                state.log("error", "vless inbound WebSocket upgrade timed out");
-                return;
-            }
-        };
-        dispatch_vless_session(
+        let websocket =
+            match tokio::time::timeout(Duration::from_secs(10), accept_websocket_path(tls, &path))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("vless inbound WebSocket upgrade failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "vless inbound WebSocket upgrade timed out");
+                    return;
+                }
+            };
+        Box::pin(dispatch_vless_session(
             websocket,
             peer,
             local,
@@ -303,12 +297,12 @@ async fn handle_vless_inbound(
             dns_service,
             shutdown,
             inbound_name,
-        )
+        ))
         .await;
         return;
     }
 
-    dispatch_vless_session(
+    Box::pin(dispatch_vless_session(
         tls,
         peer,
         local,
@@ -318,7 +312,7 @@ async fn handle_vless_inbound(
         dns_service,
         shutdown,
         inbound_name,
-    )
+    ))
     .await;
 }
 
@@ -541,7 +535,10 @@ async fn serve_vless_udp<S>(
     let Some(mode) = udp_session_mode(&outbound_target, config) else {
         state.log(
             "error",
-            format!("vless inbound UDP target {} is unsupported", decision.target),
+            format!(
+                "vless inbound UDP target {} is unsupported",
+                decision.target
+            ),
         );
         return;
     };
@@ -557,8 +554,16 @@ async fn serve_vless_udp<S>(
     );
     match mode {
         UdpSessionMode::Direct => {
-            serve_vless_udp_direct(&mut stream, metadata, fake_host, decision, config, state, shutdown)
-                .await;
+            serve_vless_udp_direct(
+                &mut stream,
+                metadata,
+                fake_host,
+                decision,
+                config,
+                state,
+                shutdown,
+            )
+            .await;
         }
         _ => {
             state.log(
@@ -572,7 +577,7 @@ async fn serve_vless_udp<S>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn serve_vless_udp_direct<S>(
     stream: &mut S,
     metadata: Metadata,

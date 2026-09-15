@@ -3873,6 +3873,7 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn loads_named_vless_tls_listener_and_rejects_deferred_keys() {
     let config = Config::from_yaml(
         r"mode: rule
@@ -3895,7 +3896,10 @@ rules: ['MATCH,DIRECT']
     assert_eq!(inbound.name, "vless-tls");
     assert_eq!(inbound.users.len(), 1);
     assert_eq!(inbound.users[0].username, "alice");
-    assert_eq!(inbound.users[0].uuid, "b831381d-6324-4d53-ad4f-8cda48b30811");
+    assert_eq!(
+        inbound.users[0].uuid,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
     assert_eq!(inbound.certificate, "./server.crt");
     assert_eq!(inbound.private_key, "./server.key");
     assert!(inbound.ws_path.is_none());

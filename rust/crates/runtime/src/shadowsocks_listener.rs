@@ -476,6 +476,7 @@ impl ShadowsocksUdpSessions {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_shadowsocks_udp_packet(
     peer: SocketAddr,
     inbound_port: u16,
@@ -1468,7 +1469,7 @@ async fn run_shadowsocks_direct_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 if request.reply_handle.is_some() {
-                    reply_handle = request.reply_handle.clone();
+                    reply_handle.clone_from(&request.reply_handle);
                 }
                 let target = match resolve_udp_target(
                     &request.metadata,
@@ -1589,7 +1590,7 @@ async fn run_shadowsocks_dns_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 if request.reply_handle.is_some() {
-                    reply_handle = request.reply_handle.clone();
+                    reply_handle.clone_from(&request.reply_handle);
                 }
                 current = Some(request);
             }
@@ -1706,7 +1707,7 @@ async fn run_shadowsocks_socks5_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 if request.reply_handle.is_some() {
-                    reply_handle = request.reply_handle.clone();
+                    reply_handle.clone_from(&request.reply_handle);
                 }
                 current = Some(request);
             }
@@ -1823,7 +1824,7 @@ async fn run_shadowsocks_proxy_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 if request.reply_handle.is_some() {
-                    reply_handle = request.reply_handle.clone();
+                    reply_handle.clone_from(&request.reply_handle);
                 }
                 current = Some(request);
             }
@@ -1962,7 +1963,7 @@ async fn run_shadowsocks_uot_udp_session(
             request = requests.recv() => {
                 let Some(request) = request else { break };
                 if request.reply_handle.is_some() {
-                    reply_handle = request.reply_handle.clone();
+                    reply_handle.clone_from(&request.reply_handle);
                 }
                 current = Some(request);
             }

@@ -7,6 +7,7 @@
 //! since Vision negotiation is deferred.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use rewrite_model::{Destination, Host};
@@ -68,12 +69,13 @@ pub fn uuid_table<'a>(
 /// non-empty addons (Vision deferred), unknown UUID, unsupported command, or
 /// malformed address; returns [`VlessProtocolError::Io`] for transport
 /// failures.
-pub async fn accept_vless_request<S>(
+pub async fn accept_vless_request<S, H>(
     stream: &mut S,
-    users: &HashMap<[u8; 16], String>,
+    users: &HashMap<[u8; 16], String, H>,
 ) -> Result<VlessServerRequest, VlessProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
+    H: BuildHasher,
 {
     let mut version = [0_u8; 1];
     stream.read_exact(&mut version).await?;
@@ -189,8 +191,9 @@ pub async fn write_vless_udp_payload<S>(
 where
     S: AsyncWrite + Unpin,
 {
-    let length = u16::try_from(payload.len())
-        .map_err(|_| VlessProtocolError::Protocol("VLESS UDP payload exceeds 65535 bytes".to_owned()))?;
+    let length = u16::try_from(payload.len()).map_err(|_| {
+        VlessProtocolError::Protocol("VLESS UDP payload exceeds 65535 bytes".to_owned())
+    })?;
     stream.write_all(&length.to_be_bytes()).await?;
     stream.write_all(payload).await?;
     Ok(())
