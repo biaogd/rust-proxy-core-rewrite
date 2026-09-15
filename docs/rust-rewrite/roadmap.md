@@ -1395,7 +1395,7 @@ IN-A/IN-B.
 | **IN-A** | Census + shared access boundary | Keep mixed/SS/TUN behavior; document config-compat edges |
 | **IN-B** | Shadowsocks server completion | Common AEAD, SS2022, TCP/UDP; single/multi-user scope explicit; Go client ↔ Rust inbound; auth + replay |
 | **IN-C** | Trojan inbound | Standard TLS TCP+UDP first, then WS/gRPC; auth, certs, bidirectional relay, multi-dest UDP, half-close |
-| **IN-D** | VLESS inbound | Basic TCP/TLS, WS/gRPC, UDP, Vision done; REALITY later with separate security/lifecycle gate |
+| **IN-D** | VLESS inbound | Basic TCP/TLS, WS/gRPC, UDP, Vision, REALITY auth Accept done; dest camouflage fallback / Vision+REALITY later |
 | **IN-E** | VMess inbound | Prefer AEAD `alterId: 0`; TCP/TLS, WS/gRPC, UDP; address, security mode, time window, replay, carriers |
 | **IN-F** | QUIC servers | Hysteria2 and TUIC v5 separately; auth, TCP/UDP, stream caps, congestion knobs, recovery, resource pressure |
 | **IN-G** | AnyTLS inbound | TLS, padding, session reuse, multi-stream, UDP/UoT; isolation, close, heartbeat, idle reclaim, malicious-frame limits |
@@ -1473,9 +1473,9 @@ Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and
 
 **Vision slice complete (2026-09-15):** per-user `flow: xtls-rprx-vision` on
 native TLS; `accept_vision_tls` + `VisionStream` on the server path. Evidence
-`phase_ind_vless_vision.py`. REALITY inbound is deferred: Go uses
-`utls.RealityServer`, while Rust `shadow-rustls` exposes client REALITY only —
-no server Accept API yet — so `reality-config` stays rejected at parse.
+`phase_ind_vless_vision.py`. REALITY inbound auth Accept is in
+`phase_ind_vless_reality.py` (shadow-rustls `.4` `RealityServerConfig`); dest
+camouflage fallback and Vision+REALITY remain later.
 Combined ws+grpc stays rejected.
 
 

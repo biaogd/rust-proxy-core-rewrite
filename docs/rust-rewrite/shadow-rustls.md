@@ -50,3 +50,7 @@ The patch file lives in this repo only as a convenience for the above workflow; 
 ## Patch summary
 
 See [shadow-rustls/docs/PATCHES.md](https://github.com/biaogd/shadow-rustls/blob/main/docs/PATCHES.md).
+
+## Rewrite consumer
+
+`rewrite-transport` exposes `reality_acceptor` / `accept_reality` for named VLESS `reality-config` inbound (IN-D). Dest dial + record camouflage stay application-owned and are deferred.
