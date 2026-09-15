@@ -632,7 +632,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; `phase_inc_trojan_websocket.py` |
 | IN-C Trojan gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+UDP UoT; combined ws+grpc rejected; `phase_inc_trojan_grpc.py` |
 | IN-D VLESS Vision inbound | Complete (declared native TLS scope) | Per-user `flow: xtls-rprx-vision`; `phase_ind_vless_vision.py` |
-| IN-D VLESS REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls `.4`; dest fallback deferred; `phase_ind_vless_reality.py` |
+| IN-D VLESS REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls `.5`; dest fallback deferred; `phase_ind_vless_reality.py` |
 | IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
 | IN-D VLESS WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; standard UDP remains on TLS evidence; `phase_ind_vless_websocket.py` |
 | IN-D VLESS gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; standard UDP remains on TLS evidence; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |

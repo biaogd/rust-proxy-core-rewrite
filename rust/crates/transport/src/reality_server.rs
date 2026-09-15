@@ -72,3 +72,72 @@ where
         .map(|tls| Box::new(tls) as BoxedStream)
         .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reality::{RealityConnectOptions, connect_reality};
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn reality_accept_roundtrip() {
+        let _ = shadow_rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // Fixed Phase 6E keypair
+        let private_key = {
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode("yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw")
+                .expect("priv");
+            let key: [u8; 32] = decoded.try_into().expect("32");
+            key
+        };
+        let public_key = {
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode("Cu7X8PtrU22DHCW46oyZfgEEFLoWMxJYWhHOpBIokhc")
+                .expect("pub");
+            let key: [u8; 32] = decoded.try_into().expect("32");
+            key
+        };
+        let short_id = hex::decode("10f897e26c4b9478").expect("short");
+        let short_id: [u8; 8] = short_id.try_into().expect("8");
+        let acceptor = reality_acceptor(&RealityAcceptOptions {
+            private_key,
+            short_ids: vec![short_id],
+            server_names: vec!["itunes.apple.com".into()],
+            max_time_difference: None,
+        })
+        .expect("acceptor");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept tcp");
+            match accept_reality(&acceptor, tcp).await {
+                Ok(_) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        });
+
+        let tcp = TcpStream::connect(addr).await.expect("connect");
+        let client = connect_reality(
+            tcp,
+            RealityConnectOptions {
+                server_name: "itunes.apple.com",
+                public_key,
+                short_id: &short_id,
+                tls13_only: true,
+                support_x25519mlkem768: false,
+            },
+        )
+        .await;
+        let server_result = server.await.expect("join");
+        match (client, server_result) {
+            (Ok(_), Ok(())) => {}
+            (client, server) => {
+                panic!("client={client:?} server={server:?}");
+            }
+        }
+    }
+}

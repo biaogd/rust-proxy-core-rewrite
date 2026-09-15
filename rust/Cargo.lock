@@ -218,7 +218,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -229,7 +229,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1301,7 +1301,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3579,7 +3579,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4320,7 +4320,7 @@ dependencies = [
  "rand 0.10.2",
  "rewrite-io",
  "rewrite-services",
- "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?rev=5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa)",
+ "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?rev=b4015f66ae5308f0e70275dcb58a34c18dab9812)",
  "rustls-jls",
  "rustls-native-certs",
  "rustls-pemfile",
@@ -4329,7 +4329,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls 0.26.4 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?rev=5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa)",
+ "tokio-rustls 0.26.4 (git+https://github.com/biaogd/shadow-rustls?rev=b4015f66ae5308f0e70275dcb58a34c18dab9812)",
  "tokio-tungstenite",
  "tokio-util",
  "tower",
@@ -4585,7 +4585,7 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.43"
-source = "git+https://github.com/biaogd/shadow-rustls?rev=5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa#5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa"
+source = "git+https://github.com/biaogd/shadow-rustls?rev=b4015f66ae5308f0e70275dcb58a34c18dab9812#b4015f66ae5308f0e70275dcb58a34c18dab9812"
 dependencies = [
  "aws-lc-rs",
  "brotli",
@@ -4664,7 +4664,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5143,7 +5143,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5475,9 +5475,9 @@ dependencies = [
 [[package]]
 name = "tokio-rustls"
 version = "0.26.4"
-source = "git+https://github.com/biaogd/shadow-rustls?rev=5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa#5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa"
+source = "git+https://github.com/biaogd/shadow-rustls?rev=b4015f66ae5308f0e70275dcb58a34c18dab9812#b4015f66ae5308f0e70275dcb58a34c18dab9812"
 dependencies = [
- "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?rev=5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa)",
+ "rustls 0.23.43 (git+https://github.com/biaogd/shadow-rustls?rev=b4015f66ae5308f0e70275dcb58a34c18dab9812)",
  "tokio",
 ]
 
@@ -5995,7 +5995,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6386,7 +6386,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

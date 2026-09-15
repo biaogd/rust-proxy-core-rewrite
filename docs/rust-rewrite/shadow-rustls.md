@@ -15,7 +15,7 @@ There is **no** `[patch.crates-io]` — the fork is imported as renamed packages
 
 ```toml
 # rewrite-transport/Cargo.toml
-shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", rev = "5438ecbcb93cdd4cfbab08d75eacda7b1fa71caa", package = "rustls" }
+shadow-rustls = { git = "https://github.com/biaogd/shadow-rustls", rev = "b4015f66ae5308f0e70275dcb58a34c18dab9812", package = "rustls" }
 shadow-tokio-rustls = { git = "...", package = "tokio-rustls", ... }
 tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 ```
@@ -28,6 +28,7 @@ tokio-rustls.workspace = true   # default crates.io for non-ShadowTLS paths
 | `rustls-0.23.43-shadow.2` | 0.23.43 | 0.26.4 | + VLESS REALITY client (`with_reality()`) |
 | `40a767d6fa3c519167026d4c42e21187c80798f3` | 0.23.43 | 0.26.4 | Full uTLS Chrome 133 cipher advertisement |
 | `rustls-0.23.43-shadow.4` (`5438ecbc…`) | 0.23.43 | 0.26.4 | + VLESS REALITY server Accept (`RealityServerConfig` / `RealityServerCertResolver`) |
+| `rustls-0.23.43-shadow.5` (`b4015f66…`) | 0.23.43 | 0.26.4 | + Chrome fingerprint advertises ED25519 (REALITY CertificateVerify) |
 
 After publishing a new fork tag, bump both git deps in `rust/crates/transport/Cargo.toml`.
 

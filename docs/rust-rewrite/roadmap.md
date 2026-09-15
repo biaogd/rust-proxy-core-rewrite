@@ -1474,7 +1474,7 @@ Evidence also `phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`, and
 **Vision slice complete (2026-09-15):** per-user `flow: xtls-rprx-vision` on
 native TLS; `accept_vision_tls` + `VisionStream` on the server path. Evidence
 `phase_ind_vless_vision.py`. REALITY inbound auth Accept is in
-`phase_ind_vless_reality.py` (shadow-rustls `.4` `RealityServerConfig`); dest
+`phase_ind_vless_reality.py` (shadow-rustls `.5` `RealityServerConfig`); dest
 camouflage fallback and Vision+REALITY remain later.
 Combined ws+grpc stays rejected.
 
