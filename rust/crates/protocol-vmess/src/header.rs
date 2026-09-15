@@ -24,7 +24,6 @@ const OPTION_GLOBAL_PADDING: u8 = 0x08;
 const OPTION_AUTHENTICATED_LENGTH: u8 = 0x10;
 pub(super) const OPTION_CHUNK_STREAM: u8 = 0x01;
 pub(super) const OPTION_CHUNK_MASKING: u8 = 0x04;
-const OPTION_CHUNK_STREAM_AND_MASKING: u8 = OPTION_CHUNK_STREAM | OPTION_CHUNK_MASKING;
 const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x02;
 const ADDRESS_IPV6: u8 = 0x03;
@@ -1021,7 +1020,7 @@ mod tests {
         assert_eq!(&plaintext[1..17], &sealed.request_iv);
         assert_eq!(&plaintext[17..33], &sealed.request_key);
         assert_eq!(plaintext[33], sealed.response_verification);
-        assert_eq!(plaintext[34], OPTION_CHUNK_STREAM_AND_MASKING);
+        assert_eq!(plaintext[34], OPTION_CHUNK_STREAM | OPTION_CHUNK_MASKING);
         assert_eq!(plaintext[35] & 0x0f, 3);
         assert_eq!(plaintext[37], VmessCommand::Tcp.wire_value());
         assert_eq!(&plaintext[38..40], &443_u16.to_be_bytes());
