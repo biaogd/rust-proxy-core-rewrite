@@ -4035,7 +4035,6 @@ rules: ['MATCH,DIRECT']
     assert!(with_reality.vless_listeners[0].certificate.is_none());
 }
 
-
 #[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(

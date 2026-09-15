@@ -433,9 +433,7 @@ fn parse_reality_config(
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            ConfigError::InvalidInbound(format!(
-                "listener {name} reality-config is missing dest"
-            ))
+            ConfigError::InvalidInbound(format!("listener {name} reality-config is missing dest"))
         })?;
     let private_key_text = mapping_string(reality, "private-key")
         .map(|value| value.trim().to_owned())
@@ -493,10 +491,7 @@ fn decode_reality_private_key(text: &str, name: &str) -> Result<[u8; 32], Config
     })
 }
 
-fn parse_reality_short_ids(
-    mapping: &Mapping,
-    name: &str,
-) -> Result<Vec<[u8; 8]>, ConfigError> {
+fn parse_reality_short_ids(mapping: &Mapping, name: &str) -> Result<Vec<[u8; 8]>, ConfigError> {
     let Some(value) = mapping.get(Value::from("short-id")) else {
         return Ok(Vec::new());
     };
@@ -544,10 +539,7 @@ fn parse_reality_short_ids(
     Ok(short_ids)
 }
 
-fn parse_reality_server_names(
-    mapping: &Mapping,
-    name: &str,
-) -> Result<Vec<String>, ConfigError> {
+fn parse_reality_server_names(mapping: &Mapping, name: &str) -> Result<Vec<String>, ConfigError> {
     let Some(value) = mapping.get(Value::from("server-names")) else {
         return Ok(Vec::new());
     };

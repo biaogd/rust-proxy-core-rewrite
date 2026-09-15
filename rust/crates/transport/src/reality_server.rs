@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rewrite_io::BoxedStream;
-use shadow_rustls::server::{RealityServerCertResolver, RealityServerConfig};
 use shadow_rustls::ServerConfig;
+use shadow_rustls::server::{RealityServerCertResolver, RealityServerConfig};
 use shadow_tokio_rustls::TlsAcceptor;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -31,9 +31,7 @@ pub struct RealityAcceptOptions {
 /// # Errors
 ///
 /// Returns [`TlsClientError::Configuration`] when the REALITY server config is invalid.
-pub fn reality_acceptor(
-    options: &RealityAcceptOptions,
-) -> Result<TlsAcceptor, TlsClientError> {
+pub fn reality_acceptor(options: &RealityAcceptOptions) -> Result<TlsAcceptor, TlsClientError> {
     // shadow-rustls enables both aws-lc-rs and ring for fingerprint/REALITY;
     // the server Accept path consults the process default provider.
     let _ = shadow_rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -72,7 +70,6 @@ where
         .map(|tls| Box::new(tls) as BoxedStream)
         .map_err(|error| TlsClientError::Handshake(std::io::Error::other(error)))
 }
-
 
 #[cfg(test)]
 mod tests {
