@@ -407,9 +407,9 @@ jobs:
             cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
             rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
-            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1|inb)_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1|_inb)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
-            trojan) SHARD_REGEX='phase(6f_trojan_|inc_trojan_)[a-z0-9_]+\.py$' ;;
+            trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_)[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;

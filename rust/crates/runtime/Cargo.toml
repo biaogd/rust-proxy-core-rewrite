@@ -37,6 +37,7 @@ ipnet.workspace = true
 [dev-dependencies]
 quinn.workspace = true
 rcgen = "0.13"
+tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls.workspace = true
 
 [lints]
