@@ -34,6 +34,9 @@ pub struct RealityAcceptOptions {
 pub fn reality_acceptor(
     options: &RealityAcceptOptions,
 ) -> Result<TlsAcceptor, TlsClientError> {
+    // shadow-rustls enables both aws-lc-rs and ring for fingerprint/REALITY;
+    // the server Accept path consults the process default provider.
+    let _ = shadow_rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut config = RealityServerConfig::new(options.private_key);
     config = config
         .with_short_ids(options.short_ids.iter().copied())
