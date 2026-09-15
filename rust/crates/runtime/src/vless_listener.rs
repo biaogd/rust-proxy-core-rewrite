@@ -54,6 +54,8 @@ const VLESS_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const VLESS_XUDP_MAX_SESSIONS: usize = 64;
 /// Drop mux UDP associations idle longer than this.
 const VLESS_XUDP_SESSION_IDLE: Duration = Duration::from_secs(60);
+/// How often the association loop sweeps idle sessions.
+const VLESS_XUDP_IDLE_SWEEP: Duration = Duration::from_secs(10);
 
 type XudpReply = (u16, SocketAddr, Vec<u8>);
 
@@ -62,21 +64,40 @@ type XudpReply = (u16, SocketAddr, Vec<u8>);
 struct XudpMuxSession {
     socket: Arc<UdpSocket>,
     cancel: CancellationToken,
+    reader: tokio::task::JoinHandle<()>,
     last_used: Instant,
+}
+
+impl Drop for XudpMuxSession {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.reader.abort();
+    }
 }
 
 struct XudpMuxTable {
     sessions: HashMap<u16, XudpMuxSession>,
     lru: VecDeque<u16>,
     max_sessions: usize,
+    /// Parent cancel for the VLESS connection; session tokens are children so
+    /// hot-reload / connection abort cancels readers even if the table Drop is
+    /// raced with `JoinSet::abort_all`.
+    parent_cancel: CancellationToken,
+}
+
+impl Drop for XudpMuxTable {
+    fn drop(&mut self) {
+        self.shutdown_all();
+    }
 }
 
 impl XudpMuxTable {
-    fn new(max_sessions: usize) -> Self {
+    fn new(max_sessions: usize, parent_cancel: CancellationToken) -> Self {
         Self {
             sessions: HashMap::new(),
             lru: VecDeque::new(),
             max_sessions: max_sessions.max(1),
+            parent_cancel,
         }
     }
 
@@ -109,8 +130,7 @@ impl XudpMuxTable {
 
     fn evict_oldest(&mut self) -> Option<u16> {
         while let Some(session_id) = self.lru.pop_front() {
-            if let Some(session) = self.sessions.remove(&session_id) {
-                session.cancel.cancel();
+            if self.sessions.remove(&session_id).is_some() {
                 return Some(session_id);
             }
         }
@@ -126,9 +146,7 @@ impl XudpMuxTable {
             .map(|(session_id, _)| *session_id)
             .collect();
         for session_id in idle {
-            if let Some(session) = self.sessions.remove(&session_id) {
-                session.cancel.cancel();
-            }
+            let _ = self.sessions.remove(&session_id);
             self.lru.retain(|id| *id != session_id);
         }
     }
@@ -142,9 +160,7 @@ impl XudpMuxTable {
         reply_tx: mpsc::Sender<XudpReply>,
     ) -> Arc<UdpSocket> {
         if self.sessions.contains_key(&session_id) {
-            if let Some(previous) = self.sessions.remove(&session_id) {
-                previous.cancel.cancel();
-            }
+            let _ = self.sessions.remove(&session_id);
             self.lru.retain(|id| *id != session_id);
         } else {
             self.evict_idle(VLESS_XUDP_SESSION_IDLE);
@@ -153,14 +169,16 @@ impl XudpMuxTable {
             }
         }
         let socket = Arc::new(socket);
-        let cancel = CancellationToken::new();
-        spawn_xudp_session_reader(session_id, Arc::clone(&socket), cancel.clone(), reply_tx);
+        let cancel = self.parent_cancel.child_token();
+        let reader =
+            spawn_xudp_session_reader(session_id, Arc::clone(&socket), cancel.clone(), reply_tx);
         self.lru.push_back(session_id);
         self.sessions.insert(
             session_id,
             XudpMuxSession {
                 socket: Arc::clone(&socket),
                 cancel,
+                reader,
                 last_used: Instant::now(),
             },
         );
@@ -168,9 +186,7 @@ impl XudpMuxTable {
     }
 
     fn shutdown_all(&mut self) {
-        for (_, session) in self.sessions.drain() {
-            session.cancel.cancel();
-        }
+        self.sessions.clear();
         self.lru.clear();
     }
 }
@@ -180,7 +196,7 @@ fn spawn_xudp_session_reader(
     socket: Arc<UdpSocket>,
     cancel: CancellationToken,
     reply_tx: mpsc::Sender<XudpReply>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buffer = vec![0_u8; 65_536];
         loop {
@@ -196,7 +212,7 @@ fn spawn_xudp_session_reader(
                 }
             }
         }
-    });
+    })
 }
 
 async fn ensure_xudp_session(
@@ -1064,7 +1080,7 @@ async fn serve_vless_xudp<S>(
     );
 
     let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(32);
-    let mut sessions = XudpMuxTable::new(VLESS_XUDP_MAX_SESSIONS);
+    let mut sessions = XudpMuxTable::new(VLESS_XUDP_MAX_SESSIONS, shutdown.child_token());
     let Some(first_socket) = ensure_xudp_session(
         &mut sessions,
         first_session_id,
@@ -1120,10 +1136,18 @@ async fn serve_vless_xudp<S>(
         }
     });
 
+    let mut idle_sweep = tokio::time::interval(VLESS_XUDP_IDLE_SWEEP);
+    idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume the immediate first tick so idle expiry waits a full sweep period.
+    idle_sweep.tick().await;
+
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
+            _ = idle_sweep.tick() => {
+                sessions.evict_idle(VLESS_XUDP_SESSION_IDLE);
+            }
             reply = reply_rx.recv() => {
                 let Some((session_id, source, payload)) = reply else { break };
                 let destination = Destination {
@@ -1282,7 +1306,7 @@ mod udp_write_tests {
     #[tokio::test]
     async fn xudp_table_evicts_lru_when_at_capacity() {
         let (reply_tx, _reply_rx) = mpsc::channel::<XudpReply>(8);
-        let mut table = XudpMuxTable::new(2);
+        let mut table = XudpMuxTable::new(2, CancellationToken::new());
         for session_id in [1_u16, 2, 3] {
             let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
             table.insert_session(session_id, socket, reply_tx.clone());
@@ -1309,7 +1333,7 @@ mod udp_write_tests {
         });
 
         let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(8);
-        let mut table = XudpMuxTable::new(8);
+        let mut table = XudpMuxTable::new(8, CancellationToken::new());
         let socket_one = UdpSocket::bind("127.0.0.1:0").await.expect("s1");
         let socket_two = UdpSocket::bind("127.0.0.1:0").await.expect("s2");
         let session_one = table.insert_session(11, socket_one, reply_tx.clone());
@@ -1353,13 +1377,66 @@ mod udp_write_tests {
     #[tokio::test(start_paused = true)]
     async fn xudp_table_evicts_idle_sessions() {
         let (reply_tx, _reply_rx) = mpsc::channel::<XudpReply>(4);
-        let mut table = XudpMuxTable::new(8);
+        let mut table = XudpMuxTable::new(8, CancellationToken::new());
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         table.insert_session(7, socket, reply_tx);
         assert!(table.contains(7));
         tokio::time::advance(VLESS_XUDP_SESSION_IDLE + Duration::from_secs(1)).await;
         table.evict_idle(VLESS_XUDP_SESSION_IDLE);
         assert!(!table.contains(7), "idle session must expire");
+        table.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn xudp_table_drop_closes_reader_senders() {
+        let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(4);
+        {
+            let mut table = XudpMuxTable::new(4, CancellationToken::new());
+            let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            table.insert_session(1, socket, reply_tx);
+            // Dropping the table must cancel/abort the reader so the only
+            // Sender is released and recv completes with None.
+        }
+        assert!(
+            reply_rx.recv().await.is_none(),
+            "Drop must recycle session reader tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn xudp_parent_cancel_stops_session_readers() {
+        let parent = CancellationToken::new();
+        let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(4);
+        let mut table = XudpMuxTable::new(4, parent.child_token());
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        table.insert_session(1, socket, reply_tx);
+        parent.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), reply_rx.recv())
+                .await
+                .expect("reader must observe parent cancel")
+                .is_none(),
+            "parent cancel must stop session readers"
+        );
+        table.shutdown_all();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn xudp_idle_sweep_interval_matches_runtime_cadence() {
+        // The association loop sweeps on VLESS_XUDP_IDLE_SWEEP; after idle
+        // timeout + one sweep period, sessions must be reclaimable without a
+        // new client frame.
+        let (reply_tx, _reply_rx) = mpsc::channel::<XudpReply>(4);
+        let mut table = XudpMuxTable::new(4, CancellationToken::new());
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        table.insert_session(9, socket, reply_tx);
+        let mut sweep = tokio::time::interval(VLESS_XUDP_IDLE_SWEEP);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        sweep.tick().await;
+        tokio::time::advance(VLESS_XUDP_SESSION_IDLE + VLESS_XUDP_IDLE_SWEEP).await;
+        sweep.tick().await;
+        table.evict_idle(VLESS_XUDP_SESSION_IDLE);
+        assert!(!table.contains(9));
         table.shutdown_all();
     }
 }
