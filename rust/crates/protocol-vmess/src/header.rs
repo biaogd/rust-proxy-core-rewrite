@@ -1,7 +1,10 @@
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes::Aes128;
-use aes::cipher::{AsyncStreamCipher as _, BlockEncrypt, KeyInit as _, KeyIvInit as _};
+use aes::cipher::{
+    AsyncStreamCipher as _, BlockDecrypt as _, BlockEncrypt, KeyInit as _, KeyIvInit as _,
+};
 use aes_gcm::aead::{Aead as _, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
 use hmac::{Hmac, Mac as _};
@@ -17,24 +20,47 @@ use super::{VmessProtocolError, VmessSecurity, fnv1a32};
 const VMESS_MAGIC: &[u8] = b"c48619fe-8f02-49e0-b9e9-edf763e17e21";
 const VMESS_ALTER_ID_MAGIC: &[u8] = b"16167dc8-16b6-4e6d-b8bb-65dd68113a81";
 const VMESS_ALTER_ID_COLLISION_MAGIC: &[u8] = b"533eff8a-4113-4b10-b5ce-0f5d76b98cd2";
+const OPTION_GLOBAL_PADDING: u8 = 0x08;
+const OPTION_AUTHENTICATED_LENGTH: u8 = 0x10;
 const OPTION_CHUNK_STREAM_AND_MASKING: u8 = 0x01 | 0x04;
 const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x02;
 const ADDRESS_IPV6: u8 = 0x03;
 
+/// Default AuthID timestamp acceptance window used by sing-vmess / v2fly (±120s).
+pub const DEFAULT_TIMESTAMP_SKEW_SECS: u64 = 120;
+
+/// AEAD request header length prefix: 2 plaintext bytes + 16-byte GCM tag.
+const AEAD_LENGTH_CIPHERTEXT_LEN: usize = 18;
+#[cfg(test)]
+const AEAD_AUTH_ID_LEN: usize = 16;
+const AEAD_CONNECTION_NONCE_LEN: usize = 8;
+const AEAD_TAG_LEN: usize = 16;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum VmessCommand {
+pub enum VmessCommand {
     Tcp,
     Udp,
     Mux,
 }
 
 impl VmessCommand {
-    const fn wire_value(self) -> u8 {
+    pub(super) const fn wire_value(self) -> u8 {
         match self {
             Self::Tcp => 1,
             Self::Udp => 2,
             Self::Mux => 3,
+        }
+    }
+
+    fn from_wire(value: u8) -> Result<Self, VmessProtocolError> {
+        match value {
+            1 => Ok(Self::Tcp),
+            2 => Ok(Self::Udp),
+            3 => Ok(Self::Mux),
+            other => Err(VmessProtocolError::Protocol(format!(
+                "unsupported VMess command {other}"
+            ))),
         }
     }
 }
@@ -49,6 +75,18 @@ impl VmessSecurity {
             Self::Auto => unreachable!(),
         }
     }
+
+    fn from_wire(value: u8) -> Result<Self, VmessProtocolError> {
+        match value {
+            0x01 => Ok(Self::Aes128Cfb),
+            0x03 => Ok(Self::Aes128Gcm),
+            0x04 => Ok(Self::ChaCha20Poly1305),
+            0x05 => Ok(Self::None),
+            other => Err(VmessProtocolError::Protocol(format!(
+                "unsupported VMess security {other}"
+            ))),
+        }
+    }
 }
 
 pub(super) struct SealedHeader {
@@ -56,6 +94,34 @@ pub(super) struct SealedHeader {
     pub(super) request_key: [u8; 16],
     pub(super) request_iv: [u8; 16],
     pub(super) response_verification: u8,
+}
+
+/// Parsed AEAD request header after AuthID match and header decryption.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct OpenedAeadRequest {
+    pub request_key: [u8; 16],
+    pub request_iv: [u8; 16],
+    pub response_verification: u8,
+    pub request_options: u8,
+    pub security: VmessSecurity,
+    pub command: VmessCommand,
+    pub destination: Destination,
+    pub global_padding: bool,
+    pub authenticated_length: bool,
+    pub timestamp: u64,
+    /// Decrypted AuthID plaintext used for replay detection.
+    pub decoded_auth_id: [u8; 16],
+}
+
+/// Returns whether `timestamp` is within `±skew_secs` of `now_secs`.
+#[must_use]
+pub fn timestamp_within_skew(timestamp: u64, now_secs: u64, skew_secs: u64) -> bool {
+    let delta = if timestamp >= now_secs {
+        timestamp - now_secs
+    } else {
+        now_secs - timestamp
+    };
+    delta <= skew_secs
 }
 
 #[derive(Clone, Copy)]
@@ -89,10 +155,20 @@ pub(super) fn seal_request_header(
     destination: &Destination,
     options: SealRequestOptions,
 ) -> Result<SealedHeader, VmessProtocolError> {
-    let mut random = rand::rng();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
+    seal_request_header_at(uuid, command_key, destination, options, now)
+}
+
+pub(super) fn seal_request_header_at(
+    uuid: &[u8; 16],
+    command_key: &[u8; 16],
+    destination: &Destination,
+    options: SealRequestOptions,
+    now: u64,
+) -> Result<SealedHeader, VmessProtocolError> {
+    let mut random = rand::rng();
 
     let mut request_key = [0_u8; 16];
     let mut request_iv = [0_u8; 16];
@@ -221,7 +297,7 @@ fn seal_legacy_request_header(
     })
 }
 
-fn first_alter_id(uuid: &[u8; 16]) -> [u8; 16] {
+pub(super) fn first_alter_id(uuid: &[u8; 16]) -> [u8; 16] {
     let mut material = Vec::with_capacity(
         uuid.len() + VMESS_ALTER_ID_MAGIC.len() + VMESS_ALTER_ID_COLLISION_MAGIC.len(),
     );
@@ -236,7 +312,7 @@ fn first_alter_id(uuid: &[u8; 16]) -> [u8; 16] {
     }
 }
 
-fn build_auth_id(
+pub(super) fn build_auth_id(
     command_key: &[u8; 16],
     now: u64,
     random: &mut impl rand::Rng,
@@ -253,6 +329,391 @@ fn build_auth_id(
     let mut encrypted = aes::Block::from(block);
     cipher.encrypt_block(&mut encrypted);
     Ok(encrypted.into())
+}
+
+/// Decrypts a wire AuthID with the user's command key.
+///
+/// Returns the decoded plaintext block when the CRC32 checksum is valid.
+pub(super) fn try_decode_auth_id(
+    command_key: &[u8; 16],
+    encrypted_auth_id: &[u8; 16],
+) -> Result<Option<[u8; 16]>, VmessProtocolError> {
+    let key = derive_16(command_key, &[b"AES Auth ID Encryption"]);
+    let cipher = Aes128::new_from_slice(&key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
+    let mut decoded = aes::Block::from(*encrypted_auth_id);
+    cipher.decrypt_block(&mut decoded);
+    let decoded: [u8; 16] = decoded.into();
+    let expected = crc32fast::hash(&decoded[..12]);
+    let actual = u32::from_be_bytes(
+        decoded[12..]
+            .try_into()
+            .expect("AuthID checksum is four bytes"),
+    );
+    if expected != actual {
+        return Ok(None);
+    }
+    Ok(Some(decoded))
+}
+
+pub(super) fn auth_id_timestamp(decoded_auth_id: &[u8; 16]) -> u64 {
+    u64::from_be_bytes(
+        decoded_auth_id[..8]
+            .try_into()
+            .expect("AuthID timestamp is eight bytes"),
+    )
+}
+
+/// Returns true when `auth_prefix` matches the legacy alterId HMAC for `uuid`
+/// at any timestamp within `±skew_secs` of `now_secs`.
+pub(super) fn matches_legacy_alter_id_auth(
+    uuid: &[u8; 16],
+    auth_prefix: &[u8; 16],
+    now_secs: u64,
+    skew_secs: u64,
+) -> Result<bool, VmessProtocolError> {
+    let alter_id = first_alter_id(uuid);
+    let start = now_secs.saturating_sub(skew_secs);
+    let end = now_secs.saturating_add(skew_secs);
+    for timestamp in start..=end {
+        let mut authenticator = <Hmac<Md5> as hmac::Mac>::new_from_slice(&alter_id)
+            .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
+        authenticator.update(&timestamp.to_be_bytes());
+        if authenticator.verify_slice(auth_prefix).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Opens an AEAD request header given a matched command key and the full wire
+/// buffer starting at the AuthID.
+#[cfg(test)]
+pub(super) fn open_aead_request_header(
+    command_key: &[u8; 16],
+    wire: &[u8],
+    decoded_auth_id: [u8; 16],
+) -> Result<OpenedAeadRequest, VmessProtocolError> {
+    let auth_id = wire
+        .get(..AEAD_AUTH_ID_LEN)
+        .ok_or_else(|| VmessProtocolError::Protocol("VMess AEAD header is truncated".to_owned()))?;
+    let encrypted_length = wire
+        .get(AEAD_AUTH_ID_LEN..AEAD_AUTH_ID_LEN + AEAD_LENGTH_CIPHERTEXT_LEN)
+        .ok_or_else(|| VmessProtocolError::Protocol("VMess AEAD header is truncated".to_owned()))?;
+    let connection_nonce = wire
+        .get(
+            AEAD_AUTH_ID_LEN + AEAD_LENGTH_CIPHERTEXT_LEN
+                ..AEAD_AUTH_ID_LEN + AEAD_LENGTH_CIPHERTEXT_LEN + AEAD_CONNECTION_NONCE_LEN,
+        )
+        .ok_or_else(|| VmessProtocolError::Protocol("VMess AEAD header is truncated".to_owned()))?;
+
+    let length_key = derive_16(
+        command_key,
+        &[b"VMess Header AEAD Key_Length", auth_id, connection_nonce],
+    );
+    let length_nonce = derive_12(
+        command_key,
+        &[b"VMess Header AEAD Nonce_Length", auth_id, connection_nonce],
+    );
+    let length = Aes128Gcm::new_from_slice(&length_key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+        .decrypt(
+            Nonce::from_slice(&length_nonce),
+            Payload {
+                msg: encrypted_length,
+                aad: auth_id,
+            },
+        )
+        .map_err(|_| {
+            VmessProtocolError::Protocol("VMess request length authentication failed".to_owned())
+        })?;
+    let length = match length.as_slice() {
+        [high, low] => usize::from(u16::from_be_bytes([*high, *low])),
+        _ => {
+            return Err(VmessProtocolError::Protocol(
+                "invalid VMess request header length".to_owned(),
+            ));
+        }
+    };
+
+    let header_offset = AEAD_AUTH_ID_LEN + AEAD_LENGTH_CIPHERTEXT_LEN + AEAD_CONNECTION_NONCE_LEN;
+    let encrypted_header = wire
+        .get(header_offset..)
+        .ok_or_else(|| VmessProtocolError::Protocol("VMess AEAD header is truncated".to_owned()))?;
+    if encrypted_header.len() != length + AEAD_TAG_LEN {
+        return Err(VmessProtocolError::Protocol(
+            "VMess AEAD header length mismatch".to_owned(),
+        ));
+    }
+
+    let header_key = derive_16(
+        command_key,
+        &[b"VMess Header AEAD Key", auth_id, connection_nonce],
+    );
+    let header_nonce = derive_12(
+        command_key,
+        &[b"VMess Header AEAD Nonce", auth_id, connection_nonce],
+    );
+    let plaintext = Aes128Gcm::new_from_slice(&header_key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+        .decrypt(
+            Nonce::from_slice(&header_nonce),
+            Payload {
+                msg: encrypted_header,
+                aad: auth_id,
+            },
+        )
+        .map_err(|_| {
+            VmessProtocolError::Protocol("VMess request header authentication failed".to_owned())
+        })?;
+
+    let mut opened = parse_request_plaintext(&plaintext)?;
+    opened.decoded_auth_id = decoded_auth_id;
+    opened.timestamp = auth_id_timestamp(&decoded_auth_id);
+    Ok(opened)
+}
+
+/// Reads the remainder of an AEAD request after a matched AuthID has already
+/// been consumed from `reader`.
+pub(super) async fn read_aead_request_after_auth_id<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    command_key: &[u8; 16],
+    auth_id: [u8; 16],
+    decoded_auth_id: [u8; 16],
+) -> Result<OpenedAeadRequest, VmessProtocolError> {
+    let mut encrypted_length = [0_u8; AEAD_LENGTH_CIPHERTEXT_LEN];
+    reader.read_exact(&mut encrypted_length).await?;
+    let mut connection_nonce = [0_u8; AEAD_CONNECTION_NONCE_LEN];
+    reader.read_exact(&mut connection_nonce).await?;
+
+    let length_key = derive_16(
+        command_key,
+        &[b"VMess Header AEAD Key_Length", &auth_id, &connection_nonce],
+    );
+    let length_nonce = derive_12(
+        command_key,
+        &[
+            b"VMess Header AEAD Nonce_Length",
+            &auth_id,
+            &connection_nonce,
+        ],
+    );
+    let length = Aes128Gcm::new_from_slice(&length_key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+        .decrypt(
+            Nonce::from_slice(&length_nonce),
+            Payload {
+                msg: &encrypted_length,
+                aad: &auth_id,
+            },
+        )
+        .map_err(|_| {
+            VmessProtocolError::Protocol("VMess request length authentication failed".to_owned())
+        })?;
+    let length = match length.as_slice() {
+        [high, low] => usize::from(u16::from_be_bytes([*high, *low])),
+        _ => {
+            return Err(VmessProtocolError::Protocol(
+                "invalid VMess request header length".to_owned(),
+            ));
+        }
+    };
+    if !(38..=4096).contains(&length) {
+        return Err(VmessProtocolError::Protocol(
+            "invalid VMess request header size".to_owned(),
+        ));
+    }
+
+    let mut encrypted_header = vec![0_u8; length + AEAD_TAG_LEN];
+    reader.read_exact(&mut encrypted_header).await?;
+
+    let header_key = derive_16(
+        command_key,
+        &[b"VMess Header AEAD Key", &auth_id, &connection_nonce],
+    );
+    let header_nonce = derive_12(
+        command_key,
+        &[b"VMess Header AEAD Nonce", &auth_id, &connection_nonce],
+    );
+    let plaintext = Aes128Gcm::new_from_slice(&header_key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+        .decrypt(
+            Nonce::from_slice(&header_nonce),
+            Payload {
+                msg: &encrypted_header,
+                aad: &auth_id,
+            },
+        )
+        .map_err(|_| {
+            VmessProtocolError::Protocol("VMess request header authentication failed".to_owned())
+        })?;
+
+    let mut opened = parse_request_plaintext(&plaintext)?;
+    opened.decoded_auth_id = decoded_auth_id;
+    opened.timestamp = auth_id_timestamp(&decoded_auth_id);
+    Ok(opened)
+}
+
+fn parse_request_plaintext(plaintext: &[u8]) -> Result<OpenedAeadRequest, VmessProtocolError> {
+    if plaintext.len() < 42 {
+        return Err(VmessProtocolError::Protocol(
+            "VMess request header is too short".to_owned(),
+        ));
+    }
+    let checksum_offset = plaintext.len() - 4;
+    let expected = u32::from_be_bytes(
+        plaintext[checksum_offset..]
+            .try_into()
+            .expect("FNV checksum is four bytes"),
+    );
+    if fnv1a32(&plaintext[..checksum_offset]) != expected {
+        return Err(VmessProtocolError::Protocol(
+            "VMess request header checksum failed".to_owned(),
+        ));
+    }
+    if plaintext[0] != 0x01 {
+        return Err(VmessProtocolError::Protocol(format!(
+            "unsupported VMess request version {}",
+            plaintext[0]
+        )));
+    }
+
+    let mut request_iv = [0_u8; 16];
+    request_iv.copy_from_slice(&plaintext[1..17]);
+    let mut request_key = [0_u8; 16];
+    request_key.copy_from_slice(&plaintext[17..33]);
+    let response_verification = plaintext[33];
+    let request_options = plaintext[34];
+    let padding_length = usize::from(plaintext[35] >> 4);
+    let security = VmessSecurity::from_wire(plaintext[35] & 0x0f)?;
+    let command = VmessCommand::from_wire(plaintext[37])?;
+    let global_padding = request_options & OPTION_GLOBAL_PADDING != 0;
+    let authenticated_length = request_options & OPTION_AUTHENTICATED_LENGTH != 0;
+
+    let address_end = checksum_offset.saturating_sub(padding_length);
+    let mut cursor = 38_usize;
+    let destination = if command == VmessCommand::Mux {
+        if cursor + padding_length != checksum_offset {
+            return Err(VmessProtocolError::Protocol(
+                "VMess mux request header padding length mismatch".to_owned(),
+            ));
+        }
+        Destination {
+            host: Host::Ip(Ipv4Addr::UNSPECIFIED.into()),
+            port: 0,
+        }
+    } else {
+        if address_end < cursor + 3 {
+            return Err(VmessProtocolError::Protocol(
+                "VMess request address is truncated".to_owned(),
+            ));
+        }
+        let port = u16::from_be_bytes([plaintext[cursor], plaintext[cursor + 1]]);
+        cursor += 2;
+        let host = match plaintext[cursor] {
+            ADDRESS_IPV4 => {
+                cursor += 1;
+                if address_end < cursor + 4 {
+                    return Err(VmessProtocolError::Protocol(
+                        "VMess request IPv4 address is truncated".to_owned(),
+                    ));
+                }
+                let mut octets = [0_u8; 4];
+                octets.copy_from_slice(&plaintext[cursor..cursor + 4]);
+                cursor += 4;
+                Host::Ip(Ipv4Addr::from(octets).into())
+            }
+            ADDRESS_IPV6 => {
+                cursor += 1;
+                if address_end < cursor + 16 {
+                    return Err(VmessProtocolError::Protocol(
+                        "VMess request IPv6 address is truncated".to_owned(),
+                    ));
+                }
+                let mut octets = [0_u8; 16];
+                octets.copy_from_slice(&plaintext[cursor..cursor + 16]);
+                cursor += 16;
+                Host::Ip(Ipv6Addr::from(octets).into())
+            }
+            ADDRESS_DOMAIN => {
+                cursor += 1;
+                if address_end < cursor + 1 {
+                    return Err(VmessProtocolError::Protocol(
+                        "VMess request domain is truncated".to_owned(),
+                    ));
+                }
+                let length = usize::from(plaintext[cursor]);
+                cursor += 1;
+                if length == 0 || address_end < cursor + length {
+                    return Err(VmessProtocolError::Protocol(
+                        "VMess request domain is truncated".to_owned(),
+                    ));
+                }
+                let domain = String::from_utf8(plaintext[cursor..cursor + length].to_vec())
+                    .map_err(|_| {
+                        VmessProtocolError::Protocol("VMess request domain is not UTF-8".to_owned())
+                    })?;
+                cursor += length;
+                Host::Domain(domain)
+            }
+            other => {
+                return Err(VmessProtocolError::Protocol(format!(
+                    "unsupported VMess address type {other}"
+                )));
+            }
+        };
+        if cursor + padding_length != checksum_offset {
+            return Err(VmessProtocolError::Protocol(
+                "VMess request header padding length mismatch".to_owned(),
+            ));
+        }
+        Destination { host, port }
+    };
+
+    Ok(OpenedAeadRequest {
+        request_key,
+        request_iv,
+        response_verification,
+        request_options,
+        security,
+        command,
+        destination,
+        global_padding,
+        authenticated_length,
+        timestamp: 0,
+        decoded_auth_id: [0_u8; 16],
+    })
+}
+
+/// Seals the AEAD response header (`[verification, option, 0, 0]`).
+pub(super) fn seal_response_header(
+    response_key: &[u8; 16],
+    response_iv: &[u8; 16],
+    response_verification: u8,
+    request_options: u8,
+) -> Result<Vec<u8>, VmessProtocolError> {
+    let plaintext = [response_verification, request_options, 0, 0];
+    let length_key = derive_16(response_key, &[b"AEAD Resp Header Len Key"]);
+    let length_iv = derive_12(response_iv, &[b"AEAD Resp Header Len IV"]);
+    let header_key = derive_16(response_key, &[b"AEAD Resp Header Key"]);
+    let header_iv = derive_12(response_iv, &[b"AEAD Resp Header IV"]);
+
+    let mut wire = Aes128Gcm::new_from_slice(&length_key)
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+        .encrypt(
+            Nonce::from_slice(&length_iv),
+            &u16::try_from(plaintext.len())
+                .expect("response header length fits in u16")
+                .to_be_bytes()[..],
+        )
+        .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?;
+    wire.extend(
+        Aes128Gcm::new_from_slice(&header_key)
+            .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?
+            .encrypt(Nonce::from_slice(&header_iv), plaintext.as_slice())
+            .map_err(|error| VmessProtocolError::Protocol(error.to_string()))?,
+    );
+    Ok(wire)
 }
 
 fn build_request_plaintext(
@@ -393,7 +854,7 @@ pub(super) async fn read_response_header<R: AsyncRead + Unpin>(
 
 #[cfg(test)]
 mod tests {
-    use aes_gcm::aead::Aead as _;
+    use aes_gcm::aead::Payload;
     use tokio::io::AsyncWriteExt as _;
 
     use super::*;
@@ -440,6 +901,82 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn timestamp_skew_matches_sing_vmess_window() {
+        assert!(timestamp_within_skew(
+            1_000,
+            1_000,
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
+        assert!(timestamp_within_skew(
+            1_000,
+            1_120,
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
+        assert!(timestamp_within_skew(
+            1_120,
+            1_000,
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
+        assert!(!timestamp_within_skew(
+            1_000,
+            1_121,
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
+        assert!(!timestamp_within_skew(
+            1_121,
+            1_000,
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
+    }
+
+    #[test]
+    fn production_open_parses_sealed_aead_request() {
+        let uuid = [
+            0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
+            0x08, 0x11,
+        ];
+        let key = command_key(&uuid);
+        let destination = Destination {
+            host: Host::Domain("phase6d.example".to_owned()),
+            port: 443,
+        };
+        let sealed = seal_request_header(
+            &uuid,
+            &key,
+            &destination,
+            SealRequestOptions {
+                alter_id: 0,
+                security: VmessSecurity::Aes128Gcm,
+                command: VmessCommand::Tcp,
+                global_padding: true,
+                authenticated_length: true,
+            },
+        )
+        .unwrap();
+        let auth_id: [u8; 16] = sealed.wire[..16].try_into().unwrap();
+        let decoded = try_decode_auth_id(&key, &auth_id)
+            .unwrap()
+            .expect("auth id");
+        let opened = open_aead_request_header(&key, &sealed.wire, decoded).unwrap();
+        assert_eq!(opened.request_key, sealed.request_key);
+        assert_eq!(opened.request_iv, sealed.request_iv);
+        assert_eq!(opened.response_verification, sealed.response_verification);
+        assert_eq!(opened.security, VmessSecurity::Aes128Gcm);
+        assert_eq!(opened.command, VmessCommand::Tcp);
+        assert_eq!(opened.destination, destination);
+        assert!(opened.global_padding);
+        assert!(opened.authenticated_length);
+        assert!(timestamp_within_skew(
+            opened.timestamp,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            DEFAULT_TIMESTAMP_SKEW_SECS
+        ));
     }
 
     #[test]

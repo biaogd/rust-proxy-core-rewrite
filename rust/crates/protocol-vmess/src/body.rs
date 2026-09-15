@@ -525,6 +525,35 @@ pub(super) fn pair(
     )
 }
 
+/// Inverted body pair for the server: decrypt request records, encrypt response.
+pub(super) fn server_pair(
+    security: VmessSecurity,
+    request_key: &[u8; 16],
+    request_iv: &[u8; 16],
+    options: BodyOptions,
+) -> (BodyReader, BodyWriter, [u8; 16], [u8; 16]) {
+    let (response_key, response_iv) =
+        response_body_material(request_key, request_iv, options.legacy_header);
+    (
+        BodyReader::new_with_none_chunking(
+            security,
+            DirectionKeys::request(request_key, request_iv),
+            options.global_padding,
+            options.authenticated_length,
+            options.chunked_none,
+        ),
+        BodyWriter::new_with_none_chunking(
+            security,
+            DirectionKeys::response(request_key, request_iv, &response_key, &response_iv),
+            options.global_padding,
+            options.authenticated_length,
+            options.chunked_none,
+        ),
+        response_key,
+        response_iv,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
