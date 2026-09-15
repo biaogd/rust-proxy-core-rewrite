@@ -288,7 +288,7 @@ impl Aead2022ServerSessions {
             return Err(ServerUdpReject::PacketId);
         }
         let key = SessionKey {
-            auth: auth_key(&incoming.user),
+            auth: auth_key(incoming.user.as_ref()),
             client_session_id: incoming.client_session_id,
         };
         if self.sessions.len() >= SERVER_SESSION_CAP && !self.sessions.contains_key(&key) {
@@ -345,9 +345,7 @@ impl Aead2022ServerSessions {
 
     fn next_reply_at(&mut self, peer: SocketAddr, now: Instant) -> Option<UdpSocketControlData> {
         self.reap(now);
-        let Some(route) = self.peer_index.get(&peer) else {
-            return None;
-        };
+        let route = self.peer_index.get(&peer)?;
         let handle = Aead2022ReplyHandle {
             key: route.key.clone(),
         };
@@ -361,6 +359,12 @@ impl Aead2022ServerSessions {
     /// # Errors
     ///
     /// Propagates [`Self::accept_incoming`] failures for AEAD-2022 datagrams.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session accepted earlier in this call is missing when the
+    /// reply is minted, which would indicate an internal table invariant
+    /// failure.
     pub fn prepare_reply(
         &mut self,
         peer: SocketAddr,
@@ -450,7 +454,7 @@ impl Aead2022ServerSessions {
     }
 }
 
-fn auth_key(user: &Option<std::sync::Arc<shadowsocks::config::ServerUser>>) -> AuthKey {
+fn auth_key(user: Option<&std::sync::Arc<shadowsocks::config::ServerUser>>) -> AuthKey {
     match user {
         Some(user) => AuthKey::User(user.name().to_owned()),
         None => AuthKey::Default,

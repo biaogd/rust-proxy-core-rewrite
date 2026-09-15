@@ -38,7 +38,7 @@ pub(crate) fn parse_named_listeners(
         match listener_type.as_str() {
             "shadowsocks" => {
                 shadowsocks.push(parse_shadowsocks_listener(
-                    mapping,
+                    &mapping,
                     index,
                     allow_lan,
                     bind_address,
@@ -47,7 +47,7 @@ pub(crate) fn parse_named_listeners(
             }
             "trojan" => {
                 trojan.push(parse_trojan_listener(
-                    mapping,
+                    &mapping,
                     index,
                     allow_lan,
                     bind_address,
@@ -68,14 +68,14 @@ pub(crate) fn parse_named_listeners(
 }
 
 fn parse_shadowsocks_listener(
-    mapping: Mapping,
+    mapping: &Mapping,
     index: usize,
     allow_lan: bool,
     bind_address: &str,
     names: &mut std::collections::BTreeSet<String>,
 ) -> Result<ShadowsocksInboundConfig, ConfigError> {
     validate_mapping_keys(
-        &mapping,
+        mapping,
         &[
             "name",
             "type",
@@ -89,16 +89,16 @@ fn parse_shadowsocks_listener(
         ],
         &format!("listener {index}"),
     )?;
-    let name = mapping_string(&mapping, "name")
+    let name = mapping_string(mapping, "name")
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
     if !names.insert(name.clone()) {
         return Err(ConfigError::InvalidInbound(format!(
             "listener name is duplicated: {name}"
         )));
     }
-    let cipher = mapping_string(&mapping, "cipher")
+    let cipher = mapping_string(mapping, "cipher")
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing cipher")))?;
-    let password = mapping_string(&mapping, "password").ok_or_else(|| {
+    let password = mapping_string(mapping, "password").ok_or_else(|| {
         ConfigError::InvalidInbound(format!("listener {name} is missing password"))
     })?;
     if !supported_shadowsocks_cipher(&cipher) {
@@ -107,7 +107,7 @@ fn parse_shadowsocks_listener(
         )));
     }
     validate_shadowsocks_inbound_key(&cipher, &password)?;
-    let listen_host = mapping_string(&mapping, "listen").unwrap_or_else(|| {
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
         if allow_lan {
             "0.0.0.0".to_owned()
         } else {
@@ -124,25 +124,24 @@ fn parse_shadowsocks_listener(
         .get(Value::from("udp"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if shadowsocks_2022_cipher(&cipher) && !shadowsocks_2022_udp_cipher(&cipher) {
-        if requested_udp
-            && mapping
-                .get(Value::from("udp"))
-                .and_then(Value::as_bool)
-                .is_some_and(|enabled| enabled)
-        {
-            return Err(ConfigError::InvalidInbound(format!(
-                "listener {name} cannot enable UDP for Shadowsocks 2022 cipher {cipher}"
-            )));
-        }
+    if shadowsocks_2022_cipher(&cipher)
+        && !shadowsocks_2022_udp_cipher(&cipher)
+        && mapping
+            .get(Value::from("udp"))
+            .and_then(Value::as_bool)
+            .is_some_and(|enabled| enabled)
+    {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} cannot enable UDP for Shadowsocks 2022 cipher {cipher}"
+        )));
     }
     let udp = if shadowsocks_2022_cipher(&cipher) {
         requested_udp && shadowsocks_2022_udp_cipher(&cipher)
     } else {
         requested_udp
     };
-    let simple_obfs = parse_simple_obfs(&mapping, &name)?;
-    let shadow_tls = parse_shadow_tls(&mapping, &name)?;
+    let simple_obfs = parse_simple_obfs(mapping, &name)?;
+    let shadow_tls = parse_shadow_tls(mapping, &name)?;
     if simple_obfs.is_some() && shadow_tls.is_some() {
         return Err(ConfigError::InvalidInbound(format!(
             "listener {name} cannot enable both simple-obfs and shadow-tls"
@@ -160,14 +159,14 @@ fn parse_shadowsocks_listener(
 }
 
 fn parse_trojan_listener(
-    mapping: Mapping,
+    mapping: &Mapping,
     index: usize,
     allow_lan: bool,
     bind_address: &str,
     names: &mut std::collections::BTreeSet<String>,
 ) -> Result<TrojanInboundConfig, ConfigError> {
     validate_mapping_keys(
-        &mapping,
+        mapping,
         &[
             "name",
             "type",
@@ -181,14 +180,14 @@ fn parse_trojan_listener(
         ],
         &format!("listener {index}"),
     )?;
-    let name = mapping_string(&mapping, "name")
+    let name = mapping_string(mapping, "name")
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
     if !names.insert(name.clone()) {
         return Err(ConfigError::InvalidInbound(format!(
             "listener name is duplicated: {name}"
         )));
     }
-    let listen_host = mapping_string(&mapping, "listen").unwrap_or_else(|| {
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
         if allow_lan {
             "0.0.0.0".to_owned()
         } else {
@@ -201,10 +200,10 @@ fn parse_trojan_listener(
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
     let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
-    let certificate = mapping_string(&mapping, "certificate").ok_or_else(|| {
+    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
         ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
     })?;
-    let private_key = mapping_string(&mapping, "private-key").ok_or_else(|| {
+    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
         ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
     })?;
     if certificate.trim().is_empty() || private_key.trim().is_empty() {
@@ -212,11 +211,11 @@ fn parse_trojan_listener(
             "listener {name} requires non-empty certificate and private-key"
         )));
     }
-    let ws_path = mapping_string(&mapping, "ws-path").and_then(|path| {
+    let ws_path = mapping_string(mapping, "ws-path").and_then(|path| {
         let trimmed = path.trim().to_owned();
         (!trimmed.is_empty()).then_some(trimmed)
     });
-    let grpc_service_name = mapping_string(&mapping, "grpc-service-name").and_then(|name| {
+    let grpc_service_name = mapping_string(mapping, "grpc-service-name").and_then(|name| {
         let trimmed = name.trim().to_owned();
         (!trimmed.is_empty()).then_some(trimmed)
     });
@@ -225,7 +224,7 @@ fn parse_trojan_listener(
             "listener {name} cannot combine ws-path and grpc-service-name until shared HTTP mux"
         )));
     }
-    let users = parse_trojan_users(&mapping, &name)?;
+    let users = parse_trojan_users(mapping, &name)?;
     if users.is_empty() {
         return Err(ConfigError::InvalidInbound(format!(
             "listener {name} requires at least one user password"
