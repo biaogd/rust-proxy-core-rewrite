@@ -10,9 +10,11 @@ absent or `0`; nonzero rejected). TCP relays via `into_tcp_relay` →
 `serve_shadowsocks_connection`; UDP covers standard body-record datagrams on
 TLS plus Mux/XUDP (VLESS-identical framing inside VMess body records) with
 per-session sockets. Product Accept enables a listener-scoped AuthID replay
-cache (sing-vmess style ±120s TTL; capacity full never evicts in-window
-entries). Body framing honors request `ChunkStream` / `ChunkMasking` bits.
-Evidence: `phase_ine_vmess_tls.py`, `phase_ine_vmess_websocket.py`,
+cache (sing-vmess style ±120s TTL; in-window entries never evicted). Soft
+per-user budget (65 536) and a 1 048 576 global ceiling isolate overload so
+≫1024 short handshakes/120s succeed; one user cannot starve others. Body
+framing honors request `ChunkStream` / `ChunkMasking` bits. Evidence:
+`phase_ine_vmess_tls.py`, `phase_ine_vmess_websocket.py`,
 `phase_ine_vmess_grpc.py`, `phase_ine_vmess_xudp.py` (CI shard
 `controller-services-outbound` via `_ine`). Reality/mKCP/Mekya and combined
 ws+grpc stay rejected. Protocol Accept landed earlier as `9b963029`.

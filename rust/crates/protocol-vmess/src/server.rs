@@ -28,8 +28,24 @@ use crate::header::{
 };
 use crate::{VmessProtocolError, VmessSecurity};
 
-/// Default AuthID replay cache capacity (decoded AuthID plaintexts).
-pub const DEFAULT_AUTH_ID_REPLAY_CAPACITY: usize = 1024;
+/// Soft per-user in-window AuthID budget (product default).
+///
+/// Sized well above short-lived TLS reconnect bursts: more than 1024 unique
+/// handshakes inside the ±120s window must succeed for a single user. One
+/// abusive UUID hitting this soft limit does not block other users.
+pub const DEFAULT_AUTH_ID_REPLAY_PER_USER: usize = 65_536;
+
+/// Absolute in-window entries across all users (OOM / pathological DoS ceiling).
+///
+/// Still never evicts in-window AuthIDs; only refuses *new* AuthIDs after TTL
+/// reap when this ceiling is reached. Matches the spirit of sing-vmess's
+/// unbounded TTL map while keeping a hard memory bound.
+pub const DEFAULT_AUTH_ID_REPLAY_GLOBAL: usize = 1_048_576;
+
+/// Deprecated alias kept for call sites that previously passed a single
+/// capacity; prefer [`AuthIdReplayCache::product_default`].
+#[deprecated(note = "use AuthIdReplayCache::product_default or with_limits")]
+pub const DEFAULT_AUTH_ID_REPLAY_CAPACITY: usize = DEFAULT_AUTH_ID_REPLAY_PER_USER;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmessUserEntry {
@@ -67,65 +83,102 @@ pub enum AuthIdAdmission {
     Fresh,
     /// Duplicate within the TTL.
     Replay,
-    /// Cache is full of still-valid entries; refused without eviction.
+    /// This UUID's soft in-window budget is exhausted; other users are unaffected.
+    UserLimitExhausted,
+    /// Global safety ceiling is full of still-valid entries; refused without eviction.
     CapacityExhausted,
 }
 
-/// Bounded AuthID replay filter matching sing-vmess's 120s window.
+/// AuthID replay filter matching sing-vmess's 120s TTL window.
 ///
-/// Inserts decoded AuthID plaintexts. Duplicates within the TTL are rejected.
-/// When at capacity, still-valid entries are **never** evicted to make room —
-/// new AuthIDs are refused instead (evicting an in-window AuthID would reopen
-/// replay of that value). Expired entries are reaped before capacity checks.
+/// Duplicates within the TTL are rejected. In-window entries are **never**
+/// evicted to make room (that would reopen replay). Overload uses two layers:
+///
+/// 1. **Per-user soft limit** — only the offending UUID is refused.
+/// 2. **Global safety ceiling** — pathological DoS / OOM guard across users.
+///
+/// Product defaults (`product_default`) use high limits so legitimate short-
+/// connection bursts (≫1024 handshakes / 120s) succeed, unlike a shared 1024
+/// hard cap.
 #[derive(Debug)]
 pub struct AuthIdReplayCache {
     ttl: Duration,
-    capacity: usize,
-    order: VecDeque<([u8; 16], Instant)>,
+    per_user_limit: usize,
+    global_limit: usize,
+    order: VecDeque<([u8; 16], [u8; 16], Instant)>,
     seen: HashMap<[u8; 16], Instant>,
+    per_user: HashMap<[u8; 16], usize>,
 }
 
 impl AuthIdReplayCache {
-    /// Creates a cache with `capacity` entries and a 120-second TTL.
+    /// Product listener defaults: high per-user soft limit + global OOM ceiling.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        Self::with_ttl(capacity, Duration::from_secs(DEFAULT_TIMESTAMP_SKEW_SECS))
+    pub fn product_default() -> Self {
+        Self::with_limits(
+            DEFAULT_AUTH_ID_REPLAY_PER_USER,
+            DEFAULT_AUTH_ID_REPLAY_GLOBAL,
+            Duration::from_secs(DEFAULT_TIMESTAMP_SKEW_SECS),
+        )
     }
 
-    /// Creates a cache with an explicit TTL (primarily for tests).
+    /// Creates a cache with explicit per-user / global limits and TTL.
     #[must_use]
-    pub fn with_ttl(capacity: usize, ttl: Duration) -> Self {
+    pub fn with_limits(per_user_limit: usize, global_limit: usize, ttl: Duration) -> Self {
         Self {
             ttl,
-            capacity: capacity.max(1),
+            per_user_limit: per_user_limit.max(1),
+            global_limit: global_limit.max(1),
             order: VecDeque::new(),
             seen: HashMap::new(),
+            per_user: HashMap::new(),
         }
     }
 
-    /// Admits `decoded_auth_id` or reports why it was refused.
-    pub fn check_and_insert(&mut self, decoded_auth_id: [u8; 16]) -> AuthIdAdmission {
+    /// Test helper: tiny shared ceiling (global == per-user) for capacity tests.
+    #[cfg(test)]
+    #[must_use]
+    fn with_ttl(capacity: usize, ttl: Duration) -> Self {
+        Self::with_limits(capacity, capacity, ttl)
+    }
+
+    /// Admits `decoded_auth_id` for `user_uuid` or reports why it was refused.
+    pub fn check_and_insert(
+        &mut self,
+        user_uuid: [u8; 16],
+        decoded_auth_id: [u8; 16],
+    ) -> AuthIdAdmission {
         let now = Instant::now();
         self.reap(now);
         if self.seen.contains_key(&decoded_auth_id) {
             return AuthIdAdmission::Replay;
         }
-        if self.seen.len() >= self.capacity {
+        let user_count = self.per_user.get(&user_uuid).copied().unwrap_or(0);
+        if user_count >= self.per_user_limit {
+            return AuthIdAdmission::UserLimitExhausted;
+        }
+        if self.seen.len() >= self.global_limit {
             return AuthIdAdmission::CapacityExhausted;
         }
         self.seen.insert(decoded_auth_id, now);
-        self.order.push_back((decoded_auth_id, now));
+        self.order.push_back((user_uuid, decoded_auth_id, now));
+        *self.per_user.entry(user_uuid).or_insert(0) += 1;
         AuthIdAdmission::Fresh
     }
 
     fn reap(&mut self, now: Instant) {
-        while let Some((id, inserted)) = self.order.front().copied() {
+        while let Some((user, id, inserted)) = self.order.front().copied() {
             if now.saturating_duration_since(inserted) < self.ttl {
                 break;
             }
             self.order.pop_front();
             if self.seen.get(&id).copied() == Some(inserted) {
                 self.seen.remove(&id);
+                if let Some(count) = self.per_user.get_mut(&user) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.per_user.remove(&user);
+                    }
+                }
             }
         }
     }
@@ -525,11 +578,16 @@ where
                 let mut cache = cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match cache.check_and_insert(decoded) {
+                match cache.check_and_insert(*uuid, decoded) {
                     AuthIdAdmission::Fresh => {}
                     AuthIdAdmission::Replay => {
                         return Err(VmessProtocolError::Protocol(
                             "VMess AuthID replay detected".to_owned(),
+                        ));
+                    }
+                    AuthIdAdmission::UserLimitExhausted => {
+                        return Err(VmessProtocolError::Protocol(
+                            "VMess AuthID replay budget exhausted for user".to_owned(),
                         ));
                     }
                     AuthIdAdmission::CapacityExhausted => {
@@ -628,31 +686,113 @@ mod tests {
     #[test]
     fn auth_id_replay_cache_rejects_duplicates_within_ttl() {
         let mut cache = AuthIdReplayCache::with_ttl(4, Duration::from_secs(60));
+        let user = [0xaa; 16];
         let id = [0x11; 16];
-        assert_eq!(cache.check_and_insert(id), AuthIdAdmission::Fresh);
-        assert_eq!(cache.check_and_insert(id), AuthIdAdmission::Replay);
-        assert_eq!(cache.check_and_insert([0x22; 16]), AuthIdAdmission::Fresh);
+        assert_eq!(cache.check_and_insert(user, id), AuthIdAdmission::Fresh);
+        assert_eq!(cache.check_and_insert(user, id), AuthIdAdmission::Replay);
+        assert_eq!(
+            cache.check_and_insert(user, [0x22; 16]),
+            AuthIdAdmission::Fresh
+        );
     }
 
     #[test]
     fn auth_id_replay_cache_refuses_insert_when_full_of_valid_entries() {
         let mut cache = AuthIdReplayCache::with_ttl(2, Duration::from_secs(60));
-        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Fresh);
-        assert_eq!(cache.check_and_insert([2; 16]), AuthIdAdmission::Fresh);
+        let user = [0x01; 16];
         assert_eq!(
-            cache.check_and_insert([3; 16]),
-            AuthIdAdmission::CapacityExhausted
+            cache.check_and_insert(user, [1; 16]),
+            AuthIdAdmission::Fresh
+        );
+        assert_eq!(
+            cache.check_and_insert(user, [2; 16]),
+            AuthIdAdmission::Fresh
+        );
+        // Per-user soft limit and global ceiling are both 2 here.
+        assert_eq!(
+            cache.check_and_insert(user, [3; 16]),
+            AuthIdAdmission::UserLimitExhausted
         );
         // In-window entry must still be protected against replay.
-        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Replay);
+        assert_eq!(
+            cache.check_and_insert(user, [1; 16]),
+            AuthIdAdmission::Replay
+        );
+    }
+
+    #[test]
+    fn auth_id_replay_user_limit_does_not_block_other_users() {
+        let mut cache = AuthIdReplayCache::with_limits(1, 8, Duration::from_secs(60));
+        let alice = [0xa1; 16];
+        let bob = [0xb2; 16];
+        assert_eq!(
+            cache.check_and_insert(alice, [1; 16]),
+            AuthIdAdmission::Fresh
+        );
+        assert_eq!(
+            cache.check_and_insert(alice, [2; 16]),
+            AuthIdAdmission::UserLimitExhausted
+        );
+        assert_eq!(cache.check_and_insert(bob, [3; 16]), AuthIdAdmission::Fresh);
+    }
+
+    #[test]
+    fn auth_id_replay_global_ceiling_refuses_without_eviction() {
+        let mut cache = AuthIdReplayCache::with_limits(8, 2, Duration::from_secs(60));
+        let alice = [0xa1; 16];
+        let bob = [0xb2; 16];
+        assert_eq!(
+            cache.check_and_insert(alice, [1; 16]),
+            AuthIdAdmission::Fresh
+        );
+        assert_eq!(cache.check_and_insert(bob, [2; 16]), AuthIdAdmission::Fresh);
+        assert_eq!(
+            cache.check_and_insert(bob, [3; 16]),
+            AuthIdAdmission::CapacityExhausted
+        );
+        assert_eq!(
+            cache.check_and_insert(alice, [1; 16]),
+            AuthIdAdmission::Replay
+        );
     }
 
     #[test]
     fn auth_id_replay_cache_reaps_expired_before_capacity_check() {
         let mut cache = AuthIdReplayCache::with_ttl(1, Duration::from_millis(20));
-        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Fresh);
+        let user = [0xcc; 16];
+        assert_eq!(
+            cache.check_and_insert(user, [1; 16]),
+            AuthIdAdmission::Fresh
+        );
         std::thread::sleep(Duration::from_millis(40));
-        assert_eq!(cache.check_and_insert([2; 16]), AuthIdAdmission::Fresh);
+        assert_eq!(
+            cache.check_and_insert(user, [2; 16]),
+            AuthIdAdmission::Fresh
+        );
+    }
+
+    #[test]
+    fn product_default_admits_more_than_1024_unique_auth_ids_in_window() {
+        // Regression for the shared-1024 choke: legitimate short-connection
+        // bursts inside the 120s TTL must not be rejected.
+        let mut cache = AuthIdReplayCache::product_default();
+        let user = map_uuid(UUID_TEXT);
+        const BURST: usize = 2048;
+        for index in 0..BURST {
+            let mut auth_id = [0_u8; 16];
+            auth_id[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            auth_id[8..].copy_from_slice(&(index as u64).wrapping_mul(0x9e37_79b9).to_be_bytes());
+            assert_eq!(
+                cache.check_and_insert(user, auth_id),
+                AuthIdAdmission::Fresh,
+                "product default refused AuthID #{index}"
+            );
+        }
+        // First AuthID must still be replay-protected.
+        let mut first = [0_u8; 16];
+        first[..8].copy_from_slice(&0_u64.to_be_bytes());
+        first[8..].copy_from_slice(&0_u64.wrapping_mul(0x9e37_79b9).to_be_bytes());
+        assert_eq!(cache.check_and_insert(user, first), AuthIdAdmission::Replay);
     }
 
     #[tokio::test]
@@ -799,7 +939,7 @@ mod tests {
         )
         .unwrap();
 
-        let cache = std::sync::Mutex::new(AuthIdReplayCache::new(DEFAULT_AUTH_ID_REPLAY_CAPACITY));
+        let cache = std::sync::Mutex::new(AuthIdReplayCache::product_default());
         let (mut client1, mut server1) = tokio::io::duplex(4096);
         client1.write_all(&sealed.wire).await.unwrap();
         accept_vmess_request(

@@ -29,9 +29,9 @@ pub use packet::{
     encode_xudp_server_frame,
 };
 pub use server::{
-    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_CAPACITY, VmessAcceptOptions, VmessServerReader,
-    VmessServerRequest, VmessServerSession, VmessServerWriter, VmessUserEntry,
-    accept_vmess_request, map_uuid, uuid_table,
+    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_GLOBAL, DEFAULT_AUTH_ID_REPLAY_PER_USER,
+    VmessAcceptOptions, VmessServerReader, VmessServerRequest, VmessServerSession,
+    VmessServerWriter, VmessUserEntry, accept_vmess_request, map_uuid, uuid_table,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -19,9 +19,9 @@ use rewrite_config::{Config, ControllerTls, VmessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vmess::{
-    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_CAPACITY, VmessAcceptOptions, VmessCommand,
-    VmessServerSession, VmessServerWriter, VmessUserEntry, VmessXudpReadBuffer,
-    accept_vmess_request, encode_xudp_server_frame, uuid_table,
+    AuthIdReplayCache, VmessAcceptOptions, VmessCommand, VmessServerSession, VmessServerWriter,
+    VmessUserEntry, VmessXudpReadBuffer, accept_vmess_request, encode_xudp_server_frame,
+    uuid_table,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
@@ -344,9 +344,7 @@ pub(super) async fn run_vmess_listener(
         ws_path,
         grpc_service_name,
     } = listener;
-    let replay_cache = Arc::new(std::sync::Mutex::new(AuthIdReplayCache::new(
-        DEFAULT_AUTH_ID_REPLAY_CAPACITY,
-    )));
+    let replay_cache = Arc::new(std::sync::Mutex::new(AuthIdReplayCache::product_default()));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
