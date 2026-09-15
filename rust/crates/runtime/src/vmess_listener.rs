@@ -19,8 +19,8 @@ use rewrite_config::{Config, ControllerTls, VmessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vmess::{
-    VmessAcceptOptions, VmessCommand, VmessServerReader, VmessServerSession, VmessServerWriter,
-    VmessUserEntry, VmessXudpReadBuffer, accept_vmess_request, encode_xudp_server_frame, uuid_table,
+    VmessAcceptOptions, VmessCommand, VmessServerSession, VmessServerWriter, VmessUserEntry,
+    VmessXudpReadBuffer, accept_vmess_request, encode_xudp_server_frame, uuid_table,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
