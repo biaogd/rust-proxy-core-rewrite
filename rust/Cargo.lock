@@ -4218,6 +4218,7 @@ dependencies = [
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",
  "rewrite-protocol-vless",
+ "rewrite-protocol-vmess",
  "rewrite-rules",
  "rewrite-services",
  "rewrite-state",

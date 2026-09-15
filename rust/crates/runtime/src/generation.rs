@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rewrite_config::{
     Config, ConfigError, ListenerKind, ProxyGroupKind, ShadowsocksInboundConfig,
-    TrojanInboundConfig, VlessInboundConfig,
+    TrojanInboundConfig, VlessInboundConfig, VmessInboundConfig,
 };
 use rewrite_state::RuntimeState;
 use tokio::net::{TcpListener, UdpSocket};
@@ -23,6 +23,7 @@ use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
 };
 use crate::vless_listener::{VlessListener, run_vless_listener};
+use crate::vmess_listener::{VmessListener, run_vmess_listener};
 
 #[derive(Default)]
 struct PreparedGeneration {
@@ -30,6 +31,7 @@ struct PreparedGeneration {
     shadowsocks: Vec<(ListenerKey, ShadowsocksListener)>,
     trojan: Vec<(ListenerKey, TrojanListener)>,
     vless: Vec<(ListenerKey, VlessListener)>,
+    vmess: Vec<(ListenerKey, VmessListener)>,
     controllers: Vec<PreparedController>,
     dns: Option<(SocketAddr, TcpListener, UdpSocket)>,
     retired_listeners: Vec<ListenerKey>,
@@ -44,6 +46,7 @@ impl PreparedGeneration {
         self.shadowsocks.clear();
         self.trojan.clear();
         self.vless.clear();
+        self.vmess.clear();
         self.controllers.clear();
         self.dns = None;
     }
@@ -142,6 +145,12 @@ async fn apply_generation_inner(
                     .vless_listener_for_port(port)
                     .map_or_else(String::new, VlessInboundConfig::reload_identity);
                 Ok((kind, port, address, identity))
+            } else if kind == ListenerKind::Vmess {
+                let address = next.vmess_listen_address(port)?;
+                let identity = next
+                    .vmess_listener_for_port(port)
+                    .map_or_else(String::new, VmessInboundConfig::reload_identity);
+                Ok((kind, port, address, identity))
             } else {
                 next.listener_address(port)
                     .map(|address| (kind, port, address, String::new()))
@@ -198,6 +207,15 @@ async fn apply_generation_inner(
             };
             let listener = VlessListener::bind(vless, state.clock()).await?;
             prepared.vless.push((key, listener));
+            continue;
+        }
+
+        if kind == ListenerKind::Vmess {
+            let Some(vmess) = next.vmess_listener_for_port(port) else {
+                continue;
+            };
+            let listener = VmessListener::bind(vmess, state.clock()).await?;
+            prepared.vmess.push((key, listener));
             continue;
         }
 
@@ -307,6 +325,17 @@ async fn apply_generation_inner(
 
     for (key, listener) in std::mem::take(&mut prepared.vless) {
         spawn_vless_listener(
+            key,
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+
+    for (key, listener) in std::mem::take(&mut prepared.vmess) {
+        spawn_vmess_listener(
             key,
             listener,
             config_receiver,
@@ -440,6 +469,21 @@ async fn restore_retired_sockets(
             };
             let listener = VlessListener::bind(vless, state.clock()).await?;
             spawn_vless_listener(
+                key,
+                listener,
+                config_receiver,
+                state,
+                dns_service,
+                listeners,
+            );
+            continue;
+        }
+        if kind == ListenerKind::Vmess {
+            let Some(vmess) = previous.vmess_listener_for_port(port) else {
+                continue;
+            };
+            let listener = VmessListener::bind(vmess, state.clock()).await?;
+            spawn_vmess_listener(
                 key,
                 listener,
                 config_receiver,
@@ -627,6 +671,38 @@ fn spawn_vless_listener(
     let task_dns_service = Arc::clone(dns_service);
     let handle = tokio::spawn(async move {
         run_vless_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_vmess_listener(
+    key: ListenerKey,
+    listener: VmessListener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_vmess_listener(
             listener,
             task_config,
             task_state,
