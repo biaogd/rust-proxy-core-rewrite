@@ -359,19 +359,10 @@ where
                 Err(error) => return Some(Err(h2_error(error))),
             };
             if !is_gun_request(&request, &self.expected_path) {
-                let response = http::Response::builder()
-                    .status(http::StatusCode::NOT_FOUND)
-                    .body(())
-                    .expect("empty NOT_FOUND body");
-                let _ = respond.send_response(response, true);
+                let _ = respond.send_response(empty_http_response(http::StatusCode::NOT_FOUND), true);
                 continue;
             }
-            let response = http::Response::builder()
-                .status(http::StatusCode::OK)
-                .header("content-type", "application/grpc")
-                .body(())
-                .expect("empty OK body");
-            let sender = match respond.send_response(response, false) {
+            let sender = match respond.send_response(grpc_ok_response(), false) {
                 Ok(sender) => sender,
                 Err(error) => return Some(Err(h2_error(error))),
             };
@@ -380,6 +371,21 @@ where
             return Some(Ok(Box::new(GunStream::new(duplex))));
         }
     }
+}
+
+fn empty_http_response(status: http::StatusCode) -> http::Response<()> {
+    let mut response = http::Response::new(());
+    *response.status_mut() = status;
+    response
+}
+
+fn grpc_ok_response() -> http::Response<()> {
+    let mut response = empty_http_response(http::StatusCode::OK);
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/grpc"),
+    );
+    response
 }
 
 fn is_gun_request(request: &http::Request<h2::RecvStream>, expected_path: &str) -> bool {

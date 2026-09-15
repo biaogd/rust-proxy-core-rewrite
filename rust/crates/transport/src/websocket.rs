@@ -71,6 +71,12 @@ where
 ///
 /// Returns a Tungstenite error when the peer violates the handshake or requests
 /// a different path.
+///
+/// The path-check callback returns tungstenite's fixed `ErrorResponse`
+/// (`Response<Option<String>>`). That `Err` variant is larger than Clippy's
+/// threshold and cannot be boxed without changing the handshake callback
+/// contract, so `result_large_err` is allowed here.
+#[allow(clippy::result_large_err)]
 pub async fn accept_websocket_path<S>(stream: S, path: &str) -> Result<WebSocketIo<S>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
