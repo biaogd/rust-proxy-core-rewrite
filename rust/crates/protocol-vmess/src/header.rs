@@ -22,7 +22,9 @@ const VMESS_ALTER_ID_MAGIC: &[u8] = b"16167dc8-16b6-4e6d-b8bb-65dd68113a81";
 const VMESS_ALTER_ID_COLLISION_MAGIC: &[u8] = b"533eff8a-4113-4b10-b5ce-0f5d76b98cd2";
 const OPTION_GLOBAL_PADDING: u8 = 0x08;
 const OPTION_AUTHENTICATED_LENGTH: u8 = 0x10;
-const OPTION_CHUNK_STREAM_AND_MASKING: u8 = 0x01 | 0x04;
+pub(super) const OPTION_CHUNK_STREAM: u8 = 0x01;
+pub(super) const OPTION_CHUNK_MASKING: u8 = 0x04;
+const OPTION_CHUNK_STREAM_AND_MASKING: u8 = OPTION_CHUNK_STREAM | OPTION_CHUNK_MASKING;
 const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x02;
 const ADDRESS_IPV6: u8 = 0x03;
@@ -131,6 +133,8 @@ struct RequestPlaintextOptions {
     command: VmessCommand,
     global_padding: bool,
     authenticated_length: bool,
+    /// When true (product AEAD default), set `RequestOptionChunkMasking`.
+    chunk_masking: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -140,6 +144,9 @@ pub(super) struct SealRequestOptions {
     pub command: VmessCommand,
     pub global_padding: bool,
     pub authenticated_length: bool,
+    /// AEAD length XOR (sing `RequestOptionChunkMasking`). Product clients
+    /// always set this; tests may clear it to exercise unmasked framing.
+    pub chunk_masking: bool,
 }
 
 pub(super) fn command_key(uuid: &[u8; 16]) -> [u8; 16] {
@@ -187,6 +194,7 @@ pub(super) fn seal_request_header_at(
             command: options.command,
             global_padding: options.global_padding,
             authenticated_length: options.authenticated_length,
+            chunk_masking: options.chunk_masking,
         },
         &mut random,
     )?;
@@ -730,16 +738,19 @@ fn build_request_plaintext(
     header.extend_from_slice(request_key);
     header.push(options.response_verification);
     let request_options = match options.security {
-        VmessSecurity::None if options.command == VmessCommand::Udp => 0x01,
+        VmessSecurity::None if options.command == VmessCommand::Udp => OPTION_CHUNK_STREAM,
         VmessSecurity::None => 0,
-        VmessSecurity::Aes128Cfb => 0x01,
+        VmessSecurity::Aes128Cfb => OPTION_CHUNK_STREAM,
         VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305 => {
-            let mut request_options = OPTION_CHUNK_STREAM_AND_MASKING;
+            let mut request_options = OPTION_CHUNK_STREAM;
+            if options.chunk_masking {
+                request_options |= OPTION_CHUNK_MASKING;
+            }
             if options.global_padding {
-                request_options |= 0x08;
+                request_options |= OPTION_GLOBAL_PADDING;
             }
             if options.authenticated_length {
-                request_options |= 0x10;
+                request_options |= OPTION_AUTHENTICATED_LENGTH;
             }
             request_options
         }
@@ -953,6 +964,7 @@ mod tests {
                 command: VmessCommand::Tcp,
                 global_padding: true,
                 authenticated_length: true,
+                chunk_masking: true,
             },
         )
         .unwrap();
@@ -1000,6 +1012,7 @@ mod tests {
                 command: VmessCommand::Tcp,
                 global_padding: false,
                 authenticated_length: false,
+                chunk_masking: true,
             },
         )
         .unwrap();
@@ -1044,6 +1057,7 @@ mod tests {
                     command: VmessCommand::Tcp,
                     global_padding: true,
                     authenticated_length: true,
+                    chunk_masking: true,
                 },
             )
             .unwrap();
@@ -1070,6 +1084,7 @@ mod tests {
                 command: VmessCommand::Udp,
                 global_padding: false,
                 authenticated_length: false,
+                chunk_masking: true,
             },
             &mut random,
         )
@@ -1090,6 +1105,7 @@ mod tests {
                 command: VmessCommand::Mux,
                 global_padding: false,
                 authenticated_length: false,
+                chunk_masking: true,
             },
             &mut random,
         )
@@ -1117,6 +1133,7 @@ mod tests {
                 command: VmessCommand::Tcp,
                 global_padding: false,
                 authenticated_length: false,
+                chunk_masking: true,
             },
         )
         .unwrap();

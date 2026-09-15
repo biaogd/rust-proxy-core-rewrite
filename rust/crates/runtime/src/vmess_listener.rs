@@ -19,8 +19,9 @@ use rewrite_config::{Config, ControllerTls, VmessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vmess::{
-    VmessAcceptOptions, VmessCommand, VmessServerSession, VmessServerWriter, VmessUserEntry,
-    VmessXudpReadBuffer, accept_vmess_request, encode_xudp_server_frame, uuid_table,
+    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_CAPACITY, VmessAcceptOptions, VmessCommand,
+    VmessServerSession, VmessServerWriter, VmessUserEntry, VmessXudpReadBuffer,
+    accept_vmess_request, encode_xudp_server_frame, uuid_table,
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
@@ -343,6 +344,9 @@ pub(super) async fn run_vmess_listener(
         ws_path,
         grpc_service_name,
     } = listener;
+    let replay_cache = Arc::new(std::sync::Mutex::new(AuthIdReplayCache::new(
+        DEFAULT_AUTH_ID_REPLAY_CAPACITY,
+    )));
     let mut connections = JoinSet::new();
     loop {
         tokio::select! {
@@ -374,6 +378,7 @@ pub(super) async fn run_vmess_listener(
                 let connection_inbound_name = inbound_name.clone();
                 let connection_ws_path = ws_path.clone();
                 let connection_grpc_service = grpc_service_name.clone();
+                let connection_replay = Arc::clone(&replay_cache);
                 connections.spawn(async move {
                     Box::pin(handle_vmess_inbound(
                         tcp,
@@ -388,6 +393,7 @@ pub(super) async fn run_vmess_listener(
                         connection_inbound_name,
                         connection_ws_path,
                         connection_grpc_service,
+                        connection_replay,
                     ))
                     .await;
                 });
@@ -417,6 +423,7 @@ async fn handle_vmess_inbound(
     inbound_name: String,
     ws_path: Option<String>,
     grpc_service_name: Option<String>,
+    replay_cache: Arc<std::sync::Mutex<AuthIdReplayCache>>,
 ) {
     let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
         Ok(Ok(stream)) => stream,
@@ -445,6 +452,7 @@ async fn handle_vmess_inbound(
             dns_service,
             shutdown,
             inbound_name,
+            replay_cache,
         )
         .await;
         return;
@@ -478,6 +486,7 @@ async fn handle_vmess_inbound(
             dns_service,
             shutdown,
             inbound_name,
+            replay_cache,
         ))
         .await;
         return;
@@ -493,6 +502,7 @@ async fn handle_vmess_inbound(
         dns_service,
         shutdown,
         inbound_name,
+        replay_cache,
     ))
     .await;
 }
@@ -509,6 +519,7 @@ async fn serve_vmess_grpc_connection<S>(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
     inbound_name: String,
+    replay_cache: Arc<std::sync::Mutex<AuthIdReplayCache>>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -554,6 +565,7 @@ async fn serve_vmess_grpc_connection<S>(
                         let dns_service = Arc::clone(&dns_service);
                         let shutdown = shutdown.child_token();
                         let inbound_name = inbound_name.clone();
+                        let replay_cache = Arc::clone(&replay_cache);
                         streams.spawn(async move {
                             dispatch_vmess_session(
                                 stream,
@@ -565,6 +577,7 @@ async fn serve_vmess_grpc_connection<S>(
                                 dns_service,
                                 shutdown,
                                 inbound_name,
+                                replay_cache,
                             )
                             .await;
                         });
@@ -601,12 +614,20 @@ async fn dispatch_vmess_session<S>(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
     inbound_name: String,
+    replay_cache: Arc<std::sync::Mutex<AuthIdReplayCache>>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let accepted = match tokio::time::timeout(
         Duration::from_secs(10),
-        accept_vmess_request(&mut stream, &users, VmessAcceptOptions::default()),
+        accept_vmess_request(
+            &mut stream,
+            &users,
+            VmessAcceptOptions {
+                replay_cache: Some(replay_cache.as_ref()),
+                ..VmessAcceptOptions::default()
+            },
+        ),
     )
     .await
     {

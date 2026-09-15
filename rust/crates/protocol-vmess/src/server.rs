@@ -1,11 +1,12 @@
 //! IN-E VMess AEAD server-side request Accept (`alterId = 0` only).
 //!
 //! Authenticates AuthID + AEAD request headers, validates the sing-vmess
-//! ±120s timestamp window, and optionally rejects replayed AuthIDs.
+//! ±120s timestamp window, and rejects replayed AuthIDs when a shared
+//! [`AuthIdReplayCache`] is supplied (product inbound always enables one).
 //!
-//! Note: the Go product listener calls `ServiceWithDisableHeaderProtection()`,
-//! so product differentials may not exercise AuthID replay rejection even when
-//! this optional cache is enabled.
+//! Go's `ServiceWithDisableHeaderProtection()` only changes how the first
+//! header bytes are read (`ReadOnceFrom` vs `ReadAtLeastFrom`); the AEAD path
+//! still unconditionally runs `replayFilter.Check()` on the decoded AuthID.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
@@ -21,9 +22,9 @@ use uuid::Uuid;
 
 use crate::body::{self, BodyOptions, BodyReader, BodyWriter};
 use crate::header::{
-    DEFAULT_TIMESTAMP_SKEW_SECS, VmessCommand, command_key, matches_legacy_alter_id_auth,
-    read_aead_request_after_auth_id, seal_response_header, timestamp_within_skew,
-    try_decode_auth_id,
+    DEFAULT_TIMESTAMP_SKEW_SECS, OPTION_CHUNK_MASKING, OPTION_CHUNK_STREAM, VmessCommand,
+    command_key, matches_legacy_alter_id_auth, read_aead_request_after_auth_id,
+    seal_response_header, timestamp_within_skew, try_decode_auth_id,
 };
 use crate::{VmessProtocolError, VmessSecurity};
 
@@ -47,21 +48,35 @@ pub struct VmessServerRequest {
 }
 
 /// Options for [`accept_vmess_request`].
-///
-/// The Go mihomo VMess inbound disables header protection, so enabling the
-/// optional AuthID replay cache here may exceed what product differentials
-/// cover today.
 #[derive(Debug, Default)]
 pub struct VmessAcceptOptions<'a> {
     /// Maximum accepted `|client_unix - server_unix|` in seconds (default 120).
     pub timestamp_skew_secs: Option<u64>,
-    /// Optional bounded AuthID replay filter (TTL matches the timestamp window).
-    pub replay_cache: Option<&'a mut AuthIdReplayCache>,
+    /// Shared AuthID replay filter (TTL matches the timestamp window).
+    ///
+    /// Product inbound always supplies a listener-scoped cache. The mutex is
+    /// locked only around the AuthID admission check, not across stream I/O.
+    /// When omitted (framing-only unit tests), replays are not checked.
+    pub replay_cache: Option<&'a std::sync::Mutex<AuthIdReplayCache>>,
 }
 
-/// Bounded AuthID replay filter matching sing-vmess's simple 120s window.
+/// Outcome of admitting one decoded AuthID into the replay filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthIdAdmission {
+    /// First sighting within the TTL; recorded.
+    Fresh,
+    /// Duplicate within the TTL.
+    Replay,
+    /// Cache is full of still-valid entries; refused without eviction.
+    CapacityExhausted,
+}
+
+/// Bounded AuthID replay filter matching sing-vmess's 120s window.
 ///
-/// Inserts decoded AuthID plaintexts; a duplicate within the TTL is rejected.
+/// Inserts decoded AuthID plaintexts. Duplicates within the TTL are rejected.
+/// When at capacity, still-valid entries are **never** evicted to make room —
+/// new AuthIDs are refused instead (evicting an in-window AuthID would reopen
+/// replay of that value). Expired entries are reaped before capacity checks.
 #[derive(Debug)]
 pub struct AuthIdReplayCache {
     ttl: Duration,
@@ -88,23 +103,19 @@ impl AuthIdReplayCache {
         }
     }
 
-    /// Returns `true` when `decoded_auth_id` is new (and records it); `false` on replay.
-    pub fn check_and_insert(&mut self, decoded_auth_id: [u8; 16]) -> bool {
+    /// Admits `decoded_auth_id` or reports why it was refused.
+    pub fn check_and_insert(&mut self, decoded_auth_id: [u8; 16]) -> AuthIdAdmission {
         let now = Instant::now();
         self.reap(now);
         if self.seen.contains_key(&decoded_auth_id) {
-            return false;
+            return AuthIdAdmission::Replay;
         }
-        while self.seen.len() >= self.capacity {
-            if let Some((oldest, _)) = self.order.pop_front() {
-                self.seen.remove(&oldest);
-            } else {
-                break;
-            }
+        if self.seen.len() >= self.capacity {
+            return AuthIdAdmission::CapacityExhausted;
         }
         self.seen.insert(decoded_auth_id, now);
         self.order.push_back((decoded_auth_id, now));
-        true
+        AuthIdAdmission::Fresh
     }
 
     fn reap(&mut self, now: Instant) {
@@ -480,7 +491,7 @@ async fn run_server_relay(
 pub async fn accept_vmess_request<S, H>(
     stream: &mut S,
     users: &HashMap<[u8; 16], VmessUserEntry, H>,
-    mut options: VmessAcceptOptions<'_>,
+    options: VmessAcceptOptions<'_>,
 ) -> Result<(VmessServerRequest, VmessServerSession), VmessProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -510,11 +521,22 @@ where
                     "VMess AuthID timestamp outside allowed window".to_owned(),
                 ));
             }
-            if let Some(cache) = options.replay_cache.as_mut() {
-                if !cache.check_and_insert(decoded) {
-                    return Err(VmessProtocolError::Protocol(
-                        "VMess AuthID replay detected".to_owned(),
-                    ));
+            if let Some(cache) = options.replay_cache {
+                let mut cache = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match cache.check_and_insert(decoded) {
+                    AuthIdAdmission::Fresh => {}
+                    AuthIdAdmission::Replay => {
+                        return Err(VmessProtocolError::Protocol(
+                            "VMess AuthID replay detected".to_owned(),
+                        ));
+                    }
+                    AuthIdAdmission::CapacityExhausted => {
+                        return Err(VmessProtocolError::Protocol(
+                            "VMess AuthID replay cache is full".to_owned(),
+                        ));
+                    }
                 }
             }
             matched = Some((*uuid, entry.clone(), key, decoded));
@@ -536,8 +558,9 @@ where
     };
 
     let opened = read_aead_request_after_auth_id(stream, &key, auth_id, decoded_auth_id).await?;
-    let chunked_none =
-        opened.security == VmessSecurity::None && opened.command == VmessCommand::Udp;
+    let chunk_stream = opened.request_options & OPTION_CHUNK_STREAM != 0;
+    let chunk_masking = opened.request_options & OPTION_CHUNK_MASKING != 0;
+    let chunked_none = opened.security == VmessSecurity::None && chunk_stream;
     let (body_reader, body_writer, response_key, response_iv) = body::server_pair(
         opened.security,
         &opened.request_key,
@@ -545,6 +568,7 @@ where
         BodyOptions {
             legacy_header: false,
             chunked_none,
+            chunk_masking,
             global_padding: opened.global_padding,
             authenticated_length: opened.authenticated_length,
         },
@@ -605,19 +629,30 @@ mod tests {
     fn auth_id_replay_cache_rejects_duplicates_within_ttl() {
         let mut cache = AuthIdReplayCache::with_ttl(4, Duration::from_secs(60));
         let id = [0x11; 16];
-        assert!(cache.check_and_insert(id));
-        assert!(!cache.check_and_insert(id));
-        assert!(cache.check_and_insert([0x22; 16]));
+        assert_eq!(cache.check_and_insert(id), AuthIdAdmission::Fresh);
+        assert_eq!(cache.check_and_insert(id), AuthIdAdmission::Replay);
+        assert_eq!(cache.check_and_insert([0x22; 16]), AuthIdAdmission::Fresh);
     }
 
     #[test]
-    fn auth_id_replay_cache_is_capacity_bounded() {
+    fn auth_id_replay_cache_refuses_insert_when_full_of_valid_entries() {
         let mut cache = AuthIdReplayCache::with_ttl(2, Duration::from_secs(60));
-        assert!(cache.check_and_insert([1; 16]));
-        assert!(cache.check_and_insert([2; 16]));
-        assert!(cache.check_and_insert([3; 16]));
-        // Oldest entry was evicted by capacity.
-        assert!(cache.check_and_insert([1; 16]));
+        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Fresh);
+        assert_eq!(cache.check_and_insert([2; 16]), AuthIdAdmission::Fresh);
+        assert_eq!(
+            cache.check_and_insert([3; 16]),
+            AuthIdAdmission::CapacityExhausted
+        );
+        // In-window entry must still be protected against replay.
+        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Replay);
+    }
+
+    #[test]
+    fn auth_id_replay_cache_reaps_expired_before_capacity_check() {
+        let mut cache = AuthIdReplayCache::with_ttl(1, Duration::from_millis(20));
+        assert_eq!(cache.check_and_insert([1; 16]), AuthIdAdmission::Fresh);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(cache.check_and_insert([2; 16]), AuthIdAdmission::Fresh);
     }
 
     #[tokio::test]
@@ -688,6 +723,7 @@ mod tests {
                     command: VmessCommand::Tcp,
                     global_padding: false,
                     authenticated_length: false,
+                    chunk_masking: true,
                 },
             )
             .unwrap();
@@ -725,6 +761,7 @@ mod tests {
                     command: VmessCommand::Tcp,
                     global_padding: false,
                     authenticated_length: false,
+                    chunk_masking: true,
                 },
                 now.saturating_sub(DEFAULT_TIMESTAMP_SKEW_SECS + 30),
             )
@@ -757,18 +794,19 @@ mod tests {
                 command: VmessCommand::Tcp,
                 global_padding: false,
                 authenticated_length: false,
+                chunk_masking: true,
             },
         )
         .unwrap();
 
-        let mut cache = AuthIdReplayCache::new(DEFAULT_AUTH_ID_REPLAY_CAPACITY);
+        let cache = std::sync::Mutex::new(AuthIdReplayCache::new(DEFAULT_AUTH_ID_REPLAY_CAPACITY));
         let (mut client1, mut server1) = tokio::io::duplex(4096);
         client1.write_all(&sealed.wire).await.unwrap();
         accept_vmess_request(
             &mut server1,
             &users(),
             VmessAcceptOptions {
-                replay_cache: Some(&mut cache),
+                replay_cache: Some(&cache),
                 ..VmessAcceptOptions::default()
             },
         )
@@ -781,7 +819,7 @@ mod tests {
             &mut server2,
             &users(),
             VmessAcceptOptions {
-                replay_cache: Some(&mut cache),
+                replay_cache: Some(&cache),
                 ..VmessAcceptOptions::default()
             },
         )
@@ -791,6 +829,57 @@ mod tests {
         assert!(
             matches!(error, VmessProtocolError::Protocol(message) if message.contains("replay"))
         );
+    }
+
+    #[tokio::test]
+    async fn server_accepts_aead_without_chunk_masking_and_relays_body() {
+        let uuid = map_uuid(UUID_TEXT);
+        let destination = Destination {
+            host: Host::Ip("192.0.2.55".parse().unwrap()),
+            port: 8443,
+        };
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let sealed = seal_request_header(
+            &uuid,
+            &command_key(&uuid),
+            &destination,
+            SealRequestOptions {
+                alter_id: 0,
+                security: VmessSecurity::Aes128Gcm,
+                command: VmessCommand::Tcp,
+                global_padding: true,
+                authenticated_length: false,
+                chunk_masking: false,
+            },
+        )
+        .unwrap();
+        client.write_all(&sealed.wire).await.unwrap();
+        let (_, mut client_body_writer, _, _) = body::pair(
+            VmessSecurity::Aes128Gcm,
+            &sealed.request_key,
+            &sealed.request_iv,
+            BodyOptions {
+                legacy_header: false,
+                chunked_none: false,
+                chunk_masking: false,
+                global_padding: true,
+                authenticated_length: false,
+            },
+        );
+        client_body_writer
+            .write_record(&mut client, b"no-mask-payload")
+            .await
+            .unwrap();
+
+        let (request, mut session) =
+            accept_vmess_request(&mut server, &users(), VmessAcceptOptions::default())
+                .await
+                .expect("accept unmasked");
+        assert!(request.global_padding);
+        assert!(!request.authenticated_length);
+        assert_eq!(request.security, VmessSecurity::Aes128Gcm);
+        let plaintext = session.read_body(&mut server).await.expect("body");
+        assert_eq!(plaintext, b"no-mask-payload");
     }
 
     #[tokio::test]
@@ -812,6 +901,7 @@ mod tests {
                     command: VmessCommand::Tcp,
                     global_padding: false,
                     authenticated_length: false,
+                    chunk_masking: true,
                 },
             )
             .unwrap();

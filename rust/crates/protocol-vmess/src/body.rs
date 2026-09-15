@@ -21,6 +21,9 @@ const AEAD_OVERHEAD: usize = 16;
 pub(super) struct BodyOptions {
     pub legacy_header: bool,
     pub chunked_none: bool,
+    /// sing `RequestOptionChunkMasking` — XOR AEAD length with Shake128 when
+    /// authenticated-length framing is off.
+    pub chunk_masking: bool,
     pub global_padding: bool,
     pub authenticated_length: bool,
 }
@@ -110,6 +113,7 @@ impl RecordCipher {
 struct Framing {
     shake: sha3::Shake128Reader,
     global_padding: bool,
+    chunk_masking: bool,
     authenticated_length: Option<RecordCipher>,
     authenticated_length_iv: [u8; 16],
 }
@@ -121,6 +125,7 @@ impl Framing {
         authenticated_length_iv: &[u8; 16],
         padding_iv: &[u8; 16],
         global_padding: bool,
+        chunk_masking: bool,
         authenticated_length: bool,
     ) -> Self {
         let mut shake = Shake128::default();
@@ -128,6 +133,7 @@ impl Framing {
         Self {
             shake: shake.finalize_xof(),
             global_padding,
+            chunk_masking,
             authenticated_length: authenticated_length.then(|| {
                 RecordCipher::new(
                     security,
@@ -153,7 +159,11 @@ impl Framing {
     }
 
     fn mask_length(&mut self, length: u16) -> u16 {
-        length ^ self.next_u16()
+        if self.chunk_masking {
+            length ^ self.next_u16()
+        } else {
+            length
+        }
     }
 
     fn authenticated_length_nonce(&self, counter: u16) -> [u8; 12] {
@@ -194,13 +204,23 @@ impl BodyWriter {
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
-        Self::new_with_none_chunking(security, keys, global_padding, authenticated_length, false)
+        // Product AEAD clients always set ChunkMasking; tests that need the
+        // unmasked path use `new_with_framing`.
+        Self::new_with_framing(
+            security,
+            keys,
+            global_padding,
+            true,
+            authenticated_length,
+            false,
+        )
     }
 
-    fn new_with_none_chunking(
+    fn new_with_framing(
         security: VmessSecurity,
         keys: DirectionKeys,
         global_padding: bool,
+        chunk_masking: bool,
         authenticated_length: bool,
         chunked_none: bool,
     ) -> Self {
@@ -225,6 +245,7 @@ impl BodyWriter {
                         &keys.authenticated_length_iv,
                         &keys.body_iv,
                         global_padding,
+                        chunk_masking,
                         authenticated_length,
                     ),
                 }))
@@ -232,6 +253,24 @@ impl BodyWriter {
             VmessSecurity::Auto => unreachable!(),
         };
         Self { mode }
+    }
+
+    #[cfg(test)]
+    fn new_with_none_chunking(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+        chunked_none: bool,
+    ) -> Self {
+        Self::new_with_framing(
+            security,
+            keys,
+            global_padding,
+            true,
+            authenticated_length,
+            chunked_none,
+        )
     }
 
     pub(super) async fn write_record<W: AsyncWrite + Unpin>(
@@ -329,13 +368,21 @@ impl BodyReader {
         global_padding: bool,
         authenticated_length: bool,
     ) -> Self {
-        Self::new_with_none_chunking(security, keys, global_padding, authenticated_length, false)
+        Self::new_with_framing(
+            security,
+            keys,
+            global_padding,
+            true,
+            authenticated_length,
+            false,
+        )
     }
 
-    fn new_with_none_chunking(
+    fn new_with_framing(
         security: VmessSecurity,
         keys: DirectionKeys,
         global_padding: bool,
+        chunk_masking: bool,
         authenticated_length: bool,
         chunked_none: bool,
     ) -> Self {
@@ -360,6 +407,7 @@ impl BodyReader {
                         &keys.authenticated_length_iv,
                         &keys.body_iv,
                         global_padding,
+                        chunk_masking,
                         authenticated_length,
                     ),
                 }))
@@ -367,6 +415,24 @@ impl BodyReader {
             VmessSecurity::Auto => unreachable!(),
         };
         Self { mode }
+    }
+
+    #[cfg(test)]
+    fn new_with_none_chunking(
+        security: VmessSecurity,
+        keys: DirectionKeys,
+        global_padding: bool,
+        authenticated_length: bool,
+        chunked_none: bool,
+    ) -> Self {
+        Self::new_with_framing(
+            security,
+            keys,
+            global_padding,
+            true,
+            authenticated_length,
+            chunked_none,
+        )
     }
 
     pub(super) async fn read_record<R: AsyncRead + Unpin>(
@@ -506,17 +572,19 @@ pub(super) fn pair(
     let (response_key, response_iv) =
         response_body_material(request_key, request_iv, options.legacy_header);
     (
-        BodyReader::new_with_none_chunking(
+        BodyReader::new_with_framing(
             security,
             DirectionKeys::response(request_key, request_iv, &response_key, &response_iv),
             options.global_padding,
+            options.chunk_masking,
             options.authenticated_length,
             options.chunked_none,
         ),
-        BodyWriter::new_with_none_chunking(
+        BodyWriter::new_with_framing(
             security,
             DirectionKeys::request(request_key, request_iv),
             options.global_padding,
+            options.chunk_masking,
             options.authenticated_length,
             options.chunked_none,
         ),
@@ -535,17 +603,19 @@ pub(super) fn server_pair(
     let (response_key, response_iv) =
         response_body_material(request_key, request_iv, options.legacy_header);
     (
-        BodyReader::new_with_none_chunking(
+        BodyReader::new_with_framing(
             security,
             DirectionKeys::request(request_key, request_iv),
             options.global_padding,
+            options.chunk_masking,
             options.authenticated_length,
             options.chunked_none,
         ),
-        BodyWriter::new_with_none_chunking(
+        BodyWriter::new_with_framing(
             security,
             DirectionKeys::response(request_key, request_iv, &response_key, &response_iv),
             options.global_padding,
+            options.chunk_masking,
             options.authenticated_length,
             options.chunked_none,
         ),
@@ -566,8 +636,8 @@ mod tests {
             [0x12, 0x34, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
         let key = [0x11; 16];
-        let mut first = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, false);
-        let mut second = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, false);
+        let mut first = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, true, false);
+        let mut second = Framing::new(VmessSecurity::Aes128Gcm, &key, &iv, &iv, false, true, false);
         assert_eq!(first.next_u16(), second.next_u16());
         assert_eq!(first.next_u16(), second.next_u16());
     }
@@ -756,6 +826,7 @@ mod tests {
             BodyOptions {
                 legacy_header: false,
                 chunked_none: false,
+                chunk_masking: true,
                 global_padding: true,
                 authenticated_length: true,
             },
@@ -767,5 +838,49 @@ mod tests {
                 .unwrap(),
             b"response"
         );
+    }
+
+    #[tokio::test]
+    async fn aead_round_trip_without_chunk_masking() {
+        let key = [0x91; 16];
+        let iv = [0xa2; 16];
+        for security in [VmessSecurity::Aes128Gcm, VmessSecurity::ChaCha20Poly1305] {
+            for global_padding in [false, true] {
+                let keys = DirectionKeys::request(&key, &iv);
+                let mut writer = BodyWriter::new_with_framing(
+                    security,
+                    keys,
+                    global_padding,
+                    false,
+                    false,
+                    false,
+                );
+                let mut wire = Vec::new();
+                writer
+                    .write_record(&mut wire, b"unmasked-aead-body")
+                    .await
+                    .unwrap();
+                // Without ChunkMasking the length prefix is plaintext (no Shake XOR).
+                if !global_padding {
+                    let framed = u16::from_be_bytes([wire[0], wire[1]]);
+                    assert_eq!(usize::from(framed), wire.len() - 2);
+                }
+                let mut reader = BodyReader::new_with_framing(
+                    security,
+                    keys,
+                    global_padding,
+                    false,
+                    false,
+                    false,
+                );
+                assert_eq!(
+                    reader
+                        .read_record(&mut std::io::Cursor::new(wire))
+                        .await
+                        .unwrap(),
+                    b"unmasked-aead-body"
+                );
+            }
+        }
     }
 }

@@ -164,6 +164,7 @@ pub(crate) async fn connect_protocol_on_stream(
             command,
             global_padding: options.global_padding,
             authenticated_length: options.authenticated_length,
+            chunk_masking: true,
         },
     )?;
     remote.write_all(&sealed.wire).await?;
@@ -175,6 +176,12 @@ pub(crate) async fn connect_protocol_on_stream(
         BodyOptions {
             legacy_header: options.alter_id > 0,
             chunked_none,
+            // Product AEAD clients always set ChunkStream|ChunkMasking; CFB uses
+            // ChunkStream only (no length XOR).
+            chunk_masking: matches!(
+                security,
+                VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305
+            ),
             global_padding: options.global_padding,
             authenticated_length: options.authenticated_length,
         },

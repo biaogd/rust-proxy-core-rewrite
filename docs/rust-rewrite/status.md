@@ -9,10 +9,13 @@ Named `type: vmess` accepts plain TLS (`certificate` + `private-key`), optional
 absent or `0`; nonzero rejected). TCP relays via `into_tcp_relay` →
 `serve_shadowsocks_connection`; UDP covers standard body-record datagrams on
 TLS plus Mux/XUDP (VLESS-identical framing inside VMess body records) with
-per-session sockets. Evidence: `phase_ine_vmess_tls.py`,
-`phase_ine_vmess_websocket.py`, `phase_ine_vmess_grpc.py`,
-`phase_ine_vmess_xudp.py`. Reality/mKCP/Mekya and combined ws+grpc stay
-rejected. Protocol Accept landed earlier as `9b963029`.
+per-session sockets. Product Accept enables a listener-scoped AuthID replay
+cache (sing-vmess style ±120s TTL; capacity full never evicts in-window
+entries). Body framing honors request `ChunkStream` / `ChunkMasking` bits.
+Evidence: `phase_ine_vmess_tls.py`, `phase_ine_vmess_websocket.py`,
+`phase_ine_vmess_grpc.py`, `phase_ine_vmess_xudp.py` (CI shard
+`controller-services-outbound` via `_ine`). Reality/mKCP/Mekya and combined
+ws+grpc stay rejected. Protocol Accept landed earlier as `9b963029`.
 
 ### IN-D VLESS Vision TLS inbound — 2026-09-15
 
