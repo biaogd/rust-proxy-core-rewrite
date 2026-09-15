@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,6 +32,9 @@ use crate::types::RuntimeError;
 const TROJAN_MAX_INBOUND_CONNECTIONS: usize = 1024;
 const TROJAN_MAX_GRPC_STREAMS: usize = 256;
 const TROJAN_GRPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound client-side UDP writes so a stalled reader cannot pin the select loop
+/// past connection cancel / controller close.
+const TROJAN_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct TrojanListener {
     listener: TcpListener,
@@ -654,9 +658,16 @@ async fn serve_trojan_udp_direct<S>(
                     host: Host::Ip(unmap_ip(source.ip())),
                     port: source.port(),
                 };
-                if write_trojan_udp_packet(&mut writer, &destination, &response[..length])
-                    .await
-                    .is_err()
+                // Race the client write against cancel/timeout: a full TCP
+                // window must not trap us inside select! past tracker close.
+                if !write_trojan_udp_to_client(
+                    &mut writer,
+                    &destination,
+                    &response[..length],
+                    shutdown,
+                    tracker.cancelled(),
+                )
+                .await
                 {
                     break;
                 }
@@ -692,4 +703,111 @@ async fn serve_trojan_udp_direct<S>(
     reader_task.abort();
     let _ = reader_task.await;
     tracker.finish(uploaded, downloaded);
+}
+
+/// Writes one Trojan UDP frame to the client, aborting on cancel or write timeout.
+///
+/// Returns `false` when the write should stop the UDP association (cancel,
+/// timeout, or I/O error). A stalled client reader must not pin the association
+/// past controller close.
+async fn write_trojan_udp_to_client<W, C>(
+    writer: &mut W,
+    destination: &Destination,
+    payload: &[u8],
+    shutdown: &CancellationToken,
+    tracker_cancelled: C,
+) -> bool
+where
+    W: AsyncWrite + Unpin,
+    C: Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => false,
+        () = tracker_cancelled => false,
+        result = tokio::time::timeout(
+            TROJAN_UDP_CLIENT_WRITE_TIMEOUT,
+            write_trojan_udp_packet(writer, destination, payload),
+        ) => matches!(result, Ok(Ok(()))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn client_udp_write_aborts_when_peer_stops_reading() {
+        // Tiny duplex buffer so a large frame write blocks once the window fills.
+        let (client, server) = tokio::io::duplex(8);
+        let (_reader, mut writer) = tokio::io::split(server);
+        // Hold the client half without reading so the write backs up.
+        let client = client;
+        let shutdown = CancellationToken::new();
+        let tracker = CancellationToken::new();
+        let destination = Destination {
+            host: Host::Ip("192.0.2.1".parse().expect("ip")),
+            port: 53,
+        };
+        let payload = vec![0_u8; 4096];
+        let write = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let tracker = tracker.clone();
+            async move {
+                write_trojan_udp_to_client(
+                    &mut writer,
+                    &destination,
+                    &payload,
+                    &shutdown,
+                    tracker.cancelled(),
+                )
+                .await
+            }
+        });
+        // Let the write fill the duplex and block.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert!(
+            !write.is_finished(),
+            "write should still be blocked on a full window"
+        );
+        // Controller close must unblock the association promptly.
+        tracker.cancel();
+        let finished = tokio::time::timeout(Duration::from_secs(1), write)
+            .await
+            .expect("write must observe cancel")
+            .expect("join");
+        assert!(!finished, "cancel must abort the client write");
+        // Keep client alive until the write task exits to avoid early EOF races.
+        drop(client);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn client_udp_write_times_out_when_peer_never_reads() {
+        let (_client, server) = tokio::io::duplex(8);
+        let (_reader, mut writer) = tokio::io::split(server);
+        let shutdown = CancellationToken::new();
+        let tracker = CancellationToken::new();
+        let destination = Destination {
+            host: Host::Ip("192.0.2.1".parse().expect("ip")),
+            port: 53,
+        };
+        let payload = vec![0_u8; 4096];
+        let write = tokio::spawn(async move {
+            write_trojan_udp_to_client(
+                &mut writer,
+                &destination,
+                &payload,
+                &shutdown,
+                tracker.cancelled(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(TROJAN_UDP_CLIENT_WRITE_TIMEOUT + Duration::from_millis(1)).await;
+        let finished = tokio::time::timeout(Duration::from_secs(1), write)
+            .await
+            .expect("write must observe timeout")
+            .expect("join");
+        assert!(!finished, "timeout must abort the stalled client write");
+    }
 }

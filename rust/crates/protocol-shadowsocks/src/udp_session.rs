@@ -19,6 +19,11 @@ const WINDOW_SIZE: u64 = (RING_BLOCKS as u64 - 1) * BLOCK_BITS;
 const SERVER_SESSION_TTL: Duration = Duration::from_mins(1);
 const SERVER_SESSION_CAP: usize = 1024;
 const CLIENT_SERVER_SESSION_CAP: usize = 8;
+/// Peer address→session routes are independent of replay windows: a single live
+/// session can be observed from many source ports, so the route table needs its
+/// own cap and TTL or memory grows without bound while the session stays hot.
+const PEER_INDEX_TTL: Duration = Duration::from_secs(30);
+const PEER_INDEX_CAP: usize = 4096;
 
 /// Sliding window that accepts legitimate reordering and rejects duplicates
 /// or counters that have already slid out of the window.
@@ -204,7 +209,15 @@ pub struct Aead2022ServerSessions {
     /// Peer addresses are only routing hints via [`Self::peer_index`].
     sessions: HashMap<SessionKey, ServerUdpSession>,
     /// Last session observed from each peer, used to build replies.
-    peer_index: HashMap<SocketAddr, SessionKey>,
+    /// Bounded independently of [`Self::sessions`] so rotating source ports
+    /// cannot retain unbounded address→session mappings.
+    peer_index: HashMap<SocketAddr, PeerRoute>,
+}
+
+#[derive(Clone, Debug)]
+struct PeerRoute {
+    key: SessionKey,
+    last_seen: Instant,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -280,7 +293,7 @@ impl Aead2022ServerSessions {
         }
         session.last_user.clone_from(&incoming.user);
         session.last_seen = now;
-        self.peer_index.insert(peer, key);
+        self.remember_peer(peer, key, now);
         Ok(())
     }
 
@@ -288,15 +301,21 @@ impl Aead2022ServerSessions {
     /// [`Self::accept_incoming`]. Returns the all-zero default when the peer has
     /// no live AEAD-2022 session (pre-2022 callers).
     pub fn next_reply(&mut self, peer: SocketAddr) -> UdpSocketControlData {
-        self.reap(Instant::now());
-        let Some(key) = self.peer_index.get(&peer).cloned() else {
+        self.next_reply_at(peer, Instant::now())
+    }
+
+    fn next_reply_at(&mut self, peer: SocketAddr, now: Instant) -> UdpSocketControlData {
+        self.reap(now);
+        let Some(route) = self.peer_index.get_mut(&peer) else {
             return UdpSocketControlData::default();
         };
+        route.last_seen = now;
+        let key = route.key.clone();
         let Some(session) = self.sessions.get_mut(&key) else {
             self.peer_index.remove(&peer);
             return UdpSocketControlData::default();
         };
-        session.last_seen = Instant::now();
+        session.last_seen = now;
         session.next_packet_id = next_packet_id(session.next_packet_id);
         let mut control = UdpSocketControlData::default();
         control.client_session_id = session.client_session_id;
@@ -325,13 +344,15 @@ impl Aead2022ServerSessions {
         Ok(self.next_reply(peer))
     }
 
-    /// Drops idle sessions so the table stays bounded.
+    /// Drops idle sessions and stale peer routes so both tables stay bounded.
     pub fn reap(&mut self, now: Instant) {
         self.sessions.retain(|_, session| {
             now.saturating_duration_since(session.last_seen) < SERVER_SESSION_TTL
         });
-        self.peer_index
-            .retain(|_, key| self.sessions.contains_key(key));
+        self.peer_index.retain(|_, route| {
+            now.saturating_duration_since(route.last_seen) < PEER_INDEX_TTL
+                && self.sessions.contains_key(&route.key)
+        });
     }
 
     /// Number of live identity/session replay windows.
@@ -346,6 +367,34 @@ impl Aead2022ServerSessions {
         self.sessions.is_empty()
     }
 
+    #[cfg(test)]
+    fn peer_route_count(&self) -> usize {
+        self.peer_index.len()
+    }
+
+    #[cfg(test)]
+    fn has_peer_route(&self, peer: SocketAddr) -> bool {
+        self.peer_index.contains_key(&peer)
+    }
+
+    fn remember_peer(&mut self, peer: SocketAddr, key: SessionKey, now: Instant) {
+        if let Some(route) = self.peer_index.get_mut(&peer) {
+            route.key = key;
+            route.last_seen = now;
+            return;
+        }
+        if self.peer_index.len() >= PEER_INDEX_CAP {
+            self.evict_oldest_peer();
+        }
+        self.peer_index.insert(
+            peer,
+            PeerRoute {
+                key,
+                last_seen: now,
+            },
+        );
+    }
+
     fn evict_oldest(&mut self) {
         let oldest = self
             .sessions
@@ -354,7 +403,18 @@ impl Aead2022ServerSessions {
             .map(|(key, _)| key.clone());
         if let Some(key) = oldest {
             self.sessions.remove(&key);
-            self.peer_index.retain(|_, bound| bound != &key);
+            self.peer_index.retain(|_, route| route.key != key);
+        }
+    }
+
+    fn evict_oldest_peer(&mut self) {
+        let oldest = self
+            .peer_index
+            .iter()
+            .min_by_key(|(_, route)| route.last_seen)
+            .map(|(peer, _)| *peer);
+        if let Some(peer) = oldest {
+            self.peer_index.remove(&peer);
         }
     }
 }
@@ -697,5 +757,73 @@ mod tests {
         assert_eq!(first.packet_id, 1);
         assert_eq!(second.server_session_id, first.server_session_id);
         assert_eq!(second.packet_id, 2);
+    }
+
+    #[test]
+    fn server_peer_routes_cap_independently_of_replay_windows() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let now = Instant::now();
+        for index in 0..(PEER_INDEX_CAP + 32) {
+            let port = u16::try_from(10_000 + (index % 50_000)).expect("port");
+            let peer = SocketAddr::from(([127, 0, 0, 1], port));
+            // One live session, many source addresses with increasing packet ids.
+            sessions
+                .accept_incoming_at(
+                    peer,
+                    Some(&control(7, u64::try_from(index + 1).unwrap())),
+                    now,
+                )
+                .expect("accept rotating peer");
+        }
+        assert_eq!(
+            sessions.len(),
+            1,
+            "session cap must not be the peer-route bound"
+        );
+        assert!(
+            sessions.peer_route_count() <= PEER_INDEX_CAP,
+            "peer routes must stay capped"
+        );
+        // Early packet id remains rejected even after address-table pressure.
+        let late_peer = SocketAddr::from(([127, 0, 0, 1], 9));
+        assert_eq!(
+            sessions.accept_incoming_at(late_peer, Some(&control(7, 1)), now),
+            Err(ServerUdpReject::Replay)
+        );
+    }
+
+    #[test]
+    fn server_peer_routes_expire_while_session_window_stays() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let t0 = Instant::now();
+        let peer_a: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+        let peer_b: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+        sessions
+            .accept_incoming_at(peer_a, Some(&control(9, 1)), t0)
+            .expect("peer a");
+        sessions
+            .accept_incoming_at(peer_b, Some(&control(9, 2)), t0)
+            .expect("peer b");
+        // Keep the session (and peer_a) fresh past the peer-route TTL.
+        let mid = t0 + PEER_INDEX_TTL / 2;
+        sessions
+            .accept_incoming_at(peer_a, Some(&control(9, 3)), mid)
+            .expect("refresh peer a");
+        sessions.reap(t0 + PEER_INDEX_TTL + Duration::from_millis(1));
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.has_peer_route(peer_a));
+        assert!(
+            !sessions.has_peer_route(peer_b),
+            "idle peer routes must expire independently of the live session"
+        );
+        assert_eq!(
+            sessions.accept_incoming_at(
+                SocketAddr::from(([127, 0, 0, 1], 7003)),
+                Some(&control(9, 1)),
+                mid + Duration::from_secs(1)
+            ),
+            Err(ServerUdpReject::Replay),
+            "replay window must survive peer-route expiry"
+        );
     }
 }
