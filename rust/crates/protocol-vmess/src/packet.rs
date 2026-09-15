@@ -509,6 +509,152 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, VmessProtocolError> {
         .ok_or_else(|| VmessProtocolError::Protocol("truncated VMess packet frame".to_owned()))
 }
 
+/// Encodes one server→client XUDP KEEP frame (wire-identical to VLESS XUDP).
+///
+/// The returned bytes are written as a single VMess body record.
+///
+/// # Errors
+///
+/// Returns a protocol error when the destination or payload cannot be framed.
+pub fn encode_xudp_server_frame(
+    session_id: u16,
+    source: &Destination,
+    payload: &[u8],
+) -> Result<Vec<u8>, VmessProtocolError> {
+    let payload_length = u16::try_from(payload.len())
+        .map_err(|_| VmessProtocolError::Protocol("XUDP payload exceeds 65535 bytes".to_owned()))?;
+    let mut address = Vec::with_capacity(20);
+    encode_vmess_address(&mut address, source)?;
+    let header_length = 5_usize
+        .checked_add(address.len())
+        .ok_or_else(|| VmessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
+    let header_length = u16::try_from(header_length)
+        .map_err(|_| VmessProtocolError::Protocol("XUDP frame is too large".to_owned()))?;
+    let mut frame = Vec::with_capacity(2 + usize::from(header_length) + 2 + payload.len());
+    frame.extend_from_slice(&header_length.to_be_bytes());
+    frame.extend_from_slice(&session_id.to_be_bytes());
+    frame.push(XUDP_STATUS_KEEP);
+    frame.push(XUDP_OPTION_DATA);
+    frame.push(XUDP_NETWORK_UDP);
+    frame.extend_from_slice(&address);
+    frame.extend_from_slice(&payload_length.to_be_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+/// Reassembles client→server XUDP frames from VMess body records.
+///
+/// XUDP framing matches VLESS (session_id + status + option + network + address
+/// + optional global id + payload). Body records may split mid-frame.
+#[derive(Debug, Default)]
+pub struct VmessXudpReadBuffer {
+    buffer: Vec<u8>,
+}
+
+impl VmessXudpReadBuffer {
+    /// Creates an empty reassembly buffer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends one decrypted VMess body record.
+    pub fn push(&mut self, record: &[u8]) {
+        self.buffer.extend_from_slice(record);
+    }
+
+    /// Tries to parse one complete client XUDP packet.
+    ///
+    /// Returns `Ok(None)` when more body bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol errors for malformed, END, or ERROR frames.
+    pub fn try_parse_client_packet(
+        &mut self,
+    ) -> Result<Option<(u16, Destination, Vec<u8>)>, VmessProtocolError> {
+        if self.buffer.len() < 2 {
+            return Ok(None);
+        }
+        let header_length = usize::from(u16::from_be_bytes([self.buffer[0], self.buffer[1]]));
+        if header_length < 5 {
+            return Err(VmessProtocolError::Protocol(
+                "invalid XUDP client frame header length".to_owned(),
+            ));
+        }
+        let header_end = 2 + header_length;
+        if self.buffer.len() < header_end {
+            return Ok(None);
+        }
+        let header = &self.buffer[2..header_end];
+        let session_id = u16::from_be_bytes([header[0], header[1]]);
+        let status = header[2];
+        let option = header[3];
+        if option & XUDP_OPTION_ERROR != 0 {
+            return Err(VmessProtocolError::Protocol(
+                "client closed XUDP association".to_owned(),
+            ));
+        }
+        match status {
+            XUDP_STATUS_NEW | XUDP_STATUS_KEEP => {}
+            XUDP_STATUS_END => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "XUDP association ended",
+                )
+                .into());
+            }
+            XUDP_STATUS_KEEPALIVE => {
+                return Err(VmessProtocolError::Protocol(
+                    "unexpected XUDP keepalive from client".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(VmessProtocolError::Protocol(
+                    "invalid XUDP client status".to_owned(),
+                ));
+            }
+        }
+        if header[4] != XUDP_NETWORK_UDP {
+            return Err(VmessProtocolError::Protocol(
+                "invalid XUDP client network".to_owned(),
+            ));
+        }
+        let (destination, consumed) = decode_vmess_address(&header[5..])?;
+        let rest = &header[5 + consumed..];
+        if status == XUDP_STATUS_NEW {
+            if rest.len() < 8 {
+                return Err(VmessProtocolError::Protocol(
+                    "truncated XUDP global id".to_owned(),
+                ));
+            }
+        } else if !rest.is_empty() {
+            return Err(VmessProtocolError::Protocol(
+                "unexpected XUDP keep header extension".to_owned(),
+            ));
+        }
+        if option & XUDP_OPTION_DATA == 0 {
+            // Control frame without data: consume header and continue.
+            self.buffer.drain(..header_end);
+            return self.try_parse_client_packet();
+        }
+        if self.buffer.len() < header_end + 2 {
+            return Ok(None);
+        }
+        let payload_length = usize::from(u16::from_be_bytes([
+            self.buffer[header_end],
+            self.buffer[header_end + 1],
+        ]));
+        let frame_end = header_end + 2 + payload_length;
+        if self.buffer.len() < frame_end {
+            return Ok(None);
+        }
+        let payload = self.buffer[header_end + 2..frame_end].to_vec();
+        self.buffer.drain(..frame_end);
+        Ok(Some((session_id, destination, payload)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +701,50 @@ mod tests {
             assert_eq!(decoded, destination);
             assert_eq!(consumed, frame.len());
         }
+    }
+
+    #[test]
+    fn xudp_server_frame_preserves_session_id() {
+        let destination = Destination {
+            host: Host::Ip("192.0.2.10".parse().unwrap()),
+            port: 9,
+        };
+        let frame = encode_xudp_server_frame(42, &destination, b"pong").unwrap();
+        assert_eq!(u16::from_be_bytes([frame[2], frame[3]]), 42);
+        assert_eq!(frame[4], XUDP_STATUS_KEEP);
+    }
+
+    #[test]
+    fn xudp_read_buffer_parses_split_records() {
+        let destination = Destination {
+            host: Host::Ip("192.0.2.11".parse().unwrap()),
+            port: 53,
+        };
+        let mut address = Vec::new();
+        encode_vmess_address(&mut address, &destination).unwrap();
+        let global_id = [1_u8, 2, 3, 4, 5, 6, 7, 8];
+        let header_length = u16::try_from(5 + address.len() + global_id.len()).unwrap();
+        let payload = b"hello-xudp";
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&header_length.to_be_bytes());
+        frame.extend_from_slice(&7_u16.to_be_bytes());
+        frame.push(XUDP_STATUS_NEW);
+        frame.push(XUDP_OPTION_DATA);
+        frame.push(XUDP_NETWORK_UDP);
+        frame.extend_from_slice(&address);
+        frame.extend_from_slice(&global_id);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame.extend_from_slice(payload);
+
+        let mut buffer = VmessXudpReadBuffer::new();
+        let split = frame.len() / 2;
+        buffer.push(&frame[..split]);
+        assert!(buffer.try_parse_client_packet().unwrap().is_none());
+        buffer.push(&frame[split..]);
+        let (session_id, got_dest, got_payload) =
+            buffer.try_parse_client_packet().unwrap().expect("packet");
+        assert_eq!(session_id, 7);
+        assert_eq!(got_dest, destination);
+        assert_eq!(got_payload, payload);
     }
 }

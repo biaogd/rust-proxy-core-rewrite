@@ -4036,6 +4036,152 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn loads_named_vmess_tls_listener_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-tls
+    type: vmess
+    listen: 127.0.0.1
+    port: 18440
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - username: alice
+        uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vmess tls listener");
+    assert_eq!(config.vmess_listeners.len(), 1);
+    let inbound = &config.vmess_listeners[0];
+    assert_eq!(inbound.name, "vmess-tls");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(inbound.users[0].username, "alice");
+    assert_eq!(
+        inbound.users[0].uuid,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    assert!(inbound.ws_path.is_none());
+    assert!(inbound.grpc_service_name.is_none());
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Vmess, 18440)));
+
+    let defaults_username_to_uuid = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-default-username
+    type: vmess
+    listen: 127.0.0.1
+    port: 18441
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("uuid-only user defaults username to uuid");
+    assert_eq!(
+        defaults_username_to_uuid.vmess_listeners[0].users[0].username,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+
+    let alter_id_zero = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-alterid-zero
+    type: vmess
+    listen: 127.0.0.1
+    port: 18442
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+        alterId: 0
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("alterId 0 is accepted");
+    assert_eq!(alter_id_zero.vmess_listeners[0].users.len(), 1);
+
+    let with_ws = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-wss
+    type: vmess
+    listen: 127.0.0.1
+    port: 18443
+    certificate: ./server.crt
+    private-key: ./server.key
+    ws-path: /vmess
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vmess wss listener");
+    assert_eq!(
+        with_ws.vmess_listeners[0].ws_path.as_deref(),
+        Some("/vmess")
+    );
+
+    let with_grpc = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-grpc
+    type: vmess
+    listen: 127.0.0.1
+    port: 18444
+    certificate: ./server.crt
+    private-key: ./server.key
+    grpc-service-name: GunService
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vmess grpc listener");
+    assert_eq!(
+        with_grpc.vmess_listeners[0].grpc_service_name.as_deref(),
+        Some("GunService")
+    );
+
+    for unsupported in [
+        "ws-path: /vmess\n    grpc-service-name: GunService",
+        "reality-config:\n      dest: itunes.apple.com:443\n      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18445\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let nonzero_alter_id = "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18446\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        alterId: 1\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(nonzero_alter_id).is_err(),
+        "nonzero alterId must be rejected"
+    );
+
+    let missing_uuid = "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18447\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - username: alice\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_uuid).is_err(),
+        "uuid is required per user"
+    );
+
+    let missing_cert = "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18448\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_cert).is_err(),
+        "certificate is required"
+    );
+}
+
+#[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"

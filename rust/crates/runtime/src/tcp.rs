@@ -35,7 +35,10 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
-        ListenerKind::Shadowsocks | ListenerKind::Trojan | ListenerKind::Vless => return,
+        ListenerKind::Shadowsocks
+        | ListenerKind::Trojan
+        | ListenerKind::Vless
+        | ListenerKind::Vmess => return,
     };
     let authentication = if config.skips_inbound_auth(peer.ip()) {
         &[]
@@ -77,7 +80,10 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => "DEFAULT-HTTP",
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
-        ListenerKind::Shadowsocks | ListenerKind::Trojan | ListenerKind::Vless => return,
+        ListenerKind::Shadowsocks
+        | ListenerKind::Trojan
+        | ListenerKind::Vless
+        | ListenerKind::Vmess => return,
     }
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
@@ -184,6 +190,7 @@ pub(super) async fn serve_stream_session(
             InboundProtocol::Shadowsocks => "DEFAULT-SHADOWSOCKS",
             InboundProtocol::Trojan => "DEFAULT-TROJAN",
             InboundProtocol::Vless => "DEFAULT-VLESS",
+            InboundProtocol::Vmess => "DEFAULT-VMESS",
             InboundProtocol::Tun => "DEFAULT-TUN",
             InboundProtocol::Http
             | InboundProtocol::Https

@@ -9,6 +9,7 @@ mod body;
 mod header;
 mod kdf;
 mod packet;
+mod server;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -20,11 +21,18 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
 use body::{BodyOptions, BodyReader, BodyWriter};
-use header::{
-    SealRequestOptions, VmessCommand, command_key, read_response_header, seal_request_header,
-};
+use header::{SealRequestOptions, command_key, read_response_header, seal_request_header};
 
-pub use packet::{VmessPacketMode, VmessUdpAssociation, associate_vmess_udp_on_stream};
+pub use header::{DEFAULT_TIMESTAMP_SKEW_SECS, VmessCommand, timestamp_within_skew};
+pub use packet::{
+    VmessPacketMode, VmessUdpAssociation, VmessXudpReadBuffer, associate_vmess_udp_on_stream,
+    encode_xudp_server_frame,
+};
+pub use server::{
+    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_GLOBAL, DEFAULT_AUTH_ID_REPLAY_PER_USER,
+    VmessAcceptOptions, VmessServerReader, VmessServerRequest, VmessServerSession,
+    VmessServerWriter, VmessUserEntry, accept_vmess_request, map_uuid, uuid_table,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmessSecurity {
@@ -156,6 +164,7 @@ pub(crate) async fn connect_protocol_on_stream(
             command,
             global_padding: options.global_padding,
             authenticated_length: options.authenticated_length,
+            chunk_masking: true,
         },
     )?;
     remote.write_all(&sealed.wire).await?;
@@ -167,6 +176,12 @@ pub(crate) async fn connect_protocol_on_stream(
         BodyOptions {
             legacy_header: options.alter_id > 0,
             chunked_none,
+            // Product AEAD clients always set ChunkStream|ChunkMasking; CFB uses
+            // ChunkStream only (no length XOR).
+            chunk_masking: matches!(
+                security,
+                VmessSecurity::Aes128Gcm | VmessSecurity::ChaCha20Poly1305
+            ),
             global_padding: options.global_padding,
             authenticated_length: options.authenticated_length,
         },

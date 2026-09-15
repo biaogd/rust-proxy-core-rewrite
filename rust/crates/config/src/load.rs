@@ -15,7 +15,7 @@ use crate::error::ConfigError;
 use crate::model::{
     Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls, ListenerKind, LogLevel, Mode,
     NormalizedConfig, NtpConfig, ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle,
-    ShadowsocksInboundConfig, TrojanInboundConfig, VlessInboundConfig,
+    ShadowsocksInboundConfig, TrojanInboundConfig, VlessInboundConfig, VmessInboundConfig,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
@@ -196,6 +196,7 @@ impl ConfigSpec {
         let mut shadowsocks_listeners = named.shadowsocks;
         let trojan_listeners = named.trojan;
         let vless_listeners = named.vless;
+        let vmess_listeners = named.vmess;
         if let Some(config) = raw
             .ss_config
             .as_deref()
@@ -205,7 +206,12 @@ impl ConfigSpec {
         {
             shadowsocks_listeners.insert(0, config);
         }
-        validate_named_listener_ports(&shadowsocks_listeners, &trojan_listeners, &vless_listeners)?;
+        validate_named_listener_ports(
+            &shadowsocks_listeners,
+            &trojan_listeners,
+            &vless_listeners,
+            &vmess_listeners,
+        )?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -272,6 +278,7 @@ impl ConfigSpec {
             shadowsocks_listeners,
             trojan_listeners,
             vless_listeners,
+            vmess_listeners,
             tun,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
@@ -436,6 +443,7 @@ impl TryFrom<ConfigSpec> for Config {
             shadowsocks_listeners: spec.shadowsocks_listeners,
             trojan_listeners: spec.trojan_listeners,
             vless_listeners: spec.vless_listeners,
+            vmess_listeners: spec.vmess_listeners,
             tun: spec.tun,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
@@ -789,6 +797,9 @@ impl Config {
         for vless in &self.vless_listeners {
             listeners.push((ListenerKind::Vless, vless.listen.port()));
         }
+        for vmess in &self.vmess_listeners {
+            listeners.push((ListenerKind::Vmess, vmess.listen.port()));
+        }
         if listeners.is_empty() && self.dns.is_none() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
@@ -812,6 +823,13 @@ impl Config {
     #[must_use]
     pub fn vless_listener_for_port(&self, port: u16) -> Option<&VlessInboundConfig> {
         self.vless_listeners
+            .iter()
+            .find(|listener| listener.listen.port() == port)
+    }
+
+    #[must_use]
+    pub fn vmess_listener_for_port(&self, port: u16) -> Option<&VmessInboundConfig> {
+        self.vmess_listeners
             .iter()
             .find(|listener| listener.listen.port() == port)
     }
@@ -857,6 +875,21 @@ impl Config {
             .ok_or_else(|| {
                 ConfigError::InvalidInbound(format!(
                     "vless inbound is not configured on port {port}"
+                ))
+            })
+    }
+
+    /// Returns the bind address for a VMess inbound listener on the given port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInbound`] when no VMess inbound is configured for the port.
+    pub fn vmess_listen_address(&self, port: u16) -> Result<SocketAddr, ConfigError> {
+        self.vmess_listener_for_port(port)
+            .map(|config| config.listen)
+            .ok_or_else(|| {
+                ConfigError::InvalidInbound(format!(
+                    "vmess inbound is not configured on port {port}"
                 ))
             })
     }

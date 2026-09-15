@@ -1481,11 +1481,14 @@ Combined ws+grpc stays rejected.
 
 ### IN-E — VMess inbound
 
-Prefer AEAD with `alterId: 0`. Cover TCP/TLS, WS/gRPC and UDP. Prove address
-encoding, security modes, time window, replay detection and carrier behavior.
-Nonzero/legacy AlterID server work stays out of early slices unless a
-compatibility fixture proves the pinned Go server still requires it for the
-declared row.
+**Partial — this checkout:** AEAD `alterId: 0` named TLS inbound with optional
+WSS or gRPC (not both), TCP relay, standard UDP, and Mux/XUDP. Product path
+enables shared AuthID replay defense with per-user soft budgets and a high
+global ceiling (never evicts in-window AuthIDs). Body framing follows request
+ChunkStream/ChunkMasking bits. Evidence: `phase_ine_vmess_tls.py`,
+`phase_ine_vmess_websocket.py`, `phase_ine_vmess_grpc.py`,
+`phase_ine_vmess_xudp.py`. Nonzero/legacy AlterID, Reality, mKCP, Mekya, and
+plain TCP without TLS stay out of this slice.
 
 ### IN-F — QUIC servers (Hysteria2, TUIC v5)
 
