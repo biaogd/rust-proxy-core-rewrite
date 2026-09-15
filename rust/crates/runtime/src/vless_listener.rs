@@ -7,7 +7,7 @@
 //! multi-destination frames. Vision (`flow: xtls-rprx-vision`) is supported on
 //! certificate TLS; REALITY is native-TCP only in this slice (no Vision).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -31,9 +31,10 @@ use rewrite_transport::{
     reality_acceptor,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +50,170 @@ const VLESS_GRPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound client-side UDP writes so a stalled reader cannot pin the select loop
 /// past connection cancel / controller close.
 const VLESS_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap concurrent mux UDP associations on one VLESS TCP connection.
+const VLESS_XUDP_MAX_SESSIONS: usize = 64;
+/// Drop mux UDP associations idle longer than this.
+const VLESS_XUDP_SESSION_IDLE: Duration = Duration::from_secs(60);
+
+type XudpReply = (u16, SocketAddr, Vec<u8>);
+
+/// One mux session owns a dedicated UDP socket so replies cannot demux by
+/// destination address (multiple sessions may share the same remote target).
+struct XudpMuxSession {
+    socket: Arc<UdpSocket>,
+    cancel: CancellationToken,
+    last_used: Instant,
+}
+
+struct XudpMuxTable {
+    sessions: HashMap<u16, XudpMuxSession>,
+    lru: VecDeque<u16>,
+    max_sessions: usize,
+}
+
+impl XudpMuxTable {
+    fn new(max_sessions: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            lru: VecDeque::new(),
+            max_sessions: max_sessions.max(1),
+        }
+    }
+
+    fn touch(&mut self, session_id: u16) {
+        if !self.sessions.contains_key(&session_id) {
+            return;
+        }
+        self.lru.retain(|id| *id != session_id);
+        self.lru.push_back(session_id);
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.last_used = Instant::now();
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, session_id: u16) -> bool {
+        self.sessions.contains_key(&session_id)
+    }
+
+    fn get_socket(&self, session_id: u16) -> Option<Arc<UdpSocket>> {
+        self.sessions
+            .get(&session_id)
+            .map(|session| Arc::clone(&session.socket))
+    }
+
+    fn evict_oldest(&mut self) -> Option<u16> {
+        while let Some(session_id) = self.lru.pop_front() {
+            if let Some(session) = self.sessions.remove(&session_id) {
+                session.cancel.cancel();
+                return Some(session_id);
+            }
+        }
+        None
+    }
+
+    fn evict_idle(&mut self, max_idle: Duration) {
+        let now = Instant::now();
+        let idle: Vec<u16> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| now.duration_since(session.last_used) > max_idle)
+            .map(|(session_id, _)| *session_id)
+            .collect();
+        for session_id in idle {
+            if let Some(session) = self.sessions.remove(&session_id) {
+                session.cancel.cancel();
+            }
+            self.lru.retain(|id| *id != session_id);
+        }
+    }
+
+    /// Inserts a bound socket for `session_id`, spawning a dedicated reader.
+    /// Evicts idle sessions first, then the least-recently-used session when at capacity.
+    fn insert_session(
+        &mut self,
+        session_id: u16,
+        socket: UdpSocket,
+        reply_tx: mpsc::Sender<XudpReply>,
+    ) -> Arc<UdpSocket> {
+        if self.sessions.contains_key(&session_id) {
+            if let Some(previous) = self.sessions.remove(&session_id) {
+                previous.cancel.cancel();
+            }
+            self.lru.retain(|id| *id != session_id);
+        } else {
+            self.evict_idle(VLESS_XUDP_SESSION_IDLE);
+            while self.sessions.len() >= self.max_sessions {
+                let _ = self.evict_oldest();
+            }
+        }
+        let socket = Arc::new(socket);
+        let cancel = CancellationToken::new();
+        spawn_xudp_session_reader(session_id, Arc::clone(&socket), cancel.clone(), reply_tx);
+        self.lru.push_back(session_id);
+        self.sessions.insert(
+            session_id,
+            XudpMuxSession {
+                socket: Arc::clone(&socket),
+                cancel,
+                last_used: Instant::now(),
+            },
+        );
+        socket
+    }
+
+    fn shutdown_all(&mut self) {
+        for (_, session) in self.sessions.drain() {
+            session.cancel.cancel();
+        }
+        self.lru.clear();
+    }
+}
+
+fn spawn_xudp_session_reader(
+    session_id: u16,
+    socket: Arc<UdpSocket>,
+    cancel: CancellationToken,
+    reply_tx: mpsc::Sender<XudpReply>,
+) {
+    tokio::spawn(async move {
+        let mut buffer = vec![0_u8; 65_536];
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                received = socket.recv_from(&mut buffer) => {
+                    let Ok((length, source)) = received else { break };
+                    let payload = buffer[..length].to_vec();
+                    if reply_tx.send((session_id, source, payload)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn ensure_xudp_session(
+    table: &mut XudpMuxTable,
+    session_id: u16,
+    bind_target: SocketAddr,
+    config: &Config,
+    reply_tx: &mpsc::Sender<XudpReply>,
+) -> Option<Arc<UdpSocket>> {
+    table.evict_idle(VLESS_XUDP_SESSION_IDLE);
+    if let Some(socket) = table.get_socket(session_id) {
+        table.touch(session_id);
+        return Some(socket);
+    }
+    let socket = crate::listener::bind_direct_udp_socket(bind_target, config).ok()?;
+    Some(table.insert_session(session_id, socket, reply_tx.clone()))
+}
 
 #[derive(Clone)]
 enum VlessTlsAcceptor {
@@ -848,9 +1013,10 @@ where
     }
 }
 
-/// Mux/XUDP VLESS UDP: each frame carries its own destination (product VLESS
-/// outbound defaults to this mode). Subsequent destinations are re-evaluated
-/// against the rule engine so an allow→reject switch cannot leak past DIRECT.
+/// Mux/XUDP VLESS UDP: each mux session_id owns a dedicated UDP association.
+/// Subsequent destinations are re-evaluated against the rule engine so an
+/// allow→reject switch cannot leak past DIRECT. Replies are tagged with the
+/// owning session_id (never demuxed by remote address alone).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn serve_vless_xudp<S>(
     mut stream: S,
@@ -873,96 +1039,67 @@ async fn serve_vless_xudp<S>(
         return;
     };
 
-    let mut first_metadata = Metadata::new(first_destination.clone(), InboundProtocol::Vless);
-    first_metadata.network = Network::Udp;
-    first_metadata.source_ip = Some(unmap_ip(peer.ip()));
-    first_metadata.source_port = peer.port();
-    first_metadata.inbound_port = local.port();
-    inbound_name.clone_into(&mut first_metadata.inbound_name);
-    first_metadata.inbound_user = username;
+    let mut base_metadata = Metadata::new(first_destination.clone(), InboundProtocol::Vless);
+    base_metadata.network = Network::Udp;
+    base_metadata.source_ip = Some(unmap_ip(peer.ip()));
+    base_metadata.source_port = peer.port();
+    base_metadata.inbound_port = local.port();
+    inbound_name.clone_into(&mut base_metadata.inbound_name);
+    base_metadata.inbound_user = username;
 
-    let first_fake_host = apply_host_mapping(&mut first_metadata, config, state);
-    let decision =
-        mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(&first_metadata));
-    let Some((decision, outbound_target, _)) =
-        resolve_rematch_target(decision, &mut first_metadata, config, state)
+    let Some((first_decision, first_target)) =
+        route_xudp_datagram(&mut base_metadata, first_destination, config, state).await
     else {
         return;
     };
-    let route = resolved_route(&outbound_target, config);
-    if matches!(route, Route::Reject | Route::RejectDrop) {
-        return;
-    }
-    let Some(mode) = udp_session_mode(&outbound_target, config) else {
-        state.log(
-            "error",
-            format!(
-                "vless inbound XUDP target {} is unsupported",
-                decision.target
-            ),
-        );
-        return;
-    };
-    if !matches!(mode, UdpSessionMode::Direct) {
-        state.log(
-            "error",
-            format!(
-                "vless inbound XUDP target {} is unsupported in IN-D",
-                decision.target
-            ),
-        );
-        return;
-    }
     state.log(
         "info",
         format!(
             "[UDP] {} --> {} match {} using {} (VLESS XUDP)",
-            first_metadata.source_port,
-            first_metadata.destination.authority(),
-            decision.matched_kind.as_deref().unwrap_or("none"),
-            decision.target
+            base_metadata.source_port,
+            base_metadata.destination.authority(),
+            first_decision.matched_kind.as_deref().unwrap_or("none"),
+            first_decision.target
         ),
     );
 
-    let first_target =
-        match resolve_udp_target(&first_metadata, first_fake_host.as_deref(), config).await {
-            Ok(target) => target,
-            Err(error) => {
-                state.log(
-                    "error",
-                    format!("vless inbound XUDP resolution failed: {error}"),
-                );
-                return;
-            }
-        };
-    let outbound = match crate::listener::bind_direct_udp_socket(first_target, config) {
-        Ok(socket) => socket,
-        Err(error) => {
-            state.log("error", format!("vless inbound XUDP bind failed: {error}"));
-            return;
-        }
+    let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(32);
+    let mut sessions = XudpMuxTable::new(VLESS_XUDP_MAX_SESSIONS);
+    let Some(first_socket) = ensure_xudp_session(
+        &mut sessions,
+        first_session_id,
+        first_target,
+        config,
+        &reply_tx,
+    )
+    .await
+    else {
+        state.log(
+            "error",
+            format!("vless inbound XUDP bind failed for session {first_session_id}"),
+        );
+        return;
     };
     let tracker = state.register(
-        &first_metadata,
-        &decision.target,
-        decision.matched_kind.as_deref(),
+        &base_metadata,
+        &first_decision.target,
+        first_decision.matched_kind.as_deref(),
     );
-    let mut uploaded = first_payload.len() as u64;
+    let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
-    // Map reply source addresses back to the mux session that sent there.
-    let mut session_by_target: HashMap<SocketAddr, u16> = HashMap::new();
-    session_by_target.insert(first_target, first_session_id);
-    if outbound
+    if first_socket
         .send_to(&first_payload, first_target)
         .await
         .is_err()
     {
+        sessions.shutdown_all();
         tracker.finish(uploaded, downloaded);
         return;
     }
+    uploaded = uploaded.saturating_add(first_payload.len() as u64);
 
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u16, Destination, Vec<u8>)>(16);
+    let (frame_tx, mut frame_rx) = mpsc::channel::<(u16, Destination, Vec<u8>)>(16);
     let reader_shutdown = shutdown.child_token();
     let reader_task = tokio::spawn(async move {
         loop {
@@ -984,25 +1121,21 @@ async fn serve_vless_xudp<S>(
     });
 
     loop {
-        let mut response = vec![0_u8; 65_536];
         tokio::select! {
             () = shutdown.cancelled() => break,
             () = tracker.cancelled() => break,
-            received = outbound.recv_from(&mut response) => {
-                let Ok((length, source)) = received else { break };
+            reply = reply_rx.recv() => {
+                let Some((session_id, source, payload)) = reply else { break };
                 let destination = Destination {
                     host: Host::Ip(unmap_ip(source.ip())),
                     port: source.port(),
                 };
-                let session_id = session_by_target
-                    .get(&source)
-                    .copied()
-                    .unwrap_or(first_session_id);
+                sessions.touch(session_id);
                 if !write_vless_xudp_to_client(
                     &mut writer,
                     session_id,
                     &destination,
-                    &response[..length],
+                    &payload,
                     shutdown,
                     tracker.cancelled(),
                 )
@@ -1010,66 +1143,86 @@ async fn serve_vless_xudp<S>(
                 {
                     break;
                 }
-                downloaded = downloaded.saturating_add(length as u64);
+                downloaded = downloaded.saturating_add(payload.len() as u64);
             }
             packet = frame_rx.recv() => {
                 let Some((session_id, destination, payload)) = packet else { break };
-                let mut packet_metadata = first_metadata.clone();
-                packet_metadata.destination = destination;
-                let fake_host = apply_host_mapping(&mut packet_metadata, config, state);
-                let decision = mode_decision(config, state)
-                    .unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
-                let Some((decision, outbound_target, _)) =
-                    resolve_rematch_target(decision, &mut packet_metadata, config, state)
+                let mut packet_metadata = base_metadata.clone();
+                let Some((_decision, target)) =
+                    route_xudp_datagram(&mut packet_metadata, destination, config, state).await
                 else {
                     continue;
                 };
-                let route = resolved_route(&outbound_target, config);
-                if matches!(route, Route::Reject | Route::RejectDrop) {
+                let Some(socket) =
+                    ensure_xudp_session(&mut sessions, session_id, target, config, &reply_tx)
+                        .await
+                else {
                     state.log(
-                        "info",
-                        format!(
-                            "[UDP] {} --> {} match {} using {} (VLESS XUDP)",
-                            packet_metadata.source_port,
-                            packet_metadata.destination.authority(),
-                            decision.matched_kind.as_deref().unwrap_or("none"),
-                            decision.target
-                        ),
+                        "error",
+                        format!("vless inbound XUDP bind failed for session {session_id}"),
                     );
                     continue;
-                }
-                let Some(mode) = udp_session_mode(&outbound_target, config) else {
-                    continue;
                 };
-                if !matches!(mode, UdpSessionMode::Direct) {
-                    continue;
-                }
-                let target = match resolve_udp_target(
-                    &packet_metadata,
-                    fake_host.as_deref(),
-                    config,
-                )
-                .await
-                {
-                    Ok(target) => target,
-                    Err(error) => {
-                        state.log(
-                            "error",
-                            format!("vless inbound XUDP resolution failed: {error}"),
-                        );
-                        continue;
-                    }
-                };
-                session_by_target.insert(target, session_id);
-                if outbound.send_to(&payload, target).await.is_ok() {
+                if socket.send_to(&payload, target).await.is_ok() {
                     uploaded = uploaded.saturating_add(payload.len() as u64);
                 }
             }
         }
     }
+    sessions.shutdown_all();
     reader_task.abort();
     let _ = reader_task.await;
     tracker.finish(uploaded, downloaded);
+}
+
+/// Routes one XUDP datagram destination. Returns `None` when the packet should
+/// be dropped (reject / unsupported outbound).
+async fn route_xudp_datagram(
+    metadata: &mut Metadata,
+    destination: Destination,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+) -> Option<(rewrite_rules::Decision, SocketAddr)> {
+    metadata.destination = destination;
+    let fake_host = apply_host_mapping(metadata, config, state);
+    let decision = mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(metadata));
+    let (decision, outbound_target, _) = resolve_rematch_target(decision, metadata, config, state)?;
+    let route = resolved_route(&outbound_target, config);
+    if matches!(route, Route::Reject | Route::RejectDrop) {
+        state.log(
+            "info",
+            format!(
+                "[UDP] {} --> {} match {} using {} (VLESS XUDP)",
+                metadata.source_port,
+                metadata.destination.authority(),
+                decision.matched_kind.as_deref().unwrap_or("none"),
+                decision.target
+            ),
+        );
+        return None;
+    }
+    let mode = udp_session_mode(&outbound_target, config)?;
+    if !matches!(mode, UdpSessionMode::Direct) {
+        state.log(
+            "error",
+            format!(
+                "vless inbound XUDP target {} is unsupported in IN-D",
+                decision.target
+            ),
+        );
+        return None;
+    }
+    let target = match resolve_udp_target(metadata, fake_host.as_deref(), config).await {
+        Ok(target) => target,
+        Err(error) => {
+            state.log(
+                "error",
+                format!("vless inbound XUDP resolution failed: {error}"),
+            );
+            return None;
+        }
+    };
+    Some((decision, target))
 }
 
 #[cfg(test)]
@@ -1124,5 +1277,89 @@ mod udp_write_tests {
             .expect("write must observe timeout")
             .expect("join");
         assert!(!finished, "timeout must abort the stalled client write");
+    }
+
+    #[tokio::test]
+    async fn xudp_table_evicts_lru_when_at_capacity() {
+        let (reply_tx, _reply_rx) = mpsc::channel::<XudpReply>(8);
+        let mut table = XudpMuxTable::new(2);
+        for session_id in [1_u16, 2, 3] {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+            table.insert_session(session_id, socket, reply_tx.clone());
+        }
+        assert_eq!(table.len(), 2);
+        assert!(!table.contains(1), "oldest session must be evicted");
+        assert!(table.contains(2));
+        assert!(table.contains(3));
+        table.shutdown_all();
+    }
+
+    #[tokio::test]
+    async fn xudp_same_target_replies_stay_on_own_session() {
+        let echo = UdpSocket::bind("127.0.0.1:0").await.expect("echo");
+        let echo_addr = echo.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 1500];
+            loop {
+                let Ok((length, source)) = echo.recv_from(&mut buffer).await else {
+                    break;
+                };
+                let _ = echo.send_to(&buffer[..length], source).await;
+            }
+        });
+
+        let (reply_tx, mut reply_rx) = mpsc::channel::<XudpReply>(8);
+        let mut table = XudpMuxTable::new(8);
+        let socket_one = UdpSocket::bind("127.0.0.1:0").await.expect("s1");
+        let socket_two = UdpSocket::bind("127.0.0.1:0").await.expect("s2");
+        let session_one = table.insert_session(11, socket_one, reply_tx.clone());
+        let session_two = table.insert_session(22, socket_two, reply_tx.clone());
+
+        session_one
+            .send_to(b"from-session-11", echo_addr)
+            .await
+            .expect("send1");
+        session_two
+            .send_to(b"from-session-22", echo_addr)
+            .await
+            .expect("send2");
+
+        let mut got_one = false;
+        let mut got_two = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !(got_one && got_two) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(Some((session_id, _source, payload))) =
+                tokio::time::timeout(remaining, reply_rx.recv()).await
+            else {
+                break;
+            };
+            match session_id {
+                11 => {
+                    assert_eq!(payload, b"from-session-11");
+                    got_one = true;
+                }
+                22 => {
+                    assert_eq!(payload, b"from-session-22");
+                    got_two = true;
+                }
+                other => panic!("unexpected session id {other}"),
+            }
+        }
+        assert!(got_one && got_two, "each session must receive its own echo");
+        table.shutdown_all();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn xudp_table_evicts_idle_sessions() {
+        let (reply_tx, _reply_rx) = mpsc::channel::<XudpReply>(4);
+        let mut table = XudpMuxTable::new(8);
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        table.insert_session(7, socket, reply_tx);
+        assert!(table.contains(7));
+        tokio::time::advance(VLESS_XUDP_SESSION_IDLE + Duration::from_secs(1)).await;
+        table.evict_idle(VLESS_XUDP_SESSION_IDLE);
+        assert!(!table.contains(7), "idle session must expire");
+        table.shutdown_all();
     }
 }
