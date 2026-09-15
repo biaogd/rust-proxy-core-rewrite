@@ -407,9 +407,9 @@ jobs:
             cli-runtime) SHARD_REGEX='phase5a[6-8][0-9a-z]*\.py$' ;;
             rules) SHARD_REGEX='phase5b(_[a-z]+|[0-9a-z]+)\.py$' ;;
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
-            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1)_[a-z0-9_]+\.py$' ;;
+            controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1|_inb)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase6e_vless_[a-z0-9_]+\.py$' ;;
-            trojan) SHARD_REGEX='phase6f_trojan_[a-z0-9_]+\.py$' ;;
+            trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_)[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
@@ -505,11 +505,13 @@ jobs:
             compat/scripts/phase6c_shadowsocks_shadow_tls.py \
             compat/scripts/phase6c_shadowtls_clienthello_regression.py \
             compat/scripts/phase6c_shadowsocks_inbound.py \
+            compat/scripts/phase_inb_shadowsocks_2022_udp.py \
             compat/scripts/phase6f_trojan_tcp.py \
             compat/scripts/phase6f_trojan_udp.py \
             compat/scripts/phase6f_trojan_websocket.py \
             compat/scripts/phase6f_trojan_grpc.py \
             compat/scripts/phase6f_trojan_reality.py \
+            compat/scripts/phase_inc_trojan_tls.py \
             compat/scripts/phase6g_anytls_tcp.py \
             compat/scripts/phase6g_anytls_mux.py \
             compat/scripts/phase6g_anytls_udp.py \

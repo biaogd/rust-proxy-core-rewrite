@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::{COMMAND_UDP, TrojanProtocolError, append_socks_address, request_header_with_command};
 
@@ -39,15 +39,7 @@ impl TrojanUdpAssociation {
             .chunks(MAX_PACKET)
             .chain(payload.is_empty().then_some(&[][..]))
         {
-            let mut frame = Vec::with_capacity(23 + chunk.len());
-            append_socks_address(&mut frame, destination)?;
-            let length = u16::try_from(chunk.len()).map_err(|_| {
-                TrojanProtocolError::Protocol("Trojan UDP frame length overflow".to_owned())
-            })?;
-            frame.extend_from_slice(&length.to_be_bytes());
-            frame.extend_from_slice(b"\r\n");
-            frame.extend_from_slice(chunk);
-            self.remote.write_all(&frame).await?;
+            write_trojan_udp_packet(&mut self.remote, destination, chunk).await?;
         }
         Ok(())
     }
@@ -59,18 +51,7 @@ impl TrojanUdpAssociation {
     /// Returns an error for malformed addresses, oversized lengths, a bad
     /// delimiter or truncated payloads.
     pub async fn recv(&mut self) -> Result<(Destination, Vec<u8>), TrojanProtocolError> {
-        let destination = read_socks_address(&mut self.remote).await?;
-        let length = usize::from(self.remote.read_u16().await?);
-        if length > MAX_PACKET {
-            return Err(TrojanProtocolError::Protocol(
-                "Trojan UDP packet exceeds 8192 bytes".to_owned(),
-            ));
-        }
-        let mut delimiter = [0_u8; 2];
-        self.remote.read_exact(&mut delimiter).await?;
-        let mut payload = vec![0_u8; length];
-        self.remote.read_exact(&mut payload).await?;
-        Ok((destination, payload))
+        read_trojan_udp_packet(&mut self.remote).await
     }
 }
 
@@ -89,18 +70,84 @@ pub fn associate_trojan_udp_on_stream(
     }
 }
 
-async fn read_socks_address(remote: &mut BoxedStream) -> Result<Destination, TrojanProtocolError> {
-    let host = match remote.read_u8().await? {
-        1 => Host::Ip(IpAddr::V4(Ipv4Addr::from(remote.read_u32().await?))),
+/// Reads one Trojan UDP packet frame from an authenticated association stream.
+///
+/// # Errors
+///
+/// Returns an error for malformed addresses, oversized lengths, a bad
+/// delimiter or truncated payloads.
+pub async fn read_trojan_udp_packet<S>(
+    stream: &mut S,
+) -> Result<(Destination, Vec<u8>), TrojanProtocolError>
+where
+    S: AsyncRead + Unpin,
+{
+    let destination = read_socks_address(stream).await?;
+    let length = usize::from(stream.read_u16().await?);
+    if length > MAX_PACKET {
+        return Err(TrojanProtocolError::Protocol(
+            "Trojan UDP packet exceeds 8192 bytes".to_owned(),
+        ));
+    }
+    let mut delimiter = [0_u8; 2];
+    stream.read_exact(&mut delimiter).await?;
+    if &delimiter != b"\r\n" {
+        return Err(TrojanProtocolError::Protocol(
+            "invalid Trojan UDP delimiter".to_owned(),
+        ));
+    }
+    let mut payload = vec![0_u8; length];
+    stream.read_exact(&mut payload).await?;
+    Ok((destination, payload))
+}
+
+/// Writes one Trojan UDP packet frame, splitting is the caller's responsibility.
+///
+/// # Errors
+///
+/// Returns an I/O or address-framing error.
+pub async fn write_trojan_udp_packet<S>(
+    stream: &mut S,
+    destination: &Destination,
+    payload: &[u8],
+) -> Result<(), TrojanProtocolError>
+where
+    S: AsyncWrite + Unpin,
+{
+    if payload.len() > MAX_PACKET {
+        return Err(TrojanProtocolError::Protocol(
+            "Trojan UDP packet exceeds 8192 bytes".to_owned(),
+        ));
+    }
+    let mut frame = Vec::with_capacity(23 + payload.len());
+    append_socks_address(&mut frame, destination)?;
+    let length = u16::try_from(payload.len()).map_err(|_| {
+        TrojanProtocolError::Protocol("Trojan UDP frame length overflow".to_owned())
+    })?;
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(b"\r\n");
+    frame.extend_from_slice(payload);
+    stream.write_all(&frame).await?;
+    Ok(())
+}
+
+pub(crate) async fn read_socks_address<S>(
+    stream: &mut S,
+) -> Result<Destination, TrojanProtocolError>
+where
+    S: AsyncRead + Unpin,
+{
+    let host = match stream.read_u8().await? {
+        1 => Host::Ip(IpAddr::V4(Ipv4Addr::from(stream.read_u32().await?))),
         4 => {
             let mut bytes = [0_u8; 16];
-            remote.read_exact(&mut bytes).await?;
+            stream.read_exact(&mut bytes).await?;
             Host::Ip(IpAddr::V6(Ipv6Addr::from(bytes)))
         }
         3 => {
-            let length = usize::from(remote.read_u8().await?);
+            let length = usize::from(stream.read_u8().await?);
             let mut bytes = vec![0_u8; length];
-            remote.read_exact(&mut bytes).await?;
+            stream.read_exact(&mut bytes).await?;
             Host::Domain(String::from_utf8(bytes).map_err(|_| {
                 TrojanProtocolError::Protocol("invalid Trojan UDP domain".to_owned())
             })?)
@@ -113,7 +160,7 @@ async fn read_socks_address(remote: &mut BoxedStream) -> Result<Destination, Tro
     };
     Ok(Destination {
         host,
-        port: remote.read_u16().await?,
+        port: stream.read_u16().await?,
     })
 }
 

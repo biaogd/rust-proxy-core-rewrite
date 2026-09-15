@@ -19,6 +19,11 @@ const WINDOW_SIZE: u64 = (RING_BLOCKS as u64 - 1) * BLOCK_BITS;
 const SERVER_SESSION_TTL: Duration = Duration::from_mins(1);
 const SERVER_SESSION_CAP: usize = 1024;
 const CLIENT_SERVER_SESSION_CAP: usize = 8;
+/// Peer address→session routes are independent of replay windows: a single live
+/// session can be observed from many source ports, so the route table needs its
+/// own cap and TTL or memory grows without bound while the session stays hot.
+const PEER_INDEX_TTL: Duration = Duration::from_secs(30);
+const PEER_INDEX_CAP: usize = 4096;
 
 /// Sliding window that accepts legitimate reordering and rejects duplicates
 /// or counters that have already slid out of the window.
@@ -184,10 +189,57 @@ pub(crate) enum ClientUdpReject {
     Replay,
 }
 
-/// Per-peer SIP022 server counters used by the test authority and later inbound.
+/// Why an inbound SIP022 datagram was dropped by the server session table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerUdpReject {
+    /// AEAD-2022 datagram lacked a control block.
+    MissingControl,
+    /// Client session identifier was zero.
+    ClientSession,
+    /// Packet identifier was zero.
+    PacketId,
+    /// Duplicate or too-old client packet identifier.
+    Replay,
+}
+
+/// Per-peer SIP022 server counters used by the test authority and product inbound.
 #[derive(Debug, Default)]
 pub struct Aead2022ServerSessions {
-    entries: HashMap<SocketAddr, ServerUdpSession>,
+    /// Replay windows keyed by authenticated identity + client session id.
+    /// Peer addresses are only routing hints via [`Self::peer_index`].
+    sessions: HashMap<SessionKey, ServerUdpSession>,
+    /// Last session observed from each peer, used to build replies.
+    /// Bounded independently of [`Self::sessions`] so rotating source ports
+    /// cannot retain unbounded address→session mappings.
+    peer_index: HashMap<SocketAddr, PeerRoute>,
+}
+
+#[derive(Clone, Debug)]
+struct PeerRoute {
+    key: SessionKey,
+    last_seen: Instant,
+}
+
+/// Opaque binding to an accepted AEAD-2022 server session used to mint replies.
+///
+/// Forwarding tasks must retain this handle for the lifetime of the UDP
+/// association. Peer-address routes are only a routing cache and may expire or
+/// be evicted while the session window is still live.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Aead2022ReplyHandle {
+    key: SessionKey,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum AuthKey {
+    Default,
+    User(String),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SessionKey {
+    auth: AuthKey,
+    client_session_id: u64,
 }
 
 #[derive(Debug)]
@@ -195,71 +247,217 @@ struct ServerUdpSession {
     client_session_id: u64,
     server_session_id: u64,
     next_packet_id: u64,
+    incoming_window: ReplayWindow,
+    last_user: Option<std::sync::Arc<shadowsocks::config::ServerUser>>,
     last_seen: Instant,
 }
 
 impl Aead2022ServerSessions {
-    /// Builds reply control data for `peer`, creating or rotating the server
-    /// session when the client session identifier changes.
-    pub fn prepare_reply(
+    /// Accepts one inbound SIP022 datagram for `peer`.
+    ///
+    /// Keys the replay window by authenticated identity + client session id so
+    /// source-port changes cannot bypass replay, and alternating sessions from
+    /// one peer cannot wipe each other's windows. Rejects missing control, zero
+    /// ids, and replayed client packet ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerUdpReject`] when the datagram must be dropped.
+    pub fn accept_incoming(
         &mut self,
         peer: SocketAddr,
         incoming: Option<&UdpSocketControlData>,
-    ) -> UdpSocketControlData {
-        self.reap(Instant::now());
+    ) -> Result<Aead2022ReplyHandle, ServerUdpReject> {
+        self.accept_incoming_at(peer, incoming, Instant::now())
+    }
+
+    fn accept_incoming_at(
+        &mut self,
+        peer: SocketAddr,
+        incoming: Option<&UdpSocketControlData>,
+        now: Instant,
+    ) -> Result<Aead2022ReplyHandle, ServerUdpReject> {
+        self.reap(now);
         let Some(incoming) = incoming else {
-            return UdpSocketControlData::default();
+            return Err(ServerUdpReject::MissingControl);
         };
-        if self.entries.len() >= SERVER_SESSION_CAP && !self.entries.contains_key(&peer) {
+        if incoming.client_session_id == 0 {
+            return Err(ServerUdpReject::ClientSession);
+        }
+        if incoming.packet_id == 0 {
+            return Err(ServerUdpReject::PacketId);
+        }
+        let key = SessionKey {
+            auth: auth_key(incoming.user.as_ref()),
+            client_session_id: incoming.client_session_id,
+        };
+        if self.sessions.len() >= SERVER_SESSION_CAP && !self.sessions.contains_key(&key) {
             self.evict_oldest();
         }
         let session = self
-            .entries
-            .entry(peer)
-            .and_modify(|session| {
-                if session.client_session_id != incoming.client_session_id {
-                    *session = ServerUdpSession::new(incoming.client_session_id);
-                }
-            })
+            .sessions
+            .entry(key.clone())
             .or_insert_with(|| ServerUdpSession::new(incoming.client_session_id));
-        session.last_seen = Instant::now();
+        if !session.incoming_window.accept(incoming.packet_id) {
+            return Err(ServerUdpReject::Replay);
+        }
+        session.last_user.clone_from(&incoming.user);
+        session.last_seen = now;
+        self.remember_peer(peer, key.clone(), now);
+        Ok(Aead2022ReplyHandle { key })
+    }
+
+    /// Builds the next reply control for a previously accepted session handle.
+    ///
+    /// Returns [`None`] when the session window is gone. Callers must not invent
+    /// an all-zero control block for AEAD-2022 replies — drop the datagram
+    /// instead so clients do not see a mismatched session id.
+    pub fn next_reply_for(&mut self, handle: &Aead2022ReplyHandle) -> Option<UdpSocketControlData> {
+        self.next_reply_for_at(handle, Instant::now())
+    }
+
+    fn next_reply_for_at(
+        &mut self,
+        handle: &Aead2022ReplyHandle,
+        now: Instant,
+    ) -> Option<UdpSocketControlData> {
+        self.reap(now);
+        let session = self.sessions.get_mut(&handle.key)?;
+        session.last_seen = now;
         session.next_packet_id = next_packet_id(session.next_packet_id);
         let mut control = UdpSocketControlData::default();
         control.client_session_id = session.client_session_id;
         control.server_session_id = session.server_session_id;
         control.packet_id = session.next_packet_id;
-        control.user.clone_from(&incoming.user);
-        control
+        control.user.clone_from(&session.last_user);
+        Some(control)
     }
 
-    /// Drops idle peer sessions so the table stays bounded.
+    /// Builds the next reply control by looking up the peer-address route cache.
+    ///
+    /// Prefer [`Self::next_reply_for`] from long-lived forwarding tasks: peer
+    /// routes may expire or be capped while the session window is still valid.
+    /// Returns [`None`] instead of an all-zero control block when the route or
+    /// session is missing.
+    pub fn next_reply(&mut self, peer: SocketAddr) -> Option<UdpSocketControlData> {
+        self.next_reply_at(peer, Instant::now())
+    }
+
+    fn next_reply_at(&mut self, peer: SocketAddr, now: Instant) -> Option<UdpSocketControlData> {
+        self.reap(now);
+        let route = self.peer_index.get(&peer)?;
+        let handle = Aead2022ReplyHandle {
+            key: route.key.clone(),
+        };
+        self.next_reply_for_at(&handle, now)
+    }
+
+    /// Accepts `incoming` then builds one reply control. Echo authorities and
+    /// unit tests use this one-shot helper. Missing control is treated as a
+    /// pre-2022 datagram and yields the all-zero default reply block.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::accept_incoming`] failures for AEAD-2022 datagrams.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session accepted earlier in this call is missing when the
+    /// reply is minted, which would indicate an internal table invariant
+    /// failure.
+    pub fn prepare_reply(
+        &mut self,
+        peer: SocketAddr,
+        incoming: Option<&UdpSocketControlData>,
+    ) -> Result<UdpSocketControlData, ServerUdpReject> {
+        if incoming.is_none() {
+            return Ok(UdpSocketControlData::default());
+        }
+        let handle = self.accept_incoming(peer, incoming)?;
+        Ok(self
+            .next_reply_for(&handle)
+            .expect("accepted AEAD-2022 session must still be present"))
+    }
+
+    /// Drops idle sessions and stale peer routes so both tables stay bounded.
     pub fn reap(&mut self, now: Instant) {
-        self.entries.retain(|_, session| {
+        self.sessions.retain(|_, session| {
             now.saturating_duration_since(session.last_seen) < SERVER_SESSION_TTL
+        });
+        self.peer_index.retain(|_, route| {
+            now.saturating_duration_since(route.last_seen) < PEER_INDEX_TTL
+                && self.sessions.contains_key(&route.key)
         });
     }
 
-    /// Number of live peer sessions.
+    /// Number of live identity/session replay windows.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.sessions.len()
     }
 
-    /// Returns whether the table currently holds no peer sessions.
+    /// Returns whether the table currently holds no sessions.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.sessions.is_empty()
+    }
+
+    #[cfg(test)]
+    fn peer_route_count(&self) -> usize {
+        self.peer_index.len()
+    }
+
+    #[cfg(test)]
+    fn has_peer_route(&self, peer: SocketAddr) -> bool {
+        self.peer_index.contains_key(&peer)
+    }
+
+    fn remember_peer(&mut self, peer: SocketAddr, key: SessionKey, now: Instant) {
+        if let Some(route) = self.peer_index.get_mut(&peer) {
+            route.key = key;
+            route.last_seen = now;
+            return;
+        }
+        if self.peer_index.len() >= PEER_INDEX_CAP {
+            self.evict_oldest_peer();
+        }
+        self.peer_index.insert(
+            peer,
+            PeerRoute {
+                key,
+                last_seen: now,
+            },
+        );
     }
 
     fn evict_oldest(&mut self) {
         let oldest = self
-            .entries
+            .sessions
             .iter()
             .min_by_key(|(_, session)| session.last_seen)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest {
+            self.sessions.remove(&key);
+            self.peer_index.retain(|_, route| route.key != key);
+        }
+    }
+
+    fn evict_oldest_peer(&mut self) {
+        let oldest = self
+            .peer_index
+            .iter()
+            .min_by_key(|(_, route)| route.last_seen)
             .map(|(peer, _)| *peer);
         if let Some(peer) = oldest {
-            self.entries.remove(&peer);
+            self.peer_index.remove(&peer);
         }
+    }
+}
+
+fn auth_key(user: Option<&std::sync::Arc<shadowsocks::config::ServerUser>>) -> AuthKey {
+    match user {
+        Some(user) => AuthKey::User(user.name().to_owned()),
+        None => AuthKey::Default,
     }
 }
 
@@ -269,6 +467,8 @@ impl ServerUdpSession {
             client_session_id,
             server_session_id: random_session_id(),
             next_packet_id: 0,
+            incoming_window: ReplayWindow::default(),
+            last_user: None,
             last_seen: Instant::now(),
         }
     }
@@ -454,21 +654,98 @@ mod tests {
         let peer_a: SocketAddr = "127.0.0.1:1000".parse().unwrap();
         let peer_b: SocketAddr = "127.0.0.1:1001".parse().unwrap();
         let incoming_a = control(11, 1);
-        let first_a = sessions.prepare_reply(peer_a, Some(&incoming_a));
-        let second_a = sessions.prepare_reply(peer_a, Some(&incoming_a));
+        let first_a = sessions
+            .prepare_reply(peer_a, Some(&incoming_a))
+            .expect("first a");
+        let second_a = sessions
+            .prepare_reply(peer_a, Some(&control(11, 2)))
+            .expect("second a");
         assert_eq!(first_a.client_session_id, 11);
         assert_ne!(first_a.server_session_id, 0);
         assert_eq!(first_a.packet_id, 1);
         assert_eq!(second_a.server_session_id, first_a.server_session_id);
         assert_eq!(second_a.packet_id, 2);
+        assert_eq!(
+            sessions.prepare_reply(peer_a, Some(&incoming_a)).err(),
+            Some(ServerUdpReject::Replay)
+        );
         let incoming_b = control(22, 1);
-        let first_b = sessions.prepare_reply(peer_b, Some(&incoming_b));
+        let first_b = sessions
+            .prepare_reply(peer_b, Some(&incoming_b))
+            .expect("first b");
         assert_ne!(first_b.server_session_id, first_a.server_session_id);
         let rebuilt = control(33, 1);
-        let rotated = sessions.prepare_reply(peer_a, Some(&rebuilt));
+        let rotated = sessions
+            .prepare_reply(peer_a, Some(&rebuilt))
+            .expect("rotated");
         assert_eq!(rotated.client_session_id, 33);
         assert_ne!(rotated.server_session_id, first_a.server_session_id);
         assert_eq!(rotated.packet_id, 1);
+        // Rebuilding must not wipe the prior session window.
+        assert_eq!(
+            sessions.prepare_reply(peer_a, Some(&incoming_a)).err(),
+            Some(ServerUdpReject::Replay)
+        );
+        assert_eq!(sessions.len(), 3);
+    }
+
+    #[test]
+    fn server_sessions_reject_cross_port_replay_of_same_session() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer_a: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let peer_b: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+        let packet = control(77, 1);
+        sessions
+            .prepare_reply(peer_a, Some(&packet))
+            .expect("first delivery");
+        assert_eq!(
+            sessions.prepare_reply(peer_b, Some(&packet)).err(),
+            Some(ServerUdpReject::Replay),
+            "same ciphertext from another source port must stay rejected"
+        );
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn server_sessions_keep_windows_when_sessions_alternate_on_one_peer() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:6000".parse().unwrap();
+        let session_a = control(11, 1);
+        let session_b = control(22, 1);
+        sessions
+            .prepare_reply(peer, Some(&session_a))
+            .expect("session a first");
+        sessions
+            .prepare_reply(peer, Some(&session_b))
+            .expect("session b first");
+        assert_eq!(
+            sessions.prepare_reply(peer, Some(&session_a)).err(),
+            Some(ServerUdpReject::Replay),
+            "alternating sessions must not clear the earlier window"
+        );
+        assert_eq!(
+            sessions.prepare_reply(peer, Some(&session_b)).err(),
+            Some(ServerUdpReject::Replay)
+        );
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn server_sessions_reject_missing_control_and_zero_ids() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        assert_eq!(
+            sessions.accept_incoming(peer, None),
+            Err(ServerUdpReject::MissingControl)
+        );
+        assert_eq!(
+            sessions.accept_incoming(peer, Some(&control(0, 1))),
+            Err(ServerUdpReject::ClientSession)
+        );
+        assert_eq!(
+            sessions.accept_incoming(peer, Some(&control(9, 0))),
+            Err(ServerUdpReject::PacketId)
+        );
     }
 
     #[test]
@@ -476,7 +753,9 @@ mod tests {
         let mut sessions = Aead2022ServerSessions::default();
         let peer: SocketAddr = "127.0.0.1:2000".parse().unwrap();
         let incoming = control(1, 1);
-        sessions.prepare_reply(peer, Some(&incoming));
+        sessions
+            .prepare_reply(peer, Some(&incoming))
+            .expect("prepare");
         assert_eq!(sessions.len(), 1);
         sessions.reap(Instant::now() + SERVER_SESSION_TTL + Duration::from_secs(1));
         assert_eq!(sessions.len(), 0);
@@ -488,11 +767,156 @@ mod tests {
         for index in 0..SERVER_SESSION_CAP {
             let port = u16::try_from(index + 1).expect("port");
             let peer = SocketAddr::from(([127, 0, 0, 1], port));
-            sessions.prepare_reply(peer, Some(&control(u64::from(port), 1)));
+            sessions
+                .prepare_reply(peer, Some(&control(u64::from(port), 1)))
+                .expect("prepare");
         }
         assert_eq!(sessions.len(), SERVER_SESSION_CAP);
         let extra = SocketAddr::from(([127, 0, 0, 1], 60_000));
-        sessions.prepare_reply(extra, Some(&control(60_000, 1)));
+        sessions
+            .prepare_reply(extra, Some(&control(60_000, 1)))
+            .expect("evict prepare");
         assert_eq!(sessions.len(), SERVER_SESSION_CAP);
+    }
+
+    #[test]
+    fn server_sessions_next_reply_after_accept() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        let handle = sessions
+            .accept_incoming(peer, Some(&control(44, 1)))
+            .expect("accept");
+        let first = sessions.next_reply_for(&handle).expect("first reply");
+        let second = sessions.next_reply_for(&handle).expect("second reply");
+        assert_eq!(first.client_session_id, 44);
+        assert_eq!(first.packet_id, 1);
+        assert_eq!(second.server_session_id, first.server_session_id);
+        assert_eq!(second.packet_id, 2);
+    }
+
+    #[test]
+    fn reply_handle_survives_peer_route_ttl() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let t0 = Instant::now();
+        let peer: SocketAddr = "127.0.0.1:7100".parse().unwrap();
+        let handle = sessions
+            .accept_incoming_at(peer, Some(&control(55, 1)), t0)
+            .expect("accept");
+        // Peer-address route expires while the session window is still live.
+        sessions.reap(t0 + PEER_INDEX_TTL + Duration::from_millis(1));
+        assert!(
+            !sessions.has_peer_route(peer),
+            "peer route should expire before the session TTL"
+        );
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions.next_reply(peer).is_none(),
+            "peer lookup must not invent a zero control block"
+        );
+        let delayed = sessions
+            .next_reply_for(&handle)
+            .expect("handle must mint a delayed reply after peer-route expiry");
+        assert_eq!(delayed.client_session_id, 55);
+        assert_ne!(delayed.server_session_id, 0);
+        assert_eq!(delayed.packet_id, 1);
+    }
+
+    #[test]
+    fn reply_handle_survives_peer_route_cap_eviction() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let now = Instant::now();
+        let first_peer = SocketAddr::from(([127, 0, 0, 1], 10_000));
+        let handle = sessions
+            .accept_incoming_at(first_peer, Some(&control(66, 1)), now)
+            .expect("first accept");
+        for index in 1..=PEER_INDEX_CAP {
+            let port = u16::try_from(10_000 + index).expect("port");
+            let peer = SocketAddr::from(([127, 0, 0, 1], port));
+            sessions
+                .accept_incoming_at(
+                    peer,
+                    Some(&control(66, u64::try_from(index + 1).unwrap())),
+                    now + Duration::from_millis(u64::try_from(index).unwrap()),
+                )
+                .expect("fill peer routes");
+        }
+        assert!(
+            !sessions.has_peer_route(first_peer),
+            "oldest peer route should be evicted under cap pressure"
+        );
+        assert!(sessions.next_reply(first_peer).is_none());
+        let reply = sessions
+            .next_reply_for(&handle)
+            .expect("session handle must outlive peer-route eviction");
+        assert_eq!(reply.client_session_id, 66);
+        assert_ne!(reply.server_session_id, 0);
+    }
+
+    #[test]
+    fn server_peer_routes_cap_independently_of_replay_windows() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let now = Instant::now();
+        for index in 0..(PEER_INDEX_CAP + 32) {
+            let port = u16::try_from(10_000 + (index % 50_000)).expect("port");
+            let peer = SocketAddr::from(([127, 0, 0, 1], port));
+            // One live session, many source addresses with increasing packet ids.
+            sessions
+                .accept_incoming_at(
+                    peer,
+                    Some(&control(7, u64::try_from(index + 1).unwrap())),
+                    now,
+                )
+                .expect("accept rotating peer");
+        }
+        assert_eq!(
+            sessions.len(),
+            1,
+            "session cap must not be the peer-route bound"
+        );
+        assert!(
+            sessions.peer_route_count() <= PEER_INDEX_CAP,
+            "peer routes must stay capped"
+        );
+        // Early packet id remains rejected even after address-table pressure.
+        let late_peer = SocketAddr::from(([127, 0, 0, 1], 9));
+        assert_eq!(
+            sessions.accept_incoming_at(late_peer, Some(&control(7, 1)), now),
+            Err(ServerUdpReject::Replay)
+        );
+    }
+
+    #[test]
+    fn server_peer_routes_expire_while_session_window_stays() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let t0 = Instant::now();
+        let peer_a: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+        let peer_b: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+        sessions
+            .accept_incoming_at(peer_a, Some(&control(9, 1)), t0)
+            .expect("peer a");
+        sessions
+            .accept_incoming_at(peer_b, Some(&control(9, 2)), t0)
+            .expect("peer b");
+        // Keep the session (and peer_a) fresh past the peer-route TTL.
+        let mid = t0 + PEER_INDEX_TTL / 2;
+        sessions
+            .accept_incoming_at(peer_a, Some(&control(9, 3)), mid)
+            .expect("refresh peer a");
+        sessions.reap(t0 + PEER_INDEX_TTL + Duration::from_millis(1));
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.has_peer_route(peer_a));
+        assert!(
+            !sessions.has_peer_route(peer_b),
+            "idle peer routes must expire independently of the live session"
+        );
+        assert_eq!(
+            sessions.accept_incoming_at(
+                SocketAddr::from(([127, 0, 0, 1], 7003)),
+                Some(&control(9, 1)),
+                mid + Duration::from_secs(1)
+            ),
+            Err(ServerUdpReject::Replay),
+            "replay window must survive peer-route expiry"
+        );
     }
 }

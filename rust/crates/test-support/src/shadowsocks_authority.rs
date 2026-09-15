@@ -98,6 +98,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .prepare_reply(peer, control.as_ref());
+        let Ok(reply) = reply else {
+            continue;
+        };
         let udp = Arc::clone(&udp);
         tokio::spawn(async move {
             let result = relay_udp(&udp, peer, &destination, &payload, &reply).await;

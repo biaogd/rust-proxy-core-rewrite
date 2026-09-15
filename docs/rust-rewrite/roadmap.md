@@ -1339,10 +1339,187 @@ for claims.
    No inbound/v4. Evidence: `compat/scripts/phase7e_snell_tcp.py`,
    `phase7e_snell_udp.py`, `phase7e_snell_obfs.py`, `phase7e_snell_reuse.py`,
    plus `protocol-snell` `tcp_relay` / `udp_relay`.
+7. **Inbound server track (IN-A–IN-H):** **IN-A census is complete** (see
+   [`inbound-support-matrix.md`](inbound-support-matrix.md)). Do not re-copy
+   the outbound checklist. Preserve mixed/SS/TUN. Recommended next product
+   work: **IN-B** Shadowsocks server completion, then **IN-C** Trojan, then
+   **IN-D** VLESS. Full phase definitions follow in
+   [Inbound server phases](#inbound-server-phases-in-ain-h).
 
 The remaining Phase 7 families stay backlog. Hysteria2 Brutal
 precision/Quinn modifications remain deferred; the declared BBR profile still
 needs its own release evidence.
+
+## Inbound server phases (IN-A–IN-H)
+
+These labels are a **separate ownership track** from Phase 6 outbound clients
+(`6C`/`6D`/…). They must not be renumbered onto existing Phase 6/7/8 gates.
+Client and server directions remain independent matrix claims. Do **not** copy
+the outbound checklist wholesale: prefer protocols that already have Rust
+`protocol-*` crates, shared carriers, rules and outbound dial paths.
+
+Canonical census: [`inbound-support-matrix.md`](inbound-support-matrix.md).
+Inventory IDs stay `IN-01`…`IN-14`.
+
+### Architecture (server direction)
+
+```text
+listen TCP/UDP
+  → TLS / WS / gRPC / … carriers
+  → protocol authenticate + decode
+  → unified TCP session / UDP datagram
+  → Metadata → DNS / rules → existing outbound
+  → encode response to the client
+```
+
+| Layer | Owns |
+| --- | --- |
+| `protocol-*` | Shared client/server address, crypto, framing; server auth and session |
+| `rewrite-transport` | Protocol-agnostic carriers |
+| `rewrite-inbound` | Local HTTP/SOCKS/mixed framing (not a mega remote-server framework) |
+| `rewrite-runtime` | Listeners, generations, routing, stats, timeouts, cancel, reload, reclaim |
+
+Protocol test authorities are **not** production servers: each inbound phase
+must prove authentication, replay defense where required, resource caps and
+lifecycle on the product path.
+
+Preserve existing HTTP/SOCKS/mixed, TUN and Phase 6C-N Shadowsocks inbound
+behavior. Extract a shared remote-server interface only when a second remote
+protocol needs it (expected at IN-C); do not pre-build a generic framework in
+IN-A/IN-B.
+
+### Phase table
+
+| Phase | Scope | Exit target |
+| --- | --- | --- |
+| **IN-A** | Census + shared access boundary | Keep mixed/SS/TUN behavior; document config-compat edges |
+| **IN-B** | Shadowsocks server completion | Common AEAD, SS2022, TCP/UDP; single/multi-user scope explicit; Go client ↔ Rust inbound; auth + replay |
+| **IN-C** | Trojan inbound | Standard TLS TCP+UDP first, then WS/gRPC; auth, certs, bidirectional relay, multi-dest UDP, half-close |
+| **IN-D** | VLESS inbound | Basic TCP/TLS, WS/gRPC, UDP first; Vision + REALITY later with separate security/lifecycle gates |
+| **IN-E** | VMess inbound | Prefer AEAD `alterId: 0`; TCP/TLS, WS/gRPC, UDP; address, security mode, time window, replay, carriers |
+| **IN-F** | QUIC servers | Hysteria2 and TUIC v5 separately; auth, TCP/UDP, stream caps, congestion knobs, recovery, resource pressure |
+| **IN-G** | AnyTLS inbound | TLS, padding, session reuse, multi-stream, UDP/UoT; isolation, close, heartbeat, idle reclaim, malicious-frame limits |
+| **IN-H** | Production acceptance | All declared inbounds; three platforms, long soak, reload, cert rotation, security tests |
+
+Recommended start after IN-A: **IN-B → IN-C → IN-D**. Finish one protocol's
+declared scope per slice; run that phase's tests and Clippy locally; full
+three-platform regression stays on GitHub Actions.
+
+### IN-A — census and public access boundary
+
+**Status: complete as documentation gate (2026-09-14).**
+
+Deliverables:
+
+1. Accurate support tables in `inbound-support-matrix.md` covering Go listeners,
+   Rust listeners, SS deep-dive, inventory crosswalk and non-goals.
+2. Confirm existing SS inbound already enters the shared post-handshake TCP
+   path (`serve_shadowsocks_connection` → `serve_stream_session`) and UDP
+   session machinery without a new framework.
+3. Classify remaining SS work as Go-compatible gaps vs Rust extensions vs
+   rejected options (see matrix §C).
+4. Record that HTTP/SOCKS/mixed, TUN and 6C-N SS must not be re-implemented
+   under these labels.
+
+Exit gate: matrix and this section agree; no product behavior change required;
+status and inventory planned gates point at IN-B…IN-H.
+
+### IN-B — Shadowsocks server completion
+
+**Status: implemented in this checkout (2026-09-14) for the declared SS2022 UDP
+inbound slice; three-platform Parity not claimed.**
+
+Builds on Phase 6C-N. Do not reopen local mixed/TUN work.
+
+Declared product goals (this slice):
+
+- Enable **SS2022 UDP inbound** for the three standard methods
+  (`2022-blake3-aes-128/256-gcm`, `2022-blake3-chacha20-poly1305`) on
+  `ss-config` and named listeners; ChaCha8 UDP stays fail-closed (matches
+  outbound 6C-O).
+- Wire product UDP through `recv_from_with_ctrl` /
+  `send_to_with_ctrl` plus `Aead2022ServerSessions::{accept_incoming,next_reply}`
+  so client `packet_id` replay is rejected on the production path.
+- Keep AES-2022 EIH and ShadowTLS `IN-USER` as Rust extensions (not Go parity).
+- Evidence: `compat/scripts/phase_inb_shadowsocks_2022_udp.py` (Go/Rust inbound
+  differential for the three standard methods; Rust-only ChaCha8 reject, EIH
+  config and capture/replay probe) plus `protocol-shadowsocks` `udp_session`
+  unit tests.
+
+Still deferred under IN-B / later SS inbound work: complete inbound cipher
+matrix beyond the exercised methods, ShadowTLS v1/v2, mux/res-tls/jls/kcp-tun,
+UoT v2 connect, Snell server.
+
+Out of IN-B: Snell server, SSR inbound, full camouflage carrier zoo.
+
+### IN-C — Trojan inbound
+
+**TLS slice complete (2026-09-14):** named `type: trojan` with certificate /
+private-key, password users, TCP via `serve_stream_session`, UDP-over-TLS
+command 3 (Direct). Evidence `phase_inc_trojan_tls.py` (including product
+Trojan-outbound half-close). WS/gRPC/Reality / `ss-option` stay fail-closed at
+parse. Certificate rotation and a thinner shared remote accept helper remain
+optional follow-ups. Remaining IN-C work: WS/gRPC carriers via shared transport.
+
+### IN-D — VLESS inbound
+
+Basic TCP/TLS, WS/gRPC and UDP first against `protocol-vless`. Vision and
+REALITY are separate sub-gates with independent security and lifecycle
+acceptance. Do not claim Vision/REALITY from the basic TCP slice.
+
+### IN-E — VMess inbound
+
+Prefer AEAD with `alterId: 0`. Cover TCP/TLS, WS/gRPC and UDP. Prove address
+encoding, security modes, time window, replay detection and carrier behavior.
+Nonzero/legacy AlterID server work stays out of early slices unless a
+compatibility fixture proves the pinned Go server still requires it for the
+declared row.
+
+### IN-F — QUIC servers (Hysteria2, TUIC v5)
+
+Implement Hysteria2 and TUIC v5 **as separate sub-gates**. Reuse outbound
+protocol crates where framing/auth already exist. Prove auth, TCP/UDP,
+multi-stream limits, congestion configuration, connection recovery and
+resource-pressure behavior. ShadowQUIC and Hysteria2-realm stay later unless
+explicitly pulled forward.
+
+### IN-G — AnyTLS inbound
+
+TLS, padding, session reuse, multi-stream and UDP/UoT. Prove stream isolation,
+close semantics, heartbeat, idle reclaim and malicious-frame limits.
+
+### IN-H — production acceptance
+
+Only after declared IN-B…IN-G rows for the release set: three-platform CI,
+long soak, config reload failure rollback, listener removal reclaim, certificate
+rotation and security tests (credential isolation from logs/API, connection/stream/
+UDP caps, slow-handshake bounds).
+
+### Per-protocol acceptance minimum (IN-B onward)
+
+Beyond echo:
+
+- Valid credentials succeed; invalid credentials never reach target dial.
+- Fragmented handshake, truncated frames, malformed addresses, oversized
+  payloads.
+- Bidirectional large payloads, half-close, RST, early client disconnect.
+- Slow handshake; bounded connection/stream/UDP session/queue/buffer limits.
+- Replay defense where the protocol requires it (separate cases).
+- Multi-user isolation; credentials absent from logs/API observations.
+- Failed reload rolls back; removed listeners reclaim tasks and sockets.
+- UDP multi-destination, response source, idle timeout and cancel.
+- TLS entries: certificate load, update and error paths.
+
+Prefer **Go client → Go/Rust server** differentials. When Go lacks the server
+surface, use a pinned reference implementation and label the evidence
+**interop**, never Go parity.
+
+### Explicit non-goals (inbound track)
+
+SSR inbound; VMess legacy AlterID expansion; Snell/SSH/WireGuard servers;
+mKCP/Mekya and complex camouflage as early work; generic fallback diversion;
+subscription panels; dynamic user management/billing; exposing protocol test
+authorities publicly.
 
 ### Phase 6J — SSH outbound acceptance plan
 

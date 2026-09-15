@@ -15,6 +15,7 @@ use rewrite_outbound::{
     HttpObfsServer, HttpProxyTls, ShadowTlsAcceptResult, ShadowTlsHandshakeDial,
     ShadowTlsServerConfig, TlsObfsServer, accept_shadow_tls_v3,
 };
+use rewrite_protocol_shadowsocks::{Aead2022ReplyHandle, Aead2022ServerSessions};
 use rewrite_rules::{Decision, Route};
 use rewrite_state::RuntimeState;
 use shadowsocks::ProxyListener;
@@ -60,6 +61,7 @@ pub(crate) struct ShadowsocksListener {
     context: SharedContext,
     user_manager: Option<Arc<ServerUserManager>>,
     udp: Option<Arc<ProxySocket<SsUdpSocket>>>,
+    aead_2022: bool,
     inbound_name: String,
     simple_obfs: Option<ShadowsocksSimpleObfsConfig>,
     shadow_tls: Option<ShadowsocksShadowTlsConfig>,
@@ -123,6 +125,7 @@ impl ShadowsocksListener {
             context,
             user_manager: server.clone_user_manager(),
             udp,
+            aead_2022: method.is_aead_2022(),
             inbound_name: config.name.clone(),
             simple_obfs: config.simple_obfs.clone(),
             shadow_tls: config.shadow_tls.clone(),
@@ -207,6 +210,7 @@ pub(super) async fn run_shadowsocks_listener(
         context,
         user_manager,
         udp,
+        aead_2022,
         inbound_name,
         simple_obfs,
         shadow_tls,
@@ -216,6 +220,7 @@ pub(super) async fn run_shadowsocks_listener(
     let shadow_tls_handshake = shadow_tls.as_ref().map(shadow_tls_handshake_target);
     let mut connections = JoinSet::new();
     let mut udp_sessions = ShadowsocksUdpSessions::default();
+    let udp_sessions_table = Arc::new(std::sync::Mutex::new(Aead2022ServerSessions::default()));
     let mut datagram = vec![0_u8; 65_536];
     loop {
         tokio::select! {
@@ -247,8 +252,8 @@ pub(super) async fn run_shadowsocks_listener(
             result = udp_sessions.tasks.join_next(), if !udp_sessions.tasks.is_empty() => {
                 udp_sessions.reap(result.as_ref());
             }
-            received = recv_shadowsocks_udp(udp.as_deref(), &mut datagram) => {
-                if let Ok((length, peer, destination, _)) = received {
+            received = recv_shadowsocks_udp(udp.as_deref(), aead_2022, &udp_sessions_table, &mut datagram) => {
+                if let Ok(Some((length, peer, destination, reply_handle))) = received {
                     let connection_config = Arc::clone(&config.borrow());
                     let inbound_port = inner.local_addr().map_or(0, |address| address.port());
                     let Some(inbound_socket) = udp.as_ref() else {
@@ -259,6 +264,7 @@ pub(super) async fn run_shadowsocks_listener(
                         inbound_port,
                         &destination,
                         datagram[..length].to_vec(),
+                        reply_handle,
                         &inbound_name,
                         &connection_config,
                         &state,
@@ -270,6 +276,8 @@ pub(super) async fn run_shadowsocks_listener(
                         request,
                         ShadowsocksUdpSessionContext {
                             inbound: Arc::clone(inbound_socket),
+                            aead_2022,
+                            sessions: Arc::clone(&udp_sessions_table),
                             config: connection_config,
                             state: Arc::clone(&state),
                             dns_service: Arc::clone(&dns_service),
@@ -299,12 +307,28 @@ pub(super) async fn run_shadowsocks_listener(
 
 async fn recv_shadowsocks_udp(
     socket: Option<&ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: &Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     buffer: &mut [u8],
-) -> std::io::Result<(usize, SocketAddr, Address, usize)> {
+) -> std::io::Result<Option<(usize, SocketAddr, Address, Option<Aead2022ReplyHandle>)>> {
     match socket {
+        Some(socket) if aead_2022 => loop {
+            let (length, peer, destination, _, control) = socket
+                .recv_from_with_ctrl(buffer)
+                .await
+                .map_err(std::io::Error::other)?;
+            let accepted = sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .accept_incoming(peer, control.as_ref());
+            if let Ok(handle) = accepted {
+                return Ok(Some((length, peer, destination, Some(handle))));
+            }
+        },
         Some(socket) => socket
             .recv_from(buffer)
             .await
+            .map(|(length, peer, destination, _)| Some((length, peer, destination, None)))
             .map_err(std::io::Error::other),
         None => pending().await,
     }
@@ -314,11 +338,15 @@ struct ShadowsocksUdpPacket {
     metadata: Metadata,
     fake_host: Option<String>,
     payload: Vec<u8>,
+    /// AEAD-2022 reply binding retained for the association lifetime.
+    reply_handle: Option<Aead2022ReplyHandle>,
 }
 
 #[derive(Clone)]
 struct ShadowsocksUdpSessionContext {
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -416,6 +444,8 @@ impl ShadowsocksUdpSessions {
         self.tasks.spawn(async move {
             run_shadowsocks_inbound_udp_session(
                 context.inbound,
+                context.aead_2022,
+                context.sessions,
                 source,
                 request,
                 receiver,
@@ -451,6 +481,7 @@ fn prepare_shadowsocks_udp_packet(
     inbound_port: u16,
     destination: &Address,
     payload: Vec<u8>,
+    reply_handle: Option<Aead2022ReplyHandle>,
     inbound_name: &str,
     config: &Config,
     state: &Arc<RuntimeState>,
@@ -479,12 +510,15 @@ fn prepare_shadowsocks_udp_packet(
         metadata,
         fake_host,
         payload,
+        reply_handle,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_shadowsocks_inbound_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -498,13 +532,16 @@ async fn run_shadowsocks_inbound_udp_session(
     match mode {
         UdpSessionMode::Direct => {
             run_shadowsocks_direct_udp_session(
-                inbound, peer, first, requests, config, state, decision, shutdown,
+                inbound, aead_2022, sessions, peer, first, requests, config, state, decision,
+                shutdown,
             )
             .await;
         }
         UdpSessionMode::Dns => {
             run_shadowsocks_dns_udp_session(
                 inbound,
+                aead_2022,
+                sessions,
                 peer,
                 first,
                 requests,
@@ -518,19 +555,22 @@ async fn run_shadowsocks_inbound_udp_session(
         }
         UdpSessionMode::Socks5(proxy) => {
             run_shadowsocks_socks5_udp_session(
-                inbound, peer, first, requests, config, state, proxy, decision, shutdown,
+                inbound, aead_2022, sessions, peer, first, requests, config, state, proxy,
+                decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::Shadowsocks(proxy) => {
             run_shadowsocks_proxy_udp_session(
-                inbound, peer, first, requests, config, state, proxy, decision, shutdown,
+                inbound, aead_2022, sessions, peer, first, requests, config, state, proxy,
+                decision, shutdown,
             )
             .await;
         }
         UdpSessionMode::ShadowsocksUot(proxy) => {
             run_shadowsocks_uot_udp_session(
-                inbound, peer, first, requests, config, state, proxy, decision, shutdown,
+                inbound, aead_2022, sessions, peer, first, requests, config, state, proxy,
+                decision, shutdown,
             )
             .await;
         }
@@ -580,11 +620,30 @@ async fn send_shadowsocks_udp_reply(
     peer: SocketAddr,
     remote: SocketAddr,
     payload: &[u8],
+    aead_2022: bool,
+    sessions: &Arc<std::sync::Mutex<Aead2022ServerSessions>>,
+    reply_handle: Option<&Aead2022ReplyHandle>,
 ) -> bool {
-    inbound
-        .send_to(peer, &Address::SocketAddress(remote), payload)
-        .await
-        .is_ok()
+    let address = Address::SocketAddress(remote);
+    if aead_2022 {
+        let Some(handle) = reply_handle else {
+            return false;
+        };
+        let Some(control) = sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next_reply_for(handle)
+        else {
+            // Session window gone — never invent an all-zero AEAD-2022 control.
+            return false;
+        };
+        inbound
+            .send_to_with_ctrl(peer, &address, &control, payload)
+            .await
+            .is_ok()
+    } else {
+        inbound.send_to(peer, &address, payload).await.is_ok()
+    }
 }
 
 fn shadowsocks_uot_version(destination: &Destination) -> Option<u8> {
@@ -1336,6 +1395,8 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn run_shadowsocks_direct_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -1373,6 +1434,7 @@ async fn run_shadowsocks_direct_udp_session(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
+    let mut reply_handle = first.reply_handle.clone();
     let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
     if outbound.send_to(&first.payload, target).await.is_err() {
@@ -1405,6 +1467,9 @@ async fn run_shadowsocks_direct_udp_session(
             }
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                if request.reply_handle.is_some() {
+                    reply_handle = request.reply_handle.clone();
+                }
                 let target = match resolve_udp_target(
                     &request.metadata,
                     request.fake_host.as_deref(),
@@ -1426,7 +1491,7 @@ async fn run_shadowsocks_direct_udp_session(
             }
             received = outbound.recv_from(&mut response) => {
                 let Ok((length, remote)) = received else { break };
-                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &response[..length]).await {
+                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &response[..length], aead_2022, &sessions, reply_handle.as_ref()).await {
                     break;
                 }
                 downloaded = downloaded.saturating_add(length as u64);
@@ -1459,6 +1524,8 @@ fn bind_shadowsocks_direct_udp(
 #[allow(clippy::too_many_arguments)]
 async fn run_shadowsocks_dns_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -1475,6 +1542,8 @@ async fn run_shadowsocks_dns_udp_session(
         &decision.target,
         decision.matched_kind.as_deref(),
     );
+    let mut reply_handle = first.reply_handle.clone();
+
     let mut uploaded = 0_u64;
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
@@ -1489,7 +1558,17 @@ async fn run_shadowsocks_dns_udp_session(
             {
                 Ok(response) => {
                     let remote = dns_adapter_response_addr(&request.metadata);
-                    if !send_shadowsocks_udp_reply(&inbound, peer, remote, &response).await {
+                    if !send_shadowsocks_udp_reply(
+                        &inbound,
+                        peer,
+                        remote,
+                        &response,
+                        aead_2022,
+                        &sessions,
+                        reply_handle.as_ref(),
+                    )
+                    .await
+                    {
                         break;
                     }
                     downloaded = downloaded.saturating_add(response.len() as u64);
@@ -1509,6 +1588,9 @@ async fn run_shadowsocks_dns_udp_session(
             () = tracker.cancelled() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                if request.reply_handle.is_some() {
+                    reply_handle = request.reply_handle.clone();
+                }
                 current = Some(request);
             }
             () = &mut idle => break,
@@ -1520,6 +1602,8 @@ async fn run_shadowsocks_dns_udp_session(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_shadowsocks_socks5_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -1596,6 +1680,7 @@ async fn run_shadowsocks_socks5_udp_session(
         decision.matched_kind.as_deref(),
     );
     let mut uploaded = 0_u64;
+    let mut reply_handle = first.reply_handle.clone();
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
     tokio::pin!(idle);
@@ -1620,6 +1705,9 @@ async fn run_shadowsocks_socks5_udp_session(
             () = tracker.cancelled() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                if request.reply_handle.is_some() {
+                    reply_handle = request.reply_handle.clone();
+                }
                 current = Some(request);
             }
             response = association.recv() => {
@@ -1627,7 +1715,7 @@ async fn run_shadowsocks_socks5_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload).await {
+                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload, aead_2022, &sessions, reply_handle.as_ref()).await {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1642,6 +1730,8 @@ async fn run_shadowsocks_socks5_udp_session(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_shadowsocks_proxy_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -1707,6 +1797,7 @@ async fn run_shadowsocks_proxy_udp_session(
         decision.matched_kind.as_deref(),
     );
     let mut uploaded = 0_u64;
+    let mut reply_handle = first.reply_handle.clone();
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
     tokio::pin!(idle);
@@ -1731,6 +1822,9 @@ async fn run_shadowsocks_proxy_udp_session(
             () = tracker.cancelled() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                if request.reply_handle.is_some() {
+                    reply_handle = request.reply_handle.clone();
+                }
                 current = Some(request);
             }
             changed = generation.changed() => {
@@ -1762,7 +1856,7 @@ async fn run_shadowsocks_proxy_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload).await {
+                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload, aead_2022, &sessions, reply_handle.as_ref()).await {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);
@@ -1777,6 +1871,8 @@ async fn run_shadowsocks_proxy_udp_session(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_shadowsocks_uot_udp_session(
     inbound: Arc<ProxySocket<SsUdpSocket>>,
+    aead_2022: bool,
+    sessions: Arc<std::sync::Mutex<Aead2022ServerSessions>>,
     peer: SocketAddr,
     first: ShadowsocksUdpPacket,
     mut requests: mpsc::Receiver<ShadowsocksUdpPacket>,
@@ -1840,6 +1936,7 @@ async fn run_shadowsocks_uot_udp_session(
         decision.matched_kind.as_deref(),
     );
     let mut uploaded = 0_u64;
+    let mut reply_handle = first.reply_handle.clone();
     let mut downloaded = 0_u64;
     let idle = tokio::time::sleep(UDP_SESSION_TIMEOUT);
     tokio::pin!(idle);
@@ -1864,6 +1961,9 @@ async fn run_shadowsocks_uot_udp_session(
             () = tracker.cancelled() => break,
             request = requests.recv() => {
                 let Some(request) = request else { break };
+                if request.reply_handle.is_some() {
+                    reply_handle = request.reply_handle.clone();
+                }
                 current = Some(request);
             }
             response = association.recv() => {
@@ -1871,7 +1971,7 @@ async fn run_shadowsocks_uot_udp_session(
                 let Some(remote) = resolve_udp_response_source(&remote, &config).await else {
                     continue;
                 };
-                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload).await {
+                if !send_shadowsocks_udp_reply(&inbound, peer, remote, &payload, aead_2022, &sessions, reply_handle.as_ref()).await {
                     break;
                 }
                 downloaded = downloaded.saturating_add(payload.len() as u64);

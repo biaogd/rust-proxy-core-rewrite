@@ -87,6 +87,7 @@ pub struct ConfigSpec {
     pub proxy_groups: Vec<ProxyGroupConfig>,
     pub rules: RuleSet,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
+    pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -151,6 +152,7 @@ pub struct Config {
     pub(crate) raw_sub_rules: BTreeMap<String, Vec<String>>,
     pub(crate) rematches: Vec<RematchSpec>,
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
+    pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1259,12 +1261,39 @@ impl ShadowsocksInboundConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrojanInboundUser {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrojanInboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<TrojanInboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+}
+
+impl TrojanInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}",
+            self.name, self.listen, self.users, self.certificate, self.private_key
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
     Socks,
     Mixed,
     Shadowsocks,
+    Trojan,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {

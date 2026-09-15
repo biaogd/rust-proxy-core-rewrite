@@ -17,6 +17,7 @@ rewrite-net = { path = "../net" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-platform = { path = "../platform" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-rules = { path = "../rules" }
 rewrite-services = { path = "../services" }
 rewrite-state = { path = "../state" }
@@ -36,6 +37,7 @@ ipnet.workspace = true
 [dev-dependencies]
 quinn.workspace = true
 rcgen = "0.13"
+tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls.workspace = true
 
 [lints]
