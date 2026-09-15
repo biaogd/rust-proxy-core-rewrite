@@ -445,7 +445,15 @@ async fn run_server_relay(
     tokio::pin!(write_loop);
     tokio::select! {
         () = cancellation.cancelled() => {}
-        _ = &mut read_loop => cancellation.cancel(),
+        read_result = &mut read_loop => {
+            // Client write half-close ends the request stream; keep flushing
+            // response body records until the application write side finishes.
+            let _ = read_result;
+            tokio::select! {
+                () = cancellation.cancelled() => {}
+                _ = &mut write_loop => {}
+            }
+        }
         write_result = &mut write_loop => {
             if write_result.is_err() {
                 cancellation.cancel();
