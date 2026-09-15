@@ -521,9 +521,8 @@ pub fn encode_xudp_server_frame(
     source: &Destination,
     payload: &[u8],
 ) -> Result<Vec<u8>, VmessProtocolError> {
-    let payload_length = u16::try_from(payload.len()).map_err(|_| {
-        VmessProtocolError::Protocol("XUDP payload exceeds 65535 bytes".to_owned())
-    })?;
+    let payload_length = u16::try_from(payload.len())
+        .map_err(|_| VmessProtocolError::Protocol("XUDP payload exceeds 65535 bytes".to_owned()))?;
     let mut address = Vec::with_capacity(20);
     encode_vmess_address(&mut address, source)?;
     let header_length = 5_usize
@@ -642,8 +641,10 @@ impl VmessXudpReadBuffer {
         if self.buffer.len() < header_end + 2 {
             return Ok(None);
         }
-        let payload_length =
-            usize::from(u16::from_be_bytes([self.buffer[header_end], self.buffer[header_end + 1]]));
+        let payload_length = usize::from(u16::from_be_bytes([
+            self.buffer[header_end],
+            self.buffer[header_end + 1],
+        ]));
         let frame_end = header_end + 2 + payload_length;
         if self.buffer.len() < frame_end {
             return Ok(None);

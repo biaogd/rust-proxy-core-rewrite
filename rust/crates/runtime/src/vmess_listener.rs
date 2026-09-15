@@ -250,9 +250,12 @@ impl VmessListener {
             listener,
             acceptor: TlsAcceptor::from(Arc::new(tls)),
             users: uuid_table(config.users.iter().map(|user| {
-                (user.uuid.as_str(), VmessUserEntry {
-                    username: user.username.clone(),
-                })
+                (
+                    user.uuid.as_str(),
+                    VmessUserEntry {
+                        username: user.username.clone(),
+                    },
+                )
             })),
             inbound_name: config.name.clone(),
             listen: config.listen,
