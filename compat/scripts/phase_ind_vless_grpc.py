@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""IN-D Go/Rust differential for VLESS gRPC/Gun inbound TCP and UDP.
+"""IN-D Go/Rust differential for VLESS gRPC/Gun inbound TCP.
 
 Named `type: vless` listeners with `grpc-service-name` accept TLS + HTTP/2 Gun,
 then VLESS auth/relay. Product VLESS outbound (`network: grpc`) exercises both
-Go and Rust inbounds for TCP, UDP multi-dest, and wrong-UUID fail-closed.
+Go and Rust inbounds for TCP small/large payloads and wrong-UUID fail-closed.
+Standard-mode UDP stays on the TLS evidence (`phase_ind_vless_tls.py`); product
+VLESS outbound defaults to XUDP, which is deferred with Vision/REALITY.
 Combined ws-path+grpc stays rejected until a shared HTTP mux lands.
 """
 
@@ -28,10 +30,9 @@ from phase1 import (
     reserve_port,
     wait_ready,
 )
-from phase3 import UdpEchoHandler, launch, stop
+from phase3 import launch, stop
 from phase4e2 import SERVER_CERTIFICATE, SERVER_KEY
 from phase5b1a import build_binaries, debug_files
-from phase6e_vless_udp import exchange as socks_udp_exchange
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-ind-vless-grpc-diff.json"
 UUID = "b831381d-6324-4d53-ad4f-8cda48b30811"
@@ -88,7 +89,6 @@ proxies:
     network: grpc
     grpc-opts:
       grpc-service-name: {GRPC_SERVICE}
-    udp: true
 proxy-groups:
   - name: PROXY
     type: select
@@ -167,11 +167,6 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     tcp_thread.start()
     tcp_port = int(tcp_echo.server_address[1])
 
-    udp_echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
-    udp_thread = threading.Thread(target=udp_echo.serve_forever, daemon=True)
-    udp_thread.start()
-    udp_port = int(udp_echo.server_address[1])
-
     server_dir = scratch / "server"
     server_dir.mkdir()
     certificate, private_key = stage_tls_material(server_dir)
@@ -187,9 +182,6 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
     client_config.write_text(outbound_client_yaml(mixed_port, vless_port))
     client, client_out, client_err = launch(binary, client_config, client_dir)
 
-    udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_client.bind(("127.0.0.1", 0))
-    udp_client.settimeout(IO_DEADLINE)
     try:
         wait_ready(server, vless_port)
         wait_tcp_route(client, mixed_port, tcp_port)
@@ -234,26 +226,14 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             wrong_out.close()
             wrong_err.close()
 
-        first = socks_udp_exchange(
-            udp_client, mixed_port, "127.0.0.1", udp_port, b"ind-grpc-udp-1"
-        )
-        second = socks_udp_exchange(
-            udp_client,
-            mixed_port,
-            "127.0.0.1",
-            udp_port,
-            b"ind-grpc-udp-2-" + (b"z" * 2048),
-        )
         return {
             "config": validate_config(binary, scratch / "config-cases"),
             "small": small,
             "large": large,
             "wrong-uuid-rejected": wrong_uuid,
-            "udp-multi-dest": bool(first and second),
             "process-alive": server.poll() is None and client.poll() is None,
         }
     finally:
-        udp_client.close()
         stop(client)
         client_out.close()
         client_err.close()
@@ -263,9 +243,6 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         tcp_echo.shutdown()
         tcp_echo.server_close()
         tcp_thread.join(timeout=1)
-        udp_echo.shutdown()
-        udp_echo.server_close()
-        udp_thread.join(timeout=1)
 
 
 def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
@@ -276,16 +253,15 @@ def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
         "small": observations["small"],
         "large": observations["large"],
         "wrong-uuid-rejected": observations["wrong-uuid-rejected"],
-        "udp-multi-dest": observations["udp-multi-dest"],
         "process-alive": observations["process-alive"],
     }
 
 
 def main() -> int:
     observations: dict[str, Any] = {}
-    with tempfile.TemporaryDirectory(prefix="phase-inc-vless-grpc-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="phase-ind-vless-grpc-") as temporary:
         root = pathlib.Path(temporary)
-        binaries = build_binaries(root, "PHASE_IND_VLESS_GRPC_CARGO_TARGET", "phase-inc-vless-grpc")
+        binaries = build_binaries(root, "PHASE_IND_VLESS_GRPC_CARGO_TARGET", "phase-ind-vless-grpc")
         try:
             for name in ["rust", "go"]:
                 scratch = root / name
