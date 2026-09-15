@@ -89,6 +89,7 @@ pub struct ConfigSpec {
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub vless_listeners: Vec<VlessInboundConfig>,
+    pub vmess_listeners: Vec<VmessInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -155,6 +156,7 @@ pub struct Config {
     pub shadowsocks_listeners: Vec<ShadowsocksInboundConfig>,
     pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub vless_listeners: Vec<VlessInboundConfig>,
+    pub vmess_listeners: Vec<VmessInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1360,6 +1362,48 @@ impl VlessInboundConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmessInboundUser {
+    pub username: String,
+    pub uuid: String,
+}
+
+/// Named `type: vmess` TLS inbound accepted in IN-E.
+///
+/// AEAD only (`alterId` must be absent or `0`). Optional `ws-path` /
+/// `grpc-service-name` select the Trojan-style carriers (not both).
+/// Plain TLS (`certificate` + `private-key`) is required; Reality/mKCP/Mekya
+/// stay rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmessInboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<VmessInboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+    /// When set, clients must WebSocket-upgrade on this path before VMess bytes.
+    pub ws_path: Option<String>,
+    /// When set, clients must open a Gun/gRPC stream on this service before VMess bytes.
+    pub grpc_service_name: Option<String>,
+}
+
+impl VmessInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.ws_path.as_deref().unwrap_or(""),
+            self.grpc_service_name.as_deref().unwrap_or("")
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
@@ -1368,6 +1412,7 @@ pub enum ListenerKind {
     Shadowsocks,
     Trojan,
     Vless,
+    Vmess,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {

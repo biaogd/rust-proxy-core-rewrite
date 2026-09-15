@@ -24,10 +24,14 @@ use body::{BodyOptions, BodyReader, BodyWriter};
 use header::{SealRequestOptions, command_key, read_response_header, seal_request_header};
 
 pub use header::{DEFAULT_TIMESTAMP_SKEW_SECS, VmessCommand, timestamp_within_skew};
-pub use packet::{VmessPacketMode, VmessUdpAssociation, associate_vmess_udp_on_stream};
+pub use packet::{
+    VmessPacketMode, VmessUdpAssociation, VmessXudpReadBuffer, associate_vmess_udp_on_stream,
+    encode_xudp_server_frame,
+};
 pub use server::{
-    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_CAPACITY, VmessAcceptOptions, VmessServerRequest,
-    VmessServerSession, VmessUserEntry, accept_vmess_request, map_uuid, uuid_table,
+    AuthIdReplayCache, DEFAULT_AUTH_ID_REPLAY_CAPACITY, VmessAcceptOptions, VmessServerReader,
+    VmessServerRequest, VmessServerSession, VmessServerWriter, VmessUserEntry,
+    accept_vmess_request, map_uuid, uuid_table,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

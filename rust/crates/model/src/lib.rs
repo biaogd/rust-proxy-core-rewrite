@@ -84,6 +84,7 @@ pub enum InboundProtocol {
     Shadowsocks,
     Trojan,
     Vless,
+    Vmess,
     Tun,
     Inner,
 }

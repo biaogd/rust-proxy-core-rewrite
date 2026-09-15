@@ -382,6 +382,7 @@ pub(crate) fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
             "SHADOWSOCKS" | "SS" => types.push(rewrite_model::InboundProtocol::Shadowsocks),
             "TROJAN" => types.push(rewrite_model::InboundProtocol::Trojan),
             "VLESS" => types.push(rewrite_model::InboundProtocol::Vless),
+            "VMESS" => types.push(rewrite_model::InboundProtocol::Vmess),
             "TUN" => types.push(rewrite_model::InboundProtocol::Tun),
             "INNER" => types.push(rewrite_model::InboundProtocol::Inner),
             "SOCKS" => types.extend([

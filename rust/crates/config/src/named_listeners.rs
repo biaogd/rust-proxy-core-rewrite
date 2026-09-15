@@ -4,7 +4,8 @@ use crate::ConfigError;
 use crate::model::{
     RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
     ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
-    TrojanInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser,
+    TrojanInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser, VmessInboundConfig,
+    VmessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -16,6 +17,7 @@ pub(crate) struct NamedListeners {
     pub shadowsocks: Vec<ShadowsocksInboundConfig>,
     pub trojan: Vec<TrojanInboundConfig>,
     pub vless: Vec<VlessInboundConfig>,
+    pub vmess: Vec<VmessInboundConfig>,
 }
 
 pub(crate) fn parse_named_listeners(
@@ -28,11 +30,13 @@ pub(crate) fn parse_named_listeners(
             shadowsocks: Vec::new(),
             trojan: Vec::new(),
             vless: Vec::new(),
+            vmess: Vec::new(),
         });
     };
     let mut shadowsocks = Vec::new();
     let mut trojan = Vec::new();
     let mut vless = Vec::new();
+    let mut vmess = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
@@ -66,6 +70,15 @@ pub(crate) fn parse_named_listeners(
                     &mut names,
                 )?);
             }
+            "vmess" => {
+                vmess.push(parse_vmess_listener(
+                    &mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
             other => {
                 return Err(ConfigError::InvalidInbound(format!(
                     "listener {index} has unsupported type: {other}"
@@ -77,6 +90,7 @@ pub(crate) fn parse_named_listeners(
         shadowsocks,
         trojan,
         vless,
+        vmess,
     })
 }
 
@@ -631,6 +645,144 @@ fn parse_vless_inbound_flow(
     }
 }
 
+fn parse_vmess_listener(
+    mapping: &Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<VmessInboundConfig, ConfigError> {
+    validate_mapping_keys(
+        mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+            "ws-path",
+            "grpc-service-name",
+        ],
+        &format!("listener {index}"),
+    )?;
+    let name = mapping_string(mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
+    })?;
+    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
+    })?;
+    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires non-empty certificate and private-key"
+        )));
+    }
+    let ws_path = mapping_string(mapping, "ws-path").and_then(|path| {
+        let trimmed = path.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let grpc_service_name = mapping_string(mapping, "grpc-service-name").and_then(|name| {
+        let trimmed = name.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    if ws_path.is_some() && grpc_service_name.is_some() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} cannot combine ws-path and grpc-service-name until shared HTTP mux"
+        )));
+    }
+    let users = parse_vmess_users(mapping, &name)?;
+    if users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires at least one user uuid"
+        )));
+    }
+    Ok(VmessInboundConfig {
+        name,
+        listen,
+        users,
+        certificate,
+        private_key,
+        ws_path,
+        grpc_service_name,
+    })
+}
+
+fn parse_vmess_users(mapping: &Mapping, name: &str) -> Result<Vec<VmessInboundUser>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(users) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(users.len());
+    for (index, user) in users.iter().enumerate() {
+        let Some(user) = user.as_mapping() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} is invalid"
+            )));
+        };
+        validate_mapping_keys(
+            user,
+            &["username", "uuid", "alterId"],
+            &format!("listener {name} user {index}"),
+        )?;
+        let uuid = mapping_string(user, "uuid").ok_or_else(|| {
+            ConfigError::InvalidInbound(format!("listener {name} user {index} is missing uuid"))
+        })?;
+        if uuid.trim().is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} uuid must not be empty"
+            )));
+        }
+        if let Some(alter_id) = user.get(Value::from("alterId")) {
+            let alter_id = alter_id.as_i64().or_else(|| {
+                alter_id
+                    .as_u64()
+                    .and_then(|value| i64::try_from(value).ok())
+            });
+            match alter_id {
+                Some(0) => {}
+                Some(other) => {
+                    return Err(ConfigError::InvalidInbound(format!(
+                        "listener {name} user {index} alterId {other} is not supported; only alterId 0 (AEAD)"
+                    )));
+                }
+                None => {
+                    return Err(ConfigError::InvalidInbound(format!(
+                        "listener {name} user {index} has invalid alterId"
+                    )));
+                }
+            }
+        }
+        let username = mapping_string(user, "username").unwrap_or_else(|| uuid.clone());
+        parsed.push(VmessInboundUser { username, uuid });
+    }
+    Ok(parsed)
+}
+
 fn parse_simple_obfs(
     mapping: &Mapping,
     name: &str,
@@ -872,14 +1024,31 @@ pub(crate) fn validate_vless_listener_ports(
     Ok(())
 }
 
+pub(crate) fn validate_vmess_listener_ports(
+    listeners: &[VmessInboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "vmess listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_named_listener_ports(
     shadowsocks: &[ShadowsocksInboundConfig],
     trojan: &[TrojanInboundConfig],
     vless: &[VlessInboundConfig],
+    vmess: &[VmessInboundConfig],
 ) -> Result<(), ConfigError> {
     validate_shadowsocks_listener_ports(shadowsocks)?;
     validate_trojan_listener_ports(trojan)?;
     validate_vless_listener_ports(vless)?;
+    validate_vmess_listener_ports(vmess)?;
     let mut ports = std::collections::BTreeSet::new();
     for listener in shadowsocks {
         ports.insert((listener.listen.ip(), listener.listen.port()));
@@ -893,6 +1062,14 @@ pub(crate) fn validate_named_listener_ports(
         }
     }
     for listener in vless {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
+                listener.listen
+            )));
+        }
+    }
+    for listener in vmess {
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener address is duplicated across inbound types: {}",

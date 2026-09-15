@@ -245,6 +245,94 @@ impl VmessServerSession {
             cancellation,
         })
     }
+
+    /// Splits the session into independent body reader/writer halves for UDP
+    /// and Mux/XUDP association loops.
+    #[must_use]
+    pub fn into_udp_halves(self) -> (VmessServerReader, VmessServerWriter) {
+        (
+            VmessServerReader {
+                body_reader: self.body_reader,
+            },
+            VmessServerWriter {
+                body_writer: self.body_writer,
+                response_key: self.response_key,
+                response_iv: self.response_iv,
+                response_verification: self.response_verification,
+                request_options: self.request_options,
+                response_header_written: self.response_header_written,
+            },
+        )
+    }
+}
+
+/// Request-direction body half of a VMess server session (UDP / XUDP).
+pub struct VmessServerReader {
+    body_reader: BodyReader,
+}
+
+impl VmessServerReader {
+    /// Reads and decrypts one request-direction body record.
+    ///
+    /// # Errors
+    ///
+    /// Returns I/O errors from the body reader.
+    pub async fn read_body<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<Vec<u8>, VmessProtocolError> {
+        Ok(self.body_reader.read_record(reader).await?)
+    }
+}
+
+/// Response-direction body half of a VMess server session (UDP / XUDP).
+pub struct VmessServerWriter {
+    body_writer: BodyWriter,
+    response_key: [u8; 16],
+    response_iv: [u8; 16],
+    response_verification: u8,
+    request_options: u8,
+    response_header_written: bool,
+}
+
+impl VmessServerWriter {
+    /// Writes the AEAD response header if it has not been written yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol or I/O errors when sealing/writing the header fails.
+    pub async fn ensure_response_header<W: AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+    ) -> Result<(), VmessProtocolError> {
+        if self.response_header_written {
+            return Ok(());
+        }
+        let wire = seal_response_header(
+            &self.response_key,
+            &self.response_iv,
+            self.response_verification,
+            self.request_options,
+        )?;
+        writer.write_all(&wire).await?;
+        self.response_header_written = true;
+        Ok(())
+    }
+
+    /// Seals and writes one response-direction body record, writing the response
+    /// header first when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol or I/O errors from the response header or body writer.
+    pub async fn write_body<W: AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+        plaintext: &[u8],
+    ) -> Result<(), VmessProtocolError> {
+        self.ensure_response_header(writer).await?;
+        Ok(self.body_writer.write_record(writer, plaintext).await?)
+    }
 }
 
 struct VmessServerRelayStream {
