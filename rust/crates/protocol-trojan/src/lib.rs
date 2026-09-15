@@ -1,6 +1,7 @@
 //! Transport-independent Trojan framing shared by outbound and inbound adapters.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -91,12 +92,13 @@ pub fn connect_trojan_on_stream(
 ///
 /// Returns I/O or protocol errors for truncated headers, unknown commands, bad
 /// addresses, or authentication failure.
-pub async fn accept_trojan_request<S>(
+pub async fn accept_trojan_request<S, H>(
     stream: &mut S,
-    passwords: &HashMap<[u8; PASSWORD_HEX_LEN], String>,
+    passwords: &HashMap<[u8; PASSWORD_HEX_LEN], String, H>,
 ) -> Result<TrojanServerRequest, TrojanProtocolError>
 where
     S: AsyncRead + Unpin,
+    H: BuildHasher,
 {
     let mut key = [0_u8; PASSWORD_HEX_LEN];
     stream.read_exact(&mut key).await?;

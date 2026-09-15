@@ -220,6 +220,16 @@ struct PeerRoute {
     last_seen: Instant,
 }
 
+/// Opaque binding to an accepted AEAD-2022 server session used to mint replies.
+///
+/// Forwarding tasks must retain this handle for the lifetime of the UDP
+/// association. Peer-address routes are only a routing cache and may expire or
+/// be evicted while the session window is still live.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Aead2022ReplyHandle {
+    key: SessionKey,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum AuthKey {
     Default,
@@ -257,7 +267,7 @@ impl Aead2022ServerSessions {
         &mut self,
         peer: SocketAddr,
         incoming: Option<&UdpSocketControlData>,
-    ) -> Result<(), ServerUdpReject> {
+    ) -> Result<Aead2022ReplyHandle, ServerUdpReject> {
         self.accept_incoming_at(peer, incoming, Instant::now())
     }
 
@@ -266,7 +276,7 @@ impl Aead2022ServerSessions {
         peer: SocketAddr,
         incoming: Option<&UdpSocketControlData>,
         now: Instant,
-    ) -> Result<(), ServerUdpReject> {
+    ) -> Result<Aead2022ReplyHandle, ServerUdpReject> {
         self.reap(now);
         let Some(incoming) = incoming else {
             return Err(ServerUdpReject::MissingControl);
@@ -293,28 +303,26 @@ impl Aead2022ServerSessions {
         }
         session.last_user.clone_from(&incoming.user);
         session.last_seen = now;
-        self.remember_peer(peer, key, now);
-        Ok(())
+        self.remember_peer(peer, key.clone(), now);
+        Ok(Aead2022ReplyHandle { key })
     }
 
-    /// Builds the next reply control for a peer that previously passed
-    /// [`Self::accept_incoming`]. Returns the all-zero default when the peer has
-    /// no live AEAD-2022 session (pre-2022 callers).
-    pub fn next_reply(&mut self, peer: SocketAddr) -> UdpSocketControlData {
-        self.next_reply_at(peer, Instant::now())
+    /// Builds the next reply control for a previously accepted session handle.
+    ///
+    /// Returns [`None`] when the session window is gone. Callers must not invent
+    /// an all-zero control block for AEAD-2022 replies — drop the datagram
+    /// instead so clients do not see a mismatched session id.
+    pub fn next_reply_for(&mut self, handle: &Aead2022ReplyHandle) -> Option<UdpSocketControlData> {
+        self.next_reply_for_at(handle, Instant::now())
     }
 
-    fn next_reply_at(&mut self, peer: SocketAddr, now: Instant) -> UdpSocketControlData {
+    fn next_reply_for_at(
+        &mut self,
+        handle: &Aead2022ReplyHandle,
+        now: Instant,
+    ) -> Option<UdpSocketControlData> {
         self.reap(now);
-        let Some(route) = self.peer_index.get_mut(&peer) else {
-            return UdpSocketControlData::default();
-        };
-        route.last_seen = now;
-        let key = route.key.clone();
-        let Some(session) = self.sessions.get_mut(&key) else {
-            self.peer_index.remove(&peer);
-            return UdpSocketControlData::default();
-        };
+        let session = self.sessions.get_mut(&handle.key)?;
         session.last_seen = now;
         session.next_packet_id = next_packet_id(session.next_packet_id);
         let mut control = UdpSocketControlData::default();
@@ -322,7 +330,28 @@ impl Aead2022ServerSessions {
         control.server_session_id = session.server_session_id;
         control.packet_id = session.next_packet_id;
         control.user.clone_from(&session.last_user);
-        control
+        Some(control)
+    }
+
+    /// Builds the next reply control by looking up the peer-address route cache.
+    ///
+    /// Prefer [`Self::next_reply_for`] from long-lived forwarding tasks: peer
+    /// routes may expire or be capped while the session window is still valid.
+    /// Returns [`None`] instead of an all-zero control block when the route or
+    /// session is missing.
+    pub fn next_reply(&mut self, peer: SocketAddr) -> Option<UdpSocketControlData> {
+        self.next_reply_at(peer, Instant::now())
+    }
+
+    fn next_reply_at(&mut self, peer: SocketAddr, now: Instant) -> Option<UdpSocketControlData> {
+        self.reap(now);
+        let Some(route) = self.peer_index.get(&peer) else {
+            return None;
+        };
+        let handle = Aead2022ReplyHandle {
+            key: route.key.clone(),
+        };
+        self.next_reply_for_at(&handle, now)
     }
 
     /// Accepts `incoming` then builds one reply control. Echo authorities and
@@ -340,8 +369,10 @@ impl Aead2022ServerSessions {
         if incoming.is_none() {
             return Ok(UdpSocketControlData::default());
         }
-        self.accept_incoming(peer, incoming)?;
-        Ok(self.next_reply(peer))
+        let handle = self.accept_incoming(peer, incoming)?;
+        Ok(self
+            .next_reply_for(&handle)
+            .expect("accepted AEAD-2022 session must still be present"))
     }
 
     /// Drops idle sessions and stale peer routes so both tables stay bounded.
@@ -748,15 +779,73 @@ mod tests {
     fn server_sessions_next_reply_after_accept() {
         let mut sessions = Aead2022ServerSessions::default();
         let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
-        sessions
+        let handle = sessions
             .accept_incoming(peer, Some(&control(44, 1)))
             .expect("accept");
-        let first = sessions.next_reply(peer);
-        let second = sessions.next_reply(peer);
+        let first = sessions.next_reply_for(&handle).expect("first reply");
+        let second = sessions.next_reply_for(&handle).expect("second reply");
         assert_eq!(first.client_session_id, 44);
         assert_eq!(first.packet_id, 1);
         assert_eq!(second.server_session_id, first.server_session_id);
         assert_eq!(second.packet_id, 2);
+    }
+
+    #[test]
+    fn reply_handle_survives_peer_route_ttl() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let t0 = Instant::now();
+        let peer: SocketAddr = "127.0.0.1:7100".parse().unwrap();
+        let handle = sessions
+            .accept_incoming_at(peer, Some(&control(55, 1)), t0)
+            .expect("accept");
+        // Peer-address route expires while the session window is still live.
+        sessions.reap(t0 + PEER_INDEX_TTL + Duration::from_millis(1));
+        assert!(
+            !sessions.has_peer_route(peer),
+            "peer route should expire before the session TTL"
+        );
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions.next_reply(peer).is_none(),
+            "peer lookup must not invent a zero control block"
+        );
+        let delayed = sessions
+            .next_reply_for(&handle)
+            .expect("handle must mint a delayed reply after peer-route expiry");
+        assert_eq!(delayed.client_session_id, 55);
+        assert_ne!(delayed.server_session_id, 0);
+        assert_eq!(delayed.packet_id, 1);
+    }
+
+    #[test]
+    fn reply_handle_survives_peer_route_cap_eviction() {
+        let mut sessions = Aead2022ServerSessions::default();
+        let now = Instant::now();
+        let first_peer = SocketAddr::from(([127, 0, 0, 1], 10_000));
+        let handle = sessions
+            .accept_incoming_at(first_peer, Some(&control(66, 1)), now)
+            .expect("first accept");
+        for index in 1..=PEER_INDEX_CAP {
+            let port = u16::try_from(10_000 + index).expect("port");
+            let peer = SocketAddr::from(([127, 0, 0, 1], port));
+            sessions
+                .accept_incoming_at(
+                    peer,
+                    Some(&control(66, u64::try_from(index + 1).unwrap())),
+                    now + Duration::from_millis(u64::try_from(index).unwrap()),
+                )
+                .expect("fill peer routes");
+        }
+        assert!(
+            !sessions.has_peer_route(first_peer),
+            "oldest peer route should be evicted under cap pressure"
+        );
+        assert!(sessions.next_reply(first_peer).is_none());
+        let reply = sessions
+            .next_reply_for(&handle)
+            .expect("session handle must outlive peer-route eviction");
+        assert_eq!(reply.client_session_id, 66);
+        assert_ne!(reply.server_session_id, 0);
     }
 
     #[test]
