@@ -13,6 +13,7 @@ rewrite-model = { path = "../model" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

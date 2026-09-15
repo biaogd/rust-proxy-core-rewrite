@@ -6,6 +6,7 @@
 
 mod addons;
 mod packet;
+mod server;
 mod stream;
 mod vision;
 
@@ -18,7 +19,16 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 
-pub use packet::{VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream};
+pub use addons::decode_flow_addon;
+pub use packet::{
+    VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream, read_xudp_client_packet,
+    write_xudp_server_packet,
+};
+pub use server::{
+    VlessCommand, VlessServerRequest, VlessUserEntry, accept_vless_request, map_uuid,
+    read_vless_udp_payload, uuid_table, write_vless_udp_payload,
+};
+pub use vision::VisionStream;
 
 const VERSION: u8 = 0;
 

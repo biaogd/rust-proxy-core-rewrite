@@ -83,6 +83,7 @@ pub enum InboundProtocol {
     Socks5,
     Shadowsocks,
     Trojan,
+    Vless,
     Tun,
     Inner,
 }

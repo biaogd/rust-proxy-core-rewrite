@@ -143,11 +143,8 @@ pub struct VisionStream {
 }
 
 impl VisionStream {
-    pub(crate) fn new(
-        inner: BoxedStream,
-        uuid: [u8; 16],
-        control: Option<VisionDirectControl>,
-    ) -> Self {
+    #[must_use]
+    pub fn new(inner: BoxedStream, uuid: [u8; 16], control: Option<VisionDirectControl>) -> Self {
         Self {
             inner,
             write_uuid: Some(uuid),

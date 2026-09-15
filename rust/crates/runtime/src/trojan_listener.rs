@@ -192,7 +192,7 @@ pub(super) async fn run_trojan_listener(
                 let connection_ws_path = ws_path.clone();
                 let connection_grpc_service = grpc_service_name.clone();
                 connections.spawn(async move {
-                    handle_trojan_inbound(
+                    Box::pin(handle_trojan_inbound(
                         tcp,
                         peer,
                         local,
@@ -205,7 +205,7 @@ pub(super) async fn run_trojan_listener(
                         connection_inbound_name,
                         connection_ws_path,
                         connection_grpc_service,
-                    )
+                    ))
                     .await;
                 });
             }
@@ -285,7 +285,7 @@ async fn handle_trojan_inbound(
                     return;
                 }
             };
-        dispatch_trojan_session(
+        Box::pin(dispatch_trojan_session(
             websocket,
             peer,
             local,
@@ -295,12 +295,12 @@ async fn handle_trojan_inbound(
             dns_service,
             shutdown,
             inbound_name,
-        )
+        ))
         .await;
         return;
     }
 
-    dispatch_trojan_session(
+    Box::pin(dispatch_trojan_session(
         tls,
         peer,
         local,
@@ -310,7 +310,7 @@ async fn handle_trojan_inbound(
         dns_service,
         shutdown,
         inbound_name,
-    )
+    ))
     .await;
 }
 
@@ -581,6 +581,7 @@ async fn serve_trojan_udp<S>(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn serve_trojan_udp_direct<S>(
     stream: S,
     first_metadata: Metadata,

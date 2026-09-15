@@ -2,6 +2,27 @@
 
 Last updated: 2026-09-14
 
+### IN-D VLESS Vision TLS inbound — 2026-09-15
+
+Named `type: vless` accepts per-user `flow: xtls-rprx-vision` on native TLS.
+`accept_vision_tls` wraps the server TLS carrier for DIRECT promotion;
+`accept_vless_request` decodes flow addons and wraps TCP with `VisionStream`.
+Evidence: `phase_ind_vless_vision.py` (product Vision outbound vs Go/Rust
+named inbound: TCP small/large/half-close pass; nested TLS DIRECT is currently
+false on both products and kept only as a parity observation). REALITY inbound
+stays deferred — Rust transport exposes client REALITY only; Go uses
+`utls.RealityServer`, and there is no shadow-rustls server Accept API yet.
+
+### IN-D VLESS TLS + WSS + gRPC + XUDP inbound — 2026-09-15
+
+Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
+`grpc-service-name` (Gun). TCP is covered on TLS/WSS/gRPC; UDP covers standard
+fixed-destination framing on TLS plus Mux/XUDP multi-destination (product VLESS
+outbound default). Evidence: `phase_ind_vless_tls.py`,
+`phase_ind_vless_websocket.py`, `phase_ind_vless_grpc.py`,
+`phase_ind_vless_xudp.py`. Combined ws+grpc and `reality-config` stay rejected.
+
+
 ### IN-C Trojan gRPC inbound — 2026-09-14
 
 Named `type: trojan` with `grpc-service-name` accepts TLS then HTTP/2 Gun
@@ -9,7 +30,7 @@ Named `type: trojan` with `grpc-service-name` accepts TLS then HTTP/2 Gun
 `compat/scripts/phase_inc_trojan_grpc.py` (product gRPC outbound vs Go/Rust
 inbounds: TCP small/large, UDP multi-dest, wrong-password; Rust-only reject of
 combined `ws-path` + `grpc-service-name`). Reality/`ss-option` stay rejected.
-Shared HTTP mux for WS+gRPC together remains open. Next: mux or **IN-D** VLESS.
+Shared HTTP mux for WS+gRPC together remains open. Shared HTTP mux for WS+gRPC together remains open.
 
 ### IN-C Trojan WebSocket inbound — 2026-09-14
 
@@ -51,7 +72,7 @@ the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP and
 **IN-C** Trojan TLS/WSS/gRPC inbound are implemented in this checkout (see
-above). Next inbound product slice: VLESS (**IN-D**). Explicit non-goals:
+above). Next inbound product slice: REALITY (**IN-D**, blocked on server TLS Accept) or VMess (**IN-E**). Explicit non-goals:
 SSR/Snell/SSH/WG servers, early mKCP/Mekya, panels/billing, public test
 authorities.
 
@@ -609,6 +630,12 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; `phase_inc_trojan_tls.py` |
 | IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; `phase_inc_trojan_websocket.py` |
 | IN-C Trojan gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+UDP UoT; combined ws+grpc rejected; `phase_inc_trojan_grpc.py` |
+| IN-D VLESS Vision inbound | Complete (declared native TLS scope) | Per-user `flow: xtls-rprx-vision`; `phase_ind_vless_vision.py` |
+| IN-D VLESS REALITY inbound | Deferred | No Rust server Reality Accept (`utls.RealityServer` / shadow-rustls gap); `reality-config` stays rejected |
+| IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
+| IN-D VLESS WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; standard UDP remains on TLS evidence; `phase_ind_vless_websocket.py` |
+| IN-D VLESS gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; standard UDP remains on TLS evidence; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |
+| IN-D VLESS XUDP inbound | Complete (declared Mux/XUDP UDP scope) | Named TLS Mux/XUDP multi-destination UDP via product outbound; `phase_ind_vless_xudp.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |

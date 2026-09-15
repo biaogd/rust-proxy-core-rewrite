@@ -8,6 +8,7 @@ mod tcp;
 mod trojan_listener;
 mod tun;
 mod types;
+mod vless_listener;
 
 pub use lifecycle::{run, run_with_reload, run_with_reload_lifecycle};
 pub use types::{LifecycleSignals, RuntimeError};

@@ -109,6 +109,7 @@ impl From<&Metadata> for MetadataSnapshot {
             InboundProtocol::Socks5 => "Socks5",
             InboundProtocol::Shadowsocks => "Shadowsocks",
             InboundProtocol::Trojan => "Trojan",
+            InboundProtocol::Vless => "Vless",
             InboundProtocol::Tun => "TUN",
             InboundProtocol::Inner => "Inner",
         };

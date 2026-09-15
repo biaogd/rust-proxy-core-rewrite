@@ -5,10 +5,12 @@ use std::task::{Context, Poll, ready};
 
 use rewrite_io::{BoxedStream, VisionDirectControl};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::server::TlsStream as ServerTlsStream;
 
 use crate::tls::TlsClientError;
 
@@ -159,12 +161,17 @@ impl AsyncWrite for TlsRecordStream {
     }
 }
 
-struct VisionTlsStream {
+struct ClientVisionTlsStream {
     inner: TlsStream<TlsRecordStream>,
     control: VisionDirectControl,
 }
 
-impl AsyncRead for VisionTlsStream {
+struct ServerVisionTlsStream {
+    inner: ServerTlsStream<TlsRecordStream>,
+    control: VisionDirectControl,
+}
+
+impl AsyncRead for ClientVisionTlsStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -199,7 +206,7 @@ impl AsyncRead for VisionTlsStream {
     }
 }
 
-impl AsyncWrite for VisionTlsStream {
+impl AsyncWrite for ClientVisionTlsStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -243,7 +250,86 @@ pub async fn connect_vision_tls(
         .connect(server_name, TlsRecordStream::new(stream))
         .await
         .map_err(TlsClientError::Handshake)?;
-    Ok(Box::new(VisionTlsStream {
+    Ok(Box::new(ClientVisionTlsStream {
+        inner: stream,
+        control,
+    }))
+}
+
+impl AsyncRead for ServerVisionTlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.control.read_is_direct() {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut plaintext = [0_u8; COPY_BUFFER_LEN];
+        let amount = plaintext.len().min(buf.remaining());
+        let plaintext_result = self
+            .inner
+            .get_mut()
+            .1
+            .reader()
+            .read(&mut plaintext[..amount]);
+        match plaintext_result {
+            Ok(0) => {}
+            Ok(read) => {
+                buf.put_slice(&plaintext[..read]);
+                return Poll::Ready(Ok(()));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Poll::Ready(Err(error)),
+        }
+
+        self.inner.get_mut().0.poll_raw_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ServerVisionTlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.control.write_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_write(cx, buf);
+        }
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.control.write_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_flush(cx);
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.control.any_is_direct() {
+            return Pin::new(&mut self.inner.get_mut().0).poll_shutdown(cx);
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Accepts outer TLS and returns a stream that can safely promote each direction to raw TCP.
+///
+/// # Errors
+///
+/// Returns an error when the TLS handshake fails.
+pub async fn accept_vision_tls(
+    stream: BoxedStream,
+    acceptor: TlsAcceptor,
+    control: VisionDirectControl,
+) -> Result<BoxedStream, std::io::Error> {
+    let stream = acceptor.accept(TlsRecordStream::new(stream)).await?;
+    Ok(Box::new(ServerVisionTlsStream {
         inner: stream,
         control,
     }))

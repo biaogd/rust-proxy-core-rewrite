@@ -3873,6 +3873,135 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn loads_named_vless_tls_listener_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-tls
+    type: vless
+    listen: 127.0.0.1
+    port: 18430
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - username: alice
+        uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless tls listener");
+    assert_eq!(config.vless_listeners.len(), 1);
+    let inbound = &config.vless_listeners[0];
+    assert_eq!(inbound.name, "vless-tls");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(inbound.users[0].username, "alice");
+    assert_eq!(
+        inbound.users[0].uuid,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    assert!(inbound.ws_path.is_none());
+    assert!(inbound.grpc_service_name.is_none());
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Vless, 18430)));
+
+    let defaults_username_to_uuid = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-default-username
+    type: vless
+    listen: 127.0.0.1
+    port: 18431
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("uuid-only user defaults username to uuid");
+    assert_eq!(
+        defaults_username_to_uuid.vless_listeners[0].users[0].username,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+
+    let with_ws = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-wss
+    type: vless
+    listen: 127.0.0.1
+    port: 18435
+    certificate: ./server.crt
+    private-key: ./server.key
+    ws-path: /vless
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless wss listener");
+    assert_eq!(
+        with_ws.vless_listeners[0].ws_path.as_deref(),
+        Some("/vless")
+    );
+
+    let with_grpc = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-grpc
+    type: vless
+    listen: 127.0.0.1
+    port: 18436
+    certificate: ./server.crt
+    private-key: ./server.key
+    grpc-service-name: GunService
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless grpc listener");
+    assert_eq!(
+        with_grpc.vless_listeners[0].grpc_service_name.as_deref(),
+        Some("GunService")
+    );
+
+    for unsupported in [
+        "ws-path: /vless\n    grpc-service-name: GunService",
+        "reality-config:\n      public-key: aaaa\n      short-id: bb",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: vless-bad\n    type: vless\n    listen: 127.0.0.1\n    port: 18432\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let missing_uuid = "mode: rule\nlisteners:\n  - name: vless-bad\n    type: vless\n    listen: 127.0.0.1\n    port: 18433\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - username: alice\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_uuid).is_err(),
+        "uuid is required per user"
+    );
+
+    let flow_accepted = "mode: rule\nlisteners:\n  - name: vless-vision\n    type: vless\n    listen: 127.0.0.1\n    port: 18434\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        flow: xtls-rprx-vision\nrules: ['MATCH,DIRECT']\n";
+    let vision_config = Config::from_yaml(flow_accepted).expect("Vision flow must parse");
+    let vless = &vision_config.vless_listeners[0];
+    assert_eq!(vless.users.len(), 1);
+    assert_eq!(vless.users[0].flow, Some(VlessFlow::XtlsRprxVision));
+
+    let unknown_flow = "mode: rule\nlisteners:\n  - name: vless-bad\n    type: vless\n    listen: 127.0.0.1\n    port: 18435\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n        flow: unknown-flow\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(unknown_flow).is_err(),
+        "unknown user flow must be rejected"
+    );
+}
+
+#[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"

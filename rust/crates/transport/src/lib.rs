@@ -39,7 +39,7 @@ pub use v2ray_grpc::{
 pub use v2ray_h2::connect_v2ray_h2;
 pub use v2ray_http::connect_v2ray_http;
 pub use v2ray_mux::{V2rayMux, V2rayMuxNetwork, V2rayMuxOptions};
-pub use vision_tls::connect_vision_tls;
+pub use vision_tls::{accept_vision_tls, connect_vision_tls};
 pub use websocket::{
     WebSocketIo, accept_websocket_path, connect_v2ray_websocket, connect_websocket,
     connect_websocket_with_early_data, connect_websocket_with_headers,

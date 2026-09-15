@@ -359,7 +359,8 @@ where
                 Err(error) => return Some(Err(h2_error(error))),
             };
             if !is_gun_request(&request, &self.expected_path) {
-                let _ = respond.send_response(empty_http_response(http::StatusCode::NOT_FOUND), true);
+                let _ =
+                    respond.send_response(empty_http_response(http::StatusCode::NOT_FOUND), true);
                 continue;
             }
             let sender = match respond.send_response(grpc_ok_response(), false) {
