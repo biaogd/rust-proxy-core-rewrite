@@ -253,7 +253,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
     bad.write_text(
         inbound_yaml(reject_port, reject_certificate, reject_key).replace(
             "users:",
-            "grpc-service-name: GunService\n    users:",
+            "ss-option:\n      enabled: true\n      method: aes-128-gcm\n      password: nested\n    users:",
         )
     )
     rejected = launch(binary, bad, reject_dir)
@@ -261,7 +261,7 @@ def validate_config(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bo
         deadline = time.monotonic() + IO_DEADLINE
         while rejected[0].poll() is None and time.monotonic() < deadline:
             time.sleep(0.02)
-        observations["reject-grpc"] = rejected[0].poll() is not None
+        observations["reject-ss-option"] = rejected[0].poll() is not None
     finally:
         stop(rejected[0])
         rejected[1].close()
@@ -333,7 +333,7 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
 def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
     """Shared Go/Rust fields. Rust-only IN-C carrier rejection stays out of equality."""
     config = dict(observations["config"])
-    config.pop("reject-grpc", None)
+    config.pop("reject-ss-option", None)
     return {
         "config": config,
         "small": observations["small"],
@@ -355,8 +355,8 @@ def main() -> int:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], scratch)
-            if not observations["rust"]["config"].get("reject-grpc"):
-                raise AssertionError("Rust IN-C must reject named Trojan grpc-service-name")
+            if not observations["rust"]["config"].get("reject-ss-option"):
+                raise AssertionError("Rust IN-C must reject named Trojan ss-option")
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(

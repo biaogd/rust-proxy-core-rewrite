@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::BoxedStream;
-use crate::v2ray_h2::{connect_h2_request, h2_error, open_h2_request};
+use crate::v2ray_h2::{connect_h2_request, h2_data_stream, h2_error, open_h2_request};
 
 const PING_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -315,12 +315,88 @@ fn grpc_request(options: &V2rayGrpcClientOptions) -> io::Result<Request<()>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
-fn service_name_to_path(service_name: &str) -> String {
+/// Maps a Gun service name to the HTTP/2 path used by Mihomo (`/{name}/Tun`,
+/// or the name itself when it already starts with `/`).
+#[must_use]
+pub fn service_name_to_path(service_name: &str) -> String {
     if service_name.starts_with('/') {
         service_name.to_owned()
     } else {
         format!("/{service_name}/Tun")
     }
+}
+
+/// Server-side Gun/gRPC acceptor over an already-established HTTP/2 transport.
+pub struct V2rayGrpcServerConnection<S> {
+    connection: h2::server::Connection<S, Bytes>,
+    expected_path: String,
+}
+
+impl<S> V2rayGrpcServerConnection<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Completes the HTTP/2 server handshake for Gun streams on `service_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the HTTP/2 handshake fails.
+    pub async fn handshake(stream: S, service_name: &str) -> io::Result<Self> {
+        let connection = h2::server::handshake(stream).await.map_err(h2_error)?;
+        Ok(Self {
+            connection,
+            expected_path: service_name_to_path(service_name),
+        })
+    }
+
+    /// Accepts the next matching Gun stream, skipping non-Gun HTTP/2 requests.
+    ///
+    /// Returns `None` when the peer closes the HTTP/2 connection.
+    pub async fn accept(&mut self) -> Option<io::Result<BoxedStream>> {
+        loop {
+            let (request, mut respond) = match self.connection.accept().await? {
+                Ok(pair) => pair,
+                Err(error) => return Some(Err(h2_error(error))),
+            };
+            if !is_gun_request(&request, &self.expected_path) {
+                let _ = respond.send_response(empty_http_response(http::StatusCode::NOT_FOUND), true);
+                continue;
+            }
+            let sender = match respond.send_response(grpc_ok_response(), false) {
+                Ok(sender) => sender,
+                Err(error) => return Some(Err(h2_error(error))),
+            };
+            let receiver = request.into_body();
+            let duplex = Box::new(h2_data_stream(sender, receiver));
+            return Some(Ok(Box::new(GunStream::new(duplex))));
+        }
+    }
+}
+
+fn empty_http_response(status: http::StatusCode) -> http::Response<()> {
+    let mut response = http::Response::new(());
+    *response.status_mut() = status;
+    response
+}
+
+fn grpc_ok_response() -> http::Response<()> {
+    let mut response = empty_http_response(http::StatusCode::OK);
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/grpc"),
+    );
+    response
+}
+
+fn is_gun_request(request: &http::Request<h2::RecvStream>, expected_path: &str) -> bool {
+    if request.method() != Method::POST || request.uri().path() != expected_path {
+        return false;
+    }
+    request
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/grpc"))
 }
 
 struct GunStream {

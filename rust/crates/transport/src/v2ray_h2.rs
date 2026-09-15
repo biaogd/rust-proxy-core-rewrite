@@ -119,7 +119,7 @@ pub(crate) async fn open_h2_request(
     }))
 }
 
-struct H2DataStream {
+pub(crate) struct H2DataStream {
     sender: SendStream<Bytes>,
     receiver: RecvStream,
     read_chunk: Bytes,
@@ -303,6 +303,16 @@ impl AsyncWrite for H2DataStream {
             io::ErrorKind::ConnectionAborted,
             "outer HTTP/2 stream does not preserve TCP half-close",
         )))
+    }
+}
+
+pub(crate) fn h2_data_stream(sender: SendStream<Bytes>, receiver: RecvStream) -> H2DataStream {
+    H2DataStream {
+        sender,
+        receiver,
+        read_chunk: Bytes::new(),
+        read_offset: 0,
+        write_closed: false,
     }
 }
 

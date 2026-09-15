@@ -176,6 +176,7 @@ fn parse_trojan_listener(
             "certificate",
             "private-key",
             "ws-path",
+            "grpc-service-name",
         ],
         &format!("listener {index}"),
     )?;
@@ -214,6 +215,15 @@ fn parse_trojan_listener(
         let trimmed = path.trim().to_owned();
         (!trimmed.is_empty()).then_some(trimmed)
     });
+    let grpc_service_name = mapping_string(mapping, "grpc-service-name").and_then(|name| {
+        let trimmed = name.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    if ws_path.is_some() && grpc_service_name.is_some() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} cannot combine ws-path and grpc-service-name until shared HTTP mux"
+        )));
+    }
     let users = parse_trojan_users(mapping, &name)?;
     if users.is_empty() {
         return Err(ConfigError::InvalidInbound(format!(
@@ -227,6 +237,7 @@ fn parse_trojan_listener(
         certificate,
         private_key,
         ws_path,
+        grpc_service_name,
     })
 }
 
