@@ -8,10 +8,14 @@ Named `type: anytls` accepts TLS (`certificate` + `private-key`), Clash `users`
 username→password map, and optional `padding-scheme` (omit → Go default).
 `protocol-anytls` owns SHA-256 auth Accept, server session recv loop
 (SETTINGS / SYN / PSH / FIN / HEART / padding update), SocksAddr decode, and
-empty SYNACK for peer v≥2. Runtime owns listen, caps (1024 conns), and TCP →
-`serve_shadowsocks_connection`. Evidence: `phase_ing_anytls_tcp.py` (product
-AnyTLS outbound vs Go/Rust named inbound). Deferred: UoT UDP, carriers
-(ShadowTLS/ResTLS/JLS), ECH/mTLS/`allow-insecure`.
+empty SYNACK for peer v≥2. Runtime owns listen, caps (1024 conns / 256 streams),
+destination-read timeout, and TCP → `serve_shadowsocks_connection`. Session
+close drops the stream dispatch channel (frees connection slots), `Drop` /
+shutdown drain tear down the TLS carrier, and SYN intake is back-pressured by a
+bounded channel (no unbounded dispatch tasks; hard stream cap with ALERT).
+Evidence: `phase_ing_anytls_tcp.py` (product AnyTLS outbound vs Go/Rust named
+inbound). Deferred: UoT UDP, carriers (ShadowTLS/ResTLS/JLS),
+ECH/mTLS/`allow-insecure`.
 
 ### IN-F TUIC v5 named inbound — 2026-09-16
 
