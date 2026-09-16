@@ -259,16 +259,6 @@ def exercise(
             "throughput-class": throughput["throughput-class"],
             "throughput-rounds-ok": throughput["rounds-ok"],
             "throughput-rounds": throughput["rounds"],
-            "throughput-bytes-per-sec": round(
-                (
-                    int(throughput.get("rounds-ok", 0))
-                    * 16_384  # THROUGHPUT_PAYLOAD size in phase_hy2c
-                )
-                / max(1e-3, float(throughput.get("elapsed-seconds") or soak_elapsed)),
-                1,
-            )
-            if "elapsed-seconds" in throughput
-            else None,
             "soak-seconds": soak_duration,
             "soak-churn": churn,
             "soak-failures": failures,
