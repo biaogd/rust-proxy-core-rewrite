@@ -12,9 +12,11 @@ runtime owns listen, multi-user password table, stock BBR, TCP →
 `serve_shadowsocks_connection`, and Direct UDP session relay. Caps: 1024
 connections, 256 streams/conn, 256 UDP sessions (defrag map capped the same;
 orphan fragments dropped when full). Auth and TCP request headers each get an
-independent 10s timeout. UDP sessions track `last_used` and are idle-evicted
-after 60s (10s sweep) with cancel tokens; subsequent datagrams re-run rules /
-Direct resolve (reject drops that packet). Evidence:
+independent 10s timeout. UDP sessions track `last_used` (refreshed on client
+datagrams and successful downlink writebacks) and are idle-evicted after 60s
+(10s sweep) with cancel tokens; each slot has a **generation** so an evicted
+worker cannot wipe a same-ID session recreated after reclaim. Subsequent
+datagrams re-run rules / Direct resolve (reject drops that packet). Evidence:
 `phase_inf_hysteria2_tcp.py` (product Hy2 outbound vs Go/Rust named inbound:
 small/large TCP, half-close, wrong-password; required cases must pass) and
 `phase_inf_hysteria2_udp.py` (SOCKS UDP small/large, multi-dest, Rust
