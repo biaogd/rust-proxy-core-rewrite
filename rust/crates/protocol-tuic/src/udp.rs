@@ -652,7 +652,8 @@ mod tests {
     #[test]
     fn defragger_packet_count_cap_evicts_oldest() {
         let mut defrag = Defragger::default();
-        for pkt_id in 0..MAX_DEFRAG_PACKETS as u16 {
+        let max_packets = u16::try_from(MAX_DEFRAG_PACKETS).expect("cap fits in u16");
+        for pkt_id in 0..max_packets {
             let fragment = Packet {
                 assoc_id: 1,
                 pkt_id,
@@ -666,7 +667,7 @@ mod tests {
         assert_eq!(defrag.bags.len(), MAX_DEFRAG_PACKETS);
         let next = Packet {
             assoc_id: 1,
-            pkt_id: MAX_DEFRAG_PACKETS as u16,
+            pkt_id: max_packets,
             frag_total: 2,
             frag_id: 0,
             addr: Some(dest()),

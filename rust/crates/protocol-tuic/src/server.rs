@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use quinn::congestion::{BbrConfig, CubicConfig};
+use quinn::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{EndpointConfig, Runtime, TokioRuntime};
 use rewrite_model::Destination;
@@ -106,9 +106,9 @@ pub fn compute_token(
 /// # Errors
 ///
 /// Returns when framing is invalid. Authentication failure is `Ok(None)`.
-pub fn verify_authenticate(
+pub fn verify_authenticate<S: ::std::hash::BuildHasher>(
     connection: &quinn::Connection,
-    users: &HashMap<[u8; 16], String>,
+    users: &HashMap<[u8; 16], String, S>,
     buf: &[u8],
 ) -> Result<Option<ServerAuthResult>, TuicProtocolError> {
     let (uuid_bytes, token) = decode_authenticate(buf)?;
@@ -131,12 +131,12 @@ pub fn verify_authenticate(
 /// # Errors
 ///
 /// Returns I/O or framing failures. Wrong credentials yield `Ok(None)`.
-pub async fn authenticate_uni_stream(
+pub async fn authenticate_uni_stream<S: ::std::hash::BuildHasher>(
     connection: &quinn::Connection,
     mut recv: quinn::RecvStream,
-    users: &HashMap<[u8; 16], String>,
+    users: &HashMap<[u8; 16], String, S>,
 ) -> Result<Option<ServerAuthResult>, TuicProtocolError> {
-    let mut buf = vec![0_u8; 50];
+    let mut buf = [0_u8; 50];
     let mut filled = 0_usize;
     while filled < 50 {
         let n = recv
@@ -152,12 +152,12 @@ pub async fn authenticate_uni_stream(
     verify_authenticate(connection, users, &buf[..50])
 }
 
-/// Close the connection with AuthenticationFailed.
+/// Close the connection with `AuthenticationFailed`.
 pub fn close_authentication_failed(connection: &quinn::Connection) {
     connection.close(ERR_AUTHENTICATION_FAILED.into(), b"AuthenticationFailed");
 }
 
-/// Close the connection with AuthenticationTimeout.
+/// Close the connection with `AuthenticationTimeout`.
 pub fn close_authentication_timeout(connection: &quinn::Connection) {
     connection.close(
         crate::protocol::ERR_AUTHENTICATION_TIMEOUT.into(),
@@ -176,27 +176,24 @@ pub async fn accept_tcp_connect(
 ) -> Result<(Destination, TuicServerStream), TuicProtocolError> {
     let mut scratch = Vec::with_capacity(64);
     loop {
-        if scratch.len() >= 2 {
-            match try_parse_connect(&scratch)? {
-                Some((destination, consumed)) => {
-                    let leftover = if consumed < scratch.len() {
-                        scratch[consumed..].to_vec()
-                    } else {
-                        Vec::new()
-                    };
-                    return Ok((
-                        destination,
-                        TuicServerStream {
-                            send,
-                            recv,
-                            write_closed: false,
-                            leftover,
-                            leftover_pos: 0,
-                        },
-                    ));
-                }
-                None => {}
-            }
+        if scratch.len() >= 2
+            && let Some((destination, consumed)) = try_parse_connect(&scratch)?
+        {
+            let leftover = if consumed < scratch.len() {
+                scratch[consumed..].to_vec()
+            } else {
+                Vec::new()
+            };
+            return Ok((
+                destination,
+                TuicServerStream {
+                    send,
+                    recv,
+                    write_closed: false,
+                    leftover,
+                    leftover_pos: 0,
+                },
+            ));
         }
         if scratch.len() >= 2048 {
             return Err(TuicProtocolError::Protocol(
@@ -386,8 +383,11 @@ pub fn bind_server_endpoint(
     transport
         .max_concurrent_uni_streams(quinn::VarInt::from_u32(options.max_concurrent_uni_streams));
     match options.congestion {
-        CongestionController::Cubic | CongestionController::NewReno => {
+        CongestionController::Cubic => {
             transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+        }
+        CongestionController::NewReno => {
+            transport.congestion_controller_factory(Arc::new(NewRenoConfig::default()));
         }
         CongestionController::Bbr => {
             transport.congestion_controller_factory(Arc::new(BbrConfig::default()));

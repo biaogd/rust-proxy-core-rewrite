@@ -4301,6 +4301,56 @@ rules: ['MATCH,DIRECT']
     let listeners = config.listener_ports().expect("listener ports");
     assert!(listeners.contains(&(ListenerKind::Tuic, 18460)));
 
+    let zero_timeouts = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: tuic-zero
+    type: tuic
+    listen: 127.0.0.1
+    port: 18464
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      b831381d-6324-4d53-ad4f-8cda48b30811: secret
+    max-idle-time: 0
+    authentication-timeout: 0
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("explicit zero timeouts use Go defaults");
+    assert_eq!(zero_timeouts.tuic_listeners[0].max_idle_time_ms, 15_000);
+    assert_eq!(
+        zero_timeouts.tuic_listeners[0].authentication_timeout_ms,
+        1_000
+    );
+
+    let home = std::env::temp_dir().join("mihomo-tuic-inbound-home");
+    let resolved = Config::from_yaml_with_provider_directory(
+        r"mode: rule
+listeners:
+  - name: tuic-rel
+    type: tuic
+    listen: 127.0.0.1
+    port: 18465
+    certificate: server.crt
+    private-key: server.key
+    users:
+      b831381d-6324-4d53-ad4f-8cda48b30811: secret
+rules: ['MATCH,DIRECT']
+",
+        &home,
+        false,
+    )
+    .expect("relative TUIC PEM paths resolve against home");
+    assert_eq!(
+        resolved.tuic_listeners[0].certificate,
+        home.join("server.crt").to_string_lossy()
+    );
+    assert_eq!(
+        resolved.tuic_listeners[0].private_key,
+        home.join("server.key").to_string_lossy()
+    );
+
     for unsupported in [
         "token: [v4-token]",
         "ech-key: unused",

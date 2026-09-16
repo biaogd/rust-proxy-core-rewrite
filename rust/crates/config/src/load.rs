@@ -199,7 +199,18 @@ impl ConfigSpec {
         let vless_listeners = named.vless;
         let vmess_listeners = named.vmess;
         let hysteria2_listeners = named.hysteria2;
-        let tuic_listeners = named.tuic;
+        let mut tuic_listeners = named.tuic;
+        for listener in &mut tuic_listeners {
+            // Match Go ca.NewTLSKeyPairLoader → C.Path.Resolve against home (-d).
+            listener.certificate = resolve_controller_pem(
+                std::mem::take(&mut listener.certificate),
+                provider_directory,
+            )?;
+            listener.private_key = resolve_controller_pem(
+                std::mem::take(&mut listener.private_key),
+                provider_directory,
+            )?;
+        }
         if let Some(config) = raw
             .ss_config
             .as_deref()

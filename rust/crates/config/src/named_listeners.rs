@@ -1059,14 +1059,22 @@ fn parse_tuic_listener(
     }
     let alpn = parse_hysteria2_alpn(mapping, &name)?;
     let congestion_controller = parse_tuic_congestion(mapping, &name)?;
-    let max_idle_time_ms = mapping
+    // Go listener/tuic/server.go replaces explicit 0 with the same defaults used
+    // when the key is omitted (max-idle-time 15000ms, authentication-timeout 1000ms).
+    let max_idle_time_ms = match mapping
         .get(Value::from("max-idle-time"))
         .and_then(Value::as_u64)
-        .unwrap_or(15_000);
-    let authentication_timeout_ms = mapping
+    {
+        Some(0) | None => 15_000,
+        Some(value) => value,
+    };
+    let authentication_timeout_ms = match mapping
         .get(Value::from("authentication-timeout"))
         .and_then(Value::as_u64)
-        .unwrap_or(1_000);
+    {
+        Some(0) | None => 1_000,
+        Some(value) => value,
+    };
     let max_udp_relay_packet_size = mapping
         .get(Value::from("max-udp-relay-packet-size"))
         .and_then(Value::as_u64)

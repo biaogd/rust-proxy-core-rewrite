@@ -93,7 +93,7 @@ pub fn decode_connect(buf: &[u8]) -> Result<(Destination, usize), TuicProtocolEr
     Ok((destination, 2 + addr_len))
 }
 
-/// Decodes a Dissociate command (VER TYPE ASSOC_ID).
+/// Decodes a Dissociate command (VER TYPE `ASSOC_ID`).
 ///
 /// # Errors
 ///
