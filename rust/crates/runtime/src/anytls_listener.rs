@@ -181,6 +181,9 @@ pub(super) async fn run_anytls_listener(
                     state.log("error", "anytls inbound accept failed");
                     break;
                 };
+                // Match Go net.TCPConn default: TCP_NODELAY on. Without it,
+                // small TLS/AnyTLS writes stall ~40ms on Linux delayed ACK.
+                let _ = tcp.set_nodelay(true);
                 let connection_config = Arc::clone(&*config.borrow());
                 if !connection_config.permits_inbound(peer.ip()) {
                     continue;
