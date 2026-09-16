@@ -16,7 +16,7 @@ use crate::model::{
     Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls, Hysteria2InboundConfig,
     ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig, ProfileConfig, ProxyConfig,
     ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig, TrojanInboundConfig,
-    VlessInboundConfig, VmessInboundConfig,
+    TuicInboundConfig, VlessInboundConfig, VmessInboundConfig,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
@@ -199,6 +199,18 @@ impl ConfigSpec {
         let vless_listeners = named.vless;
         let vmess_listeners = named.vmess;
         let hysteria2_listeners = named.hysteria2;
+        let mut tuic_listeners = named.tuic;
+        for listener in &mut tuic_listeners {
+            // Match Go ca.NewTLSKeyPairLoader → C.Path.Resolve against home (-d).
+            listener.certificate = resolve_controller_pem(
+                std::mem::take(&mut listener.certificate),
+                provider_directory,
+            )?;
+            listener.private_key = resolve_controller_pem(
+                std::mem::take(&mut listener.private_key),
+                provider_directory,
+            )?;
+        }
         if let Some(config) = raw
             .ss_config
             .as_deref()
@@ -214,6 +226,7 @@ impl ConfigSpec {
             &vless_listeners,
             &vmess_listeners,
             &hysteria2_listeners,
+            &tuic_listeners,
         )?;
 
         Ok(Self {
@@ -283,6 +296,7 @@ impl ConfigSpec {
             vless_listeners,
             vmess_listeners,
             hysteria2_listeners,
+            tuic_listeners,
             tun,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
@@ -449,6 +463,7 @@ impl TryFrom<ConfigSpec> for Config {
             vless_listeners: spec.vless_listeners,
             vmess_listeners: spec.vmess_listeners,
             hysteria2_listeners: spec.hysteria2_listeners,
+            tuic_listeners: spec.tuic_listeners,
             tun: spec.tun,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
@@ -808,6 +823,9 @@ impl Config {
         for hysteria2 in &self.hysteria2_listeners {
             listeners.push((ListenerKind::Hysteria2, hysteria2.listen.port()));
         }
+        for tuic in &self.tuic_listeners {
+            listeners.push((ListenerKind::Tuic, tuic.listen.port()));
+        }
         if listeners.is_empty() && self.dns.is_none() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
@@ -845,6 +863,13 @@ impl Config {
     #[must_use]
     pub fn hysteria2_listener_for_port(&self, port: u16) -> Option<&Hysteria2InboundConfig> {
         self.hysteria2_listeners
+            .iter()
+            .find(|listener| listener.listen.port() == port)
+    }
+
+    #[must_use]
+    pub fn tuic_listener_for_port(&self, port: u16) -> Option<&TuicInboundConfig> {
+        self.tuic_listeners
             .iter()
             .find(|listener| listener.listen.port() == port)
     }
@@ -920,6 +945,21 @@ impl Config {
             .ok_or_else(|| {
                 ConfigError::InvalidInbound(format!(
                     "hysteria2 inbound is not configured on port {port}"
+                ))
+            })
+    }
+
+    /// Returns the bind address for a TUIC inbound listener on the given port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidInbound`] when no TUIC inbound is configured for the port.
+    pub fn tuic_listen_address(&self, port: u16) -> Result<SocketAddr, ConfigError> {
+        self.tuic_listener_for_port(port)
+            .map(|config| config.listen)
+            .ok_or_else(|| {
+                ConfigError::InvalidInbound(format!(
+                    "tuic inbound is not configured on port {port}"
                 ))
             })
     }

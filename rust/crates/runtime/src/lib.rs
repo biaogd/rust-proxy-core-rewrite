@@ -7,6 +7,7 @@ mod services;
 mod shadowsocks_listener;
 mod tcp;
 mod trojan_listener;
+mod tuic_listener;
 mod tun;
 mod types;
 mod vless_listener;

@@ -383,6 +383,8 @@ pub(crate) fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
             "TROJAN" => types.push(rewrite_model::InboundProtocol::Trojan),
             "VLESS" => types.push(rewrite_model::InboundProtocol::Vless),
             "VMESS" => types.push(rewrite_model::InboundProtocol::Vmess),
+            "HYSTERIA2" | "HY2" => types.push(rewrite_model::InboundProtocol::Hysteria2),
+            "TUIC" => types.push(rewrite_model::InboundProtocol::Tuic),
             "TUN" => types.push(rewrite_model::InboundProtocol::Tun),
             "INNER" => types.push(rewrite_model::InboundProtocol::Inner),
             "SOCKS" => types.extend([

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use quinn::congestion::{BbrConfig, CubicConfig};
+use quinn::congestion::{BbrConfig, CubicConfig, NewRenoConfig};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{EndpointConfig, Runtime, TokioRuntime};
 use tokio_rustls::rustls::client::danger::{
@@ -108,8 +108,11 @@ pub(crate) fn build_endpoint(
     transport.datagram_receive_buffer_size(Some(65_535));
     transport.datagram_send_buffer_size(65_535);
     match options.congestion {
-        CongestionController::Cubic | CongestionController::NewReno => {
+        CongestionController::Cubic => {
             transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+        }
+        CongestionController::NewReno => {
+            transport.congestion_controller_factory(Arc::new(NewRenoConfig::default()));
         }
         CongestionController::Bbr => {
             transport.congestion_controller_factory(Arc::new(BbrConfig::default()));

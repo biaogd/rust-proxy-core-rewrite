@@ -2,6 +2,21 @@
 
 Last updated: 2026-09-16
 
+### IN-F TUIC v5 named inbound — 2026-09-16
+
+Named `type: tuic` accepts QUIC/TLS (`certificate` + `private-key`), Clash
+`users` uuid→password map, optional `alpn` (default `h3`),
+`congestion-controller` (`cubic` default / `bbr` / `new_reno`),
+`max-idle-time`, `authentication-timeout`, and `max-udp-relay-packet-size`.
+Protocol crate owns TLS-exporter Authenticate Accept, Connect framing, Packet
+encode/decode + Defragger, and Quinn server bind; runtime owns listen,
+auth-timeout race (watch), TCP → `serve_shadowsocks_connection`, and Direct UDP
+association relay (native datagrams + uni-stream Packet / Dissociate). Caps:
+1024 connections, 256 streams/conn, 256 UDP associations with generation-tagged
+cleanup (sessions→defrag lock order). Evidence: `phase_inf_tuic_tcp.py` and
+`phase_inf_tuic_udp.py`. Deferred: v4 `token`, ECH, client-auth, Brutal/`cwnd`,
+ShadowQUIC.
+
 ### IN-F Hysteria2 named inbound (first slice) — 2026-09-16
 
 Named `type: hysteria2` accepts QUIC/TLS (`certificate` + `private-key`), Clash
@@ -20,8 +35,7 @@ datagrams re-run rules / Direct resolve (reject drops that packet). Evidence:
 `phase_inf_hysteria2_tcp.py` (product Hy2 outbound vs Go/Rust named inbound:
 small/large TCP, half-close, wrong-password; required cases must pass) and
 `phase_inf_hysteria2_udp.py` (SOCKS UDP small/large, multi-dest, Rust
-allow→reject). Deferred: realm, gecko, ECH, masquerade, Brutal accuracy, TUIC
-inbound.
+allow→reject). Deferred: realm, gecko, ECH, masquerade, Brutal accuracy.
 
 ### IN-E VMess TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
@@ -111,9 +125,9 @@ the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP,
 **IN-C** Trojan TLS/WSS/gRPC, **IN-E** VMess TLS/WSS/gRPC/XUDP, and **IN-F**
-Hysteria2 named inbound first slice (TCP + Direct UDP, stock BBR) are
-implemented in this checkout. TUIC inbound and Hy2 realm/gecko/ECH/masquerade/
-Brutal remain deferred. Explicit non-goals: SSR/Snell/SSH/WG servers, early
+Hysteria2 + TUIC v5 named inbounds (TCP + Direct UDP) are implemented in this
+checkout. Hy2 realm/gecko/ECH/masquerade/Brutal and TUIC v4/ECH/ShadowQUIC
+remain deferred. Explicit non-goals: SSR/Snell/SSH/WG servers, early
 mKCP/Mekya, panels/billing, public test authorities.
 
 ### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14

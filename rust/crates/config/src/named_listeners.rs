@@ -4,8 +4,9 @@ use crate::ConfigError;
 use crate::model::{
     Hysteria2InboundConfig, Hysteria2InboundUser, RealityInboundConfig, ShadowTlsHandshakeConfig,
     ShadowTlsUserConfig, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig,
-    ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser, VlessFlow,
-    VlessInboundConfig, VlessInboundUser, VmessInboundConfig, VmessInboundUser,
+    ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser, TuicInboundConfig,
+    TuicInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser, VmessInboundConfig,
+    VmessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -19,6 +20,7 @@ pub(crate) struct NamedListeners {
     pub vless: Vec<VlessInboundConfig>,
     pub vmess: Vec<VmessInboundConfig>,
     pub hysteria2: Vec<Hysteria2InboundConfig>,
+    pub tuic: Vec<TuicInboundConfig>,
 }
 
 pub(crate) fn parse_named_listeners(
@@ -33,6 +35,7 @@ pub(crate) fn parse_named_listeners(
             vless: Vec::new(),
             vmess: Vec::new(),
             hysteria2: Vec::new(),
+            tuic: Vec::new(),
         });
     };
     let mut shadowsocks = Vec::new();
@@ -40,6 +43,7 @@ pub(crate) fn parse_named_listeners(
     let mut vless = Vec::new();
     let mut vmess = Vec::new();
     let mut hysteria2 = Vec::new();
+    let mut tuic = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
@@ -91,6 +95,15 @@ pub(crate) fn parse_named_listeners(
                     &mut names,
                 )?);
             }
+            "tuic" => {
+                tuic.push(parse_tuic_listener(
+                    &mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
             other => {
                 return Err(ConfigError::InvalidInbound(format!(
                     "listener {index} has unsupported type: {other}"
@@ -104,6 +117,7 @@ pub(crate) fn parse_named_listeners(
         vless,
         vmess,
         hysteria2,
+        tuic,
     })
 }
 
@@ -971,6 +985,179 @@ fn parse_hysteria2_users(
     Ok(parsed)
 }
 
+fn parse_tuic_listener(
+    mapping: &Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<TuicInboundConfig, ConfigError> {
+    validate_mapping_keys(
+        mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+            "alpn",
+            "congestion-controller",
+            "max-idle-time",
+            "authentication-timeout",
+            "max-udp-relay-packet-size",
+        ],
+        &format!("listener {index}"),
+    )?;
+    // Reject deferred / v4-only knobs explicitly when present.
+    for deferred in [
+        "token",
+        "ech-key",
+        "client-auth-type",
+        "client-auth-cert",
+        "cwnd",
+        "bbr-profile",
+        "mux-option",
+    ] {
+        if mapping.contains_key(Value::from(deferred)) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {index} field `{deferred}` is not supported in IN-F TUIC first slice"
+            )));
+        }
+    }
+    let name = mapping_string(mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
+    })?;
+    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
+    })?;
+    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires non-empty certificate and private-key"
+        )));
+    }
+    let alpn = parse_hysteria2_alpn(mapping, &name)?;
+    let congestion_controller = parse_tuic_congestion(mapping, &name)?;
+    // Go listener/tuic/server.go replaces explicit 0 with the same defaults used
+    // when the key is omitted (max-idle-time 15000ms, authentication-timeout 1000ms).
+    let max_idle_time_ms = match mapping
+        .get(Value::from("max-idle-time"))
+        .and_then(Value::as_u64)
+    {
+        Some(0) | None => 15_000,
+        Some(value) => value,
+    };
+    let authentication_timeout_ms = match mapping
+        .get(Value::from("authentication-timeout"))
+        .and_then(Value::as_u64)
+    {
+        Some(0) | None => 1_000,
+        Some(value) => value,
+    };
+    let max_udp_relay_packet_size = mapping
+        .get(Value::from("max-udp-relay-packet-size"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let users = parse_tuic_users(mapping, &name)?;
+    if users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires at least one user"
+        )));
+    }
+    Ok(TuicInboundConfig {
+        name,
+        listen,
+        users,
+        certificate,
+        private_key,
+        alpn,
+        congestion_controller,
+        max_idle_time_ms,
+        authentication_timeout_ms,
+        max_udp_relay_packet_size,
+    })
+}
+
+fn parse_tuic_congestion(mapping: &Mapping, name: &str) -> Result<String, ConfigError> {
+    let Some(raw) = mapping_string(mapping, "congestion-controller") else {
+        return Ok("cubic".to_owned());
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "cubic" => Ok("cubic".to_owned()),
+        "bbr" => Ok("bbr".to_owned()),
+        "new_reno" | "new-reno" => Ok("new_reno".to_owned()),
+        "brutal" => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} brutal congestion is not supported in IN-F TUIC first slice"
+        ))),
+        other => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has unsupported congestion-controller: {other}"
+        ))),
+    }
+}
+
+fn parse_tuic_users(mapping: &Mapping, name: &str) -> Result<Vec<TuicInboundUser>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(users) = value.as_mapping() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(users.len());
+    for (uuid_key, password) in users {
+        let uuid = uuid_key
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::InvalidInbound(format!("listener {name} has invalid users uuid key"))
+            })?;
+        if uuid::Uuid::parse_str(uuid).is_err() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} has invalid users uuid: {uuid}"
+            )));
+        }
+        let password = password.as_str().map(str::to_owned).ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} user {uuid} password must be a string"
+            ))
+        })?;
+        if password.is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {uuid} password must not be empty"
+            )));
+        }
+        parsed.push(TuicInboundUser {
+            uuid: uuid.to_owned(),
+            password,
+        });
+    }
+    Ok(parsed)
+}
+
 fn parse_simple_obfs(
     mapping: &Mapping,
     name: &str,
@@ -1242,18 +1429,35 @@ pub(crate) fn validate_hysteria2_listener_ports(
     Ok(())
 }
 
+pub(crate) fn validate_tuic_listener_ports(
+    listeners: &[TuicInboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "tuic listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_named_listener_ports(
     shadowsocks: &[ShadowsocksInboundConfig],
     trojan: &[TrojanInboundConfig],
     vless: &[VlessInboundConfig],
     vmess: &[VmessInboundConfig],
     hysteria2: &[Hysteria2InboundConfig],
+    tuic: &[TuicInboundConfig],
 ) -> Result<(), ConfigError> {
     validate_shadowsocks_listener_ports(shadowsocks)?;
     validate_trojan_listener_ports(trojan)?;
     validate_vless_listener_ports(vless)?;
     validate_vmess_listener_ports(vmess)?;
     validate_hysteria2_listener_ports(hysteria2)?;
+    validate_tuic_listener_ports(tuic)?;
     let mut ports = std::collections::BTreeSet::new();
     for listener in shadowsocks {
         ports.insert((listener.listen.ip(), listener.listen.port()));
@@ -1283,6 +1487,14 @@ pub(crate) fn validate_named_listener_ports(
         }
     }
     for listener in hysteria2 {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
+                listener.listen
+            )));
+        }
+    }
+    for listener in tuic {
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener address is duplicated across inbound types: {}",

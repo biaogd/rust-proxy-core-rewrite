@@ -4220,6 +4220,7 @@ dependencies = [
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",
+ "rewrite-protocol-tuic",
  "rewrite-protocol-vless",
  "rewrite-protocol-vmess",
  "rewrite-rules",
