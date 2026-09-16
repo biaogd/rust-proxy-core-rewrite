@@ -18,7 +18,7 @@ use tokio::task::AbortHandle;
 use crate::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS,
     CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, CMD_WASTE, Frame,
-    HEADER_OVERHEAD, MAX_FRAME_DATA_LEN, encode_psh_payload, encode_settings, encode_socks_address,
+    HEADER_OVERHEAD, encode_psh_payload, encode_settings, encode_socks_address,
 };
 use crate::padding::{CHECK_MARK, PaddingFactory, SharedPadding};
 use crate::{AnyTlsConnectOptions, AnyTlsProtocolError};

@@ -443,14 +443,6 @@ impl ServerSessionInner {
         self.write_conn(&frame.encode()).await
     }
 
-    async fn write_data_frame(&self, sid: u32, data: &[u8]) -> Result<(), AnyTlsProtocolError> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        // Single encode allocation (header + payload); avoid Frame + second to_vec.
-        self.write_conn(&encode_psh_payload(sid, data)).await
-    }
-
     async fn write_encoded(&self, encoded: Vec<u8>) -> Result<(), AnyTlsProtocolError> {
         if encoded.is_empty() {
             return Ok(());
