@@ -101,11 +101,12 @@ SSR inbound.
 | VMess | **Partial — IN-E TLS + WSS + gRPC + XUDP** | `named_listeners.rs`, `runtime/vmess_listener.rs`, `protocol-vmess` AEAD Accept + XUDP framing | Yes | Standard body-record UDP on TLS; Mux/XUDP multi-dest on TLS | UUID users; `alterId` must be 0/absent | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vmess`; combined ws+grpc / Reality / nonzero alterId / mKCP/Mekya rejected |
 | Hysteria2 | **Partial — IN-F first slice** | `named_listeners.rs`, `runtime/hysteria2_listener.rs`, `protocol-hysteria2` server Accept | QUIC TCP | Direct UDP multi-session datagrams | `users` name→password | QUIC TLS (ALPN h3); optional Salamander | Yes | Named `type: hysteria2`; stock BBR; realm/gecko/ECH/masquerade/Brutal rejected |
 | TUIC v5 | **Partial — IN-F TUIC slice** | `named_listeners.rs`, `runtime/tuic_listener.rs`, `protocol-tuic` server Accept | QUIC TCP | Direct UDP associations (native + uni Packet) | `users` uuid→password | QUIC TLS (ALPN h3); cubic/bbr/new_reno | Yes | Named `type: tuic`; v4 token/ECH/client-auth/Brutal/cwnd rejected |
-| Snell / Hy2-realm / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented (Hy2/TUIC inbound above) | — | — | — | — | — | Server gates = later IN-F (ShadowQUIC) … IN-G |
+| AnyTLS | **Partial — IN-G TLS TCP first slice** | `named_listeners.rs`, `runtime/anytls_listener.rs`, `protocol-anytls` server Accept | Yes | Deferred (UoT) | `users` username→password (SHA-256) | Native TLS + optional `padding-scheme` | Yes | Named `type: anytls`; UoT/carriers/ECH/mTLS/`allow-insecure` rejected |
+| Snell / Hy2-realm / ShadowQUIC / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented (Hy2/TUIC/AnyTLS inbound above) | — | — | — | — | — | Server gates = ShadowQUIC later; others deferred |
 
-`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic`
+`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls`
 (`rust/crates/config/src/model.rs`). `InboundProtocol` today:
-`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | Tun | Inner`.
+`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls | Tun | Inner`.
 
 ## C. Shadowsocks inbound deep-dive (Rust vs Go)
 
@@ -173,7 +174,7 @@ Use these labels in later IN phases:
 | IN-09 | Trojan server | **Partial — IN-C** named TLS + WSS + gRPC TCP/UDP UoT; Reality/mux open | **IN-C** (TLS+WSS+gRPC done); Reality/mux later |
 | IN-10 | Hysteria2 (+ realm) server | Partial — Hy2 first slice | **IN-F** (Hy2 portion); realm later |
 | IN-11 | TUIC + ShadowQUIC server | Partial — TUIC v5 named inbound | **IN-F** (TUIC v5 done); ShadowQUIC later |
-| IN-12 | AnyTLS (+ Mieru/Sudoku/TrustTunnel) | Not started | **IN-G** (AnyTLS); others deferred |
+| IN-12 | AnyTLS (+ Mieru/Sudoku/TrustTunnel) | Partial — AnyTLS TLS TCP first slice | **IN-G** (AnyTLS TLS done; UoT/carriers open); others deferred |
 | IN-13 | Inbound carriers | Partial SS obfs + ShadowTLS v3 | Per-protocol IN-B…IN-G + later 7T |
 | IN-14 | Hot rebind / drain / stats | Partial — IN-H-A Trojan TLS lifecycle + SS 6C-N reload | **IN-H** (Trojan lifecycle done; other families / soak / three-platform open) |
 

@@ -4264,6 +4264,86 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn loads_named_anytls_listener_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: anytls-in
+    type: anytls
+    listen: 127.0.0.1
+    port: 18518
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      alice: phase-anytls-password
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named anytls listener");
+    assert_eq!(config.anytls_listeners.len(), 1);
+    let inbound = &config.anytls_listeners[0];
+    assert_eq!(inbound.name, "anytls-in");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(inbound.users[0].username, "alice");
+    assert_eq!(inbound.users[0].password, "phase-anytls-password");
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    assert!(inbound.padding_scheme.is_none());
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::AnyTls, 18518)));
+
+    let home = std::env::temp_dir().join("mihomo-anytls-inbound-home");
+    let resolved = Config::from_yaml_with_provider_directory(
+        r"mode: rule
+listeners:
+  - name: anytls-rel
+    type: anytls
+    listen: 127.0.0.1
+    port: 18519
+    certificate: server.crt
+    private-key: server.key
+    users:
+      bob: secret
+rules: ['MATCH,DIRECT']
+",
+        &home,
+        false,
+    )
+    .expect("relative AnyTLS PEM paths resolve against home");
+    assert_eq!(
+        resolved.anytls_listeners[0].certificate,
+        home.join("server.crt").to_string_lossy()
+    );
+    assert_eq!(
+        resolved.anytls_listeners[0].private_key,
+        home.join("server.key").to_string_lossy()
+    );
+
+    for unsupported in [
+        "ech-key: unused",
+        "client-auth-type: require-and-verify",
+        "shadow-tls:\n      enable: true",
+        "res-tls:\n      enable: true",
+        "jls-config:\n      enable: true",
+        "allow-insecure: true",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: anytls-bad\n    type: anytls\n    listen: 127.0.0.1\n    port: 18520\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      alice: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let missing_users = "mode: rule\nlisteners:\n  - name: anytls-bad\n    type: anytls\n    listen: 127.0.0.1\n    port: 18521\n    certificate: ./server.crt\n    private-key: ./server.key\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_users).is_err(),
+        "users are required"
+    );
+}
+
+#[test]
 fn loads_named_tuic_listener_and_rejects_deferred_keys() {
     let config = Config::from_yaml(
         r"mode: rule

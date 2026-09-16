@@ -87,6 +87,7 @@ pub enum InboundProtocol {
     Vmess,
     Hysteria2,
     Tuic,
+    AnyTls,
     Tun,
     Inner,
 }

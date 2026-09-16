@@ -1514,8 +1514,13 @@ ShadowQUIC.
 
 ### IN-G — AnyTLS inbound
 
-TLS, padding, session reuse, multi-stream and UDP/UoT. Prove stream isolation,
-close semantics, heartbeat, idle reclaim and malicious-frame limits.
+**TLS first slice implemented in this checkout (2026-09-16):** named
+`type: anytls` with certificate / private-key, Clash `users` username→password
+map, optional `padding-scheme` (default Go scheme), SHA-256 password auth,
+session mux (SETTINGS → SYN streams → empty SYNACK for peer v≥2), TCP via
+`serve_shadowsocks_connection`. Heartbeat request answered with response.
+Evidence: `phase_ing_anytls_tcp.py`. Deferred: UoT UDP, ShadowTLS/ResTLS/JLS,
+ECH/mTLS/`allow-insecure`, malicious-frame fuzz corpus beyond frame-size caps.
 
 ### IN-H — production acceptance
 

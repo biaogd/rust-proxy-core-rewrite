@@ -410,7 +410,7 @@ jobs:
             controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1|_inb|_ine)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase(6e_vless_|_ind_vless_)[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_|_inh_trojan_)[a-z0-9_]+\.py$' ;;
-            anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
+            anytls) SHARD_REGEX='phase(6g_anytls_|_ing_anytls_)[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_(hy2[abc]|inf_hysteria2)_.*\.py$' ;;
             tuic) SHARD_REGEX='phase(6h_tuic|_inf_tuic)_.*\.py$' ;;
             wireguard) SHARD_REGEX='phase6i_wireguard_.*\.py$' ;;
@@ -534,6 +534,7 @@ jobs:
             compat/scripts/phase6g_anytls_udp.py \
             compat/scripts/phase6g_anytls_idle.py \
             compat/scripts/phase6g_anytls_carriers.py \
+            compat/scripts/phase_ing_anytls_tcp.py \
             compat/scripts/phase6d_vmess_tcp.py \
             compat/scripts/phase6d_vmess_aead.py \
             compat/scripts/phase6d_vmess_security.py \

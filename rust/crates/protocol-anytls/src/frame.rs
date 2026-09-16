@@ -50,6 +50,74 @@ pub(crate) fn encode_settings(client_metadata: &str, padding_md5: &str) -> Vec<u
     format!("v=2\nclient={client_metadata}\npadding-md5={padding_md5}").into_bytes()
 }
 
+pub(crate) fn decode_socks_address(
+    buf: &[u8],
+) -> Result<(rewrite_model::Destination, usize), crate::AnyTlsProtocolError> {
+    use rewrite_model::{Destination, Host};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    if buf.is_empty() {
+        return Err(crate::AnyTlsProtocolError::Protocol(
+            "AnyTLS socks address is empty".to_owned(),
+        ));
+    }
+    let (host, consumed) = match buf[0] {
+        1 => {
+            if buf.len() < 1 + 4 {
+                return Err(crate::AnyTlsProtocolError::Protocol(
+                    "AnyTLS IPv4 address is truncated".to_owned(),
+                ));
+            }
+            let address = Ipv4Addr::new(buf[1], buf[2], buf[3], buf[4]);
+            (Host::Ip(IpAddr::V4(address)), 1 + 4)
+        }
+        3 => {
+            if buf.len() < 2 {
+                return Err(crate::AnyTlsProtocolError::Protocol(
+                    "AnyTLS domain address is truncated".to_owned(),
+                ));
+            }
+            let length = usize::from(buf[1]);
+            if buf.len() < 2 + length {
+                return Err(crate::AnyTlsProtocolError::Protocol(
+                    "AnyTLS domain address is truncated".to_owned(),
+                ));
+            }
+            let domain = std::str::from_utf8(&buf[2..2 + length])
+                .map_err(|error| {
+                    crate::AnyTlsProtocolError::Protocol(format!(
+                        "AnyTLS domain is not UTF-8: {error}"
+                    ))
+                })?
+                .to_owned();
+            (Host::Domain(domain), 2 + length)
+        }
+        4 => {
+            if buf.len() < 1 + 16 {
+                return Err(crate::AnyTlsProtocolError::Protocol(
+                    "AnyTLS IPv6 address is truncated".to_owned(),
+                ));
+            }
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(&buf[1..17]);
+            let address = Ipv6Addr::from(octets);
+            (Host::Ip(IpAddr::V6(address)), 1 + 16)
+        }
+        ty => {
+            return Err(crate::AnyTlsProtocolError::Protocol(format!(
+                "AnyTLS socks address type {ty} is unsupported"
+            )));
+        }
+    };
+    if buf.len() < consumed + 2 {
+        return Err(crate::AnyTlsProtocolError::Protocol(
+            "AnyTLS socks port is truncated".to_owned(),
+        ));
+    }
+    let port = u16::from_be_bytes([buf[consumed], buf[consumed + 1]]);
+    Ok((Destination { host, port }, consumed + 2))
+}
+
 pub(crate) fn encode_socks_address(
     destination: &rewrite_model::Destination,
 ) -> Result<Vec<u8>, crate::AnyTlsProtocolError> {

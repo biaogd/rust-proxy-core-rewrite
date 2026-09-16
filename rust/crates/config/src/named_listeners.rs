@@ -2,11 +2,11 @@ use serde_yaml_ng::{Mapping, Value};
 
 use crate::ConfigError;
 use crate::model::{
-    Hysteria2InboundConfig, Hysteria2InboundUser, RealityInboundConfig, ShadowTlsHandshakeConfig,
-    ShadowTlsUserConfig, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig,
-    ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser, TuicInboundConfig,
-    TuicInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser, VmessInboundConfig,
-    VmessInboundUser,
+    AnyTlsInboundConfig, AnyTlsInboundUser, Hysteria2InboundConfig, Hysteria2InboundUser,
+    RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
+    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser,
+    TuicInboundConfig, TuicInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser,
+    VmessInboundConfig, VmessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -21,6 +21,7 @@ pub(crate) struct NamedListeners {
     pub vmess: Vec<VmessInboundConfig>,
     pub hysteria2: Vec<Hysteria2InboundConfig>,
     pub tuic: Vec<TuicInboundConfig>,
+    pub anytls: Vec<AnyTlsInboundConfig>,
 }
 
 pub(crate) fn parse_named_listeners(
@@ -36,6 +37,7 @@ pub(crate) fn parse_named_listeners(
             vmess: Vec::new(),
             hysteria2: Vec::new(),
             tuic: Vec::new(),
+            anytls: Vec::new(),
         });
     };
     let mut shadowsocks = Vec::new();
@@ -44,6 +46,7 @@ pub(crate) fn parse_named_listeners(
     let mut vmess = Vec::new();
     let mut hysteria2 = Vec::new();
     let mut tuic = Vec::new();
+    let mut anytls = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
@@ -104,6 +107,15 @@ pub(crate) fn parse_named_listeners(
                     &mut names,
                 )?);
             }
+            "anytls" => {
+                anytls.push(parse_anytls_listener(
+                    &mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
             other => {
                 return Err(ConfigError::InvalidInbound(format!(
                     "listener {index} has unsupported type: {other}"
@@ -118,6 +130,7 @@ pub(crate) fn parse_named_listeners(
         vmess,
         hysteria2,
         tuic,
+        anytls,
     })
 }
 
@@ -1158,6 +1171,134 @@ fn parse_tuic_users(mapping: &Mapping, name: &str) -> Result<Vec<TuicInboundUser
     Ok(parsed)
 }
 
+fn parse_anytls_listener(
+    mapping: &Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<AnyTlsInboundConfig, ConfigError> {
+    validate_mapping_keys(
+        mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+            "padding-scheme",
+        ],
+        &format!("listener {index}"),
+    )?;
+    for deferred in [
+        "ech-key",
+        "client-auth-type",
+        "client-auth-cert",
+        "shadow-tls",
+        "res-tls",
+        "jls-config",
+        "allow-insecure",
+    ] {
+        if mapping.contains_key(Value::from(deferred)) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {index} field `{deferred}` is not supported in IN-G AnyTLS first slice"
+            )));
+        }
+    }
+    let name = mapping_string(mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
+    })?;
+    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
+    })?;
+    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires non-empty certificate and private-key"
+        )));
+    }
+    let padding_scheme = mapping_string(mapping, "padding-scheme").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let users = parse_anytls_users(mapping, &name)?;
+    if users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires at least one user"
+        )));
+    }
+    Ok(AnyTlsInboundConfig {
+        name,
+        listen,
+        users,
+        certificate,
+        private_key,
+        padding_scheme,
+    })
+}
+
+fn parse_anytls_users(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Vec<AnyTlsInboundUser>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(users) = value.as_mapping() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(users.len());
+    for (username_key, password) in users {
+        let username = username_key
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::InvalidInbound(format!(
+                    "listener {name} has invalid users username key"
+                ))
+            })?;
+        let password = password.as_str().map(str::to_owned).ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} user {username} password must be a string"
+            ))
+        })?;
+        if password.is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {username} password must not be empty"
+            )));
+        }
+        parsed.push(AnyTlsInboundUser {
+            username: username.to_owned(),
+            password,
+        });
+    }
+    Ok(parsed)
+}
+
 fn parse_simple_obfs(
     mapping: &Mapping,
     name: &str,
@@ -1444,6 +1585,21 @@ pub(crate) fn validate_tuic_listener_ports(
     Ok(())
 }
 
+pub(crate) fn validate_anytls_listener_ports(
+    listeners: &[AnyTlsInboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "anytls listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_named_listener_ports(
     shadowsocks: &[ShadowsocksInboundConfig],
     trojan: &[TrojanInboundConfig],
@@ -1451,6 +1607,7 @@ pub(crate) fn validate_named_listener_ports(
     vmess: &[VmessInboundConfig],
     hysteria2: &[Hysteria2InboundConfig],
     tuic: &[TuicInboundConfig],
+    anytls: &[AnyTlsInboundConfig],
 ) -> Result<(), ConfigError> {
     validate_shadowsocks_listener_ports(shadowsocks)?;
     validate_trojan_listener_ports(trojan)?;
@@ -1458,6 +1615,7 @@ pub(crate) fn validate_named_listener_ports(
     validate_vmess_listener_ports(vmess)?;
     validate_hysteria2_listener_ports(hysteria2)?;
     validate_tuic_listener_ports(tuic)?;
+    validate_anytls_listener_ports(anytls)?;
     let mut ports = std::collections::BTreeSet::new();
     for listener in shadowsocks {
         ports.insert((listener.listen.ip(), listener.listen.port()));
@@ -1495,6 +1653,14 @@ pub(crate) fn validate_named_listener_ports(
         }
     }
     for listener in tuic {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
+                listener.listen
+            )));
+        }
+    }
+    for listener in anytls {
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener address is duplicated across inbound types: {}",
