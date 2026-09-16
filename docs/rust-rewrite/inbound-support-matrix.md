@@ -99,13 +99,14 @@ SSR inbound.
 | Trojan | **Partial — IN-C TLS + WSS + gRPC** | `named_listeners.rs`, `runtime/trojan_listener.rs`, `protocol-trojan`, `transport` `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | UDP-over-TLS | Password users (SHA-224) | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: trojan`; combined ws+grpc / Reality / `ss-option` rejected |
 | VLESS | **Partial — IN-D TLS + Vision + WSS + gRPC + XUDP + REALITY** | `named_listeners.rs`, `runtime/vless_listener.rs`, `protocol-vless::server`, `transport` `accept_vision_tls` / `accept_reality` / `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | Standard-mode UDP on TLS; Mux/XUDP multi-dest on TLS; Vision TCP on native TLS; REALITY TCP auth Accept | UUID users + optional `flow: xtls-rprx-vision` (not with REALITY yet) | Native TLS; REALITY via `reality-config`; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vless`; combined ws+grpc rejected; REALITY dest fallback deferred |
 | VMess | **Partial — IN-E TLS + WSS + gRPC + XUDP** | `named_listeners.rs`, `runtime/vmess_listener.rs`, `protocol-vmess` AEAD Accept + XUDP framing | Yes | Standard body-record UDP on TLS; Mux/XUDP multi-dest on TLS | UUID users; `alterId` must be 0/absent | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vmess`; combined ws+grpc / Reality / nonzero alterId / mKCP/Mekya rejected |
-| Snell / Hy2 / realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented | — | — | — | — | — | Server gates = IN-F…IN-G |
+| Hysteria2 | **Partial — IN-F first slice** | `named_listeners.rs`, `runtime/hysteria2_listener.rs`, `protocol-hysteria2` server Accept | QUIC TCP | Direct UDP multi-session datagrams | `users` name→password | QUIC TLS (ALPN h3); optional Salamander | Yes | Named `type: hysteria2`; stock BBR; realm/gecko/ECH/masquerade/Brutal rejected |
+| Snell / Hy2-realm / TUIC / ShadowQUIC / AnyTLS / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented (Hy2 inbound above) | — | — | — | — | — | Server gates = IN-F (TUIC) … IN-G |
 | Inbound Reality / ReSTLS / JLS / WS / H2 / gRPC / xHTTP / mKCP / Mekya / mux | Missing as inbound | — | — | — | — | ShadowTLS v3 on SS; Trojan TLS + WS + Gun; VLESS TLS + Vision + WS + Gun + REALITY; VMess TLS + WS + Gun | — | `IN-13` |
 | WG / SSH / SSR inbound | Missing | — | — | — | — | — | — | Same as Go (no server) |
 
-`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks | Trojan | Vless | Vmess`
+`ListenerKind` today: `Http | Socks | Mixed | Shadowsocks | Trojan | Vless | Vmess | Hysteria2`
 (`rust/crates/config/src/model.rs`). `InboundProtocol` today:
-`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Tun | Inner`.
+`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tun | Inner`.
 
 ## C. Shadowsocks inbound deep-dive (Rust vs Go)
 
@@ -171,7 +172,7 @@ Use these labels in later IN phases:
 | IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |
 | IN-08 | VMess + VLESS server | VLESS **Partial — IN-D** TLS+WSS+gRPC+XUDP+Vision+REALITY; VMess **Partial — IN-E** TLS+WSS+gRPC+XUDP (AEAD alterId 0) | **IN-D** / **IN-E** (declared carriers done; Reality dest fallback / legacy alterId open) |
 | IN-09 | Trojan server | **Partial — IN-C** named TLS + WSS + gRPC TCP/UDP UoT; Reality/mux open | **IN-C** (TLS+WSS+gRPC done); Reality/mux later |
-| IN-10 | Hysteria2 (+ realm) server | Not started | **IN-F** (Hy2 portion) |
+| IN-10 | Hysteria2 (+ realm) server | Partial — Hy2 first slice | **IN-F** (Hy2 portion); realm later |
 | IN-11 | TUIC + ShadowQUIC server | Not started | **IN-F** (TUIC v5); ShadowQUIC later |
 | IN-12 | AnyTLS (+ Mieru/Sudoku/TrustTunnel) | Not started | **IN-G** (AnyTLS); others deferred |
 | IN-13 | Inbound carriers | Partial SS obfs + ShadowTLS v3 | Per-protocol IN-B…IN-G + later 7T |

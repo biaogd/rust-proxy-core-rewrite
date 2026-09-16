@@ -6,14 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rewrite_config::{
-    Config, ConfigError, ListenerKind, ProxyGroupKind, ShadowsocksInboundConfig,
-    TrojanInboundConfig, VlessInboundConfig, VmessInboundConfig,
+    Config, ConfigError, Hysteria2InboundConfig, ListenerKind, ProxyGroupKind,
+    ShadowsocksInboundConfig, TrojanInboundConfig, VlessInboundConfig, VmessInboundConfig,
 };
 use rewrite_state::RuntimeState;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::hysteria2_listener::{Hysteria2Listener, run_hysteria2_listener};
 use crate::listener::run_listener;
 use crate::services::hydrate_http_proxy_providers;
 use crate::shadowsocks_listener::{ShadowsocksListener, run_shadowsocks_listener};
@@ -32,6 +33,7 @@ struct PreparedGeneration {
     trojan: Vec<(ListenerKey, TrojanListener)>,
     vless: Vec<(ListenerKey, VlessListener)>,
     vmess: Vec<(ListenerKey, VmessListener)>,
+    hysteria2: Vec<(ListenerKey, Hysteria2Listener)>,
     controllers: Vec<PreparedController>,
     dns: Option<(SocketAddr, TcpListener, UdpSocket)>,
     retired_listeners: Vec<ListenerKey>,
@@ -47,6 +49,7 @@ impl PreparedGeneration {
         self.trojan.clear();
         self.vless.clear();
         self.vmess.clear();
+        self.hysteria2.clear();
         self.controllers.clear();
         self.dns = None;
     }
@@ -151,6 +154,12 @@ async fn apply_generation_inner(
                     .vmess_listener_for_port(port)
                     .map_or_else(String::new, VmessInboundConfig::reload_identity);
                 Ok((kind, port, address, identity))
+            } else if kind == ListenerKind::Hysteria2 {
+                let address = next.hysteria2_listen_address(port)?;
+                let identity = next
+                    .hysteria2_listener_for_port(port)
+                    .map_or_else(String::new, Hysteria2InboundConfig::reload_identity);
+                Ok((kind, port, address, identity))
             } else {
                 next.listener_address(port)
                     .map(|address| (kind, port, address, String::new()))
@@ -216,6 +225,15 @@ async fn apply_generation_inner(
             };
             let listener = VmessListener::bind(vmess, state.clock()).await?;
             prepared.vmess.push((key, listener));
+            continue;
+        }
+
+        if kind == ListenerKind::Hysteria2 {
+            let Some(hysteria2) = next.hysteria2_listener_for_port(port) else {
+                continue;
+            };
+            let listener = Hysteria2Listener::bind(hysteria2).await?;
+            prepared.hysteria2.push((key, listener));
             continue;
         }
 
@@ -336,6 +354,17 @@ async fn apply_generation_inner(
 
     for (key, listener) in std::mem::take(&mut prepared.vmess) {
         spawn_vmess_listener(
+            key,
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+
+    for (key, listener) in std::mem::take(&mut prepared.hysteria2) {
+        spawn_hysteria2_listener(
             key,
             listener,
             config_receiver,
@@ -484,6 +513,21 @@ async fn restore_retired_sockets(
             };
             let listener = VmessListener::bind(vmess, state.clock()).await?;
             spawn_vmess_listener(
+                key,
+                listener,
+                config_receiver,
+                state,
+                dns_service,
+                listeners,
+            );
+            continue;
+        }
+        if kind == ListenerKind::Hysteria2 {
+            let Some(hysteria2) = previous.hysteria2_listener_for_port(port) else {
+                continue;
+            };
+            let listener = Hysteria2Listener::bind(hysteria2).await?;
+            spawn_hysteria2_listener(
                 key,
                 listener,
                 config_receiver,
@@ -703,6 +747,38 @@ fn spawn_vmess_listener(
     let task_dns_service = Arc::clone(dns_service);
     let handle = tokio::spawn(async move {
         run_vmess_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_hysteria2_listener(
+    key: ListenerKey,
+    listener: Hysteria2Listener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_hysteria2_listener(
             listener,
             task_config,
             task_state,

@@ -1,14 +1,18 @@
-//! Hysteria2 client protocol: HTTP/3 auth + custom QUIC TCP streams (HY2-A),
-//! plus UDP datagrams, Salamander/port-hop, and Brutal congestion (HY2-B).
+//! Hysteria2 client and server protocol: HTTP/3 auth + custom QUIC TCP streams
+//! (HY2-A), UDP datagrams, Salamander/port-hop, and Brutal congestion (HY2-B).
 //!
 //! Congestion: stock Quinn `BbrConfig` is used when `up`/`down` are unset (Go
 //! default). Brutal is available when upload bandwidth is configured.
+//!
+//! Server Accept (IN-F): [`server`] owns wire auth/TCP/UDP framing; runtime owns
+//! listen/route.
 
 mod auth;
 mod bps;
 mod client;
 mod congestion;
 mod salamander;
+mod server;
 mod socket;
 mod tcp;
 mod udp;
@@ -16,8 +20,17 @@ mod varint;
 
 pub use bps::{parse_bps, parse_hop_interval, parse_ports};
 pub use client::{Client, ClientOptions, Session, TlsOptions};
+pub use server::{
+    AuthenticatedIncoming, H3ConnectionGuard, Hysteria2ServerStream, ServerAuthOptions,
+    ServerAuthResult, ServerEndpointOptions, accept_tcp_request, auth_password_from_headers,
+    authenticate_incoming, bind_server_endpoint, encode_tcp_request, encode_tcp_response,
+    encode_tcp_response_ok, is_auth_request, load_pem_or_path, lookup_user,
+    parse_destination_authority, parse_tcp_request, password_user_table,
+};
 pub use tcp::Hysteria2Stream;
-pub use udp::UdpSession;
+pub use udp::{
+    Defragger, MAX_DATAGRAM_FRAME_SIZE, MAX_UDP_SIZE, UdpMessage, UdpSession, frag_udp_message,
+};
 
 use thiserror::Error;
 

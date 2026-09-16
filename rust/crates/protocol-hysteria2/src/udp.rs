@@ -27,9 +27,9 @@ use crate::Hysteria2ProtocolError;
 use crate::varint::read_from;
 
 /// Largest reassembled UDP payload buffer (Go `MaxUDPSize`).
-pub(crate) const MAX_UDP_SIZE: usize = 4096;
+pub const MAX_UDP_SIZE: usize = 4096;
 /// Largest QUIC datagram frame Hysteria2 advertises (Go `MaxDatagramFrameSize`).
-pub(crate) const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
+pub const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
 /// Denial-of-service guard on address string length (Go `MaxMessageLength`).
 pub(crate) const MAX_MESSAGE_LENGTH: u64 = 2048;
 /// Per-session inbound queue depth (Go `udpMessageChanSize`).
@@ -49,7 +49,7 @@ const MAX_DEFRAG_PACKETS: usize = 64;
 /// `SessionID(u32) | PacketID(u16) | FragID(u8) | FragCount(u8) |
 ///  varint(addr_len) | addr | data`
 #[derive(Clone, Debug)]
-pub(crate) struct UdpMessage {
+pub struct UdpMessage {
     pub session_id: u32,
     pub packet_id: u16,
     pub frag_id: u8,
@@ -165,7 +165,7 @@ fn put_varint(buf: &mut [u8], v: u64) -> usize {
 /// Split a UDP message into fragments no larger than `max_size` bytes on the
 /// wire (Go `FragUDPMessage`). Returns the fragments in order, or an empty
 /// vec if even a single header doesn't fit.
-pub(crate) fn frag_udp_message(m: &UdpMessage, max_size: usize) -> Vec<UdpMessage> {
+pub fn frag_udp_message(m: &UdpMessage, max_size: usize) -> Vec<UdpMessage> {
     if m.size() <= max_size {
         return vec![m.clone()];
     }
@@ -221,7 +221,7 @@ impl PacketAssembly {
 /// different packet IDs no longer wipe each other. Age, packet-count, and
 /// buffered-byte caps prevent unbounded growth.
 #[derive(Default)]
-pub(crate) struct Defragger {
+pub struct Defragger {
     packets: HashMap<u16, PacketAssembly>,
     /// Insertion / touch order for eviction (oldest first).
     order: VecDeque<u16>,

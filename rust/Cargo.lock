@@ -4013,6 +4013,7 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.10.2",
+ "rcgen",
  "rewrite-io",
  "rewrite-model",
  "rewrite-platform",
@@ -4199,6 +4200,7 @@ dependencies = [
 name = "rewrite-runtime"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "ipnet",
  "notify",
@@ -4215,6 +4217,7 @@ dependencies = [
  "rewrite-net",
  "rewrite-outbound",
  "rewrite-platform",
+ "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",
  "rewrite-protocol-vless",

@@ -20,12 +20,15 @@ rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
 rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }
+rewrite-protocol-hysteria2 = { path = "../protocol-hysteria2" }
 rewrite-rules = { path = "../rules" }
 rewrite-services = { path = "../services" }
 rewrite-state = { path = "../state" }
 rewrite-transport = { path = "../transport" }
 rewrite-tun = { path = "../tun" }
 shadowsocks.workspace = true
+bytes.workspace = true
+quinn.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 psl.workspace = true

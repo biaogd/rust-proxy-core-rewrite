@@ -411,7 +411,7 @@ jobs:
             vless) SHARD_REGEX='phase(6e_vless_|_ind_vless_)[a-z0-9_]+\.py$' ;;
             trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_)[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
-            hysteria2) SHARD_REGEX='phase_hy2[abc]_.*\.py$' ;;
+            hysteria2) SHARD_REGEX='phase_(hy2[abc]|inf_hysteria2)_.*\.py$' ;;
             tuic) SHARD_REGEX='phase6h_tuic_.*\.py$' ;;
             wireguard) SHARD_REGEX='phase6i_wireguard_.*\.py$' ;;
             snell) SHARD_REGEX='phase7e_snell_.*\.py$' ;;
@@ -428,6 +428,8 @@ jobs:
           compat/scripts/phase_hy2b_brutal_rate.py \
           compat/scripts/phase_hy2c_hysteria2.py \
           compat/scripts/phase_hy2c_hysteria2_soak.py \
+          compat/scripts/phase_inf_hysteria2_tcp.py \
+          compat/scripts/phase_inf_hysteria2_udp.py \
           compat/scripts/phase6h_tuic_tcp.py \
           compat/scripts/phase6h_tuic_udp.py \
           compat/scripts/phase6h_tuic_lifecycle.py \

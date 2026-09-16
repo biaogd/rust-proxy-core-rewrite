@@ -111,6 +111,7 @@ impl From<&Metadata> for MetadataSnapshot {
             InboundProtocol::Trojan => "Trojan",
             InboundProtocol::Vless => "Vless",
             InboundProtocol::Vmess => "Vmess",
+            InboundProtocol::Hysteria2 => "Hysteria2",
             InboundProtocol::Tun => "TUN",
             InboundProtocol::Inner => "Inner",
         };

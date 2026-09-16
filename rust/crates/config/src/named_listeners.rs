@@ -2,10 +2,10 @@ use serde_yaml_ng::{Mapping, Value};
 
 use crate::ConfigError;
 use crate::model::{
-    RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
-    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
-    TrojanInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser, VmessInboundConfig,
-    VmessInboundUser,
+    Hysteria2InboundConfig, Hysteria2InboundUser, RealityInboundConfig, ShadowTlsHandshakeConfig,
+    ShadowTlsUserConfig, ShadowsocksInboundConfig, ShadowsocksShadowTlsConfig,
+    ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser, VlessFlow,
+    VlessInboundConfig, VlessInboundUser, VmessInboundConfig, VmessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,
@@ -18,6 +18,7 @@ pub(crate) struct NamedListeners {
     pub trojan: Vec<TrojanInboundConfig>,
     pub vless: Vec<VlessInboundConfig>,
     pub vmess: Vec<VmessInboundConfig>,
+    pub hysteria2: Vec<Hysteria2InboundConfig>,
 }
 
 pub(crate) fn parse_named_listeners(
@@ -31,12 +32,14 @@ pub(crate) fn parse_named_listeners(
             trojan: Vec::new(),
             vless: Vec::new(),
             vmess: Vec::new(),
+            hysteria2: Vec::new(),
         });
     };
     let mut shadowsocks = Vec::new();
     let mut trojan = Vec::new();
     let mut vless = Vec::new();
     let mut vmess = Vec::new();
+    let mut hysteria2 = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
@@ -79,6 +82,15 @@ pub(crate) fn parse_named_listeners(
                     &mut names,
                 )?);
             }
+            "hysteria2" => {
+                hysteria2.push(parse_hysteria2_listener(
+                    &mapping,
+                    index,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
             other => {
                 return Err(ConfigError::InvalidInbound(format!(
                     "listener {index} has unsupported type: {other}"
@@ -91,6 +103,7 @@ pub(crate) fn parse_named_listeners(
         trojan,
         vless,
         vmess,
+        hysteria2,
     })
 }
 
@@ -783,6 +796,181 @@ fn parse_vmess_users(mapping: &Mapping, name: &str) -> Result<Vec<VmessInboundUs
     Ok(parsed)
 }
 
+fn parse_hysteria2_listener(
+    mapping: &Mapping,
+    index: usize,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<Hysteria2InboundConfig, ConfigError> {
+    validate_mapping_keys(
+        mapping,
+        &[
+            "name",
+            "type",
+            "listen",
+            "port",
+            "users",
+            "certificate",
+            "private-key",
+            "alpn",
+            "obfs",
+            "obfs-password",
+        ],
+        &format!("listener {index}"),
+    )?;
+    let name = mapping_string(mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
+    })?;
+    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
+        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
+    })?;
+    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires non-empty certificate and private-key"
+        )));
+    }
+    let alpn = parse_hysteria2_alpn(mapping, &name)?;
+    let obfs_password = parse_hysteria2_obfs(mapping, &name)?;
+    let users = parse_hysteria2_users(mapping, &name)?;
+    if users.is_empty() {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} requires at least one user"
+        )));
+    }
+    Ok(Hysteria2InboundConfig {
+        name,
+        listen,
+        users,
+        certificate,
+        private_key,
+        alpn,
+        obfs_password,
+    })
+}
+
+fn parse_hysteria2_alpn(mapping: &Mapping, name: &str) -> Result<Vec<String>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("alpn")) else {
+        return Ok(Vec::new());
+    };
+    if let Some(single) = value.as_str() {
+        let trimmed = single.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![trimmed.to_owned()]);
+    }
+    let Some(items) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid alpn configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Some(proto) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} alpn entry {index} is invalid"
+            )));
+        };
+        parsed.push(proto.to_owned());
+    }
+    Ok(parsed)
+}
+
+fn parse_hysteria2_obfs(mapping: &Mapping, name: &str) -> Result<Option<String>, ConfigError> {
+    let obfs = mapping_string(mapping, "obfs");
+    let password = mapping_string(mapping, "obfs-password");
+    match (obfs.as_deref(), password) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has obfs-password without obfs"
+        ))),
+        (Some(""), _) => Ok(None),
+        (Some("salamander"), Some(password)) => {
+            if password.len() < 4 {
+                return Err(ConfigError::InvalidInbound(format!(
+                    "listener {name} salamander obfs-password must be at least 4 bytes"
+                )));
+            }
+            Ok(Some(password))
+        }
+        (Some("salamander"), None) => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} is missing obfs-password"
+        ))),
+        (Some("gecko"), _) => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} gecko obfs is not supported in IN-F first slice"
+        ))),
+        (Some(other), _) => Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has unsupported obfs type: {other}"
+        ))),
+    }
+}
+
+fn parse_hysteria2_users(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Vec<Hysteria2InboundUser>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(Vec::new());
+    };
+    let Some(users) = value.as_mapping() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut parsed = Vec::with_capacity(users.len());
+    for (username, password) in users {
+        let username = username
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::InvalidInbound(format!(
+                    "listener {name} has invalid users username key"
+                ))
+            })?;
+        let password = password.as_str().map(str::to_owned).ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} user {username} password must be a string"
+            ))
+        })?;
+        if password.is_empty() {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {username} password must not be empty"
+            )));
+        }
+        parsed.push(Hysteria2InboundUser {
+            username: username.to_owned(),
+            password,
+        });
+    }
+    Ok(parsed)
+}
+
 fn parse_simple_obfs(
     mapping: &Mapping,
     name: &str,
@@ -1039,16 +1227,33 @@ pub(crate) fn validate_vmess_listener_ports(
     Ok(())
 }
 
+pub(crate) fn validate_hysteria2_listener_ports(
+    listeners: &[Hysteria2InboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "hysteria2 listener address is duplicated: {}",
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_named_listener_ports(
     shadowsocks: &[ShadowsocksInboundConfig],
     trojan: &[TrojanInboundConfig],
     vless: &[VlessInboundConfig],
     vmess: &[VmessInboundConfig],
+    hysteria2: &[Hysteria2InboundConfig],
 ) -> Result<(), ConfigError> {
     validate_shadowsocks_listener_ports(shadowsocks)?;
     validate_trojan_listener_ports(trojan)?;
     validate_vless_listener_ports(vless)?;
     validate_vmess_listener_ports(vmess)?;
+    validate_hysteria2_listener_ports(hysteria2)?;
     let mut ports = std::collections::BTreeSet::new();
     for listener in shadowsocks {
         ports.insert((listener.listen.ip(), listener.listen.port()));
@@ -1070,6 +1275,14 @@ pub(crate) fn validate_named_listener_ports(
         }
     }
     for listener in vmess {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
+                listener.listen
+            )));
+        }
+    }
+    for listener in hysteria2 {
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener address is duplicated across inbound types: {}",

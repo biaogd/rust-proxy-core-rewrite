@@ -1498,6 +1498,12 @@ multi-stream limits, congestion configuration, connection recovery and
 resource-pressure behavior. ShadowQUIC and Hysteria2-realm stay later unless
 explicitly pulled forward.
 
+**Hysteria2 first slice (implemented in this checkout):** named `type: hysteria2`
+with certificate/private-key, users map, optional ALPN/`obfs: salamander`,
+HTTP/3 `/auth` Accept, TCP relay, Direct UDP datagram sessions, stock BBR.
+Evidence: `phase_inf_hysteria2_tcp.py`. Deferred in this slice: realm, gecko,
+ECH, masquerade, Brutal accuracy, TUIC inbound.
+
 ### IN-G — AnyTLS inbound
 
 TLS, padding, session reuse, multi-stream and UDP/UoT. Prove stream isolation,
