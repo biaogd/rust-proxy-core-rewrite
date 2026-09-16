@@ -46,11 +46,46 @@ const HY2_UDP_SESSION_IDLE: Duration = Duration::from_secs(60);
 const HY2_UDP_IDLE_SWEEP: Duration = Duration::from_secs(10);
 const HY2_UDP_MTU: usize = 1197;
 
-/// One Hy2 UDP session: client datagram channel, idle clock, and cancel token.
+/// One Hy2 UDP session: client datagram channel, idle clock, cancel token, and
+/// a generation id so a retiring worker cannot wipe a recreated same-ID slot.
 struct Hy2UdpSessionSlot {
     tx: mpsc::Sender<UdpMessage>,
     last_used: Instant,
     cancel: CancellationToken,
+    generation: u64,
+}
+
+/// Remove `session_id` only when the map still holds `generation` (this worker's
+/// instance). Prevents an evicted worker from deleting a recreated slot.
+async fn remove_udp_session_if_owner(
+    sessions: &tokio::sync::Mutex<HashMap<u32, Hy2UdpSessionSlot>>,
+    defrag_by_session: &tokio::sync::Mutex<HashMap<u32, Defragger>>,
+    session_id: u32,
+    generation: u64,
+) {
+    let mut sessions = sessions.lock().await;
+    let is_owner = sessions
+        .get(&session_id)
+        .is_some_and(|slot| slot.generation == generation);
+    if !is_owner {
+        return;
+    }
+    sessions.remove(&session_id);
+    drop(sessions);
+    defrag_by_session.lock().await.remove(&session_id);
+}
+
+/// Refresh idle clock when this generation still owns the slot.
+fn touch_udp_session(
+    sessions: &mut HashMap<u32, Hy2UdpSessionSlot>,
+    session_id: u32,
+    generation: u64,
+) {
+    if let Some(slot) = sessions.get_mut(&session_id) {
+        if slot.generation == generation {
+            slot.last_used = Instant::now();
+        }
+    }
 }
 
 /// Feed a datagram into the per-session defragger, capping orphan entries at
@@ -430,6 +465,7 @@ async fn serve_hysteria2_udp(
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let defrag_by_session: Arc<tokio::sync::Mutex<HashMap<u32, Defragger>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let next_generation = Arc::new(std::sync::atomic::AtomicU64::new(1));
     let mut workers = JoinSet::new();
     let mut idle_sweep = tokio::time::interval(HY2_UDP_IDLE_SWEEP);
     idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -473,6 +509,7 @@ async fn serve_hysteria2_udp(
                 }
                 let (tx, rx) = mpsc::channel(HY2_UDP_SESSION_CHAN);
                 let session_cancel = shutdown.child_token();
+                let generation = next_generation.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.try_send(message);
                 guard.insert(
                     session_id,
@@ -480,6 +517,7 @@ async fn serve_hysteria2_udp(
                         tx,
                         last_used: Instant::now(),
                         cancel: session_cancel.clone(),
+                        generation,
                     },
                 );
                 drop(guard);
@@ -495,6 +533,7 @@ async fn serve_hysteria2_udp(
                     serve_hysteria2_udp_session(
                         session_connection,
                         session_id,
+                        generation,
                         rx,
                         peer,
                         local,
@@ -503,10 +542,16 @@ async fn serve_hysteria2_udp(
                         session_config,
                         session_state,
                         session_cancel,
+                        Arc::clone(&session_map),
                     )
                     .await;
-                    session_map.lock().await.remove(&session_id);
-                    defrag_map.lock().await.remove(&session_id);
+                    remove_udp_session_if_owner(
+                        &session_map,
+                        &defrag_map,
+                        session_id,
+                        generation,
+                    )
+                    .await;
                 });
             }
             Some(_) = workers.join_next() => {}
@@ -520,6 +565,7 @@ async fn serve_hysteria2_udp(
 async fn serve_hysteria2_udp_session(
     connection: quinn::Connection,
     session_id: u32,
+    generation: u64,
     mut rx: mpsc::Receiver<UdpMessage>,
     peer: SocketAddr,
     local: SocketAddr,
@@ -528,6 +574,7 @@ async fn serve_hysteria2_udp_session(
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     shutdown: CancellationToken,
+    sessions: Arc<tokio::sync::Mutex<HashMap<u32, Hy2UdpSessionSlot>>>,
 ) {
     let first = tokio::select! {
         () = shutdown.cancelled() => return,
@@ -566,6 +613,7 @@ async fn serve_hysteria2_udp_session(
     serve_hysteria2_udp_direct(
         connection,
         session_id,
+        generation,
         rx,
         first,
         packet_metadata,
@@ -574,6 +622,7 @@ async fn serve_hysteria2_udp_session(
         &config,
         &state,
         &shutdown,
+        &sessions,
     )
     .await;
 }
@@ -631,6 +680,7 @@ async fn route_hy2_udp_datagram(
 async fn serve_hysteria2_udp_direct(
     connection: quinn::Connection,
     session_id: u32,
+    generation: u64,
     mut rx: mpsc::Receiver<UdpMessage>,
     first: UdpMessage,
     first_metadata: Metadata,
@@ -639,6 +689,7 @@ async fn serve_hysteria2_udp_direct(
     config: &Config,
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
+    sessions: &tokio::sync::Mutex<HashMap<u32, Hy2UdpSessionSlot>>,
 ) {
     let outbound = match crate::listener::bind_direct_udp_socket(target, config) {
         Ok(socket) => socket,
@@ -687,6 +738,8 @@ async fn serve_hysteria2_udp_direct(
                     break;
                 }
                 downloaded = downloaded.saturating_add(length as u64);
+                // Downstream success counts as activity (push / long-lived replies).
+                touch_udp_session(&mut *sessions.lock().await, session_id, generation);
             }
             message = rx.recv() => {
                 let Some(message) = message else { break };
@@ -703,6 +756,7 @@ async fn serve_hysteria2_udp_direct(
                 };
                 if outbound.send_to(&message.data, next_target).await.is_ok() {
                     uploaded = uploaded.saturating_add(message.data.len() as u64);
+                    touch_udp_session(&mut *sessions.lock().await, session_id, generation);
                 }
             }
         }
@@ -793,6 +847,7 @@ mod hy2_udp_tests {
                     tx,
                     last_used: Instant::now(),
                     cancel: CancellationToken::new(),
+                    generation: u64::from(session_id) + 1,
                 },
             );
             assert!(
@@ -823,6 +878,7 @@ mod hy2_udp_tests {
                 tx,
                 last_used: Instant::now(),
                 cancel: CancellationToken::new(),
+                generation: 1,
             },
         )]);
         for session_id in 0..HY2_MAX_UDP_SESSIONS as u32 {
@@ -858,6 +914,7 @@ mod hy2_udp_tests {
                 tx,
                 last_used: Instant::now(),
                 cancel: cancel.clone(),
+                generation: 7,
             },
         );
         defrag.insert(42, Defragger::default());
@@ -866,5 +923,104 @@ mod hy2_udp_tests {
         assert!(sessions.is_empty(), "idle session must be removed");
         assert!(defrag.is_empty(), "idle defrag entry must be removed");
         assert!(cancel.is_cancelled(), "idle eviction must cancel the token");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn old_worker_cleanup_does_not_remove_recreated_session() {
+        let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let defrag = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let session_id = 9_u32;
+        let old_cancel = CancellationToken::new();
+        {
+            let (tx, _rx) = mpsc::channel(1);
+            sessions.lock().await.insert(
+                session_id,
+                Hy2UdpSessionSlot {
+                    tx,
+                    last_used: Instant::now(),
+                    cancel: old_cancel.clone(),
+                    generation: 1,
+                },
+            );
+            defrag.lock().await.insert(session_id, Defragger::default());
+        }
+
+        // Idle eviction cancels the old worker and clears the slot.
+        {
+            let mut sessions_guard = sessions.lock().await;
+            let mut defrag_guard = defrag.lock().await;
+            tokio::time::advance(HY2_UDP_SESSION_IDLE + Duration::from_secs(1)).await;
+            evict_idle_udp_sessions(&mut sessions_guard, &mut defrag_guard, HY2_UDP_SESSION_IDLE);
+        }
+        assert!(old_cancel.is_cancelled());
+        assert!(sessions.lock().await.is_empty());
+
+        // Immediate recreate under the same session id with a new generation.
+        let new_cancel = CancellationToken::new();
+        {
+            let (tx, _rx) = mpsc::channel(1);
+            sessions.lock().await.insert(
+                session_id,
+                Hy2UdpSessionSlot {
+                    tx,
+                    last_used: Instant::now(),
+                    cancel: new_cancel.clone(),
+                    generation: 2,
+                },
+            );
+            defrag.lock().await.insert(session_id, Defragger::default());
+        }
+
+        // Old worker exit must not wipe the recreated slot / defrag state.
+        remove_udp_session_if_owner(&sessions, &defrag, session_id, 1).await;
+        let sessions_guard = sessions.lock().await;
+        let slot = sessions_guard
+            .get(&session_id)
+            .expect("recreated session must survive old worker cleanup");
+        assert_eq!(slot.generation, 2);
+        assert!(!new_cancel.is_cancelled());
+        drop(sessions_guard);
+        assert!(
+            defrag.lock().await.contains_key(&session_id),
+            "recreated defrag must survive old worker cleanup"
+        );
+
+        // Matching generation still cleans up.
+        remove_udp_session_if_owner(&sessions, &defrag, session_id, 2).await;
+        assert!(sessions.lock().await.is_empty());
+        assert!(defrag.lock().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn downlink_touch_keeps_session_from_idle_eviction() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sessions = HashMap::new();
+        let mut defrag = HashMap::new();
+        sessions.insert(
+            3,
+            Hy2UdpSessionSlot {
+                tx,
+                last_used: Instant::now(),
+                cancel: CancellationToken::new(),
+                generation: 11,
+            },
+        );
+        defrag.insert(3, Defragger::default());
+        tokio::time::advance(HY2_UDP_SESSION_IDLE - Duration::from_secs(5)).await;
+        touch_udp_session(&mut sessions, 3, 11);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        evict_idle_udp_sessions(&mut sessions, &mut defrag, HY2_UDP_SESSION_IDLE);
+        assert!(
+            sessions.contains_key(&3),
+            "fresh downlink activity must refresh idle clock"
+        );
+        // Wrong generation must not refresh.
+        tokio::time::advance(HY2_UDP_SESSION_IDLE + Duration::from_secs(1)).await;
+        touch_udp_session(&mut sessions, 3, 99);
+        evict_idle_udp_sessions(&mut sessions, &mut defrag, HY2_UDP_SESSION_IDLE);
+        assert!(
+            sessions.is_empty(),
+            "stale generation must not prevent idle eviction"
+        );
     }
 }
