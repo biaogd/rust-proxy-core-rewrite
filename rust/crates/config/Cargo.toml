@@ -12,6 +12,7 @@ http.workspace = true
 fancy-regex.workspace = true
 ipnet.workspace = true
 md-5.workspace = true
+sha2.workspace = true
 network-interface.workspace = true
 prost.workspace = true
 regex.workspace = true

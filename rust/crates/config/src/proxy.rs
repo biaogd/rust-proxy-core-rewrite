@@ -1693,6 +1693,18 @@ fn parse_anytls_carrier(
 }
 
 #[allow(clippy::too_many_lines)]
+fn trojan_password_key(password: &str) -> [u8; 56] {
+    use sha2::{Digest as _, Sha224};
+    let digest = Sha224::digest(password.as_bytes());
+    let mut out = [0_u8; 56];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in digest.iter().enumerate() {
+        out[index * 2] = HEX[usize::from(byte >> 4)];
+        out[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+    }
+    out
+}
+
 fn parse_trojan_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, ConfigError> {
     let dialer_proxy = take_dialer_proxy(&mut proxy);
     let network = proxy.network.as_deref().unwrap_or("tcp");
@@ -1845,6 +1857,7 @@ fn parse_trojan_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, 
         vmess: None,
         vless: None,
         trojan: Some(TrojanProxyConfig {
+            password_key: trojan_password_key(&password),
             password,
             alpn,
             transport,

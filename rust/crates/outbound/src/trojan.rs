@@ -36,3 +36,17 @@ pub fn connect_trojan_on_stream(
     rewrite_protocol_trojan::connect_trojan_on_stream(remote, destination, password)
         .map_err(Into::into)
 }
+
+/// Starts a Trojan TCP request using a precomputed password key.
+///
+/// # Errors
+///
+/// Returns a protocol error when the destination cannot be encoded.
+pub fn connect_trojan_on_stream_with_key(
+    remote: BoxedOutboundStream,
+    destination: &Destination,
+    password_key: &[u8; 56],
+) -> Result<BoxedOutboundStream, TrojanProxyError> {
+    rewrite_protocol_trojan::connect_trojan_on_stream_with_key(remote, destination, password_key)
+        .map_err(Into::into)
+}

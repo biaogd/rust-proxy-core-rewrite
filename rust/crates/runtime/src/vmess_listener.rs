@@ -233,7 +233,7 @@ impl VmessListener {
         config: &VmessInboundConfig,
         clock: Arc<rewrite_services::AdjustedClock>,
     ) -> Result<Self, RuntimeError> {
-        let tls = rewrite_controller::prepare_tls_config(
+        let mut tls = rewrite_controller::prepare_tls_config(
             &ControllerTls {
                 certificate: config.certificate.clone(),
                 private_key: config.private_key.clone(),
@@ -244,6 +244,11 @@ impl VmessListener {
             clock,
         )
         .map_err(RuntimeError::Listener)?;
+        rewrite_controller::apply_inbound_alpn(
+            &mut tls,
+            config.ws_path.is_some(),
+            config.grpc_service_name.is_some(),
+        );
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;

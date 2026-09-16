@@ -76,7 +76,7 @@ pub use ssr::{
 };
 pub use trojan::{
     TrojanProxyError, TrojanUdpAssociation, associate_trojan_udp_on_stream,
-    connect_trojan_on_stream,
+    connect_trojan_on_stream, connect_trojan_on_stream_with_key,
 };
 pub use tuic::{TuicClient, TuicProxyError, TuicUdpAssociation, associate_tuic_udp};
 pub use vless::{

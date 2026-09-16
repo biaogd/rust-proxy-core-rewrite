@@ -76,9 +76,24 @@ pub fn connect_trojan_on_stream(
     destination: &Destination,
     password: &str,
 ) -> Result<BoxedStream, TrojanProtocolError> {
+    connect_trojan_on_stream_with_key(remote, destination, &password_key(password))
+}
+
+/// Like [`connect_trojan_on_stream`], but uses a precomputed SHA-224 hex key
+/// (Go `hexPassword`) so dials avoid hashing the password again.
+///
+/// # Errors
+///
+/// Returns [`TrojanProtocolError::DomainTooLong`] when a domain cannot fit in
+/// the SOCKS address used by the Trojan wire format.
+pub fn connect_trojan_on_stream_with_key(
+    remote: BoxedStream,
+    destination: &Destination,
+    password_key: &[u8; PASSWORD_HEX_LEN],
+) -> Result<BoxedStream, TrojanProtocolError> {
     Ok(Box::new(TrojanStream {
         inner: remote,
-        request: request_header(destination, password)?,
+        request: request_header_with_key(destination, password_key, COMMAND_TCP)?,
         offset: 0,
     }))
 }
@@ -139,7 +154,7 @@ fn request_header(
     destination: &Destination,
     password: &str,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
-    request_header_with_command(destination, password, COMMAND_TCP)
+    request_header_with_key(destination, &password_key(password), COMMAND_TCP)
 }
 
 fn request_header_with_command(
@@ -147,8 +162,16 @@ fn request_header_with_command(
     password: &str,
     command: u8,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
+    request_header_with_key(destination, &password_key(password), command)
+}
+
+fn request_header_with_key(
+    destination: &Destination,
+    password_key: &[u8; PASSWORD_HEX_LEN],
+    command: u8,
+) -> Result<Vec<u8>, TrojanProtocolError> {
     let mut request = Vec::with_capacity(80);
-    request.extend_from_slice(&password_key(password));
+    request.extend_from_slice(password_key);
     request.extend_from_slice(b"\r\n");
     request.push(command);
     append_socks_address(&mut request, destination)?;

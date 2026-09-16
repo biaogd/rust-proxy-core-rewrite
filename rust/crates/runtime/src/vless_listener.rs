@@ -240,7 +240,7 @@ enum VlessTlsAcceptor {
 pub(crate) struct VlessListener {
     listener: TcpListener,
     acceptor: VlessTlsAcceptor,
-    users: HashMap<[u8; 16], VlessUserEntry>,
+    users: Arc<HashMap<[u8; 16], VlessUserEntry>>,
     vision_capable: bool,
     inbound_name: String,
     listen: SocketAddr,
@@ -271,7 +271,7 @@ impl VlessListener {
             let private_key = config.private_key.clone().ok_or_else(|| {
                 RuntimeError::Listener(std::io::Error::other("vless inbound missing private-key"))
             })?;
-            let tls = rewrite_controller::prepare_tls_config(
+            let mut tls = rewrite_controller::prepare_tls_config(
                 &ControllerTls {
                     certificate,
                     private_key,
@@ -282,6 +282,12 @@ impl VlessListener {
                 clock,
             )
             .map_err(RuntimeError::Listener)?;
+            // Match Go plain-TCP VLESS: NextProtos only for WS/gRPC.
+            rewrite_controller::apply_inbound_alpn(
+                &mut tls,
+                config.ws_path.is_some(),
+                config.grpc_service_name.is_some(),
+            );
             VlessTlsAcceptor::Certificate(TlsAcceptor::from(Arc::new(tls)))
         };
         let listener = TcpListener::bind(config.listen)
@@ -294,7 +300,7 @@ impl VlessListener {
         Ok(Self {
             listener,
             acceptor,
-            users: uuid_table(config.users.iter().map(|user| {
+            users: Arc::new(uuid_table(config.users.iter().map(|user| {
                 (
                     user.uuid.as_str(),
                     VlessUserEntry {
@@ -304,7 +310,7 @@ impl VlessListener {
                         }),
                     },
                 )
-            })),
+            }))),
             vision_capable,
             inbound_name: config.name.clone(),
             listen: config.listen,
@@ -463,7 +469,7 @@ async fn handle_vless_inbound(
     peer: SocketAddr,
     local: SocketAddr,
     acceptor: VlessTlsAcceptor,
-    users: HashMap<[u8; 16], VlessUserEntry>,
+    users: Arc<HashMap<[u8; 16], VlessUserEntry>>,
     vision_capable: bool,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
@@ -607,7 +613,7 @@ async fn serve_vless_grpc_connection<S>(
     service_name: String,
     peer: SocketAddr,
     local: SocketAddr,
-    users: HashMap<[u8; 16], VlessUserEntry>,
+    users: Arc<HashMap<[u8; 16], VlessUserEntry>>,
     vision_control: Option<VisionDirectControl>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
@@ -702,7 +708,7 @@ async fn dispatch_vless_session<S>(
     stream: S,
     peer: SocketAddr,
     local: SocketAddr,
-    users: HashMap<[u8; 16], VlessUserEntry>,
+    users: Arc<HashMap<[u8; 16], VlessUserEntry>>,
     vision_control: Option<VisionDirectControl>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,

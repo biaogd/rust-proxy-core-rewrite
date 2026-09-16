@@ -39,7 +39,7 @@ const TROJAN_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct TrojanListener {
     listener: TcpListener,
     acceptor: TlsAcceptor,
-    passwords: HashMap<[u8; 56], String>,
+    passwords: Arc<HashMap<[u8; 56], String>>,
     inbound_name: String,
     listen: SocketAddr,
     ws_path: Option<String>,
@@ -51,7 +51,7 @@ impl TrojanListener {
         config: &TrojanInboundConfig,
         clock: Arc<rewrite_services::AdjustedClock>,
     ) -> Result<Self, RuntimeError> {
-        let tls = rewrite_controller::prepare_tls_config(
+        let mut tls = rewrite_controller::prepare_tls_config(
             &ControllerTls {
                 certificate: config.certificate.clone(),
                 private_key: config.private_key.clone(),
@@ -62,18 +62,24 @@ impl TrojanListener {
             clock,
         )
         .map_err(RuntimeError::Listener)?;
+        // Match Go plain-TCP Trojan: NextProtos only set for WS/gRPC carriers.
+        rewrite_controller::apply_inbound_alpn(
+            &mut tls,
+            config.ws_path.is_some(),
+            config.grpc_service_name.is_some(),
+        );
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;
         Ok(Self {
             listener,
             acceptor: TlsAcceptor::from(Arc::new(tls)),
-            passwords: password_table(
+            passwords: Arc::new(password_table(
                 config
                     .users
                     .iter()
                     .map(|user| (user.password.as_str(), user.username.clone())),
-            ),
+            )),
             inbound_name: config.name.clone(),
             listen: config.listen,
             ws_path: config.ws_path.clone(),
@@ -228,7 +234,7 @@ async fn handle_trojan_inbound(
     peer: SocketAddr,
     local: SocketAddr,
     acceptor: TlsAcceptor,
-    passwords: HashMap<[u8; 56], String>,
+    passwords: Arc<HashMap<[u8; 56], String>>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -322,7 +328,7 @@ async fn serve_trojan_grpc_connection<S>(
     service_name: String,
     peer: SocketAddr,
     local: SocketAddr,
-    passwords: HashMap<[u8; 56], String>,
+    passwords: Arc<HashMap<[u8; 56], String>>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,
@@ -414,7 +420,7 @@ async fn dispatch_trojan_session<S>(
     mut stream: S,
     peer: SocketAddr,
     local: SocketAddr,
-    passwords: HashMap<[u8; 56], String>,
+    passwords: Arc<HashMap<[u8; 56], String>>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
     dns_service: Arc<rewrite_dns::DnsService>,

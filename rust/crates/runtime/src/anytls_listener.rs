@@ -46,7 +46,7 @@ impl AnyTlsListener {
         config: &AnyTlsInboundConfig,
         clock: Arc<rewrite_services::AdjustedClock>,
     ) -> Result<Self, RuntimeError> {
-        let tls = rewrite_controller::prepare_tls_config(
+        let mut tls = rewrite_controller::prepare_tls_config(
             &ControllerTls {
                 certificate: config.certificate.clone(),
                 private_key: config.private_key.clone(),
@@ -57,6 +57,8 @@ impl AnyTlsListener {
             clock,
         )
         .map_err(RuntimeError::Listener)?;
+        // AnyTLS is native TLS TCP only — do not advertise HTTP ALPN.
+        rewrite_controller::apply_inbound_alpn(&mut tls, false, false);
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;

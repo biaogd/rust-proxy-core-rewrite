@@ -1022,7 +1022,7 @@ async fn connect_trojan_proxy(
         socket_options,
     )
     .await?;
-    rewrite_outbound::connect_trojan_on_stream(outer, destination, &trojan.password)
+    rewrite_outbound::connect_trojan_on_stream_with_key(outer, destination, &trojan.password_key)
         .map_err(|error| format!("Trojan proxy connection failed: {error}"))
 }
 
