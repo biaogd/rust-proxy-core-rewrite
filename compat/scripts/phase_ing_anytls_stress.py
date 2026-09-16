@@ -94,6 +94,28 @@ def process_cpu_percent(pid: int) -> float | None:
         return None
 
 
+class _CpuTracker:
+    """CPU% from cpu_times deltas; survives across soak samples."""
+
+    def __init__(self, pid: int) -> None:
+        import psutil
+
+        self.proc = psutil.Process(pid)
+        self._last = self.proc.cpu_times()
+        self._wall = time.monotonic()
+
+    def sample(self) -> float | None:
+        try:
+            now = self.proc.cpu_times()
+            wall = max(time.monotonic() - self._wall, 1e-6)
+            busy = (now.user - self._last.user) + (now.system - self._last.system)
+            self._last = now
+            self._wall = time.monotonic()
+            return round((busy / wall) * 100.0, 2)
+        except Exception:
+            return None
+
+
 def resource_verdict(samples: list[dict[str, Any]], duration: int) -> dict[str, Any]:
     complete = [s for s in samples if s.get("rss") and s.get("fd") is not None]
     if not complete:
@@ -218,8 +240,11 @@ def exercise(
         wait_ready(client, mixed_port)
         wait_warmup(mixed_port, echo_port)
 
-        # Prime cpu_percent so soak samples are non-zero after first call.
-        process_cpu_percent(server.pid)
+        # Prime cpu tracker so soak samples use wall-clock deltas.
+        try:
+            cpu_tracker: _CpuTracker | None = _CpuTracker(server.pid)
+        except Exception:
+            cpu_tracker = None
 
         concurrent_ok = concurrent_tcp(mixed_port, echo_port, CONCURRENT)
         cancel_ok = cancel_churn(mixed_port, echo_port, CANCEL_ROUNDS)
@@ -243,7 +268,7 @@ def exercise(
                         "t": round(now - (deadline - soak_duration), 1),
                         "rss": process_rss_kib(server.pid),
                         "fd": process_fd_count(server.pid),
-                        "cpu": process_cpu_percent(server.pid),
+                        "cpu": cpu_tracker.sample() if cpu_tracker else None,
                         "churn": churn,
                     }
                 )

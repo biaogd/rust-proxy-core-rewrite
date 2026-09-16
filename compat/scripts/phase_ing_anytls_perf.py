@@ -100,20 +100,41 @@ def wait_route(mixed_port: int, echo_port: int) -> None:
     raise TimeoutError("route not ready")
 
 
-def sample_process(pid: int) -> dict[str, float | int | None]:
-    try:
-        proc = psutil.Process(pid)
-        with proc.oneshot():
-            cpu = proc.cpu_percent(interval=None)
-            mem = proc.memory_info()
-            fds = proc.num_fds() if hasattr(proc, "num_fds") else None
-        return {
-            "cpu-percent": round(cpu, 2),
-            "rss-kib": mem.rss // 1024,
-            "fds": fds,
-        }
-    except (psutil.Error, OSError):
-        return {"cpu-percent": None, "rss-kib": None, "fds": None}
+class ProcessSampler:
+    """Track RSS/FD plus CPU% from cpu_times wall-clock deltas.
+
+    Fresh ``Process.cpu_percent(interval=None)`` always returns 0 on the first
+    call per object; recreating Process each sample loses the baseline.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.proc = psutil.Process(pid)
+        self._last_cpu = self.proc.cpu_times()
+        self._last_wall = time.perf_counter()
+
+    def sample(self) -> dict[str, float | int | None]:
+        try:
+            with self.proc.oneshot():
+                mem = self.proc.memory_info()
+                fds = self.proc.num_fds() if hasattr(self.proc, "num_fds") else None
+                now_cpu = self.proc.cpu_times()
+            now_wall = time.perf_counter()
+            wall = max(now_wall - self._last_wall, 1e-6)
+            busy = (now_cpu.user - self._last_cpu.user) + (
+                now_cpu.system - self._last_cpu.system
+            )
+            self._last_cpu = now_cpu
+            self._last_wall = now_wall
+            # Percent of one core; can exceed 100 on multi-threaded processes.
+            cpu_percent = (busy / wall) * 100.0
+            return {
+                "cpu-percent": round(cpu_percent, 2),
+                "rss-kib": mem.rss // 1024,
+                "fds": fds,
+            }
+        except (psutil.Error, OSError):
+            return {"cpu-percent": None, "rss-kib": None, "fds": None}
 
 
 def summarize_series(values: list[float | int | None], *, key: str) -> dict[str, Any]:
@@ -197,15 +218,11 @@ def run_load(
         wait_ready(client, mixed_port)
         wait_route(mixed_port, echo_port)
 
-        # Prime cpu_percent baselines (first call always returns 0.0).
-        psutil.Process(server.pid).cpu_percent(interval=None)
-        psutil.Process(client.pid).cpu_percent(interval=None)
-        idle_server = sample_process(server.pid)
-        idle_client = sample_process(client.pid)
-        time.sleep(0.2)
-        # Second idle sample after interval so cpu% is meaningful.
-        idle_server = sample_process(server.pid)
-        idle_client = sample_process(client.pid)
+        server_sampler = ProcessSampler(server.pid)
+        client_sampler = ProcessSampler(client.pid)
+        time.sleep(0.25)
+        idle_server = server_sampler.sample()
+        idle_client = client_sampler.sample()
 
         counters = {"exchanges": 0, "ok": 0, "fail": 0, "bytes": 0}
         lock = threading.Lock()
@@ -219,8 +236,8 @@ def run_load(
                 samples.append(
                     {
                         "t": round(time.perf_counter() - started, 2),
-                        "server": sample_process(server.pid),
-                        "client": sample_process(client.pid),
+                        "server": server_sampler.sample(),
+                        "client": client_sampler.sample(),
                     }
                 )
 
@@ -250,8 +267,8 @@ def run_load(
         samples.append(
             {
                 "t": round(elapsed, 2),
-                "server": sample_process(server.pid),
-                "client": sample_process(client.pid),
+                "server": server_sampler.sample(),
+                "client": client_sampler.sample(),
             }
         )
 
