@@ -409,7 +409,7 @@ jobs:
             groups-providers) SHARD_REGEX='phase5c_[a-z0-9_]+\.py$' ;;
             controller-services-outbound) SHARD_REGEX='phase(5d|5e|6b|6c|6d|7a|7b|7c|7d|7t1|_inb|_ine)_[a-z0-9_]+\.py$' ;;
             vless) SHARD_REGEX='phase(6e_vless_|_ind_vless_)[a-z0-9_]+\.py$' ;;
-            trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_)[a-z0-9_]+\.py$' ;;
+            trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_|_inh_trojan_)[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase(6g_anytls_|_ing_anytls_)[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_(hy2[abc]|inf_hysteria2)_.*\.py$' ;;
             tuic) SHARD_REGEX='phase(6h_tuic|_inf_tuic)_.*\.py$' ;;
@@ -518,6 +518,7 @@ jobs:
             compat/scripts/phase_inc_trojan_tls.py \
             compat/scripts/phase_inc_trojan_websocket.py \
             compat/scripts/phase_inc_trojan_grpc.py \
+            compat/scripts/phase_inh_trojan_lifecycle.py \
             compat/scripts/phase_ind_vless_tls.py \
             compat/scripts/phase_ind_vless_vision.py \
             compat/scripts/phase_ind_vless_websocket.py \
