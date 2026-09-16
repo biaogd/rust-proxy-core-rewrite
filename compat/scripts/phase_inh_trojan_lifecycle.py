@@ -246,13 +246,17 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         )
 
         # Wrong-password attempt for credential isolation observations.
-        wrong_password = not trojan_tcp_exchange(
-            trojan_port,
-            "127.0.0.1",
-            echo_port,
-            b"should-fail",
-            password="wrong-password",
-        )
+        try:
+            wrong_accepted = trojan_tcp_exchange(
+                trojan_port,
+                "127.0.0.1",
+                echo_port,
+                b"should-fail",
+                password="wrong-password",
+            )
+        except (AssertionError, EOFError, OSError, ssl.SSLError, TimeoutError):
+            wrong_accepted = False
+        wrong_password = not wrong_accepted
         configs_body = get_configs(controller_port)
         configs_text = configs_body.decode("utf-8", errors="replace")
         # Flush recent logs into the captured files.
@@ -274,7 +278,12 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
             and password_hash not in log_blob
         )
 
-        slow_handshake = slow_handshake_bounded(trojan_port)
+        # Slow-handshake bound is Rust-owned (Go may keep the TCP socket open
+        # longer than Trojan TLS Accept timeout). Still prove the listener
+        # recovers afterward on both engines.
+        slow_handshake = (
+            slow_handshake_bounded(trojan_port) if binary.name == "rewrite-core" else None
+        )
         after_slow = trojan_tcp_exchange(trojan_port, "127.0.0.1", echo_port, b"after-slow")
 
         # Certificate path rotation: new paths, same material; delete old files.
@@ -312,18 +321,20 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         # Mixed port should still accept connections after Trojan removal.
         mixed_alive = not port_refused(mixed_port)
 
-        return {
+        result: dict[str, Any] = {
             "baseline": baseline,
             "invalid-reload-rollback": after_invalid,
             "wrong-password-rejected": wrong_password,
             "credential-isolated": credential_isolated,
-            "slow-handshake-bounded": slow_handshake,
             "after-slow-handshake": after_slow,
             "cert-path-rotation": after_cert_rotation,
             "listener-removed": listener_removed,
             "mixed-alive-after-removal": mixed_alive,
             "process-alive": process_alive,
         }
+        if slow_handshake is not None:
+            result["slow-handshake-bounded"] = slow_handshake
+        return result
     finally:
         stop(process)
         stdout.close()
@@ -333,12 +344,11 @@ def exercise(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, Any]:
         tcp_thread.join(timeout=1)
 
 
-REQUIRED_TRUE = (
+PARITY_TRUE = (
     "baseline",
     "invalid-reload-rollback",
     "wrong-password-rejected",
     "credential-isolated",
-    "slow-handshake-bounded",
     "after-slow-handshake",
     "cert-path-rotation",
     "listener-removed",
@@ -347,8 +357,14 @@ REQUIRED_TRUE = (
 )
 
 
-def required_cases_pass(observations: dict[str, Any]) -> bool:
-    return all(observations.get(key) for key in REQUIRED_TRUE)
+def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
+    return {key: observations[key] for key in PARITY_TRUE}
+
+
+def required_cases_pass(parity: dict[str, Any], rust: dict[str, Any]) -> bool:
+    if not all(parity.get(key) for key in PARITY_TRUE):
+        return False
+    return bool(rust.get("slow-handshake-bounded"))
 
 
 def main() -> int:
@@ -377,10 +393,9 @@ def main() -> int:
                 )
             )
             raise
-    if (
-        observations["rust"] != observations["go"]
-        or not required_cases_pass(observations["rust"])
-    ):
+    rust_parity = parity_view(observations["rust"])
+    go_parity = parity_view(observations["go"])
+    if rust_parity != go_parity or not required_cases_pass(rust_parity, observations["rust"]):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
         print(json.dumps(observations, indent=2, sort_keys=True))
