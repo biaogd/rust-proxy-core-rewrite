@@ -175,7 +175,7 @@ Use these labels in later IN phases:
 | IN-11 | TUIC + ShadowQUIC server | Partial — TUIC v5 named inbound | **IN-F** (TUIC v5 done); ShadowQUIC later |
 | IN-12 | AnyTLS (+ Mieru/Sudoku/TrustTunnel) | Not started | **IN-G** (AnyTLS); others deferred |
 | IN-13 | Inbound carriers | Partial SS obfs + ShadowTLS v3 | Per-protocol IN-B…IN-G + later 7T |
-| IN-14 | Hot rebind / drain / stats | Partial local + SS reload | **IN-H** + per-family |
+| IN-14 | Hot rebind / drain / stats | Partial — IN-H-A Trojan TLS lifecycle + SS 6C-N reload | **IN-H** (Trojan lifecycle done; other families / soak / three-platform open) |
 
 ## F. IN-A exit checklist
 

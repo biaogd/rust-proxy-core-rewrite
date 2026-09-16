@@ -1524,6 +1524,13 @@ long soak, config reload failure rollback, listener removal reclaim, certificate
 rotation and security tests (credential isolation from logs/API, connection/stream/
 UDP caps, slow-handshake bounds).
 
+**IN-H-A (partial, this checkout):** Trojan TLS lifecycle via
+`phase_inh_trojan_lifecycle.py` — invalid `/configs` reload rollback, listener
+removal reclaim, certificate **path** rotation, credential isolation from
+`GET /configs` + process logs, slow-handshake bound (≤12s). Not production
+acceptance: no long soak, no three-platform claim, no cross-family matrix,
+in-place PEM rotation at unchanged paths deferred.
+
 ### Per-protocol acceptance minimum (IN-B onward)
 
 Beyond echo:
