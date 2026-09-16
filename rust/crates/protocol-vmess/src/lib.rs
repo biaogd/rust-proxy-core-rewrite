@@ -89,7 +89,7 @@ pub enum VmessProtocolError {
 /// This boundary lets TLS and WebSocket remain shared transport adapters while
 /// the `VMess` module owns only its authenticated header and body records.
 ///
-/// After WriteHeader the returned stream encodes/decodes body records in place
+/// After `WriteHeader` the returned stream encodes/decodes body records in place
 /// (no duplex relay copy), matching the VLESS TCP path.
 ///
 /// # Errors

@@ -1,4 +1,4 @@
-//! In-place VMess TCP body stream (no duplex + spawn relay).
+//! In-place `VMess` TCP body stream (no duplex + spawn relay).
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -13,7 +13,7 @@ use crate::body::{BodyReader, BodyWriter, PendingRecordRead};
 use crate::header::seal_response_header;
 use crate::kdf::{derive_12, derive_16};
 
-/// Plaintext VMess TCP session over an encrypted body carrier.
+/// Plaintext `VMess` TCP session over an encrypted body carrier.
 pub struct VmessTcpStream {
     remote: BoxedStream,
     body_reader: BodyReader,
@@ -106,6 +106,7 @@ impl VmessTcpStream {
 
     /// Server TCP body stream; seals the response header on first write.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn server(
         remote: BoxedStream,
         body_reader: BodyReader,
@@ -161,6 +162,7 @@ impl VmessTcpStream {
         Poll::Ready(Ok(()))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn poll_response_header(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         loop {
             match &mut self.response_header {

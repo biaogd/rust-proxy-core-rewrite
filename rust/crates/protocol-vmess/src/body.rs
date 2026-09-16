@@ -521,6 +521,7 @@ impl BodyReader {
     }
 
     /// Poll-oriented body record reader for in-place TCP streams (no duplex).
+    #[allow(clippy::too_many_lines)]
     pub(super) fn poll_read_record<R: AsyncRead + Unpin>(
         &mut self,
         cx: &mut Context<'_>,
