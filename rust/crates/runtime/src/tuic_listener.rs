@@ -1082,7 +1082,7 @@ async fn route_tuic_udp_datagram(
     config: &Config,
     state: &Arc<RuntimeState>,
 ) -> Option<(rewrite_rules::Decision, SocketAddr)> {
-    metadata.destination = destination;
+    sync_tuic_udp_destination(metadata, destination);
     let fake_host = apply_host_mapping(metadata, config, state);
     let decision = mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(metadata));
     let (decision, outbound_target, _) = resolve_rematch_target(decision, metadata, config, state)?;
@@ -1121,6 +1121,39 @@ async fn route_tuic_udp_datagram(
             None
         }
     }
+}
+
+/// Rebuild destination-derived rule fields (`host`, `destination_ip`) when an
+/// association switches targets. Connection source / inbound identity stay on
+/// `metadata`; cloning a prior packet's metadata without this step leaves stale
+/// `destination_ip`/`host` and can bypass IP-CIDR or domain rules.
+fn sync_tuic_udp_destination(metadata: &mut Metadata, mut destination: Destination) {
+    let (host, destination_ip) = match destination.host.clone() {
+        Host::Ip(address) => {
+            let address = unmap_ip(address);
+            destination.host = Host::Ip(address);
+            (String::new(), Some(address))
+        }
+        Host::Domain(domain) => (domain, None),
+    };
+    metadata.destination = destination;
+    metadata.host = host;
+    metadata.destination_ip = destination_ip;
+    metadata.sniff_host.clear();
+    metadata.rematch_name.clear();
+}
+
+/// Fresh per-datagram metadata: new destination fields, same connection identity.
+fn tuic_udp_metadata_for_packet(base: &Metadata, destination: Destination) -> Metadata {
+    let mut metadata = Metadata::new(destination, base.inbound);
+    metadata.network = Network::Udp;
+    metadata.source_ip = base.source_ip;
+    metadata.source_port = base.source_port;
+    metadata.inbound_port = base.inbound_port;
+    metadata.inbound_name.clone_from(&base.inbound_name);
+    metadata.inbound_user.clone_from(&base.inbound_user);
+    metadata.dscp = base.dscp;
+    metadata
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1198,7 +1231,8 @@ async fn serve_tuic_udp_direct(
                 let Some(destination) = message.addr.clone() else {
                     continue;
                 };
-                let mut metadata = first_metadata.clone();
+                let mut metadata =
+                    tuic_udp_metadata_for_packet(&first_metadata, destination.clone());
                 let Some((_decision, next_target)) =
                     route_tuic_udp_datagram(&mut metadata, destination, config, state).await
                 else {
@@ -1679,5 +1713,89 @@ mod tuic_udp_tests {
             map_congestion_controller("new-reno"),
             CongestionController::NewReno
         );
+    }
+
+    fn udp_dest(ip: &str, port: u16) -> Destination {
+        Destination {
+            host: Host::Ip(ip.parse().expect("ip")),
+            port,
+        }
+    }
+
+    fn domain_dest(host: &str, port: u16) -> Destination {
+        Destination {
+            host: Host::Domain(host.to_owned()),
+            port,
+        }
+    }
+
+    #[tokio::test]
+    async fn route_rejects_when_association_switches_to_blocked_ip() {
+        let config = Config::from_yaml(
+            "mode: rule\nipv6: false\nrules:\n  - IP-CIDR,127.0.0.2/32,REJECT,no-resolve\n  - MATCH,DIRECT\n",
+        )
+        .expect("config");
+        let state = Arc::new(RuntimeState::default());
+
+        let mut first = Metadata::new(udp_dest("127.0.0.1", 9), InboundProtocol::Tuic);
+        first.network = Network::Udp;
+        first.source_port = 12_345;
+        let allowed =
+            route_tuic_udp_datagram(&mut first, udp_dest("127.0.0.1", 9), &config, &state).await;
+        assert!(
+            allowed.is_some(),
+            "127.0.0.1 must match MATCH,DIRECT and resolve"
+        );
+
+        // Reproduce the prior bug path: clone prior packet metadata, only swap destination.
+        let mut stale = first.clone();
+        let blocked =
+            route_tuic_udp_datagram(&mut stale, udp_dest("127.0.0.2", 9), &config, &state).await;
+        assert!(
+            blocked.is_none(),
+            "127.0.0.2 must REJECT after destination_ip refresh; got {:?}",
+            blocked.as_ref().map(|(decision, _)| &decision.target)
+        );
+        assert_eq!(
+            stale.destination_ip,
+            Some("127.0.0.2".parse().expect("ip")),
+            "destination_ip must track the new target"
+        );
+
+        // Same association identity helper used by the live relay loop.
+        let mut rebuilt = tuic_udp_metadata_for_packet(&first, udp_dest("127.0.0.2", 53));
+        assert_eq!(rebuilt.source_port, first.source_port);
+        let rebuilt_blocked =
+            route_tuic_udp_datagram(&mut rebuilt, udp_dest("127.0.0.2", 53), &config, &state).await;
+        assert!(
+            rebuilt_blocked.is_none(),
+            "rebuilt metadata must also REJECT"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_refreshes_host_when_association_switches_domain() {
+        let config = Config::from_yaml(
+            "mode: rule\nipv6: false\nrules:\n  - DOMAIN,blocked.example,REJECT\n  - MATCH,DIRECT\n",
+        )
+        .expect("config");
+
+        let mut first = Metadata::new(domain_dest("allowed.example", 9), InboundProtocol::Tuic);
+        first.network = Network::Udp;
+        first.source_port = 54_321;
+        // Domain without hosts mapping will fail UDP resolve after MATCH,DIRECT —
+        // still verify host field refresh and rule evaluation independently.
+        sync_tuic_udp_destination(&mut first, domain_dest("allowed.example", 9));
+        assert_eq!(first.host, "allowed.example");
+        assert!(first.destination_ip.is_none());
+
+        let decision = config.rules.evaluate(&first);
+        assert_eq!(decision.target, "DIRECT");
+
+        let mut next = first.clone();
+        sync_tuic_udp_destination(&mut next, domain_dest("blocked.example", 9));
+        assert_eq!(next.host, "blocked.example");
+        let decision = config.rules.evaluate(&next);
+        assert_eq!(decision.target, "REJECT");
     }
 }
