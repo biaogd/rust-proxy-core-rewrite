@@ -33,13 +33,15 @@ struct PacketBag {
     created: Instant,
 }
 
+/// Reassembles fragmented TUIC Packet commands (client + inbound).
 #[derive(Default)]
-struct DeFragger {
+pub struct Defragger {
     bags: HashMap<u16, PacketBag>,
 }
 
-impl DeFragger {
-    fn feed(&mut self, packet: Packet) -> Option<Packet> {
+impl Defragger {
+    /// Feed one fragment; returns a complete packet when all fragments arrive.
+    pub fn feed(&mut self, packet: Packet) -> Option<Packet> {
         self.evict_expired();
         if packet.frag_total <= 1 {
             return Some(packet);
@@ -89,6 +91,9 @@ impl DeFragger {
             .retain(|_, bag| now.saturating_duration_since(bag.created) < DEFRAG_TTL);
     }
 }
+
+/// Backward-compatible alias used by the client UDP hub.
+type DeFragger = Defragger;
 
 pub(crate) struct UdpHub {
     connection: quinn::Connection,

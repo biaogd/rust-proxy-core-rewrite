@@ -14,6 +14,12 @@ pub const CMD_PACKET: u8 = 0x02;
 pub const CMD_DISSOCIATE: u8 = 0x03;
 pub const CMD_HEARTBEAT: u8 = 0x04;
 
+/// Quinn application error codes (Go `transport/tuic/v5/protocol.go`).
+pub const ERR_PROTOCOL: u32 = 0xffff_fff0;
+pub const ERR_AUTHENTICATION_FAILED: u32 = 0xffff_fff1;
+pub const ERR_AUTHENTICATION_TIMEOUT: u32 = 0xffff_fff2;
+pub const ERR_BAD_COMMAND: u32 = 0xffff_fff3;
+
 pub const ATYP_DOMAIN: u8 = 0;
 pub const ATYP_IPV4: u8 = 1;
 pub const ATYP_IPV6: u8 = 2;
@@ -28,6 +34,89 @@ pub fn encode_authenticate(uuid: [u8; 16], token: [u8; 32]) -> Vec<u8> {
     out.extend_from_slice(&uuid);
     out.extend_from_slice(&token);
     out
+}
+
+/// Decodes a complete Authenticate command (50 bytes).
+///
+/// # Errors
+///
+/// Returns when the buffer is truncated or not an Authenticate frame.
+pub fn decode_authenticate(buf: &[u8]) -> Result<([u8; 16], [u8; 32]), TuicProtocolError> {
+    if buf.len() < 50 {
+        return Err(TuicProtocolError::Protocol(
+            "truncated TUIC authenticate".to_owned(),
+        ));
+    }
+    if buf[0] != VERSION {
+        return Err(TuicProtocolError::Protocol(format!(
+            "unsupported TUIC version {:#04x}",
+            buf[0]
+        )));
+    }
+    if buf[1] != CMD_AUTHENTICATE {
+        return Err(TuicProtocolError::Protocol(format!(
+            "expected authenticate, got {:#04x}",
+            buf[1]
+        )));
+    }
+    let mut uuid = [0_u8; 16];
+    uuid.copy_from_slice(&buf[2..18]);
+    let mut token = [0_u8; 32];
+    token.copy_from_slice(&buf[18..50]);
+    Ok((uuid, token))
+}
+
+/// Decodes a Connect command header (VER TYPE ADDR); leftover bytes are payload.
+///
+/// # Errors
+///
+/// Returns when the buffer is truncated or not a Connect frame.
+pub fn decode_connect(buf: &[u8]) -> Result<(Destination, usize), TuicProtocolError> {
+    if buf.len() < 2 {
+        return Err(TuicProtocolError::Protocol(
+            "truncated TUIC connect".to_owned(),
+        ));
+    }
+    if buf[0] != VERSION {
+        return Err(TuicProtocolError::Protocol(format!(
+            "unsupported TUIC version {:#04x}",
+            buf[0]
+        )));
+    }
+    if buf[1] != CMD_CONNECT {
+        return Err(TuicProtocolError::Protocol(format!(
+            "expected connect, got {:#04x}",
+            buf[1]
+        )));
+    }
+    let (destination, addr_len) = decode_address(&buf[2..])?;
+    Ok((destination, 2 + addr_len))
+}
+
+/// Decodes a Dissociate command (VER TYPE ASSOC_ID).
+///
+/// # Errors
+///
+/// Returns when the buffer is truncated or not a Dissociate frame.
+pub fn decode_dissociate(buf: &[u8]) -> Result<u16, TuicProtocolError> {
+    if buf.len() < 4 {
+        return Err(TuicProtocolError::Protocol(
+            "truncated TUIC dissociate".to_owned(),
+        ));
+    }
+    if buf[0] != VERSION {
+        return Err(TuicProtocolError::Protocol(format!(
+            "unsupported TUIC version {:#04x}",
+            buf[0]
+        )));
+    }
+    if buf[1] != CMD_DISSOCIATE {
+        return Err(TuicProtocolError::Protocol(format!(
+            "expected dissociate, got {:#04x}",
+            buf[1]
+        )));
+    }
+    Ok(u16::from_be_bytes([buf[2], buf[3]]))
 }
 
 /// Encodes a TUIC v5 Connect command (VER TYPE ADDR) for a TCP relay.

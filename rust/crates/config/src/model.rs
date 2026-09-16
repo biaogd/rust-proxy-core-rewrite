@@ -91,6 +91,7 @@ pub struct ConfigSpec {
     pub vless_listeners: Vec<VlessInboundConfig>,
     pub vmess_listeners: Vec<VmessInboundConfig>,
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
+    pub tuic_listeners: Vec<TuicInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -159,6 +160,7 @@ pub struct Config {
     pub vless_listeners: Vec<VlessInboundConfig>,
     pub vmess_listeners: Vec<VmessInboundConfig>,
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
+    pub tuic_listeners: Vec<TuicInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1446,6 +1448,55 @@ impl Hysteria2InboundConfig {
     }
 }
 
+/// Named `type: tuic` QUIC inbound accepted in IN-F (TUIC v5 slice).
+///
+/// Clash-style `users` is uuid→password. v4 `token`, ECH, client-auth, Brutal/`cwnd`
+/// stay rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TuicInboundUser {
+    pub uuid: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TuicInboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<TuicInboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+    /// ALPN list; empty means default `["h3"]` at runtime.
+    pub alpn: Vec<String>,
+    /// `cubic` (default), `bbr`, or `new_reno`.
+    pub congestion_controller: String,
+    /// Idle timeout in milliseconds (Go default 15000).
+    pub max_idle_time_ms: u64,
+    /// Auth timeout in milliseconds (Go default 1000).
+    pub authentication_timeout_ms: u64,
+    /// Clash `max-udp-relay-packet-size` (0 = Go default path).
+    pub max_udp_relay_packet_size: u64,
+}
+
+impl TuicInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|alpn={:?}|cc={}|idle={}|auth-timeout={}|udp-pkt={}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.alpn,
+            self.congestion_controller,
+            self.max_idle_time_ms,
+            self.authentication_timeout_ms,
+            self.max_udp_relay_packet_size
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
@@ -1456,6 +1507,7 @@ pub enum ListenerKind {
     Vless,
     Vmess,
     Hysteria2,
+    Tuic,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {
