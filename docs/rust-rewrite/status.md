@@ -10,9 +10,9 @@ invalid `PUT /configs` rollback (listener still serves), certificate path
 rotation (new PEM paths + delete old files), listener removal reclaim (port
 refused; mixed/controller alive), wrong-password fail-closed, credential
 absence from `GET /configs` and process logs, and stall-before-ClientHello
-close within 12s. Deferred: long soak, three-platform Parity, in-place PEM
-rotation at unchanged paths, cross-family (VLESS/VMess/Hy2/TUIC/AnyTLS/SS)
-lifecycle clones.
+close within 12s (Rust-only; Go may keep the TCP socket open longer). Deferred:
+long soak, three-platform Parity, in-place PEM rotation at unchanged paths,
+cross-family (VLESS/VMess/Hy2/TUIC/AnyTLS/SS) lifecycle clones.
 
 ### IN-F TUIC v5 named inbound — 2026-09-16
 
