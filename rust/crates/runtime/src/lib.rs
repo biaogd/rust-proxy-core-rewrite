@@ -2,6 +2,7 @@ mod dialer_proxy;
 mod generation;
 mod hysteria2_listener;
 mod lifecycle;
+mod tuic_listener;
 mod listener;
 mod services;
 mod shadowsocks_listener;
