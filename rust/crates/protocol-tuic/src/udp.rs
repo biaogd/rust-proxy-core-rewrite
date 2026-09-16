@@ -1,6 +1,6 @@
 //! TUIC v5 UDP relay: native QUIC DATAGRAM and uni-stream modes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +16,10 @@ use crate::protocol::{
 };
 
 const DEFRAG_TTL: Duration = Duration::from_secs(10);
+/// Soft cap on concurrent incomplete packet assemblies per association.
+const MAX_DEFRAG_PACKETS: usize = 64;
+/// Soft cap on buffered fragment payload bytes per association.
+const MAX_DEFRAG_BYTES: usize = 4 * 1024 * 1024;
 const DISSOCIATE_QUEUE: usize = 32;
 const DISSOCIATE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -31,64 +35,157 @@ struct PacketBag {
     parts: Vec<Option<Packet>>,
     count: u8,
     created: Instant,
+    /// Buffered fragment payload bytes in this assembly.
+    size: usize,
+}
+
+impl PacketBag {
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.created) >= DEFRAG_TTL
+    }
 }
 
 /// Reassembles fragmented TUIC Packet commands (client + inbound).
+///
+/// Bounded by packet-count and buffered-byte caps with LRU eviction of the
+/// oldest incomplete assembly. TTL eviction runs on every feed and via
+/// [`Defragger::evict_expired`].
 #[derive(Default)]
 pub struct Defragger {
     bags: HashMap<u16, PacketBag>,
+    /// Insertion / touch order for eviction (oldest first).
+    order: VecDeque<u16>,
+    /// Total buffered fragment payload bytes across all assemblies.
+    size: usize,
 }
 
 impl Defragger {
+    fn touch(&mut self, pkt_id: u16) {
+        self.order.retain(|id| *id != pkt_id);
+        self.order.push_back(pkt_id);
+    }
+
+    fn remove_packet(&mut self, pkt_id: u16) {
+        if let Some(bag) = self.bags.remove(&pkt_id) {
+            self.size = self.size.saturating_sub(bag.size);
+        }
+        self.order.retain(|id| *id != pkt_id);
+    }
+
+    /// Drop assemblies older than the TTL. Safe to call from idle sweeps.
+    pub fn evict_expired(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<u16> = self
+            .bags
+            .iter()
+            .filter_map(|(id, bag)| bag.expired(now).then_some(*id))
+            .collect();
+        for id in expired {
+            self.remove_packet(id);
+        }
+    }
+
+    fn evict_one_oldest(&mut self) -> bool {
+        let Some(oldest) = self.order.pop_front() else {
+            return false;
+        };
+        if let Some(bag) = self.bags.remove(&oldest) {
+            self.size = self.size.saturating_sub(bag.size);
+        }
+        true
+    }
+
     /// Feed one fragment; returns a complete packet when all fragments arrive.
     pub fn feed(&mut self, packet: Packet) -> Option<Packet> {
+        let now = Instant::now();
         self.evict_expired();
+
         if packet.frag_total <= 1 {
             return Some(packet);
         }
         if packet.frag_id >= packet.frag_total {
             return None;
         }
+        if packet.data.len() > MAX_DEFRAG_BYTES {
+            return None;
+        }
+
         let pkt_id = packet.pkt_id;
-        let bag = self.bags.entry(pkt_id).or_insert_with(|| PacketBag {
-            total: packet.frag_total,
-            parts: vec![None; usize::from(packet.frag_total)],
-            count: 0,
-            created: Instant::now(),
-        });
-        if bag.total != packet.frag_total || bag.parts.len() != usize::from(packet.frag_total) {
-            bag.total = packet.frag_total;
-            bag.parts = vec![None; usize::from(packet.frag_total)];
-            bag.count = 0;
-            bag.created = Instant::now();
+        let needs_reset = self
+            .bags
+            .get(&pkt_id)
+            .is_some_and(|bag| bag.total != packet.frag_total);
+        if needs_reset {
+            self.remove_packet(pkt_id);
         }
+
+        if self.bags.contains_key(&pkt_id) {
+            self.touch(pkt_id);
+        } else {
+            while self.bags.len() >= MAX_DEFRAG_PACKETS
+                || self.size.saturating_add(packet.data.len()) > MAX_DEFRAG_BYTES
+            {
+                if !self.evict_one_oldest() {
+                    return None;
+                }
+            }
+            self.bags.insert(
+                pkt_id,
+                PacketBag {
+                    total: packet.frag_total,
+                    parts: vec![None; usize::from(packet.frag_total)],
+                    count: 0,
+                    created: now,
+                    size: 0,
+                },
+            );
+            self.touch(pkt_id);
+        }
+
+        let data_len = packet.data.len();
         let index = usize::from(packet.frag_id);
-        if bag.parts.get(index).is_some_and(Option::is_some) {
+        let (duplicate, over_budget) = {
+            let bag = self.bags.get(&pkt_id)?;
+            (
+                bag.parts.get(index).is_some_and(Option::is_some),
+                self.size.saturating_add(data_len) > MAX_DEFRAG_BYTES,
+            )
+        };
+        if duplicate {
             return None;
         }
-        if let Some(slot) = bag.parts.get_mut(index) {
-            *slot = Some(packet);
-            bag.count = bag.count.saturating_add(1);
-        }
-        if usize::from(bag.count) != bag.parts.len() {
+        if over_budget {
+            self.remove_packet(pkt_id);
             return None;
         }
+
+        let complete = {
+            let bag = self.bags.get_mut(&pkt_id)?;
+            if let Some(slot) = bag.parts.get_mut(index) {
+                *slot = Some(packet);
+                bag.count = bag.count.saturating_add(1);
+                bag.size = bag.size.saturating_add(data_len);
+                self.size = self.size.saturating_add(data_len);
+            }
+            usize::from(bag.count) == bag.parts.len()
+        };
+        if !complete {
+            return None;
+        }
+
+        let bag = self.bags.remove(&pkt_id)?;
+        self.order.retain(|id| *id != pkt_id);
+        self.size = self.size.saturating_sub(bag.size);
+
         let mut assembled = bag.parts[0].clone()?;
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(bag.size);
         for part in &bag.parts {
             data.extend_from_slice(&part.as_ref()?.data);
         }
         assembled.data = data;
         assembled.frag_id = 0;
         assembled.frag_total = 1;
-        self.bags.remove(&pkt_id);
         Some(assembled)
-    }
-
-    fn evict_expired(&mut self) {
-        let now = Instant::now();
-        self.bags
-            .retain(|_, bag| now.saturating_duration_since(bag.created) < DEFRAG_TTL);
     }
 }
 
@@ -550,5 +647,72 @@ mod tests {
             data: b"x".to_vec(),
         };
         assert!(defrag.feed(only).is_none());
+    }
+
+    #[test]
+    fn defragger_packet_count_cap_evicts_oldest() {
+        let mut defrag = Defragger::default();
+        for pkt_id in 0..MAX_DEFRAG_PACKETS as u16 {
+            let fragment = Packet {
+                assoc_id: 1,
+                pkt_id,
+                frag_total: 2,
+                frag_id: 0,
+                addr: Some(dest()),
+                data: vec![0xab],
+            };
+            assert!(defrag.feed(fragment).is_none());
+        }
+        assert_eq!(defrag.bags.len(), MAX_DEFRAG_PACKETS);
+        let next = Packet {
+            assoc_id: 1,
+            pkt_id: MAX_DEFRAG_PACKETS as u16,
+            frag_total: 2,
+            frag_id: 0,
+            addr: Some(dest()),
+            data: vec![0xcd],
+        };
+        assert!(defrag.feed(next).is_none());
+        assert!(defrag.bags.len() <= MAX_DEFRAG_PACKETS);
+        assert!(!defrag.bags.contains_key(&0));
+    }
+
+    #[test]
+    fn defragger_rejects_oversized_single_fragment() {
+        let mut defrag = Defragger::default();
+        let huge = Packet {
+            assoc_id: 1,
+            pkt_id: 1,
+            frag_total: 2,
+            frag_id: 0,
+            addr: Some(dest()),
+            data: vec![0u8; MAX_DEFRAG_BYTES + 1],
+        };
+        assert!(defrag.feed(huge).is_none());
+        assert!(defrag.bags.is_empty());
+    }
+
+    #[test]
+    fn defragger_evict_expired_clears_stale_bags() {
+        let mut defrag = Defragger::default();
+        let fragment = Packet {
+            assoc_id: 1,
+            pkt_id: 7,
+            frag_total: 2,
+            frag_id: 0,
+            addr: Some(dest()),
+            data: b"stale".to_vec(),
+        };
+        assert!(defrag.feed(fragment).is_none());
+        assert_eq!(defrag.bags.len(), 1);
+        // Force TTL expiry by rewriting created timestamp.
+        if let Some(bag) = defrag.bags.get_mut(&7) {
+            bag.created = Instant::now()
+                .checked_sub(DEFRAG_TTL + Duration::from_secs(1))
+                .expect("clock");
+        }
+        defrag.evict_expired();
+        assert!(defrag.bags.is_empty());
+        assert_eq!(defrag.size, 0);
     }
 }

@@ -412,7 +412,7 @@ jobs:
             trojan) SHARD_REGEX='phase(6f_trojan_|_inc_trojan_)[a-z0-9_]+\.py$' ;;
             anytls) SHARD_REGEX='phase6g_anytls_[a-z0-9_]+\.py$' ;;
             hysteria2) SHARD_REGEX='phase_(hy2[abc]|inf_hysteria2)_.*\.py$' ;;
-            tuic) SHARD_REGEX='phase(6h_tuic_|_inf_tuic)_.*\.py$' ;;
+            tuic) SHARD_REGEX='phase(6h_tuic|_inf_tuic)_.*\.py$' ;;
             wireguard) SHARD_REGEX='phase6i_wireguard_.*\.py$' ;;
             snell) SHARD_REGEX='phase7e_snell_.*\.py$' ;;
             ssh) SHARD_REGEX='phase6j_ssh_.*\.py$' ;;

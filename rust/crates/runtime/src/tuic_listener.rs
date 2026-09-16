@@ -21,7 +21,7 @@ use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_tuic::{
     CMD_AUTHENTICATE, CMD_DISSOCIATE, CMD_HEARTBEAT, CMD_PACKET, CongestionController, Defragger,
-    Packet, ServerEndpointOptions, TuicServerStream, VERSION, accept_tcp_connect,
+    Packet, ServerEndpointOptions, TuicServerStream, UdpRelayMode, VERSION, accept_tcp_connect,
     bind_server_endpoint, close_authentication_failed, close_authentication_timeout,
     compute_max_udp_relay_packet_size, decode_dissociate, decode_packet, encode_packet,
     load_pem_or_path, users_table, verify_authenticate,
@@ -58,13 +58,14 @@ enum AuthOutcome {
 }
 
 /// One TUIC UDP association (`assoc_id`): client packet channel, idle clock,
-/// cancel token, and a generation id so a retiring worker cannot wipe a
-/// recreated same-ID slot.
+/// cancel token, generation id, and the relay mode implied by how the first
+/// (and subsequent) client Packets arrived (datagram = native, uni = quic).
 struct TuicUdpSessionSlot {
     tx: mpsc::Sender<Packet>,
     last_used: Instant,
     cancel: CancellationToken,
     generation: u64,
+    relay_mode: UdpRelayMode,
 }
 
 /// Remove `assoc_id` only when the map still holds `generation` (this worker's
@@ -136,7 +137,8 @@ fn try_feed_defrag(
 }
 
 /// Cancel and remove UDP sessions idle longer than `max_idle`, and drop their
-/// defrag entries.
+/// defrag entries. Also run per-assoc TTL eviction so incomplete fragments do
+/// not linger until the next feed.
 fn evict_idle_udp_sessions(
     sessions: &mut HashMap<u16, TuicUdpSessionSlot>,
     defrag_by_assoc: &mut HashMap<u16, Defragger>,
@@ -153,6 +155,9 @@ fn evict_idle_udp_sessions(
             slot.cancel.cancel();
         }
         defrag_by_assoc.remove(&assoc_id);
+    }
+    for defrag in defrag_by_assoc.values_mut() {
+        defrag.evict_expired();
     }
 }
 
@@ -679,6 +684,7 @@ async fn handle_tuic_uni_stream(
             };
             if let Some(worker) = dispatch_reassembled_packet(
                 packet,
+                UdpRelayMode::Quic,
                 &connection,
                 peer,
                 local,
@@ -885,6 +891,7 @@ async fn serve_tuic_datagrams(
                 };
                 if let Some(task) = dispatch_reassembled_packet(
                     packet,
+                    UdpRelayMode::Native,
                     &connection,
                     peer,
                     local,
@@ -912,9 +919,13 @@ async fn serve_tuic_datagrams(
 
 /// Feed `packet` through defrag; create/route a UDP session when complete.
 /// Returns a worker future when a new session is spawned.
+///
+/// `relay_mode` is how this Packet arrived (datagram = native, uni = quic) and
+/// is stored on the association so replies use the same path.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn dispatch_reassembled_packet(
     packet: Packet,
+    relay_mode: UdpRelayMode,
     connection: &quinn::Connection,
     peer: SocketAddr,
     local: SocketAddr,
@@ -941,6 +952,8 @@ async fn dispatch_reassembled_packet(
     let mut guard = sessions.lock().await;
     if let Some(slot) = guard.get_mut(&assoc_id) {
         slot.last_used = Instant::now();
+        // Latest client Packet path wins (matches Go per-packet PacketConn mode).
+        slot.relay_mode = relay_mode;
         let _ = slot.tx.try_send(packet);
         return None;
     }
@@ -958,6 +971,7 @@ async fn dispatch_reassembled_packet(
             last_used: Instant::now(),
             cancel: session_cancel.clone(),
             generation,
+            relay_mode,
         },
     );
     drop(guard);
@@ -974,6 +988,7 @@ async fn dispatch_reassembled_packet(
             session_connection,
             assoc_id,
             generation,
+            relay_mode,
             rx,
             peer,
             local,
@@ -995,6 +1010,7 @@ async fn serve_tuic_udp_session(
     connection: quinn::Connection,
     assoc_id: u16,
     generation: u64,
+    initial_relay_mode: UdpRelayMode,
     mut rx: mpsc::Receiver<Packet>,
     peer: SocketAddr,
     local: SocketAddr,
@@ -1043,6 +1059,7 @@ async fn serve_tuic_udp_session(
         connection,
         assoc_id,
         generation,
+        initial_relay_mode,
         rx,
         first,
         packet_metadata,
@@ -1111,6 +1128,7 @@ async fn serve_tuic_udp_direct(
     connection: quinn::Connection,
     assoc_id: u16,
     generation: u64,
+    initial_relay_mode: UdpRelayMode,
     mut rx: mpsc::Receiver<Packet>,
     first: Packet,
     first_metadata: Metadata,
@@ -1152,12 +1170,18 @@ async fn serve_tuic_udp_direct(
                     host: Host::Ip(unmap_ip(source.ip())),
                     port: source.port(),
                 };
+                let relay_mode = sessions
+                    .lock()
+                    .await
+                    .get(&assoc_id)
+                    .map_or(initial_relay_mode, |slot| slot.relay_mode);
                 if !send_tuic_udp_to_client(
                     &connection,
                     assoc_id,
                     &destination,
                     &response[..length],
                     max_udp_relay_packet_size,
+                    relay_mode,
                     shutdown,
                     tracker.cancelled(),
                 )
@@ -1197,6 +1221,7 @@ async fn send_tuic_udp_to_client<C>(
     destination: &Destination,
     payload: &[u8],
     max_udp_relay_packet_size: usize,
+    relay_mode: UdpRelayMode,
     shutdown: &CancellationToken,
     tracker_cancelled: C,
 ) -> bool
@@ -1205,47 +1230,20 @@ where
 {
     let send_all = async {
         let pkt_id = rand::random::<u16>();
-        let max_payload = max_udp_relay_packet_size.max(1);
-        if payload.len() <= max_payload {
-            let packet = Packet {
-                assoc_id,
-                pkt_id,
-                frag_total: 1,
-                frag_id: 0,
-                addr: Some(destination.clone()),
-                data: payload.to_vec(),
-            };
-            let encoded =
-                encode_packet(&packet).map_err(|error| std::io::Error::other(error.to_string()))?;
-            connection
-                .send_datagram(Bytes::from(encoded))
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            return Ok::<(), std::io::Error>(());
+        let packet = Packet {
+            assoc_id,
+            pkt_id,
+            frag_total: 1,
+            frag_id: 0,
+            addr: Some(destination.clone()),
+            data: payload.to_vec(),
+        };
+        match relay_mode {
+            UdpRelayMode::Quic => send_tuic_udp_quic(connection, &packet).await,
+            UdpRelayMode::Native => {
+                send_tuic_udp_native(connection, &packet, max_udp_relay_packet_size).await
+            }
         }
-        let frag_count = u8::try_from(payload.len().div_ceil(max_payload).max(1))
-            .map_err(|_| std::io::Error::other("TUIC UDP fragment count exceeds 255"))?;
-        let mut offset = 0_usize;
-        let mut frag_id = 0_u8;
-        let mut addr = Some(destination.clone());
-        while offset < payload.len() {
-            let end = (offset + max_payload).min(payload.len());
-            let fragment = Packet {
-                assoc_id,
-                pkt_id,
-                frag_total: frag_count,
-                frag_id,
-                addr: addr.take(),
-                data: payload[offset..end].to_vec(),
-            };
-            let encoded = encode_packet(&fragment)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            connection
-                .send_datagram(Bytes::from(encoded))
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            offset = end;
-            frag_id = frag_id.saturating_add(1);
-        }
-        Ok(())
     };
     tokio::select! {
         biased;
@@ -1255,6 +1253,126 @@ where
             matches!(result, Ok(Ok(())))
         }
     }
+}
+
+/// QUIC-mode reply: one uni-stream per Packet (Go does not fragment in this mode).
+async fn send_tuic_udp_quic(
+    connection: &quinn::Connection,
+    packet: &Packet,
+) -> Result<(), std::io::Error> {
+    let encoded =
+        encode_packet(packet).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut stream = connection
+        .open_uni()
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    stream.write_all(&encoded).await?;
+    stream
+        .finish()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(())
+}
+
+/// Native-mode reply: DATAGRAM frames with configured and TooLarge re-fragmentation.
+async fn send_tuic_udp_native(
+    connection: &quinn::Connection,
+    packet: &Packet,
+    max_udp_relay_packet_size: usize,
+) -> Result<(), std::io::Error> {
+    let max_payload = max_udp_relay_packet_size.max(1);
+    let initial = if packet.data.len() > max_payload {
+        frag_write_native(connection, packet, max_payload)
+    } else {
+        let encoded =
+            encode_packet(packet).map_err(|error| std::io::Error::other(error.to_string()))?;
+        connection
+            .send_datagram(Bytes::from(encoded))
+            .map_err(TuicNativeSendError::from)
+    };
+    match initial {
+        Ok(()) => Ok(()),
+        Err(TuicNativeSendError::TooLarge) => {
+            let overhead = encode_packet(packet)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .len()
+                .saturating_sub(packet.data.len());
+            let frag = connection
+                .max_datagram_size()
+                .and_then(|size| size.checked_sub(overhead))
+                .filter(|size| *size > 0)
+                .ok_or_else(|| std::io::Error::other("TUIC datagram too large"))?;
+            frag_write_native(connection, packet, frag).map_err(Into::into)
+        }
+        Err(TuicNativeSendError::Other(error)) => Err(error),
+    }
+}
+
+enum TuicNativeSendError {
+    TooLarge,
+    Other(std::io::Error),
+}
+
+impl From<quinn::SendDatagramError> for TuicNativeSendError {
+    fn from(error: quinn::SendDatagramError) -> Self {
+        match error {
+            quinn::SendDatagramError::TooLarge => Self::TooLarge,
+            other => Self::Other(std::io::Error::other(other.to_string())),
+        }
+    }
+}
+
+impl From<std::io::Error> for TuicNativeSendError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<TuicNativeSendError> for std::io::Error {
+    fn from(error: TuicNativeSendError) -> Self {
+        match error {
+            TuicNativeSendError::TooLarge => Self::other("TUIC datagram too large"),
+            TuicNativeSendError::Other(error) => error,
+        }
+    }
+}
+
+fn frag_write_native(
+    connection: &quinn::Connection,
+    packet: &Packet,
+    frag_size: usize,
+) -> Result<(), TuicNativeSendError> {
+    let payload = &packet.data;
+    if payload.is_empty() {
+        let encoded =
+            encode_packet(packet).map_err(|error| std::io::Error::other(error.to_string()))?;
+        return connection
+            .send_datagram(Bytes::from(encoded))
+            .map_err(TuicNativeSendError::from);
+    }
+    let frag_count = u8::try_from(payload.len().div_ceil(frag_size).max(1))
+        .map_err(|_| std::io::Error::other("TUIC UDP fragment count exceeds 255"))?;
+    let mut offset = 0_usize;
+    let mut frag_id = 0_u8;
+    let mut addr = packet.addr.clone();
+    while offset < payload.len() {
+        let end = (offset + frag_size).min(payload.len());
+        let fragment = Packet {
+            assoc_id: packet.assoc_id,
+            pkt_id: packet.pkt_id,
+            frag_total: frag_count,
+            frag_id,
+            addr: addr.take(),
+            data: payload[offset..end].to_vec(),
+        };
+        let encoded =
+            encode_packet(&fragment).map_err(|error| std::io::Error::other(error.to_string()))?;
+        connection
+            .send_datagram(Bytes::from(encoded))
+            .map_err(TuicNativeSendError::from)?;
+        offset = end;
+        frag_id = frag_id.saturating_add(1);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1288,6 +1406,7 @@ mod tuic_udp_tests {
                     last_used: Instant::now(),
                     cancel: CancellationToken::new(),
                     generation: u64::from(assoc_id) + 1,
+                    relay_mode: UdpRelayMode::Native,
                 },
             );
             assert!(
@@ -1319,6 +1438,7 @@ mod tuic_udp_tests {
                 last_used: Instant::now(),
                 cancel: CancellationToken::new(),
                 generation: 1,
+                relay_mode: UdpRelayMode::Native,
             },
         )]);
         for assoc_id in 0..TUIC_MAX_UDP_SESSIONS as u16 {
@@ -1354,6 +1474,7 @@ mod tuic_udp_tests {
                 last_used: Instant::now(),
                 cancel: cancel.clone(),
                 generation: 7,
+                relay_mode: UdpRelayMode::Native,
             },
         );
         defrag.insert(42, Defragger::default());
@@ -1379,6 +1500,7 @@ mod tuic_udp_tests {
                     last_used: Instant::now(),
                     cancel: old_cancel.clone(),
                     generation: 1,
+                    relay_mode: UdpRelayMode::Native,
                 },
             );
             defrag.lock().await.insert(assoc_id, Defragger::default());
@@ -1407,6 +1529,7 @@ mod tuic_udp_tests {
                     last_used: Instant::now(),
                     cancel: new_cancel.clone(),
                     generation: 2,
+                    relay_mode: UdpRelayMode::Native,
                 },
             );
             defrag.lock().await.insert(assoc_id, Defragger::default());
@@ -1445,6 +1568,7 @@ mod tuic_udp_tests {
                         last_used: Instant::now(),
                         cancel: CancellationToken::new(),
                         generation: 1,
+                        relay_mode: UdpRelayMode::Native,
                     },
                 );
                 defrag.lock().await.insert(assoc_id, Defragger::default());
@@ -1477,6 +1601,7 @@ mod tuic_udp_tests {
                             last_used: Instant::now(),
                             cancel: CancellationToken::new(),
                             generation: 2,
+                            relay_mode: UdpRelayMode::Native,
                         },
                     );
                     recreate_defrag
@@ -1518,6 +1643,7 @@ mod tuic_udp_tests {
                 last_used: Instant::now(),
                 cancel: CancellationToken::new(),
                 generation: 11,
+                relay_mode: UdpRelayMode::Native,
             },
         );
         defrag.insert(3, Defragger::default());

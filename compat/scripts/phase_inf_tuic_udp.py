@@ -76,7 +76,9 @@ rules:
 """
 
 
-def outbound_client_yaml(mixed_port: int, tuic_port: int) -> str:
+def outbound_client_yaml(
+    mixed_port: int, tuic_port: int, *, relay_mode: str = "native"
+) -> str:
     return f"""mixed-port: {mixed_port}
 mode: rule
 log-level: info
@@ -91,7 +93,7 @@ proxies:
     sni: {SNI}
     alpn: [h3]
     skip-cert-verify: true
-    udp-relay-mode: native
+    udp-relay-mode: {relay_mode}
 proxy-groups:
   - name: PROXY
     type: select
@@ -287,6 +289,53 @@ def exercise_allow_then_reject(binary: pathlib.Path, scratch: pathlib.Path) -> d
         thread_reject.join(timeout=1)
 
 
+def exercise_quic_mode(binary: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
+    """Go/Rust product client with udp-relay-mode: quic against named TUIC inbound.
+
+    Replies must travel on uni-streams; datagram-only replies time out.
+    """
+    echo = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpEchoHandler)
+    echo.allow_reuse_address = True
+    thread = threading.Thread(target=echo.serve_forever, daemon=True)
+    thread.start()
+    echo_port = int(echo.server_address[1])
+
+    certificate, private_key = stage_tls_material(scratch)
+    tuic_port = reserve_port()
+    server_cfg = scratch / "server.yaml"
+    server_cfg.write_text(inbound_yaml(tuic_port, certificate, private_key))
+    server, server_out, server_err = launch(binary, server_cfg, scratch)
+
+    client_dir = scratch / "client-quic"
+    client_dir.mkdir()
+    mixed_port = reserve_port()
+    client_cfg = client_dir / "client.yaml"
+    client_cfg.write_text(
+        outbound_client_yaml(mixed_port, tuic_port, relay_mode="quic")
+    )
+    client, client_out, client_err = launch(binary, client_cfg, client_dir)
+
+    try:
+        wait_udp_route(client, mixed_port, echo_port)
+        small = socks_udp_exchange(mixed_port, echo_port, b"tuic-quic-small")
+        large = socks_udp_exchange(mixed_port, echo_port, PAYLOAD_LARGE)
+        return {
+            "quic-small": small,
+            "quic-large": large,
+            "quic-process-alive": server.poll() is None and client.poll() is None,
+        }
+    finally:
+        stop(client)
+        client_out.close()
+        client_err.close()
+        stop(server)
+        server_out.close()
+        server_err.close()
+        echo.shutdown()
+        echo.server_close()
+        thread.join(timeout=1)
+
+
 def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
     return {
         "small": observations["small"],
@@ -294,6 +343,9 @@ def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
         "multi-dest-a": observations["multi-dest-a"],
         "multi-dest-b": observations["multi-dest-b"],
         "process-alive": observations["process-alive"],
+        "quic-small": observations["quic"]["quic-small"],
+        "quic-large": observations["quic"]["quic-large"],
+        "quic-process-alive": observations["quic"]["quic-process-alive"],
     }
 
 
@@ -303,6 +355,9 @@ REQUIRED_TRUE = (
     "multi-dest-a",
     "multi-dest-b",
     "process-alive",
+    "quic-small",
+    "quic-large",
+    "quic-process-alive",
 )
 
 
@@ -322,6 +377,9 @@ def main() -> int:
                 scratch = root / name
                 scratch.mkdir()
                 observations[name] = exercise(binaries[name], scratch)
+                observations[name]["quic"] = exercise_quic_mode(
+                    binaries[name], scratch / "quic"
+                )
             rust_reject = exercise_allow_then_reject(
                 binaries["rust"], root / "rust-allow-reject"
             )
