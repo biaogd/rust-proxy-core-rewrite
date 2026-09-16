@@ -402,6 +402,8 @@ pub(super) async fn run_vless_listener(
                     state.log("error", "vless inbound accept failed");
                     break;
                 };
+                // Match Go net.TCPConn default: TCP_NODELAY on.
+                let _ = tcp.set_nodelay(true);
                 let connection_config = Arc::clone(&*config.borrow());
                 if !connection_config.permits_inbound(peer.ip()) {
                     continue;

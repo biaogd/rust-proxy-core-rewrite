@@ -202,17 +202,44 @@ impl AsyncWrite for TrojanStream {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        while self.offset < self.request.len() {
-            let request = self.request.clone();
-            let offset = self.offset;
-            match Pin::new(&mut self.inner).poll_write(context, &request[offset..]) {
+        // Coalesce header + first payload into one write (Go sendRequest parity)
+        // so TLS emits a single record and the server can auth+dial sooner.
+        if self.offset == 0 && !self.request.is_empty() && !buffer.is_empty() {
+            let header_len = self.request.len();
+            let mut combined = Vec::with_capacity(header_len + buffer.len());
+            combined.extend_from_slice(&self.request);
+            combined.extend_from_slice(buffer);
+            match Pin::new(&mut self.inner).poll_write(context, &combined) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
-                Poll::Ready(Ok(written)) => self.offset += written,
+                Poll::Ready(Ok(written)) if written >= header_len => {
+                    self.offset = header_len;
+                    self.request.clear();
+                    return Poll::Ready(Ok(written - header_len));
+                }
+                Poll::Ready(Ok(written)) => {
+                    // Partial header only — finish the header on subsequent polls.
+                    self.offset = written;
+                }
             }
+        }
+        while self.offset < self.request.len() {
+            let this = &mut *self;
+            let offset = this.offset;
+            match Pin::new(&mut this.inner).poll_write(context, &this.request[offset..]) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                }
+                Poll::Ready(Ok(written)) => this.offset += written,
+            }
+        }
+        if !self.request.is_empty() {
+            self.request.clear();
         }
         Pin::new(&mut self.inner).poll_write(context, buffer)
     }

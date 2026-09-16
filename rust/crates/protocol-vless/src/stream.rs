@@ -147,17 +147,43 @@ impl AsyncWrite for VlessTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        while self.request_offset < self.request.len() {
-            let request = self.request.clone();
-            let offset = self.request_offset;
-            match Pin::new(&mut self.inner).poll_write(cx, &request[offset..]) {
+        // Coalesce header + first payload (Go sendRequest) into one TLS record.
+        if self.request_offset == 0 && !self.request.is_empty() && !buf.is_empty() {
+            let header_len = self.request.len();
+            let mut combined = Vec::with_capacity(header_len + buf.len());
+            combined.extend_from_slice(&self.request);
+            combined.extend_from_slice(buf);
+            match Pin::new(&mut self.inner).poll_write(cx, &combined) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
-                Poll::Ready(Ok(written)) => self.request_offset += written,
+                Poll::Ready(Ok(written)) if written >= header_len => {
+                    self.request_offset = header_len;
+                    self.request.clear();
+                    return Poll::Ready(Ok(written - header_len));
+                }
+                Poll::Ready(Ok(written)) => {
+                    // Partial header only — finish the header on subsequent polls.
+                    self.request_offset = written;
+                }
             }
+        }
+        while self.request_offset < self.request.len() {
+            let this = &mut *self;
+            let offset = this.request_offset;
+            match Pin::new(&mut this.inner).poll_write(cx, &this.request[offset..]) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                }
+                Poll::Ready(Ok(written)) => this.request_offset += written,
+            }
+        }
+        if !self.request.is_empty() {
+            self.request.clear();
         }
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
