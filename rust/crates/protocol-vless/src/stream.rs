@@ -51,15 +51,25 @@ pub(crate) fn request_header(
     Ok(request)
 }
 
+enum HandshakeState {
+    /// Request not fully sent and/or response not fully consumed (Go Conn).
+    Active {
+        request: Vec<u8>,
+        request_offset: usize,
+        response_header: [u8; 2],
+        response_header_offset: usize,
+        response_addons_remaining: usize,
+        response_header_validated: bool,
+    },
+    /// Both directions finished handshake — bulk path is a bare forward
+    /// (Go `WriterReplaceable` + `ReaderReplaceable`).
+    Done,
+}
+
 /// VLESS TCP stream with lazy request/response handling.
 pub struct VlessTcpStream {
     inner: BoxedStream,
-    request: Vec<u8>,
-    request_offset: usize,
-    response_header: [u8; 2],
-    response_header_offset: usize,
-    response_addons_remaining: usize,
-    response_header_validated: bool,
+    handshake: HandshakeState,
 }
 
 impl VlessTcpStream {
@@ -70,13 +80,36 @@ impl VlessTcpStream {
     ) -> Result<Self, VlessProtocolError> {
         Ok(Self {
             inner,
-            request: request_header(destination, options)?,
-            request_offset: 0,
-            response_header: [0; 2],
-            response_header_offset: 0,
-            response_addons_remaining: 0,
-            response_header_validated: false,
+            handshake: HandshakeState::Active {
+                request: request_header(destination, options)?,
+                request_offset: 0,
+                response_header: [0; 2],
+                response_header_offset: 0,
+                response_addons_remaining: 0,
+                response_header_validated: false,
+            },
         })
+    }
+
+    fn maybe_finish_handshake(&mut self) {
+        let HandshakeState::Active {
+            request,
+            request_offset,
+            response_header_offset,
+            response_addons_remaining,
+            response_header_validated,
+            ..
+        } = &self.handshake
+        else {
+            return;
+        };
+        if *request_offset >= request.len()
+            && *response_header_validated
+            && *response_header_offset >= 2
+            && *response_addons_remaining == 0
+        {
+            self.handshake = HandshakeState::Done;
+        }
     }
 }
 
@@ -86,58 +119,93 @@ impl AsyncRead for VlessTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        while self.response_header_offset < self.response_header.len() {
-            let mut response = self.response_header;
-            let offset = self.response_header_offset;
-            let mut read_buf = ReadBuf::new(&mut response[offset..]);
-            match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+        if matches!(self.handshake, HandshakeState::Done) {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        loop {
+            let HandshakeState::Active {
+                response_header,
+                response_header_offset,
+                response_addons_remaining,
+                response_header_validated,
+                ..
+            } = &mut self.handshake
+            else {
+                return Pin::new(&mut self.inner).poll_read(cx, buf);
+            };
+
+            if *response_header_offset < response_header.len() {
+                let mut response = *response_header;
+                let offset = *response_header_offset;
+                let mut read_buf = ReadBuf::new(&mut response[offset..]);
+                match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "short VLESS response header",
+                        )));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        let read = read_buf.filled().len();
+                        if let HandshakeState::Active {
+                            response_header,
+                            response_header_offset,
+                            ..
+                        } = &mut self.handshake
+                        {
+                            *response_header = response;
+                            *response_header_offset += read;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if !*response_header_validated {
+                if response_header[0] != VERSION {
                     return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "short VLESS response header",
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "unexpected VLESS response version {}",
+                            response_header[0]
+                        ),
                     )));
                 }
-                Poll::Ready(Ok(())) => {
-                    let read = read_buf.filled().len();
-                    self.response_header = response;
-                    self.response_header_offset += read;
+                *response_addons_remaining = usize::from(response_header[1]);
+                *response_header_validated = true;
+            }
+
+            if *response_addons_remaining > 0 {
+                let mut addons = [0_u8; 256];
+                let length = (*response_addons_remaining).min(addons.len());
+                let mut addon_buf = ReadBuf::new(&mut addons[..length]);
+                match Pin::new(&mut self.inner).poll_read(cx, &mut addon_buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) if addon_buf.filled().is_empty() => {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "short VLESS response addons",
+                        )));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        if let HandshakeState::Active {
+                            response_addons_remaining,
+                            ..
+                        } = &mut self.handshake
+                        {
+                            *response_addons_remaining -= addon_buf.filled().len();
+                        }
+                        continue;
+                    }
                 }
             }
+
+            self.maybe_finish_handshake();
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
         }
-        if !self.response_header_validated {
-            if self.response_header[0] != VERSION {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "unexpected VLESS response version {}",
-                        self.response_header[0]
-                    ),
-                )));
-            }
-            self.response_addons_remaining = usize::from(self.response_header[1]);
-            self.response_header_validated = true;
-        }
-        while self.response_addons_remaining > 0 {
-            let mut addons = [0_u8; 256];
-            let length = self.response_addons_remaining.min(addons.len());
-            let mut addon_buf = ReadBuf::new(&mut addons[..length]);
-            match Pin::new(&mut self.inner).poll_read(cx, &mut addon_buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) if addon_buf.filled().is_empty() => {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "short VLESS response addons",
-                    )));
-                }
-                Poll::Ready(Ok(())) => {
-                    self.response_addons_remaining -= addon_buf.filled().len();
-                }
-            }
-        }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
@@ -147,11 +215,23 @@ impl AsyncWrite for VlessTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
+        if matches!(self.handshake, HandshakeState::Done) {
+            return Pin::new(&mut self.inner).poll_write(cx, buf);
+        }
+
         // Coalesce header + first payload (Go sendRequest) into one TLS record.
-        if self.request_offset == 0 && !self.request.is_empty() && !buf.is_empty() {
-            let header_len = self.request.len();
+        if let HandshakeState::Active {
+            request,
+            request_offset,
+            ..
+        } = &self.handshake
+            && *request_offset == 0
+            && !request.is_empty()
+            && !buf.is_empty()
+        {
+            let header_len = request.len();
             let mut combined = Vec::with_capacity(header_len + buf.len());
-            combined.extend_from_slice(&self.request);
+            combined.extend_from_slice(request);
             combined.extend_from_slice(buf);
             match Pin::new(&mut self.inner).poll_write(cx, &combined) {
                 Poll::Pending => return Poll::Pending,
@@ -160,31 +240,67 @@ impl AsyncWrite for VlessTcpStream {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
                 Poll::Ready(Ok(written)) if written >= header_len => {
-                    self.request_offset = header_len;
-                    self.request.clear();
+                    if let HandshakeState::Active {
+                        request,
+                        request_offset,
+                        ..
+                    } = &mut self.handshake
+                    {
+                        *request_offset = header_len;
+                        request.clear();
+                    }
+                    self.maybe_finish_handshake();
                     return Poll::Ready(Ok(written - header_len));
                 }
                 Poll::Ready(Ok(written)) => {
-                    // Partial header only — finish the header on subsequent polls.
-                    self.request_offset = written;
+                    if let HandshakeState::Active {
+                        request_offset, ..
+                    } = &mut self.handshake
+                    {
+                        *request_offset = written;
+                    }
                 }
             }
         }
-        while self.request_offset < self.request.len() {
+
+        while let HandshakeState::Active {
+            request,
+            request_offset,
+            ..
+        } = &self.handshake
+            && *request_offset < request.len()
+        {
             let this = &mut *self;
-            let offset = this.request_offset;
-            match Pin::new(&mut this.inner).poll_write(cx, &this.request[offset..]) {
+            let HandshakeState::Active {
+                request,
+                request_offset,
+                ..
+            } = &mut this.handshake
+            else {
+                break;
+            };
+            let offset = *request_offset;
+            match Pin::new(&mut this.inner).poll_write(cx, &request[offset..]) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
-                Poll::Ready(Ok(written)) => this.request_offset += written,
+                Poll::Ready(Ok(written)) => *request_offset += written,
             }
         }
-        if !self.request.is_empty() {
-            self.request.clear();
+
+        if let HandshakeState::Active {
+            request,
+            request_offset,
+            ..
+        } = &mut self.handshake
+            && *request_offset >= request.len()
+            && !request.is_empty()
+        {
+            request.clear();
         }
+        self.maybe_finish_handshake();
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 
@@ -243,15 +359,11 @@ mod tests {
         });
 
         let mut stream =
-            VlessTcpStream::new(Box::new(client), &destination, options).expect("VLESS stream");
+            VlessTcpStream::new(Box::new(client), &destination, options).expect("stream");
         stream.write_all(b"request").await.expect("request");
-        stream.shutdown().await.expect("client shutdown");
         let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("fragmented response");
+        stream.read_to_end(&mut response).await.expect("response");
         assert_eq!(response, b"response");
-        authority_task.await.expect("authority task");
+        authority_task.await.expect("authority");
     }
 }

@@ -1023,6 +1023,7 @@ async fn connect_trojan_proxy(
     )
     .await?;
     rewrite_outbound::connect_trojan_on_stream_with_key(outer, destination, &trojan.password_key)
+        .await
         .map_err(|error| format!("Trojan proxy connection failed: {error}"))
 }
 
