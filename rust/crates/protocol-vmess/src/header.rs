@@ -2,9 +2,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes::Aes128;
-use aes::cipher::{
-    AsyncStreamCipher as _, BlockDecrypt as _, BlockEncrypt, KeyInit as _, KeyIvInit as _,
-};
+use aes::cipher::{BlockCipherDecrypt as _, BlockCipherEncrypt, KeyInit as _, KeyIvInit as _};
 use aes_gcm::aead::{Aead as _, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
 use hmac::{Hmac, Mac as _};

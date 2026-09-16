@@ -639,11 +639,11 @@ dependencies = [
 
 [[package]]
 name = "cfb-mode"
-version = "0.8.2"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "738b8d467867f80a71351933f70461f5b56f24d5c93e0cf216e59229c968d330"
+checksum = "ac64b0984be8510caae81455ea2c8c23e5af6be61c36129df62f3380d5d64e1f"
 dependencies = [
- "cipher 0.4.4",
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -2062,7 +2062,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -3540,7 +3540,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3579,7 +3579,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -4046,7 +4046,7 @@ name = "rewrite-protocol-shadowsocksr"
 version = "0.1.0"
 dependencies = [
  "adler2",
- "aes 0.8.4",
+ "aes 0.9.3",
  "base64 0.22.1",
  "bytes",
  "crc32fast",
@@ -4066,9 +4066,9 @@ dependencies = [
 name = "rewrite-protocol-snell"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.10.3",
+ "aes-gcm 0.11.1",
  "argon2",
- "chacha20poly1305 0.10.1",
+ "chacha20poly1305 0.11.0",
  "rand 0.10.2",
  "rewrite-model",
  "rewrite-transport",
@@ -4141,10 +4141,10 @@ dependencies = [
 name = "rewrite-protocol-vmess"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
+ "aes 0.9.3",
+ "aes-gcm 0.11.1",
  "cfb-mode",
- "chacha20poly1305 0.10.1",
+ "chacha20poly1305 0.11.0",
  "crc32fast",
  "hex",
  "hmac 0.12.1",
@@ -4315,7 +4315,7 @@ dependencies = [
 name = "rewrite-transport"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.10.3",
+ "aes-gcm 0.11.1",
  "base64 0.22.1",
  "bytes",
  "futures-util",
