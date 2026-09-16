@@ -38,7 +38,8 @@ pub(super) async fn serve_connection(
         ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
-        | ListenerKind::Vmess => return,
+        | ListenerKind::Vmess
+        | ListenerKind::Hysteria2 => return,
     };
     let authentication = if config.skips_inbound_auth(peer.ip()) {
         &[]
@@ -83,7 +84,8 @@ pub(super) async fn serve_connection(
         ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
-        | ListenerKind::Vmess => return,
+        | ListenerKind::Vmess
+        | ListenerKind::Hysteria2 => return,
     }
     .clone_into(&mut metadata.inbound_name);
     let fake_host = apply_host_mapping(&mut metadata, config, state);
@@ -191,6 +193,7 @@ pub(super) async fn serve_stream_session(
             InboundProtocol::Trojan => "DEFAULT-TROJAN",
             InboundProtocol::Vless => "DEFAULT-VLESS",
             InboundProtocol::Vmess => "DEFAULT-VMESS",
+            InboundProtocol::Hysteria2 => "DEFAULT-HYSTERIA2",
             InboundProtocol::Tun => "DEFAULT-TUN",
             InboundProtocol::Http
             | InboundProtocol::Https

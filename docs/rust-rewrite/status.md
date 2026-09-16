@@ -1,6 +1,20 @@
 # Rust rewrite status
 
-Last updated: 2026-09-15
+Last updated: 2026-09-16
+
+### IN-F Hysteria2 named inbound (first slice) — 2026-09-16
+
+Named `type: hysteria2` accepts QUIC/TLS (`certificate` + `private-key`), Clash
+`users` name→password map, optional `alpn` (default `h3`), and optional
+`obfs: salamander` + `obfs-password`. Protocol crate owns HTTP/3 `/auth` Accept
+(status 233), TCP request/response framing, and UDP `UdpMessage`/defrag helpers;
+runtime owns listen, multi-user password table, stock BBR, TCP →
+`serve_shadowsocks_connection`, and Direct UDP session relay. Caps: 1024
+connections, 256 streams/conn, 256 UDP sessions. Evidence:
+`phase_inf_hysteria2_tcp.py` (product Hy2 outbound vs Go/Rust named inbound:
+small/large TCP, half-close, wrong-password; CI hysteria2 shard). Deferred:
+realm, gecko, ECH, masquerade, Brutal accuracy, TUIC inbound, product UDP
+outbound paths through the named inbound.
 
 ### IN-E VMess TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
@@ -88,13 +102,12 @@ listeners from `listener/parse.go`, Rust fixed HTTP/SOCKS/mixed + Phase 6C-N
 Shadowsocks + partial TUN, SS in-scope vs deferred vs Rust-extension rows, and
 the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
-framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP and
-**IN-C** Trojan TLS/WSS/gRPC inbound are implemented in this checkout (see
-**IN-C** Trojan TLS/WSS/gRPC inbound and **IN-E** VMess TLS/WSS/gRPC/XUDP
-inbound are implemented in this checkout (see above). Next inbound product
-slice: REALITY dest-fallback polish or **IN-F** QUIC servers. Explicit non-goals:
-SSR/Snell/SSH/WG servers, early mKCP/Mekya, panels/billing, public test
-authorities.
+framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP,
+**IN-C** Trojan TLS/WSS/gRPC, **IN-E** VMess TLS/WSS/gRPC/XUDP, and **IN-F**
+Hysteria2 named inbound first slice (TCP + Direct UDP, stock BBR) are
+implemented in this checkout. TUIC inbound and Hy2 realm/gecko/ECH/masquerade/
+Brutal remain deferred. Explicit non-goals: SSR/Snell/SSH/WG servers, early
+mKCP/Mekya, panels/billing, public test authorities.
 
 ### Phase 7T1-A TCP `dialer-proxy` — 2026-09-14
 
@@ -660,6 +673,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-E VMess WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; `phase_ine_vmess_websocket.py` |
 | IN-E VMess gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; combined ws+grpc rejected; `phase_ine_vmess_grpc.py` |
 | IN-E VMess XUDP inbound | Complete (declared Mux/XUDP UDP scope) | Named TLS Mux/XUDP multi-destination UDP via product outbound; `phase_ine_vmess_xudp.py` |
+| IN-F Hysteria2 inbound | Partial (first slice) | Named QUIC TCP+Direct UDP; stock BBR; salamander optional; `phase_inf_hysteria2_tcp.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |

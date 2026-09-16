@@ -4182,6 +4182,88 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn loads_named_hysteria2_listener_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: hy2-in
+    type: hysteria2
+    listen: 127.0.0.1
+    port: 18450
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      alice: phase-hy2-password
+    alpn:
+      - h3
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named hysteria2 listener");
+    assert_eq!(config.hysteria2_listeners.len(), 1);
+    let inbound = &config.hysteria2_listeners[0];
+    assert_eq!(inbound.name, "hy2-in");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(inbound.users[0].username, "alice");
+    assert_eq!(inbound.users[0].password, "phase-hy2-password");
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    assert_eq!(inbound.alpn, vec!["h3".to_owned()]);
+    assert!(inbound.obfs_password.is_none());
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Hysteria2, 18450)));
+
+    let with_salamander = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: hy2-salamander
+    type: hysteria2
+    listen: 127.0.0.1
+    port: 18451
+    certificate: ./server.crt
+    private-key: ./server.key
+    obfs: salamander
+    obfs-password: salamander-psk
+    users:
+      bob: secret
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named hysteria2 salamander listener");
+    assert_eq!(
+        with_salamander.hysteria2_listeners[0]
+            .obfs_password
+            .as_deref(),
+        Some("salamander-psk")
+    );
+
+    for unsupported in [
+        "masquerade: http://127.0.0.1:8080",
+        "ech-key: unused",
+        "cwnd: 10",
+        "bbr-profile: aggressive",
+        "mux-option:\n      padding: true",
+        "client-auth-type: require-and-verify",
+        "realm-opts:\n      enable: true",
+        "obfs: gecko\n    obfs-password: gecko-psk",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: hy2-bad\n    type: hysteria2\n    listen: 127.0.0.1\n    port: 18452\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      alice: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let missing_users = "mode: rule\nlisteners:\n  - name: hy2-bad\n    type: hysteria2\n    listen: 127.0.0.1\n    port: 18453\n    certificate: ./server.crt\n    private-key: ./server.key\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_users).is_err(),
+        "users are required"
+    );
+}
+
+#[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"

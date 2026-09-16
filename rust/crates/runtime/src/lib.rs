@@ -1,5 +1,6 @@
 mod dialer_proxy;
 mod generation;
+mod hysteria2_listener;
 mod lifecycle;
 mod listener;
 mod services;

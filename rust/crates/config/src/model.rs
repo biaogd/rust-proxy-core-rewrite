@@ -90,6 +90,7 @@ pub struct ConfigSpec {
     pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub vless_listeners: Vec<VlessInboundConfig>,
     pub vmess_listeners: Vec<VmessInboundConfig>,
+    pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -157,6 +158,7 @@ pub struct Config {
     pub trojan_listeners: Vec<TrojanInboundConfig>,
     pub vless_listeners: Vec<VlessInboundConfig>,
     pub vmess_listeners: Vec<VmessInboundConfig>,
+    pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1404,6 +1406,46 @@ impl VmessInboundConfig {
     }
 }
 
+/// Named `type: hysteria2` QUIC inbound accepted in IN-F (first slice).
+///
+/// Clash-style `users` is name→password. Optional Salamander obfs; stock BBR.
+/// Realm/gecko/ECH/masquerade/Brutal knobs stay rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hysteria2InboundUser {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Hysteria2InboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<Hysteria2InboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+    /// ALPN list; empty means default `["h3"]` at runtime.
+    pub alpn: Vec<String>,
+    /// When set, Salamander obfuscation PSK (`obfs: salamander`).
+    pub obfs_password: Option<String>,
+}
+
+impl Hysteria2InboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|alpn={:?}|obfs-password={}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.alpn,
+            self.obfs_password.as_deref().unwrap_or("")
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
@@ -1413,6 +1455,7 @@ pub enum ListenerKind {
     Trojan,
     Vless,
     Vmess,
+    Hysteria2,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {
