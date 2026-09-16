@@ -19,9 +19,7 @@ use uuid::Uuid;
 
 use crate::CongestionController;
 use crate::TuicProtocolError;
-use crate::protocol::{
-    CMD_CONNECT, ERR_AUTHENTICATION_FAILED, VERSION, decode_authenticate,
-};
+use crate::protocol::{CMD_CONNECT, ERR_AUTHENTICATION_FAILED, VERSION, decode_authenticate};
 use crate::tls::{
     DEFAULT_CONNECTION_RECEIVE_WINDOW, DEFAULT_MAX_IDLE_TIMEOUT, DEFAULT_STREAM_RECEIVE_WINDOW,
 };
@@ -70,9 +68,7 @@ impl Default for ServerEndpointOptions {
 /// # Errors
 ///
 /// Returns when a key is not a valid UUID.
-pub fn users_table<I, S1, S2>(
-    users: I,
-) -> Result<HashMap<[u8; 16], String>, TuicProtocolError>
+pub fn users_table<I, S1, S2>(users: I) -> Result<HashMap<[u8; 16], String>, TuicProtocolError>
 where
     I: IntoIterator<Item = (S1, S2)>,
     S1: AsRef<str>,
@@ -81,10 +77,7 @@ where
     let mut table = HashMap::new();
     for (uuid_raw, password) in users {
         let uuid = Uuid::parse_str(uuid_raw.as_ref().trim()).map_err(|_| {
-            TuicProtocolError::Protocol(format!(
-                "invalid TUIC user uuid: {}",
-                uuid_raw.as_ref()
-            ))
+            TuicProtocolError::Protocol(format!("invalid TUIC user uuid: {}", uuid_raw.as_ref()))
         })?;
         table.insert(*uuid.as_bytes(), password.into());
     }
@@ -409,8 +402,13 @@ pub fn bind_server_endpoint(
     std_sock
         .set_nonblocking(true)
         .map_err(TuicProtocolError::Io)?;
-    quinn::Endpoint::new(EndpointConfig::default(), Some(server_config), std_sock, runtime)
-        .map_err(TuicProtocolError::Io)
+    quinn::Endpoint::new(
+        EndpointConfig::default(),
+        Some(server_config),
+        std_sock,
+        runtime,
+    )
+    .map_err(TuicProtocolError::Io)
 }
 
 /// Load PEM certificate/private-key from inline PEM or filesystem path.
@@ -439,13 +437,13 @@ mod tests {
 
     #[test]
     fn users_table_parses_uuid_keys() {
-        let table = users_table([(
-            "b831381d-6324-4d53-ad4f-8cda48b30811",
-            "secret",
-        )])
-        .expect("users");
+        let table =
+            users_table([("b831381d-6324-4d53-ad4f-8cda48b30811", "secret")]).expect("users");
         let uuid = Uuid::parse_str("b831381d-6324-4d53-ad4f-8cda48b30811").unwrap();
-        assert_eq!(table.get(uuid.as_bytes()).map(String::as_str), Some("secret"));
+        assert_eq!(
+            table.get(uuid.as_bytes()).map(String::as_str),
+            Some("secret")
+        );
     }
 
     #[test]
@@ -466,15 +464,13 @@ mod tests {
         };
         let frame = encode_connect(&destination).expect("encode");
         assert!(matches!(try_parse_connect(&frame[..3]), Ok(None)));
-        let (parsed, consumed) = try_parse_connect(&frame)
-            .expect("parse")
-            .expect("complete");
+        let (parsed, consumed) = try_parse_connect(&frame).expect("parse").expect("complete");
         assert_eq!(parsed, destination);
         assert_eq!(consumed, frame.len());
     }
 
     #[test]
     fn authenticate_command_byte_is_zero() {
-        assert_eq!(CMD_AUTHENTICATE, 0);
+        assert_eq!(crate::protocol::CMD_AUTHENTICATE, 0);
     }
 }

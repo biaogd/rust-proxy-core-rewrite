@@ -132,10 +132,7 @@ fn try_feed_defrag(
             return None;
         }
     }
-    defrag_by_assoc
-        .entry(assoc_id)
-        .or_default()
-        .feed(packet)
+    defrag_by_assoc.entry(assoc_id).or_default().feed(packet)
 }
 
 /// Cancel and remove UDP sessions idle longer than `max_idle`, and drop their
@@ -728,7 +725,9 @@ async fn read_exact_recv(recv: &mut quinn::RecvStream, buf: &mut [u8]) -> std::i
             .read(&mut buf[filled..])
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "stream closed"))?;
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "stream closed")
+            })?;
         filled += n;
     }
     Ok(())
@@ -1126,10 +1125,7 @@ async fn serve_tuic_udp_direct(
     let outbound = match crate::listener::bind_direct_udp_socket(target, config) {
         Ok(socket) => socket,
         Err(error) => {
-            state.log(
-                "error",
-                format!("tuic inbound UDP bind failed: {error}"),
-            );
+            state.log("error", format!("tuic inbound UDP bind failed: {error}"));
             return;
         }
     };
@@ -1219,16 +1215,15 @@ where
                 addr: Some(destination.clone()),
                 data: payload.to_vec(),
             };
-            let encoded = encode_packet(&packet)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let encoded =
+                encode_packet(&packet).map_err(|error| std::io::Error::other(error.to_string()))?;
             connection
                 .send_datagram(Bytes::from(encoded))
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             return Ok::<(), std::io::Error>(());
         }
-        let frag_count = u8::try_from(payload.len().div_ceil(max_payload).max(1)).map_err(|_| {
-            std::io::Error::other("TUIC UDP fragment count exceeds 255")
-        })?;
+        let frag_count = u8::try_from(payload.len().div_ceil(max_payload).max(1))
+            .map_err(|_| std::io::Error::other("TUIC UDP fragment count exceeds 255"))?;
         let mut offset = 0_usize;
         let mut frag_id = 0_u8;
         let mut addr = Some(destination.clone());
@@ -1393,7 +1388,11 @@ mod tuic_udp_tests {
             let mut sessions_guard = sessions.lock().await;
             let mut defrag_guard = defrag.lock().await;
             tokio::time::advance(TUIC_UDP_SESSION_IDLE + Duration::from_secs(1)).await;
-            evict_idle_udp_sessions(&mut sessions_guard, &mut defrag_guard, TUIC_UDP_SESSION_IDLE);
+            evict_idle_udp_sessions(
+                &mut sessions_guard,
+                &mut defrag_guard,
+                TUIC_UDP_SESSION_IDLE,
+            );
         }
         assert!(old_cancel.is_cancelled());
         assert!(sessions.lock().await.is_empty());
@@ -1541,7 +1540,10 @@ mod tuic_udp_tests {
 
     #[test]
     fn congestion_controller_mapping() {
-        assert_eq!(map_congestion_controller("cubic"), CongestionController::Cubic);
+        assert_eq!(
+            map_congestion_controller("cubic"),
+            CongestionController::Cubic
+        );
         assert_eq!(map_congestion_controller("bbr"), CongestionController::Bbr);
         assert_eq!(
             map_congestion_controller("new_reno"),

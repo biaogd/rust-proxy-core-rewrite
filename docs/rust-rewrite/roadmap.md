@@ -1501,8 +1501,16 @@ explicitly pulled forward.
 **Hysteria2 first slice (implemented in this checkout):** named `type: hysteria2`
 with certificate/private-key, users map, optional ALPN/`obfs: salamander`,
 HTTP/3 `/auth` Accept, TCP relay, Direct UDP datagram sessions, stock BBR.
-Evidence: `phase_inf_hysteria2_tcp.py`. Deferred in this slice: realm, gecko,
-ECH, masquerade, Brutal accuracy, TUIC inbound.
+Evidence: `phase_inf_hysteria2_tcp.py` / `phase_inf_hysteria2_udp.py`. Deferred
+in the Hy2 slice: realm, gecko, ECH, masquerade, Brutal accuracy.
+
+**TUIC v5 slice (implemented in this checkout):** named `type: tuic` with
+certificate/private-key, uuid→password users, optional ALPN / congestion /
+idle / auth-timeout / max-udp-relay-packet-size. TLS-exporter Authenticate,
+TCP Connect, Direct UDP associations (native datagrams + uni Packet /
+Dissociate), generation-tagged cleanup. Evidence: `phase_inf_tuic_tcp.py` /
+`phase_inf_tuic_udp.py`. Deferred: v4 token, ECH, client-auth, Brutal/cwnd,
+ShadowQUIC.
 
 ### IN-G — AnyTLS inbound
 

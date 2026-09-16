@@ -4264,6 +4264,72 @@ rules: ['MATCH,DIRECT']
 }
 
 #[test]
+fn loads_named_tuic_listener_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: tuic-in
+    type: tuic
+    listen: 127.0.0.1
+    port: 18460
+    certificate: ./server.crt
+    private-key: ./server.key
+    users:
+      b831381d-6324-4d53-ad4f-8cda48b30811: phase-tuic-password
+    alpn:
+      - h3
+    congestion-controller: bbr
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named tuic listener");
+    assert_eq!(config.tuic_listeners.len(), 1);
+    let inbound = &config.tuic_listeners[0];
+    assert_eq!(inbound.name, "tuic-in");
+    assert_eq!(inbound.users.len(), 1);
+    assert_eq!(
+        inbound.users[0].uuid,
+        "b831381d-6324-4d53-ad4f-8cda48b30811"
+    );
+    assert_eq!(inbound.users[0].password, "phase-tuic-password");
+    assert_eq!(inbound.certificate, "./server.crt");
+    assert_eq!(inbound.private_key, "./server.key");
+    assert_eq!(inbound.alpn, vec!["h3".to_owned()]);
+    assert_eq!(inbound.congestion_controller, "bbr");
+    assert_eq!(inbound.max_idle_time_ms, 15_000);
+    assert_eq!(inbound.authentication_timeout_ms, 1_000);
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Tuic, 18460)));
+
+    for unsupported in [
+        "token: [v4-token]",
+        "ech-key: unused",
+        "cwnd: 10",
+        "bbr-profile: aggressive",
+        "mux-option:\n      padding: true",
+        "client-auth-type: require-and-verify",
+        "congestion-controller: brutal",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: tuic-bad\n    type: tuic\n    listen: 127.0.0.1\n    port: 18461\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      b831381d-6324-4d53-ad4f-8cda48b30811: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let bad_uuid = "mode: rule\nlisteners:\n  - name: tuic-bad\n    type: tuic\n    listen: 127.0.0.1\n    port: 18462\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      not-a-uuid: secret\nrules: ['MATCH,DIRECT']\n";
+    assert!(Config::from_yaml(bad_uuid).is_err(), "uuid keys required");
+
+    let missing_users = "mode: rule\nlisteners:\n  - name: tuic-bad\n    type: tuic\n    listen: 127.0.0.1\n    port: 18463\n    certificate: ./server.crt\n    private-key: ./server.key\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_users).is_err(),
+        "users are required"
+    );
+}
+
+#[test]
 fn parses_phase6e_a_vless_native_tcp_and_uuid_mapping() {
     let config = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: vless-native\n    type: vless\n    server: 127.0.0.1\n    port: 10001\n    uuid: '123456'\n    encryption: none\n    network: tcp\n"
