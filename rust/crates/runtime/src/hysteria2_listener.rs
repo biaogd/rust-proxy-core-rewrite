@@ -57,6 +57,10 @@ struct Hy2UdpSessionSlot {
 
 /// Remove `session_id` only when the map still holds `generation` (this worker's
 /// instance). Prevents an evicted worker from deleting a recreated slot.
+///
+/// Lock order is always **sessions → defrag**. Both tables are updated before
+/// either lock is released so a concurrent recreate cannot insert a new defrag
+/// entry that the retiring worker then deletes.
 async fn remove_udp_session_if_owner(
     sessions: &tokio::sync::Mutex<HashMap<u32, Hy2UdpSessionSlot>>,
     defrag_by_session: &tokio::sync::Mutex<HashMap<u32, Defragger>>,
@@ -71,7 +75,7 @@ async fn remove_udp_session_if_owner(
         return;
     }
     sessions.remove(&session_id);
-    drop(sessions);
+    // Hold `sessions` while taking `defrag` (same order as idle sweep / feed).
     defrag_by_session.lock().await.remove(&session_id);
 }
 
@@ -989,6 +993,88 @@ mod hy2_udp_tests {
         remove_udp_session_if_owner(&sessions, &defrag, session_id, 2).await;
         assert!(sessions.lock().await.is_empty());
         assert!(defrag.lock().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cleanup_cannot_drop_recreated_defrag() {
+        // Stress the former sessions→release→defrag window: recreate may insert
+        // a new defrag between those steps under the old cleanup. With atomic
+        // sessions→defrag removal, whenever generation 2 is present its defrag
+        // entry must still be present.
+        for round in 0..256_u32 {
+            let sessions = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let defrag = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let session_id = round;
+            {
+                let (tx, _rx) = mpsc::channel(1);
+                sessions.lock().await.insert(
+                    session_id,
+                    Hy2UdpSessionSlot {
+                        tx,
+                        last_used: Instant::now(),
+                        cancel: CancellationToken::new(),
+                        generation: 1,
+                    },
+                );
+                defrag.lock().await.insert(session_id, Defragger::default());
+            }
+
+            let cleanup_sessions = Arc::clone(&sessions);
+            let cleanup_defrag = Arc::clone(&defrag);
+            let cleanup = tokio::spawn(async move {
+                remove_udp_session_if_owner(&cleanup_sessions, &cleanup_defrag, session_id, 1)
+                    .await;
+            });
+
+            let recreate_sessions = Arc::clone(&sessions);
+            let recreate_defrag = Arc::clone(&defrag);
+            let recreate = tokio::spawn(async move {
+                loop {
+                    let mut sessions_guard = recreate_sessions.lock().await;
+                    let stale = sessions_guard
+                        .get(&session_id)
+                        .is_some_and(|slot| slot.generation == 1);
+                    if stale {
+                        drop(sessions_guard);
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    // Gen1 gone (or never present): install gen2 under sessions→defrag.
+                    let (tx, _rx) = mpsc::channel(1);
+                    sessions_guard.insert(
+                        session_id,
+                        Hy2UdpSessionSlot {
+                            tx,
+                            last_used: Instant::now(),
+                            cancel: CancellationToken::new(),
+                            generation: 2,
+                        },
+                    );
+                    recreate_defrag
+                        .lock()
+                        .await
+                        .insert(session_id, Defragger::default());
+                    break;
+                }
+            });
+
+            cleanup.await.expect("cleanup join");
+            recreate.await.expect("recreate join");
+
+            let sessions_guard = sessions.lock().await;
+            let defrag_guard = defrag.lock().await;
+            match sessions_guard.get(&session_id).map(|slot| slot.generation) {
+                Some(2) => assert!(
+                    defrag_guard.contains_key(&session_id),
+                    "round {round}: gen2 session must keep its defrag entry"
+                ),
+                None => assert!(
+                    !defrag_guard.contains_key(&session_id),
+                    "round {round}: no session implies no defrag left by cleanup"
+                ),
+                Some(other) => panic!("round {round}: unexpected generation {other}"),
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
