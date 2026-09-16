@@ -232,7 +232,7 @@ async fn handle_hysteria2_connection(
     dns_service: Arc<rewrite_dns::DnsService>,
     shutdown: CancellationToken,
 ) {
-    let auth = tokio::select! {
+    let authenticated = tokio::select! {
         () = shutdown.cancelled() => return,
         result = authenticate_incoming(
             connection.clone(),
@@ -240,9 +240,12 @@ async fn handle_hysteria2_connection(
             ServerAuthOptions::default(),
         ) => result,
     };
-    let Ok(auth) = auth else {
+    let Ok(authenticated) = authenticated else {
         return;
     };
+    // Must outlive TCP/UDP: h3 Connection Drop closes Quinn with H3_NO_ERROR.
+    let _h3_guard = authenticated.h3_guard;
+    let auth = authenticated.result;
 
     let mut streams = JoinSet::new();
     let udp_enabled = auth.udp_enabled;

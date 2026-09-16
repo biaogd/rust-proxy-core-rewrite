@@ -4013,6 +4013,7 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.10.2",
+ "rcgen",
  "rewrite-io",
  "rewrite-model",
  "rewrite-platform",

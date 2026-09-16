@@ -153,16 +153,32 @@ fn auth_host_matches(uri: &http::Uri, headers: &http::HeaderMap) -> bool {
         })
 }
 
+/// Guard that keeps the HTTP/3 server connection alive after `/auth`.
+///
+/// `h3::server::Connection`'s `Drop` closes the Quinn connection with
+/// `H3_NO_ERROR`. Hold this for the session lifetime while the runtime
+/// `accept_bi`s TCP streams and reads datagrams on the same Quinn connection
+/// (do not call [`h3::server::Connection::accept`] again).
+pub struct H3ConnectionGuard {
+    _inner: h3::server::Connection<h3_quinn::Connection, bytes::Bytes>,
+}
+
+/// Successful `/auth` Accept: username plus an h3 guard that must outlive TCP/UDP.
+pub struct AuthenticatedIncoming {
+    pub result: ServerAuthResult,
+    pub h3_guard: H3ConnectionGuard,
+}
+
 /// Authenticate one accepted Quinn connection via HTTP/3 `/auth`.
 ///
-/// On success the h3 pieces are dropped so the caller can `accept_bi` / read
-/// datagrams on `connection`. Wrong password yields a non-233 response and
-/// closes the Quinn connection.
+/// On success returns an [`AuthenticatedIncoming`] whose [`H3ConnectionGuard`]
+/// must be retained. Wrong password yields a non-233 response and closes the
+/// Quinn connection.
 pub async fn authenticate_incoming(
     connection: quinn::Connection,
     users: &HashMap<String, String>,
     options: ServerAuthOptions,
-) -> Result<ServerAuthResult, Hysteria2ProtocolError> {
+) -> Result<AuthenticatedIncoming, Hysteria2ProtocolError> {
     let mut h3_conn = h3::server::builder()
         .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection.clone()))
         .await
@@ -247,15 +263,14 @@ pub async fn authenticate_incoming(
         .finish()
         .await
         .map_err(|error| Hysteria2ProtocolError::Protocol(error.to_string()))?;
-
-    // Drop h3 without driving poll_close so the Quinn connection stays up for
-    // TCP bi-streams and UDP datagrams (mirrors client auth ordering).
     drop(stream);
-    drop(h3_conn);
 
-    Ok(ServerAuthResult {
-        username,
-        udp_enabled: options.udp_enabled,
+    Ok(AuthenticatedIncoming {
+        result: ServerAuthResult {
+            username,
+            udp_enabled: options.udp_enabled,
+        },
+        h3_guard: H3ConnectionGuard { _inner: h3_conn },
     })
 }
 

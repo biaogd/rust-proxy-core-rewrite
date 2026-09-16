@@ -21,11 +21,11 @@ mod varint;
 pub use bps::{parse_bps, parse_hop_interval, parse_ports};
 pub use client::{Client, ClientOptions, Session, TlsOptions};
 pub use server::{
-    Hysteria2ServerStream, ServerAuthOptions, ServerAuthResult, ServerEndpointOptions,
-    accept_tcp_request, auth_password_from_headers, authenticate_incoming, bind_server_endpoint,
-    encode_tcp_request, encode_tcp_response, encode_tcp_response_ok, is_auth_request,
-    load_pem_or_path, lookup_user, parse_destination_authority, parse_tcp_request,
-    password_user_table,
+    AuthenticatedIncoming, H3ConnectionGuard, Hysteria2ServerStream, ServerAuthOptions,
+    ServerAuthResult, ServerEndpointOptions, accept_tcp_request, auth_password_from_headers,
+    authenticate_incoming, bind_server_endpoint, encode_tcp_request, encode_tcp_response,
+    encode_tcp_response_ok, is_auth_request, load_pem_or_path, lookup_user,
+    parse_destination_authority, parse_tcp_request, password_user_table,
 };
 pub use tcp::Hysteria2Stream;
 pub use udp::{
