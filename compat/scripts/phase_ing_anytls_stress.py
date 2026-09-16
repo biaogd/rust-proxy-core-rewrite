@@ -83,6 +83,17 @@ def process_fd_count(pid: int) -> int | None:
         return None
 
 
+def process_cpu_percent(pid: int) -> float | None:
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        return round(psutil.Process(pid).cpu_percent(interval=None), 2)
+    except Exception:
+        return None
+
+
 def resource_verdict(samples: list[dict[str, Any]], duration: int) -> dict[str, Any]:
     complete = [s for s in samples if s.get("rss") and s.get("fd") is not None]
     if not complete:
@@ -104,18 +115,30 @@ def resource_verdict(samples: list[dict[str, Any]], duration: int) -> dict[str, 
         }
     rss = [int(s["rss"]) for s in complete]
     fds = [int(s["fd"]) for s in complete]
+    cpu = [float(s["cpu"]) for s in complete if s.get("cpu") is not None]
     quarter = max(1, len(complete) // 4)
     rss_growth = statistics.median(rss[-quarter:]) - statistics.median(rss[:quarter])
     fd_growth = statistics.median(fds[-quarter:]) - statistics.median(fds[:quarter])
     descriptor_budget = 64 if os.name == "nt" else 16
-    return {
+    out: dict[str, Any] = {
         "samples-complete": True,
         "rss-bounded": max(rss) - min(rss) <= 65536 and rss_growth <= 16384,
         "fd-bounded": max(fds) - min(fds) <= descriptor_budget
         and fd_growth <= descriptor_budget / 2,
+        "rss-kib-min": min(rss),
+        "rss-kib-median": statistics.median(rss),
+        "rss-kib-max": max(rss),
         "rss-growth-kib": rss_growth,
         "descriptor-growth": fd_growth,
+        "fd-min": min(fds),
+        "fd-median": statistics.median(fds),
+        "fd-max": max(fds),
     }
+    if cpu:
+        out["cpu-percent-median"] = round(statistics.median(cpu), 2)
+        out["cpu-percent-max"] = round(max(cpu), 2)
+        out["cpu-percent-mean"] = round(statistics.fmean(cpu), 2)
+    return out
 
 
 def wait_anytls_inbound(process: Any, port: int) -> None:
@@ -195,6 +218,9 @@ def exercise(
         wait_ready(client, mixed_port)
         wait_warmup(mixed_port, echo_port)
 
+        # Prime cpu_percent so soak samples are non-zero after first call.
+        process_cpu_percent(server.pid)
+
         concurrent_ok = concurrent_tcp(mixed_port, echo_port, CONCURRENT)
         cancel_ok = cancel_churn(mixed_port, echo_port, CANCEL_ROUNDS)
         throughput = measure_throughput(mixed_port, echo_port, rounds=THROUGHPUT_ROUNDS)
@@ -217,12 +243,15 @@ def exercise(
                         "t": round(now - (deadline - soak_duration), 1),
                         "rss": process_rss_kib(server.pid),
                         "fd": process_fd_count(server.pid),
+                        "cpu": process_cpu_percent(server.pid),
                         "churn": churn,
                     }
                 )
                 next_sample = now + SAMPLE_EVERY
             time.sleep(0.02)
 
+        # Absolute soak rate (tiny payloads): useful for Go/Rust compare.
+        soak_elapsed = max(soak_duration, 1e-3)
         return {
             "concurrent": concurrent_ok,
             "cancel-churn": cancel_ok,
@@ -230,9 +259,20 @@ def exercise(
             "throughput-class": throughput["throughput-class"],
             "throughput-rounds-ok": throughput["rounds-ok"],
             "throughput-rounds": throughput["rounds"],
+            "throughput-bytes-per-sec": round(
+                (
+                    int(throughput.get("rounds-ok", 0))
+                    * 16_384  # THROUGHPUT_PAYLOAD size in phase_hy2c
+                )
+                / max(1e-3, float(throughput.get("elapsed-seconds") or soak_elapsed)),
+                1,
+            )
+            if "elapsed-seconds" in throughput
+            else None,
             "soak-seconds": soak_duration,
             "soak-churn": churn,
             "soak-failures": failures,
+            "soak-exchanges-per-sec": round(churn / soak_elapsed, 2),
             "soak-failure-rate-class": "ok" if failures == 0 else "failed",
             "server-alive": server.poll() is None,
             "client-alive": client.poll() is None,
