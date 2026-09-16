@@ -10,11 +10,16 @@ Named `type: hysteria2` accepts QUIC/TLS (`certificate` + `private-key`), Clash
 (status 233), TCP request/response framing, and UDP `UdpMessage`/defrag helpers;
 runtime owns listen, multi-user password table, stock BBR, TCP →
 `serve_shadowsocks_connection`, and Direct UDP session relay. Caps: 1024
-connections, 256 streams/conn, 256 UDP sessions. Evidence:
+connections, 256 streams/conn, 256 UDP sessions (defrag map capped the same;
+orphan fragments dropped when full). Auth and TCP request headers each get an
+independent 10s timeout. UDP sessions track `last_used` and are idle-evicted
+after 60s (10s sweep) with cancel tokens; subsequent datagrams re-run rules /
+Direct resolve (reject drops that packet). Evidence:
 `phase_inf_hysteria2_tcp.py` (product Hy2 outbound vs Go/Rust named inbound:
-small/large TCP, half-close, wrong-password; CI hysteria2 shard). Deferred:
-realm, gecko, ECH, masquerade, Brutal accuracy, TUIC inbound, product UDP
-outbound paths through the named inbound.
+small/large TCP, half-close, wrong-password; required cases must pass) and
+`phase_inf_hysteria2_udp.py` (SOCKS UDP small/large, multi-dest, Rust
+allow→reject). Deferred: realm, gecko, ECH, masquerade, Brutal accuracy, TUIC
+inbound.
 
 ### IN-E VMess TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
@@ -673,7 +678,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-E VMess WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; `phase_ine_vmess_websocket.py` |
 | IN-E VMess gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; combined ws+grpc rejected; `phase_ine_vmess_grpc.py` |
 | IN-E VMess XUDP inbound | Complete (declared Mux/XUDP UDP scope) | Named TLS Mux/XUDP multi-destination UDP via product outbound; `phase_ine_vmess_xudp.py` |
-| IN-F Hysteria2 inbound | Partial (first slice) | Named QUIC TCP+Direct UDP; stock BBR; salamander optional; `phase_inf_hysteria2_tcp.py` |
+| IN-F Hysteria2 inbound | Partial (first slice) | Named QUIC TCP+Direct UDP; stock BBR; salamander optional; timeouts/defrag/session idle; per-dest re-route; `phase_inf_hysteria2_tcp.py`, `phase_inf_hysteria2_udp.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |
 | Phase 6D-B VMess explicit AEAD framing | Complete in declared client scope | Explicit AES-128-GCM/ChaCha20-Poly1305 and all global-padding/authenticated-length combinations pass an 8-case native Go/Rust differential with domain/IPv4/IPv6, 128 KiB multi-record relay and half-close; UDP/XUDP, legacy/none security, AlterID, TLS/transports/mux and inbound remain open |

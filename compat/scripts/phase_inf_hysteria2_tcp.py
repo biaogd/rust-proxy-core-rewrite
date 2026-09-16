@@ -285,6 +285,24 @@ def parity_view(observations: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+REQUIRED_TRUE = (
+    "small",
+    "large",
+    "product-outbound-half-close",
+    "wrong-password-rejected",
+    "process-alive",
+)
+
+
+def required_cases_pass(parity: dict[str, Any]) -> bool:
+    if not all(parity.get(key) for key in REQUIRED_TRUE):
+        return False
+    config = parity.get("config")
+    if not isinstance(config, dict):
+        return False
+    return bool(config.get("accept-named-hy2"))
+
+
 def main() -> int:
     observations: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="phase-inf-hy2-") as temporary:
@@ -312,7 +330,7 @@ def main() -> int:
             raise
     rust_parity = parity_view(observations["rust"])
     go_parity = parity_view(observations["go"])
-    if rust_parity != go_parity:
+    if rust_parity != go_parity or not required_cases_pass(rust_parity):
         FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
         FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
         print(json.dumps(observations, indent=2, sort_keys=True))

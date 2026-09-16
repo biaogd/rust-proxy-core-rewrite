@@ -26,6 +26,7 @@ use rewrite_state::RuntimeState;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::listener::{UdpSessionMode, resolve_udp_target, resolved_route, udp_session_mode};
@@ -39,7 +40,62 @@ const HY2_MAX_STREAMS_PER_CONN: usize = 256;
 const HY2_MAX_UDP_SESSIONS: usize = 256;
 const HY2_UDP_SESSION_CHAN: usize = 1024;
 const HY2_UDP_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const HY2_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const HY2_TCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const HY2_UDP_SESSION_IDLE: Duration = Duration::from_secs(60);
+const HY2_UDP_IDLE_SWEEP: Duration = Duration::from_secs(10);
 const HY2_UDP_MTU: usize = 1197;
+
+/// One Hy2 UDP session: client datagram channel, idle clock, and cancel token.
+struct Hy2UdpSessionSlot {
+    tx: mpsc::Sender<UdpMessage>,
+    last_used: Instant,
+    cancel: CancellationToken,
+}
+
+/// Feed a datagram into the per-session defragger, capping orphan entries at
+/// `HY2_MAX_UDP_SESSIONS`. When full, retain only sessions that still have a
+/// live slot; if still full, drop the fragment without inserting.
+fn try_feed_defrag(
+    defrag_by_session: &mut HashMap<u32, Defragger>,
+    live_sessions: &HashMap<u32, Hy2UdpSessionSlot>,
+    message: UdpMessage,
+) -> Option<UdpMessage> {
+    let session_id = message.session_id;
+    if !defrag_by_session.contains_key(&session_id)
+        && defrag_by_session.len() >= HY2_MAX_UDP_SESSIONS
+    {
+        defrag_by_session.retain(|id, _| live_sessions.contains_key(id));
+        if defrag_by_session.len() >= HY2_MAX_UDP_SESSIONS {
+            return None;
+        }
+    }
+    defrag_by_session
+        .entry(session_id)
+        .or_default()
+        .feed(message)
+}
+
+/// Cancel and remove UDP sessions idle longer than `max_idle`, and drop their
+/// defrag entries.
+fn evict_idle_udp_sessions(
+    sessions: &mut HashMap<u32, Hy2UdpSessionSlot>,
+    defrag_by_session: &mut HashMap<u32, Defragger>,
+    max_idle: Duration,
+) {
+    let now = Instant::now();
+    let idle: Vec<u32> = sessions
+        .iter()
+        .filter(|(_, slot)| now.duration_since(slot.last_used) > max_idle)
+        .map(|(session_id, _)| *session_id)
+        .collect();
+    for session_id in idle {
+        if let Some(slot) = sessions.remove(&session_id) {
+            slot.cancel.cancel();
+        }
+        defrag_by_session.remove(&session_id);
+    }
+}
 
 pub(crate) struct Hysteria2Listener {
     endpoint: quinn::Endpoint,
@@ -234,13 +290,16 @@ async fn handle_hysteria2_connection(
 ) {
     let authenticated = tokio::select! {
         () = shutdown.cancelled() => return,
-        result = authenticate_incoming(
-            connection.clone(),
-            &users,
-            ServerAuthOptions::default(),
+        result = tokio::time::timeout(
+            HY2_AUTH_TIMEOUT,
+            authenticate_incoming(
+                connection.clone(),
+                &users,
+                ServerAuthOptions::default(),
+            ),
         ) => result,
     };
-    let Ok(authenticated) = authenticated else {
+    let Ok(Ok(authenticated)) = authenticated else {
         return;
     };
     // Must outlive TCP/UDP: h3 Connection Drop closes Quinn with H3_NO_ERROR.
@@ -297,9 +356,12 @@ async fn handle_hysteria2_connection(
                 streams.spawn(async move {
                     let accepted = tokio::select! {
                         () = stream_shutdown.cancelled() => return,
-                        result = accept_tcp_request(send, recv) => result,
+                        result = tokio::time::timeout(
+                            HY2_TCP_REQUEST_TIMEOUT,
+                            accept_tcp_request(send, recv),
+                        ) => result,
                     };
-                    let Ok((destination, stream)) = accepted else {
+                    let Ok(Ok((destination, stream))) = accepted else {
                         return;
                     };
                     serve_hysteria2_tcp(
@@ -364,14 +426,28 @@ async fn serve_hysteria2_udp(
     state: Arc<RuntimeState>,
     shutdown: CancellationToken,
 ) {
-    let sessions: Arc<tokio::sync::Mutex<HashMap<u32, mpsc::Sender<UdpMessage>>>> =
+    let sessions: Arc<tokio::sync::Mutex<HashMap<u32, Hy2UdpSessionSlot>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let mut defrag_by_session: HashMap<u32, Defragger> = HashMap::new();
+    let defrag_by_session: Arc<tokio::sync::Mutex<HashMap<u32, Defragger>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut workers = JoinSet::new();
+    let mut idle_sweep = tokio::time::interval(HY2_UDP_IDLE_SWEEP);
+    idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Skip the immediate first tick so sessions get a full idle window.
+    idle_sweep.tick().await;
 
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            _ = idle_sweep.tick() => {
+                let mut sessions_guard = sessions.lock().await;
+                let mut defrag_guard = defrag_by_session.lock().await;
+                evict_idle_udp_sessions(
+                    &mut sessions_guard,
+                    &mut defrag_guard,
+                    HY2_UDP_SESSION_IDLE,
+                );
+            }
             datagram = connection.read_datagram() => {
                 let Ok(data) = datagram else { break };
                 let Some(message) = UdpMessage::parse(&data) else {
@@ -379,32 +455,42 @@ async fn serve_hysteria2_udp(
                 };
                 let session_id = message.session_id;
                 let reassembled = {
-                    let defrag = defrag_by_session.entry(session_id).or_default();
-                    defrag.feed(message)
+                    let sessions_guard = sessions.lock().await;
+                    let mut defrag_guard = defrag_by_session.lock().await;
+                    try_feed_defrag(&mut defrag_guard, &sessions_guard, message)
                 };
                 let Some(message) = reassembled else {
                     continue;
                 };
                 let mut guard = sessions.lock().await;
-                if let Some(tx) = guard.get(&session_id) {
-                    let _ = tx.try_send(message);
+                if let Some(slot) = guard.get_mut(&session_id) {
+                    slot.last_used = Instant::now();
+                    let _ = slot.tx.try_send(message);
                     continue;
                 }
                 if guard.len() >= HY2_MAX_UDP_SESSIONS {
                     continue;
                 }
                 let (tx, rx) = mpsc::channel(HY2_UDP_SESSION_CHAN);
+                let session_cancel = shutdown.child_token();
                 let _ = tx.try_send(message);
-                guard.insert(session_id, tx);
+                guard.insert(
+                    session_id,
+                    Hy2UdpSessionSlot {
+                        tx,
+                        last_used: Instant::now(),
+                        cancel: session_cancel.clone(),
+                    },
+                );
                 drop(guard);
 
                 let session_connection = connection.clone();
                 let session_config = Arc::clone(&config);
                 let session_state = Arc::clone(&state);
-                let session_shutdown = shutdown.child_token();
                 let session_inbound_name = inbound_name.clone();
                 let session_username = username.clone();
                 let session_map = Arc::clone(&sessions);
+                let defrag_map = Arc::clone(&defrag_by_session);
                 workers.spawn(async move {
                     serve_hysteria2_udp_session(
                         session_connection,
@@ -416,10 +502,11 @@ async fn serve_hysteria2_udp(
                         session_inbound_name,
                         session_config,
                         session_state,
-                        session_shutdown,
+                        session_cancel,
                     )
                     .await;
                     session_map.lock().await.remove(&session_id);
+                    defrag_map.lock().await.remove(&session_id);
                 });
             }
             Some(_) = workers.join_next() => {}
@@ -453,7 +540,7 @@ async fn serve_hysteria2_udp_session(
         Ok(destination) => destination,
         Err(_) => return,
     };
-    let mut packet_metadata = Metadata::new(destination, InboundProtocol::Hysteria2);
+    let mut packet_metadata = Metadata::new(destination.clone(), InboundProtocol::Hysteria2);
     packet_metadata.network = Network::Udp;
     packet_metadata.source_ip = Some(unmap_ip(peer.ip()));
     packet_metadata.source_port = peer.port();
@@ -461,26 +548,9 @@ async fn serve_hysteria2_udp_session(
     inbound_name.clone_into(&mut packet_metadata.inbound_name);
     packet_metadata.inbound_user = username;
 
-    let fake_host = apply_host_mapping(&mut packet_metadata, &config, &state);
-    let decision =
-        mode_decision(&config, &state).unwrap_or_else(|| config.rules.evaluate(&packet_metadata));
-    let Some((decision, outbound_target, _)) =
-        resolve_rematch_target(decision, &mut packet_metadata, &config, &state)
+    let Some((decision, target)) =
+        route_hy2_udp_datagram(&mut packet_metadata, destination, &config, &state).await
     else {
-        return;
-    };
-    let route = resolved_route(&outbound_target, &config);
-    if matches!(route, Route::Reject | Route::RejectDrop) {
-        return;
-    }
-    let Some(mode) = udp_session_mode(&outbound_target, &config) else {
-        state.log(
-            "error",
-            format!(
-                "hysteria2 inbound UDP target {} is unsupported",
-                decision.target
-            ),
-        );
         return;
     };
     state.log(
@@ -493,30 +563,66 @@ async fn serve_hysteria2_udp_session(
             decision.target
         ),
     );
-    match mode {
-        UdpSessionMode::Direct => {
-            serve_hysteria2_udp_direct(
-                connection,
-                session_id,
-                rx,
-                first,
-                packet_metadata,
-                fake_host,
-                decision,
-                &config,
-                &state,
-                &shutdown,
-            )
-            .await;
-        }
-        _ => {
+    serve_hysteria2_udp_direct(
+        connection,
+        session_id,
+        rx,
+        first,
+        packet_metadata,
+        decision,
+        target,
+        &config,
+        &state,
+        &shutdown,
+    )
+    .await;
+}
+
+/// Routes one Hy2 UDP datagram destination. Returns `None` when the packet
+/// should be dropped (reject / unsupported outbound).
+async fn route_hy2_udp_datagram(
+    metadata: &mut Metadata,
+    destination: Destination,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+) -> Option<(rewrite_rules::Decision, SocketAddr)> {
+    metadata.destination = destination;
+    let fake_host = apply_host_mapping(metadata, config, state);
+    let decision = mode_decision(config, state).unwrap_or_else(|| config.rules.evaluate(metadata));
+    let (decision, outbound_target, _) = resolve_rematch_target(decision, metadata, config, state)?;
+    let route = resolved_route(&outbound_target, config);
+    if matches!(route, Route::Reject | Route::RejectDrop) {
+        state.log(
+            "info",
+            format!(
+                "[UDP] {} --> {} match {} using {} (Hysteria2)",
+                metadata.source_port,
+                metadata.destination.authority(),
+                decision.matched_kind.as_deref().unwrap_or("none"),
+                decision.target
+            ),
+        );
+        return None;
+    }
+    let mode = udp_session_mode(&outbound_target, config)?;
+    if !matches!(mode, UdpSessionMode::Direct) {
+        state.log(
+            "error",
+            format!(
+                "hysteria2 inbound UDP target {} is unsupported in IN-F",
+                decision.target
+            ),
+        );
+        return None;
+    }
+    match resolve_udp_target(metadata, fake_host.as_deref(), config).await {
+        Ok(target) => Some((decision, target)),
+        Err(error) => {
             state.log(
                 "error",
-                format!(
-                    "hysteria2 inbound UDP target {} is unsupported in IN-F",
-                    decision.target
-                ),
+                format!("hysteria2 inbound UDP resolution failed: {error}"),
             );
+            None
         }
     }
 }
@@ -528,23 +634,12 @@ async fn serve_hysteria2_udp_direct(
     mut rx: mpsc::Receiver<UdpMessage>,
     first: UdpMessage,
     first_metadata: Metadata,
-    first_fake_host: Option<String>,
     decision: rewrite_rules::Decision,
+    target: SocketAddr,
     config: &Config,
     state: &Arc<RuntimeState>,
     shutdown: &CancellationToken,
 ) {
-    let target = match resolve_udp_target(&first_metadata, first_fake_host.as_deref(), config).await
-    {
-        Ok(target) => target,
-        Err(error) => {
-            state.log(
-                "error",
-                format!("hysteria2 inbound UDP resolution failed: {error}"),
-            );
-            return;
-        }
-    };
     let outbound = match crate::listener::bind_direct_udp_socket(target, config) {
         Ok(socket) => socket,
         Err(error) => {
@@ -600,9 +695,10 @@ async fn serve_hysteria2_udp_direct(
                     Err(_) => continue,
                 };
                 let mut metadata = first_metadata.clone();
-                metadata.destination = destination;
-                let fake_host = apply_host_mapping(&mut metadata, config, state);
-                let Ok(next_target) = resolve_udp_target(&metadata, fake_host.as_deref(), config).await else {
+                let Some((_decision, next_target)) =
+                    route_hy2_udp_datagram(&mut metadata, destination, config, state).await
+                else {
+                    // Reject / unsupported: drop this datagram, keep association.
                     continue;
                 };
                 if outbound.send_to(&message.data, next_target).await.is_ok() {
@@ -667,5 +763,108 @@ where
         result = tokio::time::timeout(HY2_UDP_CLIENT_WRITE_TIMEOUT, send_all) => {
             matches!(result, Ok(Ok(())))
         }
+    }
+}
+
+#[cfg(test)]
+mod hy2_udp_tests {
+    use super::*;
+
+    fn incomplete_fragment(session_id: u32) -> UdpMessage {
+        UdpMessage {
+            session_id,
+            packet_id: 1,
+            frag_id: 0,
+            frag_count: 2,
+            addr: "127.0.0.1:9".to_owned(),
+            data: vec![0xab],
+        }
+    }
+
+    #[test]
+    fn defrag_map_refuses_insert_when_full_of_live_sessions() {
+        let mut defrag = HashMap::new();
+        let mut live = HashMap::new();
+        for session_id in 0..HY2_MAX_UDP_SESSIONS as u32 {
+            let (tx, _rx) = mpsc::channel(1);
+            live.insert(
+                session_id,
+                Hy2UdpSessionSlot {
+                    tx,
+                    last_used: Instant::now(),
+                    cancel: CancellationToken::new(),
+                },
+            );
+            assert!(
+                try_feed_defrag(&mut defrag, &live, incomplete_fragment(session_id)).is_none(),
+                "incomplete fragment should not reassemble"
+            );
+        }
+        assert_eq!(defrag.len(), HY2_MAX_UDP_SESSIONS);
+        let overflow_id = HY2_MAX_UDP_SESSIONS as u32;
+        assert!(
+            try_feed_defrag(&mut defrag, &live, incomplete_fragment(overflow_id)).is_none(),
+            "must drop when full of live-session defrag entries"
+        );
+        assert!(
+            !defrag.contains_key(&overflow_id),
+            "overflow session must not get a defrag entry"
+        );
+        assert_eq!(defrag.len(), HY2_MAX_UDP_SESSIONS);
+    }
+
+    #[test]
+    fn defrag_map_reclaims_orphans_when_live_sessions_remain() {
+        let mut defrag = HashMap::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let live = HashMap::from([(
+            0_u32,
+            Hy2UdpSessionSlot {
+                tx,
+                last_used: Instant::now(),
+                cancel: CancellationToken::new(),
+            },
+        )]);
+        for session_id in 0..HY2_MAX_UDP_SESSIONS as u32 {
+            let _ = try_feed_defrag(&mut defrag, &live, incomplete_fragment(session_id));
+        }
+        assert_eq!(defrag.len(), HY2_MAX_UDP_SESSIONS);
+        // Orphan entries (1..N) should be retained away; live session 0 kept.
+        let new_id = HY2_MAX_UDP_SESSIONS as u32 + 7;
+        assert!(
+            try_feed_defrag(&mut defrag, &live, incomplete_fragment(new_id)).is_none(),
+            "incomplete feed returns None"
+        );
+        assert!(
+            defrag.contains_key(&0),
+            "live session defrag entry must survive reclaim"
+        );
+        assert!(
+            defrag.contains_key(&new_id),
+            "after reclaiming orphans, a new session may insert"
+        );
+        assert!(defrag.len() <= HY2_MAX_UDP_SESSIONS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_eviction_cancels_session_and_clears_defrag() {
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sessions = HashMap::new();
+        let mut defrag = HashMap::new();
+        sessions.insert(
+            42,
+            Hy2UdpSessionSlot {
+                tx,
+                last_used: Instant::now(),
+                cancel: cancel.clone(),
+            },
+        );
+        defrag.insert(42, Defragger::default());
+        tokio::time::advance(HY2_UDP_SESSION_IDLE + Duration::from_secs(1)).await;
+        evict_idle_udp_sessions(&mut sessions, &mut defrag, HY2_UDP_SESSION_IDLE);
+        assert!(sessions.is_empty(), "idle session must be removed");
+        assert!(defrag.is_empty(), "idle defrag entry must be removed");
+        assert!(cancel.is_cancelled(), "idle eviction must cancel the token");
     }
 }

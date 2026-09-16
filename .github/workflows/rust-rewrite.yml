@@ -429,6 +429,7 @@ jobs:
           compat/scripts/phase_hy2c_hysteria2.py \
           compat/scripts/phase_hy2c_hysteria2_soak.py \
           compat/scripts/phase_inf_hysteria2_tcp.py \
+          compat/scripts/phase_inf_hysteria2_udp.py \
           compat/scripts/phase6h_tuic_tcp.py \
           compat/scripts/phase6h_tuic_udp.py \
           compat/scripts/phase6h_tuic_lifecycle.py \
