@@ -133,7 +133,7 @@ pub fn prepare_tls_config(
         None
     };
     let builder = tokio_rustls::rustls::ServerConfig::builder_with_details(
-        Arc::new(tokio_rustls::rustls::crypto::ring::default_provider()),
+        Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()),
         clock,
     )
     .with_safe_default_protocol_versions()

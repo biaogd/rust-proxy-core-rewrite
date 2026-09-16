@@ -48,7 +48,7 @@ struct NoCertificateVerification {
 impl NoCertificateVerification {
     fn new() -> Self {
         Self {
-            algorithms: shadow_rustls::crypto::ring::default_provider()
+            algorithms: shadow_rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }
@@ -308,7 +308,7 @@ pub(crate) fn shadow_client_config(
             .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
                 fingerprint,
                 verification_name,
-                algorithms: shadow_rustls::crypto::ring::default_provider()
+                algorithms: shadow_rustls::crypto::aws_lc_rs::default_provider()
                     .signature_verification_algorithms,
             }))
     } else if let Some(verification_name) = tls.verification_name {

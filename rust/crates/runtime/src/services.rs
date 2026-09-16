@@ -883,7 +883,7 @@ pub(super) async fn fetch_http_proxy_provider(
     // Reqwest deliberately uses rustls-no-provider so enabling AWS-LC for ECH
     // does not make its provider selection ambiguous. Install ring before
     // constructing the client; repeated installation is harmless.
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let url = url::Url::parse(raw_url).map_err(|error| error.to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return Err("provider URL must use HTTP or HTTPS and include a host".to_owned());

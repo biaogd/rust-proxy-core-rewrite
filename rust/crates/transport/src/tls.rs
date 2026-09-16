@@ -53,7 +53,7 @@ struct NoCertificateVerification {
 impl NoCertificateVerification {
     fn new() -> Self {
         Self {
-            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+            algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }
@@ -340,7 +340,7 @@ pub fn client_config(
             .with_ech(EchMode::Enable(ech_config))
             .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     } else {
-        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         if tls.tls12_only {
             ClientConfig::builder_with_details(provider, clock)
                 .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
@@ -375,7 +375,7 @@ pub fn client_config(
             .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
                 fingerprint,
                 verification_name,
-                algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+                algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                     .signature_verification_algorithms,
             }))
     } else if let Some(verification_name) = tls.verification_name {

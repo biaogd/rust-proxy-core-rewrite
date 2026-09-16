@@ -825,7 +825,7 @@ fn build_endpoint(
     hop: Option<HopConfig>,
     brutal_next: Option<Arc<std::sync::Mutex<Option<BrutalControl>>>>,
 ) -> Result<quinn::Endpoint, Hysteria2ProtocolError> {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut roots = RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(cert);
@@ -1052,7 +1052,7 @@ struct SkipServerVerification {
 impl SkipServerVerification {
     fn new() -> Self {
         Self {
-            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+            algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }

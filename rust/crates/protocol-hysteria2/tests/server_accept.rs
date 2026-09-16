@@ -18,7 +18,7 @@ fn self_signed() -> (String, String) {
 
 #[tokio::test]
 async fn server_auth_and_tcp_round_trip() {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert, key) = self_signed();
     let endpoint = bind_server_endpoint(&ServerEndpointOptions {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -88,7 +88,7 @@ async fn server_auth_and_tcp_round_trip() {
 
 #[tokio::test]
 async fn wrong_password_is_rejected() {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert, key) = self_signed();
     let endpoint = bind_server_endpoint(&ServerEndpointOptions {
         listen: "127.0.0.1:0".parse().unwrap(),

@@ -132,7 +132,7 @@ struct NoCertificateVerification {
 impl NoCertificateVerification {
     fn new() -> Self {
         Self {
-            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+            algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }
