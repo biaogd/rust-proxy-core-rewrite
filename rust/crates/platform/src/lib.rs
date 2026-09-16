@@ -228,6 +228,9 @@ pub async fn connect_tcp(
         return Err(error);
     }
     let stream = tokio::net::TcpStream::from_std(socket.into())?;
+    // Match Go `net.Dial` / `Accept` default: TCP_NODELAY enabled. Leaving it
+    // off causes ~40ms delayed-ACK stalls on small TLS/proxy writes.
+    let _ = stream.set_nodelay(true);
     stream.writable().await?;
     if let Some(error) = stream.take_error()? {
         return Err(error);
