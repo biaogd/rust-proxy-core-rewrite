@@ -17,6 +17,7 @@ rewrite-net = { path = "../net" }
 rewrite-outbound = { path = "../outbound" }
 rewrite-platform = { path = "../platform" }
 rewrite-protocol-shadowsocks = { path = "../protocol-shadowsocks" }
+rewrite-protocol-anytls = { path = "../protocol-anytls" }
 rewrite-protocol-trojan = { path = "../protocol-trojan" }
 rewrite-protocol-vless = { path = "../protocol-vless" }
 rewrite-protocol-vmess = { path = "../protocol-vmess" }

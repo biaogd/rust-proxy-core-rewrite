@@ -4217,6 +4217,7 @@ dependencies = [
  "rewrite-net",
  "rewrite-outbound",
  "rewrite-platform",
+ "rewrite-protocol-anytls",
  "rewrite-protocol-hysteria2",
  "rewrite-protocol-shadowsocks",
  "rewrite-protocol-trojan",

@@ -3,6 +3,7 @@
 mod client;
 mod frame;
 mod padding;
+mod server;
 mod session;
 
 use rewrite_io::BoxedStream;
@@ -13,6 +14,10 @@ use tokio::io::AsyncWriteExt;
 
 pub use client::{Client, ClientOptions, DialOut};
 pub use padding::{DEFAULT_PADDING_SCHEME, PaddingFactory, SharedPadding, default_shared_padding};
+pub use server::{
+    ServerSession, ServerStream, authenticate_connection, decode_socks_address,
+    password_digest_table,
+};
 pub use session::{AnyTlsStream, Session, SessionCloseHook, StreamCloseHook};
 
 #[derive(Debug, Error)]
