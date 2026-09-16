@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rewrite_config::{
-    Config, ConfigError, Hysteria2InboundConfig, ListenerKind, ProxyGroupKind,
+    AnyTlsInboundConfig, Config, ConfigError, Hysteria2InboundConfig, ListenerKind, ProxyGroupKind,
     ShadowsocksInboundConfig, TrojanInboundConfig, TuicInboundConfig, VlessInboundConfig,
     VmessInboundConfig,
 };
@@ -15,6 +15,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::anytls_listener::{AnyTlsListener, run_anytls_listener};
 use crate::hysteria2_listener::{Hysteria2Listener, run_hysteria2_listener};
 use crate::listener::run_listener;
 use crate::services::hydrate_http_proxy_providers;
@@ -37,6 +38,7 @@ struct PreparedGeneration {
     vmess: Vec<(ListenerKey, VmessListener)>,
     hysteria2: Vec<(ListenerKey, Hysteria2Listener)>,
     tuic: Vec<(ListenerKey, TuicListener)>,
+    anytls: Vec<(ListenerKey, AnyTlsListener)>,
     controllers: Vec<PreparedController>,
     dns: Option<(SocketAddr, TcpListener, UdpSocket)>,
     retired_listeners: Vec<ListenerKey>,
@@ -54,6 +56,7 @@ impl PreparedGeneration {
         self.vmess.clear();
         self.hysteria2.clear();
         self.tuic.clear();
+        self.anytls.clear();
         self.controllers.clear();
         self.dns = None;
     }
@@ -170,6 +173,12 @@ async fn apply_generation_inner(
                     .tuic_listener_for_port(port)
                     .map_or_else(String::new, TuicInboundConfig::reload_identity);
                 Ok((kind, port, address, identity))
+            } else if kind == ListenerKind::AnyTls {
+                let address = next.anytls_listen_address(port)?;
+                let identity = next
+                    .anytls_listener_for_port(port)
+                    .map_or_else(String::new, AnyTlsInboundConfig::reload_identity);
+                Ok((kind, port, address, identity))
             } else {
                 next.listener_address(port)
                     .map(|address| (kind, port, address, String::new()))
@@ -253,6 +262,15 @@ async fn apply_generation_inner(
             };
             let listener = TuicListener::bind(tuic).await?;
             prepared.tuic.push((key, listener));
+            continue;
+        }
+
+        if kind == ListenerKind::AnyTls {
+            let Some(anytls) = next.anytls_listener_for_port(port) else {
+                continue;
+            };
+            let listener = AnyTlsListener::bind(anytls, state.clock()).await?;
+            prepared.anytls.push((key, listener));
             continue;
         }
 
@@ -395,6 +413,17 @@ async fn apply_generation_inner(
 
     for (key, listener) in std::mem::take(&mut prepared.tuic) {
         spawn_tuic_listener(
+            key,
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+
+    for (key, listener) in std::mem::take(&mut prepared.anytls) {
+        spawn_anytls_listener(
             key,
             listener,
             config_receiver,
@@ -573,6 +602,21 @@ async fn restore_retired_sockets(
             };
             let listener = TuicListener::bind(tuic).await?;
             spawn_tuic_listener(
+                key,
+                listener,
+                config_receiver,
+                state,
+                dns_service,
+                listeners,
+            );
+            continue;
+        }
+        if kind == ListenerKind::AnyTls {
+            let Some(anytls) = previous.anytls_listener_for_port(port) else {
+                continue;
+            };
+            let listener = AnyTlsListener::bind(anytls, state.clock()).await?;
+            spawn_anytls_listener(
                 key,
                 listener,
                 config_receiver,
@@ -856,6 +900,38 @@ fn spawn_tuic_listener(
     let task_dns_service = Arc::clone(dns_service);
     let handle = tokio::spawn(async move {
         run_tuic_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_anytls_listener(
+    key: ListenerKey,
+    listener: AnyTlsListener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_anytls_listener(
             listener,
             task_config,
             task_state,

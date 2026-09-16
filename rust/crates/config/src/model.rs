@@ -92,6 +92,7 @@ pub struct ConfigSpec {
     pub vmess_listeners: Vec<VmessInboundConfig>,
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
+    pub anytls_listeners: Vec<AnyTlsInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -161,6 +162,7 @@ pub struct Config {
     pub vmess_listeners: Vec<VmessInboundConfig>,
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
+    pub anytls_listeners: Vec<AnyTlsInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1497,6 +1499,39 @@ impl TuicInboundConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnyTlsInboundUser {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnyTlsInboundConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub users: Vec<AnyTlsInboundUser>,
+    pub certificate: String,
+    pub private_key: String,
+    /// Optional padding scheme; empty/`None` means Go default at bind.
+    pub padding_scheme: Option<String>,
+}
+
+impl AnyTlsInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|padding={:?}",
+            self.name,
+            self.listen,
+            self.users,
+            self.certificate,
+            self.private_key,
+            self.padding_scheme
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ListenerKind {
     Http,
@@ -1508,6 +1543,7 @@ pub enum ListenerKind {
     Vmess,
     Hysteria2,
     Tuic,
+    AnyTls,
 }
 
 fn host_pattern_rank(pattern: &str, name: &str) -> Option<Vec<u8>> {

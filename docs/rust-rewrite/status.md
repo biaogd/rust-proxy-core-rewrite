@@ -2,6 +2,17 @@
 
 Last updated: 2026-09-16
 
+### IN-G AnyTLS named inbound (TLS TCP first slice) — 2026-09-16
+
+Named `type: anytls` accepts TLS (`certificate` + `private-key`), Clash `users`
+username→password map, and optional `padding-scheme` (omit → Go default).
+`protocol-anytls` owns SHA-256 auth Accept, server session recv loop
+(SETTINGS / SYN / PSH / FIN / HEART / padding update), SocksAddr decode, and
+empty SYNACK for peer v≥2. Runtime owns listen, caps (1024 conns), and TCP →
+`serve_shadowsocks_connection`. Evidence: `phase_ing_anytls_tcp.py` (product
+AnyTLS outbound vs Go/Rust named inbound). Deferred: UoT UDP, carriers
+(ShadowTLS/ResTLS/JLS), ECH/mTLS/`allow-insecure`.
+
 ### IN-F TUIC v5 named inbound — 2026-09-16
 
 Named `type: tuic` accepts QUIC/TLS (`certificate` + `private-key`), Clash
