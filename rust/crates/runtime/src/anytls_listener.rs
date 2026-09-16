@@ -26,8 +26,11 @@ use crate::tcp::serve_shadowsocks_connection;
 use crate::types::RuntimeError;
 
 const ANYTLS_MAX_INBOUND_CONNECTIONS: usize = 1024;
+const ANYTLS_MAX_STREAMS_PER_CONN: usize = 256;
 const ANYTLS_MAX_ADDRESS_BYTES: usize = 260;
 const ANYTLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const ANYTLS_ADDRESS_TIMEOUT: Duration = Duration::from_secs(10);
+const ANYTLS_SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
 
 pub(crate) struct AnyTlsListener {
     listener: TcpListener,
@@ -95,12 +98,7 @@ struct AnyTlsInboundStream {
 }
 
 impl AnyTlsInboundStream {
-    fn new(
-        inner: ServerStream,
-        prefix: Vec<u8>,
-        local: SocketAddr,
-        peer: SocketAddr,
-    ) -> Self {
+    fn new(inner: ServerStream, prefix: Vec<u8>, local: SocketAddr, peer: SocketAddr) -> Self {
         Self {
             inner,
             prefix: Cursor::new(prefix),
@@ -121,8 +119,7 @@ impl AsyncRead for AnyTlsInboundStream {
         if position < prefix_len {
             let amount = (prefix_len - position).min(buf.remaining());
             buf.put_slice(&self.prefix.get_ref()[position..position + amount]);
-            self.prefix
-                .set_position((position + amount) as u64);
+            self.prefix.set_position((position + amount) as u64);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut self.inner).poll_read(cx, buf)
@@ -229,8 +226,16 @@ pub(super) async fn run_anytls_listener(
             }
         }
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
+    // Child tokens already cancelled; give connection tasks time to close
+    // sessions before aborting stragglers.
+    let drain = async { while connections.join_next().await.is_some() {} };
+    if tokio::time::timeout(ANYTLS_SHUTDOWN_DRAIN, drain)
+        .await
+        .is_err()
+    {
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -283,8 +288,7 @@ async fn handle_anytls_inbound(
         }
     };
 
-    let (session, mut stream_rx) =
-        ServerSession::start(Box::new(tls) as BoxedStream, padding);
+    let (session, mut stream_rx) = ServerSession::start(Box::new(tls) as BoxedStream, padding);
     let mut streams = JoinSet::new();
     loop {
         tokio::select! {
@@ -292,9 +296,25 @@ async fn handle_anytls_inbound(
                 session.close();
                 break;
             }
+            () = session.wait_closed() => break,
+            Some(result) = streams.join_next(), if !streams.is_empty() => {
+                if let Err(error) = result {
+                    state.log("error", format!("anytls inbound stream task failed: {error}"));
+                }
+            }
             stream = stream_rx.recv() => {
                 match stream {
                     Some(stream) => {
+                        if streams.len() >= ANYTLS_MAX_STREAMS_PER_CONN {
+                            state.log(
+                                "warning",
+                                format!(
+                                    "anytls inbound stream limit reached ({ANYTLS_MAX_STREAMS_PER_CONN})"
+                                ),
+                            );
+                            // Dropping the stream sends FIN and frees the session map slot.
+                            continue;
+                        }
                         let config = Arc::clone(&config);
                         let state = Arc::clone(&state);
                         let dns_service = Arc::clone(&dns_service);
@@ -321,9 +341,10 @@ async fn handle_anytls_inbound(
             }
         }
     }
+    session.close();
+    let _ = tokio::time::timeout(ANYTLS_SHUTDOWN_DRAIN, session.wait_closed()).await;
     streams.abort_all();
     while streams.join_next().await.is_some() {}
-    session.close();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,37 +409,45 @@ async fn read_socks_destination(
     stream: &mut ServerStream,
     shutdown: &CancellationToken,
 ) -> Result<(Destination, Vec<u8>), AnyTlsProtocolError> {
-    let mut buffer = Vec::with_capacity(64);
-    let mut chunk = [0_u8; 64];
-    loop {
-        if buffer.len() > ANYTLS_MAX_ADDRESS_BYTES {
-            return Err(AnyTlsProtocolError::Protocol(
-                "AnyTLS socks address exceeds maximum length".to_owned(),
-            ));
-        }
-        let read = tokio::select! {
-            () = shutdown.cancelled() => {
+    let read = async {
+        let mut buffer = Vec::with_capacity(64);
+        let mut chunk = [0_u8; 64];
+        loop {
+            if buffer.len() > ANYTLS_MAX_ADDRESS_BYTES {
                 return Err(AnyTlsProtocolError::Protocol(
-                    "AnyTLS destination read cancelled".to_owned(),
+                    "AnyTLS socks address exceeds maximum length".to_owned(),
                 ));
             }
-            result = stream.read(&mut chunk) => result?,
-        };
-        if read == 0 {
-            return Err(AnyTlsProtocolError::Protocol(
-                "AnyTLS stream closed before destination address".to_owned(),
-            ));
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-        match decode_socks_address(&buffer) {
-            Ok((destination, consumed)) => {
-                let prefix = buffer.split_off(consumed);
-                return Ok((destination, prefix));
+            let read = tokio::select! {
+                () = shutdown.cancelled() => {
+                    return Err(AnyTlsProtocolError::Protocol(
+                        "AnyTLS destination read cancelled".to_owned(),
+                    ));
+                }
+                result = stream.read(&mut chunk) => result?,
+            };
+            if read == 0 {
+                return Err(AnyTlsProtocolError::Protocol(
+                    "AnyTLS stream closed before destination address".to_owned(),
+                ));
             }
-            Err(AnyTlsProtocolError::Protocol(message))
-                if message.contains("truncated") || message.contains("empty") => {}
-            Err(error) => return Err(error),
+            buffer.extend_from_slice(&chunk[..read]);
+            match decode_socks_address(&buffer) {
+                Ok((destination, consumed)) => {
+                    let prefix = buffer.split_off(consumed);
+                    return Ok((destination, prefix));
+                }
+                Err(AnyTlsProtocolError::Protocol(message))
+                    if message.contains("truncated") || message.contains("empty") => {}
+                Err(error) => return Err(error),
+            }
         }
+    };
+    match tokio::time::timeout(ANYTLS_ADDRESS_TIMEOUT, read).await {
+        Ok(result) => result,
+        Err(_) => Err(AnyTlsProtocolError::Protocol(
+            "AnyTLS destination read timed out".to_owned(),
+        )),
     }
 }
 

@@ -17,16 +17,22 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+use crate::AnyTlsProtocolError;
 use crate::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS,
-    CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, Frame,
-    HEADER_OVERHEAD, MAX_FRAME_DATA_LEN,
+    CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, Frame, HEADER_OVERHEAD,
+    MAX_FRAME_DATA_LEN,
 };
 use crate::padding::SharedPadding;
-use crate::AnyTlsProtocolError;
 
 /// Cap matching Go's synchronous pipe: one in-flight payload stalls `recvLoop`.
 const STREAM_RECV_CAPACITY: usize = 1;
+
+/// Bound pending streams waiting for the runtime accept loop (backpressure).
+const STREAM_DISPATCH_CAPACITY: usize = 16;
+
+/// Hard cap on concurrent logical streams per authenticated session.
+const MAX_SERVER_STREAMS: usize = 256;
 
 /// Matches Go `writeControlFrame` write deadline (`time.Second * 5`).
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
@@ -82,7 +88,8 @@ struct ServerSessionInner {
     closed: AtomicBool,
     close_complete: AtomicBool,
     peer_version: AtomicU32,
-    stream_tx: mpsc::Sender<ServerStream>,
+    /// Dropped on session close so the runtime `stream_rx` observes `None`.
+    stream_tx: StdMutex<Option<mpsc::Sender<ServerStream>>>,
     close_notify: Notify,
     close_wait: Notify,
     reader_abort: StdMutex<Option<AbortHandle>>,
@@ -174,21 +181,22 @@ pub struct ServerStream {
 impl ServerSession {
     /// Starts the server recv loop and returns a receiver for inbound streams.
     #[must_use]
-    pub fn start(remote: BoxedStream, padding: SharedPadding) -> (Self, mpsc::Receiver<ServerStream>) {
-        let (stream_tx, stream_rx) = mpsc::channel(16);
+    pub fn start(
+        remote: BoxedStream,
+        padding: SharedPadding,
+    ) -> (Self, mpsc::Receiver<ServerStream>) {
+        let (stream_tx, stream_rx) = mpsc::channel(STREAM_DISPATCH_CAPACITY);
         let (close_tx, close_wait) = oneshot::channel();
         let (read_half, write_half) = split_stream(remote);
         let inner = Arc::new(ServerSessionInner {
             weak_self: StdMutex::new(Weak::new()),
-            write: Mutex::new(WriteState {
-                remote: write_half,
-            }),
+            write: Mutex::new(WriteState { remote: write_half }),
             streams: StdMutex::new(HashMap::new()),
             padding,
             closed: AtomicBool::new(false),
             close_complete: AtomicBool::new(false),
             peer_version: AtomicU32::new(0),
-            stream_tx,
+            stream_tx: StdMutex::new(Some(stream_tx)),
             close_notify: Notify::new(),
             close_wait: Notify::new(),
             reader_abort: StdMutex::new(None),
@@ -209,23 +217,42 @@ impl ServerSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(join.abort_handle());
 
-        (
-            Self {
-                inner,
-                close_wait,
-            },
-            stream_rx,
-        )
+        (Self { inner, close_wait }, stream_rx)
     }
 
-    /// Waits until the recv loop has finished.
+    /// Waits until the recv loop has finished and carrier teardown completed.
     pub async fn closed(&mut self) {
         let _ = (&mut self.close_wait).await;
         wait_for_close_complete(&self.inner).await;
     }
 
+    /// Waits until session teardown has completed (does not require `&mut self`).
+    ///
+    /// Unlike [`Self::closed`], this does not time out — suitable for `select!`
+    /// loops that must observe peer disconnect without a false-positive wake.
+    pub async fn wait_closed(&self) {
+        if self.inner.close_complete.load(Ordering::Acquire) {
+            return;
+        }
+        let notified = self.inner.close_wait.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.inner.close_complete.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+
     /// Closes the underlying TLS session.
     pub fn close(&self) {
+        request_session_close(Arc::clone(&self.inner));
+    }
+}
+
+impl Drop for ServerSession {
+    fn drop(&mut self) {
+        // Abort paths and early returns must still tear down the recv loop and
+        // carrier; finalize runs on a detached task so abort cannot cancel it.
         request_session_close(Arc::clone(&self.inner));
     }
 }
@@ -483,6 +510,15 @@ async fn finalize_session_close(inner: Arc<ServerSessionInner>) {
     {
         handle.abort();
     }
+    // Drop the dispatch sender so runtime `stream_rx.recv()` returns `None` and
+    // connection tasks can exit (freeing inbound connection slots).
+    {
+        let _ = inner
+            .stream_tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
     {
         let inboxes: Vec<_> = inner
             .streams
@@ -665,41 +701,65 @@ async fn handle_syn_frame(
     }
     let (sender, receiver) = mpsc::channel(STREAM_RECV_CAPACITY);
     let terminus = StreamTerminus::new();
-    let duplicate = session
-        .streams
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains_key(&sid);
-    if !duplicate {
-        session
+    let insert_result = {
+        let mut streams = session
             .streams
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if streams.contains_key(&sid) {
+            InsertSyn::Duplicate
+        } else if streams.len() >= MAX_SERVER_STREAMS {
+            InsertSyn::AtCapacity
+        } else {
+            streams.insert(
                 sid,
                 StreamInbox {
                     sender,
                     terminus: Arc::clone(&terminus),
                 },
             );
-        let stream = ServerStream {
-            session: Arc::clone(session),
-            sid,
-            receiver,
-            terminus,
-            pending: BytesMut::new(),
-            write_closed: false,
-            read_closed: false,
-            pending_write: None,
-            pending_shutdown: None,
-            handshake_reported: false,
-        };
-        let tx = session.stream_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(stream).await;
-        });
+            InsertSyn::Inserted
+        }
+    };
+    match insert_result {
+        InsertSyn::Duplicate => return RecvAction::Continue,
+        InsertSyn::AtCapacity => {
+            let mut frame = Frame::new(CMD_ALERT, 0);
+            frame.data = b"too many streams".to_vec();
+            let _ = session.write_control_frame(frame).await;
+            return RecvAction::Stop;
+        }
+        InsertSyn::Inserted => {}
+    }
+    let stream = ServerStream {
+        session: Arc::clone(session),
+        sid,
+        receiver,
+        terminus,
+        pending: BytesMut::new(),
+        write_closed: false,
+        read_closed: false,
+        pending_write: None,
+        pending_shutdown: None,
+        handshake_reported: false,
+    };
+    // Await in the recv loop (no spawn) so channel capacity back-pressures SYN
+    // intake instead of unbounded dispatch tasks.
+    let tx = session
+        .stream_tx
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(tx) = tx {
+        let _ = tx.send(stream).await;
     }
     RecvAction::Continue
+}
+
+enum InsertSyn {
+    Duplicate,
+    AtCapacity,
+    Inserted,
 }
 
 async fn handle_psh_frame(session: &ServerSessionInner, sid: u32, data: Vec<u8>) {
@@ -958,7 +1018,10 @@ mod tests {
             let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
             if length > 0 {
                 let mut body = vec![0_u8; length];
-                client.read_exact(&mut body).await.expect("server settings body");
+                client
+                    .read_exact(&mut body)
+                    .await
+                    .expect("server settings body");
             }
             client
                 .write_all(&frame(CMD_SYN, 1, &[]))
@@ -1001,5 +1064,95 @@ mod tests {
         stream.write_all(b"world").await.expect("write response");
         client_task.await.expect("client task");
         session.close();
+    }
+
+    #[tokio::test]
+    async fn session_close_unblocks_stream_receiver() {
+        let padding = Arc::new(std::sync::Mutex::new(PaddingFactory::default_factory()));
+        let (client, server) = duplex(4096);
+        let (mut session, mut stream_rx) =
+            ServerSession::start(Box::new(server), Arc::clone(&padding));
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), session.closed())
+            .await
+            .expect("session closed");
+        let next = tokio::time::timeout(Duration::from_secs(2), stream_rx.recv())
+            .await
+            .expect("stream receiver must unblock after session close");
+        assert!(
+            next.is_none(),
+            "dispatch channel must close on session teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_server_session_closes_peer() {
+        let padding = Arc::new(std::sync::Mutex::new(PaddingFactory::default_factory()));
+        let (mut client, server) = duplex(4096);
+        let (session, stream_rx) = ServerSession::start(Box::new(server), Arc::clone(&padding));
+        drop(stream_rx);
+        drop(session);
+        let mut buf = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("peer must observe EOF after session drop");
+        assert_eq!(read.expect("read"), 0);
+    }
+
+    #[tokio::test]
+    async fn syn_beyond_stream_cap_stops_session() {
+        let padding = Arc::new(std::sync::Mutex::new(PaddingFactory::default_factory()));
+        let padding_md5 = padding.lock().unwrap().md5().to_owned();
+        let (mut client, server) = duplex(64 * 1024);
+        let (mut session, mut stream_rx) =
+            ServerSession::start(Box::new(server), Arc::clone(&padding));
+
+        let settings = encode_settings("test-client", &padding_md5);
+        client
+            .write_all(&frame(CMD_SETTINGS, 0, &settings))
+            .await
+            .expect("settings");
+        let mut header = [0_u8; HEADER_OVERHEAD];
+        client
+            .read_exact(&mut header)
+            .await
+            .expect("server settings hdr");
+        assert_eq!(header[0], CMD_SERVER_SETTINGS);
+        let length = usize::from(u16::from_be_bytes([header[5], header[6]]));
+        if length > 0 {
+            let mut body = vec![0_u8; length];
+            client
+                .read_exact(&mut body)
+                .await
+                .expect("server settings body");
+        }
+
+        // Hold delivered streams so map entries stay alive up to the cap.
+        let mut held = Vec::new();
+        for sid in 1..=u32::try_from(MAX_SERVER_STREAMS).expect("sid") {
+            client
+                .write_all(&frame(CMD_SYN, sid, &[]))
+                .await
+                .expect("syn");
+            let stream = tokio::time::timeout(Duration::from_secs(2), stream_rx.recv())
+                .await
+                .expect("dispatch")
+                .expect("stream");
+            held.push(stream);
+        }
+        client
+            .write_all(&frame(
+                CMD_SYN,
+                u32::try_from(MAX_SERVER_STREAMS + 1).expect("sid"),
+                &[],
+            ))
+            .await
+            .expect("overflow syn");
+        client.read_exact(&mut header).await.expect("alert hdr");
+        assert_eq!(header[0], crate::frame::CMD_ALERT);
+        tokio::time::timeout(Duration::from_secs(2), session.closed())
+            .await
+            .expect("session closed after stream cap");
+        drop(held);
     }
 }
