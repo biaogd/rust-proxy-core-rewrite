@@ -10,14 +10,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rewrite_io::BoxedStream;
 use rewrite_model::Destination;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::body::{self, BodyOptions, BodyReader, BodyWriter};
@@ -267,14 +264,10 @@ impl VmessServerSession {
         Ok(self.body_writer.write_record(writer, plaintext).await?)
     }
 
-    /// Spawns an inverted TCP relay that presents a plaintext duplex to the
-    /// caller, matching [`crate::connect_vmess_on_stream`] but with server body
-    /// directions.
+    /// Returns an in-place TCP body stream (no duplex relay), matching
+    /// [`crate::connect_vmess_on_stream`].
     #[must_use]
     pub fn into_tcp_relay(self, remote: BoxedStream) -> BoxedStream {
-        let cancellation = CancellationToken::new();
-        let (application, relay) = tokio::io::duplex(64 * 1024);
-        let task_cancellation = cancellation.clone();
         let Self {
             body_reader,
             body_writer,
@@ -284,25 +277,16 @@ impl VmessServerSession {
             request_options,
             response_header_written,
         } = self;
-        tokio::spawn(async move {
-            run_server_relay(
-                remote,
-                relay,
-                body_reader,
-                body_writer,
-                response_key,
-                response_iv,
-                response_verification,
-                request_options,
-                response_header_written,
-                task_cancellation,
-            )
-            .await;
-        });
-        Box::new(VmessServerRelayStream {
-            inner: application,
-            cancellation,
-        })
+        Box::new(crate::stream::VmessTcpStream::server(
+            remote,
+            body_reader,
+            body_writer,
+            response_key,
+            response_iv,
+            response_verification,
+            request_options,
+            response_header_written,
+        ))
     }
 
     /// Splits the session into independent body reader/writer halves for UDP
@@ -391,138 +375,6 @@ impl VmessServerWriter {
     ) -> Result<(), VmessProtocolError> {
         self.ensure_response_header(writer).await?;
         Ok(self.body_writer.write_record(writer, plaintext).await?)
-    }
-}
-
-struct VmessServerRelayStream {
-    inner: tokio::io::DuplexStream,
-    cancellation: CancellationToken,
-}
-
-impl Drop for VmessServerRelayStream {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-    }
-}
-
-impl AsyncRead for VmessServerRelayStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(context, buffer)
-    }
-}
-
-impl AsyncWrite for VmessServerRelayStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        Pin::new(&mut self.inner).poll_write(context, buffer)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_server_relay(
-    remote: BoxedStream,
-    relay: tokio::io::DuplexStream,
-    mut body_reader: BodyReader,
-    mut body_writer: BodyWriter,
-    response_key: [u8; 16],
-    response_iv: [u8; 16],
-    response_verification: u8,
-    request_options: u8,
-    mut response_header_written: bool,
-    cancellation: CancellationToken,
-) {
-    let (mut remote_read, mut remote_write) = tokio::io::split(remote);
-    let (mut plain_read, mut plain_write) = tokio::io::split(relay);
-    let read_cancellation = cancellation.clone();
-    let write_cancellation = cancellation.clone();
-
-    let read_loop = async {
-        loop {
-            let plaintext = tokio::select! {
-                () = read_cancellation.cancelled() => break,
-                result = body_reader.read_record(&mut remote_read) => match result {
-                    Ok(plaintext) => plaintext,
-                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(error) => return Err(error),
-                },
-            };
-            plain_write.write_all(&plaintext).await?;
-        }
-        plain_write.shutdown().await
-    };
-
-    let write_loop = async {
-        let mut buffer = vec![0_u8; BodyWriter::maximum_plaintext()];
-        loop {
-            let size = tokio::select! {
-                () = write_cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
-                result = plain_read.read(&mut buffer) => result?,
-            };
-            if !response_header_written {
-                let wire = seal_response_header(
-                    &response_key,
-                    &response_iv,
-                    response_verification,
-                    request_options,
-                )
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                remote_write.write_all(&wire).await?;
-                response_header_written = true;
-            }
-            if size == 0 {
-                remote_write.shutdown().await?;
-                return Ok(());
-            }
-            body_writer
-                .write_record(&mut remote_write, &buffer[..size])
-                .await?;
-        }
-    };
-
-    tokio::pin!(read_loop);
-    tokio::pin!(write_loop);
-    tokio::select! {
-        () = cancellation.cancelled() => {}
-        read_result = &mut read_loop => {
-            // Client write half-close ends the request stream; keep flushing
-            // response body records until the application write side finishes.
-            let _ = read_result;
-            tokio::select! {
-                () = cancellation.cancelled() => {}
-                _ = &mut write_loop => {}
-            }
-        }
-        write_result = &mut write_loop => {
-            if write_result.is_err() {
-                cancellation.cancel();
-            } else {
-                tokio::select! {
-                    () = cancellation.cancelled() => {}
-                    _ = &mut read_loop => {}
-                }
-            }
-        }
     }
 }
 
