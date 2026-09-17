@@ -45,6 +45,70 @@
       "rust-server-rss-median-kib": 34796.0,
       "rust-success-rate": 1.0
     },
+    "ss-2022": {
+      "go-client-cpu-median": 67.96,
+      "go-client-rss-median-kib": 42084.0,
+      "go-mbps": 2456.43,
+      "go-mbps-max": 2462.783,
+      "go-mbps-min": 2406.893,
+      "go-server-cpu-median": 67.95,
+      "go-server-rss-median-kib": 46244.0,
+      "go-success-rate": 1.0,
+      "runs": 3,
+      "rust-client-cpu-median": 55.66,
+      "rust-client-rss-median-kib": 20848.0,
+      "rust-mbps": 3296.453,
+      "rust-mbps-max": 3342.714,
+      "rust-mbps-min": 3273.71,
+      "rust-over-go-mbps": 1.342,
+      "rust-server-cpu-median": 47.98,
+      "rust-server-rss-median-kib": 23556.0,
+      "rust-success-rate": 1.0
+    },
+    "ss-aead": {
+      "go-client-cpu-median": 76.42,
+      "go-client-rss-median-kib": 42056.0,
+      "go-mbps": 90.645,
+      "go-mbps-max": 91.728,
+      "go-mbps-min": 86.656,
+      "go-server-cpu-median": 71.5,
+      "go-server-rss-median-kib": 42132.0,
+      "go-success-rate": 1.0,
+      "note": "4KiB payload; Rust fails product-path bulk at >=32KiB for pre-2022 AEAD",
+      "payload-bytes": 4096,
+      "runs": 3,
+      "rust-client-cpu-median": 0.0,
+      "rust-client-rss-median-kib": 21272.0,
+      "rust-mbps": 45.51,
+      "rust-mbps-max": 111.683,
+      "rust-mbps-min": 12.891,
+      "rust-over-go-mbps": 0.502,
+      "rust-server-cpu-median": 0.0,
+      "rust-server-rss-median-kib": 22440.0,
+      "rust-success-rate": 1.0
+    },
+    "ss-chacha": {
+      "go-client-cpu-median": 79.25,
+      "go-client-rss-median-kib": 41790.0,
+      "go-mbps": 87.277,
+      "go-mbps-max": 91.218,
+      "go-mbps-min": 87.118,
+      "go-server-cpu-median": 73.55,
+      "go-server-rss-median-kib": 42106.0,
+      "go-success-rate": 1.0,
+      "note": "4KiB payload; Rust fails product-path bulk at >=32KiB for pre-2022 AEAD",
+      "payload-bytes": 4096,
+      "runs": 3,
+      "rust-client-cpu-median": 51.7,
+      "rust-client-rss-median-kib": 21196.0,
+      "rust-mbps": 99.298,
+      "rust-mbps-max": 112.441,
+      "rust-mbps-min": 52.375,
+      "rust-over-go-mbps": 1.138,
+      "rust-server-cpu-median": 45.65,
+      "rust-server-rss-median-kib": 21676.0,
+      "rust-success-rate": 1.0
+    },
     "trojan-grpc": {
       "go-client-cpu-median": 89.96,
       "go-client-rss-median-kib": 55052.0,
@@ -273,6 +337,45 @@
       "rust-p90-ms": 0.33,
       "rust-p99-ms": 0.35
     },
+    "ss-2022": {
+      "go-conn-per-sec": 2222.0,
+      "go-over-rust-p50-ms": 1.957,
+      "go-p50-ms": 0.45,
+      "go-p90-ms": 0.51,
+      "go-p99-ms": 0.63,
+      "runs": 3,
+      "rust-conn-per-sec": 4053.5,
+      "rust-over-go-conn-per-sec": 1.824,
+      "rust-p50-ms": 0.23,
+      "rust-p90-ms": 0.28,
+      "rust-p99-ms": 0.32
+    },
+    "ss-aead": {
+      "go-conn-per-sec": 2409.7,
+      "go-over-rust-p50-ms": 1.667,
+      "go-p50-ms": 0.4,
+      "go-p90-ms": 0.46,
+      "go-p99-ms": 0.53,
+      "runs": 3,
+      "rust-conn-per-sec": 4018.1,
+      "rust-over-go-conn-per-sec": 1.667,
+      "rust-p50-ms": 0.24,
+      "rust-p90-ms": 0.28,
+      "rust-p99-ms": 0.36
+    },
+    "ss-chacha": {
+      "go-conn-per-sec": 2431.0,
+      "go-over-rust-p50-ms": 1.739,
+      "go-p50-ms": 0.4,
+      "go-p90-ms": 0.47,
+      "go-p99-ms": 0.54,
+      "runs": 3,
+      "rust-conn-per-sec": 4182.6,
+      "rust-over-go-conn-per-sec": 1.721,
+      "rust-p50-ms": 0.23,
+      "rust-p90-ms": 0.28,
+      "rust-p99-ms": 0.31
+    },
     "trojan-grpc": {
       "go-conn-per-sec": 2341.9,
       "go-over-rust-p50-ms": 1.72,
@@ -415,6 +518,16 @@
       "rust-server-rss-median-kib": 23516.0,
       "rust-success-rate": 1.0
     },
+    "ss-aead": {
+      "go-alive": true,
+      "go-exchanges-per-sec": 2440.68,
+      "go-server-rss-median-kib": 41088.0,
+      "go-success-rate": 1.0,
+      "rust-alive": true,
+      "rust-exchanges-per-sec": 3863.42,
+      "rust-server-rss-median-kib": 19108.0,
+      "rust-success-rate": 1.0
+    },
     "trojan-tls": {
       "go-alive": true,
       "go-exchanges-per-sec": 593.74,
@@ -450,15 +563,25 @@
     "anytls / vless-grpc / vmess-tls medians from isolated 5-run rerun (long matrix had host contention)",
     "Go VMess Mbps anomalously low / CPU sampler often 0 in this harness; use Rust absolute Mbps for VMess",
     "Go vmess-grpc essentially non-functional in this harness (success-rate 0.11)",
-    "Rust VMess soak hits ~65535 ok then failures (uint16 ceiling); bulk path unaffected"
+    "Rust VMess soak hits ~65535 ok then failures (uint16 ceiling); bulk path unaffected",
+    "ss-2022 bulk at 256KiB; ss-aead/ss-chacha bulk reported at 4KiB because Rust pre-2022 AEAD product path fails exchanges at >=32KiB",
+    "SSR inbound does not exist on Go or Rust (outbound-only)",
+    "ss-aead Rust 4KiB bulk still highly variable (CPU sampler often 0); latency/soak remain strong"
   ],
   "profile": {
     "go": "go build -trimpath (+ strip for size compare)",
     "note": "balanced size+perf; not opt-level=z / not under-20MiB target",
     "rust": "opt-level=3 lto=fat codegen-units=1 strip=symbols panic=abort"
   },
+  "ssr": {
+    "go": "outbound only (no named SSR listener)",
+    "inbound": "unsupported",
+    "note": "Cannot run same-engine inbound perf for SSR",
+    "rust": "outbound only (Phase 7A\u2013D); no inbound SSR"
+  },
   "table": [
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 2216.744,
       "go_p50_ms": 0.36,
       "go_server_rss_kib": 45116.0,
@@ -470,6 +593,7 @@
       "rust_server_rss_kib": 24452.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1479.116,
       "go_p50_ms": 0.47,
       "go_server_rss_kib": 47720.0,
@@ -481,6 +605,43 @@
       "rust_server_rss_kib": 34796.0
     },
     {
+      "bulk_payload_bytes": 262144,
+      "go_mbps": 2456.43,
+      "go_p50_ms": 0.45,
+      "go_server_rss_kib": 46244.0,
+      "protocol": "ss-2022",
+      "rust_mbps": 3296.453,
+      "rust_over_go_conn_per_sec": 1.824,
+      "rust_over_go_mbps": 1.342,
+      "rust_p50_ms": 0.23,
+      "rust_server_rss_kib": 23556.0
+    },
+    {
+      "bulk_payload_bytes": 4096,
+      "go_mbps": 90.645,
+      "go_p50_ms": 0.4,
+      "go_server_rss_kib": 42132.0,
+      "protocol": "ss-aead",
+      "rust_mbps": 45.51,
+      "rust_over_go_conn_per_sec": 1.667,
+      "rust_over_go_mbps": 0.502,
+      "rust_p50_ms": 0.24,
+      "rust_server_rss_kib": 22440.0
+    },
+    {
+      "bulk_payload_bytes": 4096,
+      "go_mbps": 87.277,
+      "go_p50_ms": 0.4,
+      "go_server_rss_kib": 42106.0,
+      "protocol": "ss-chacha",
+      "rust_mbps": 99.298,
+      "rust_over_go_conn_per_sec": 1.721,
+      "rust_over_go_mbps": 1.138,
+      "rust_p50_ms": 0.23,
+      "rust_server_rss_kib": 21676.0
+    },
+    {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 2260.513,
       "go_p50_ms": 0.43,
       "go_server_rss_kib": 45892.0,
@@ -492,6 +653,7 @@
       "rust_server_rss_kib": 27652.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1440.551,
       "go_p50_ms": 1.7,
       "go_server_rss_kib": 44504.0,
@@ -503,6 +665,7 @@
       "rust_server_rss_kib": 23752.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1372.682,
       "go_p50_ms": 1.81,
       "go_server_rss_kib": 45028.0,
@@ -514,6 +677,7 @@
       "rust_server_rss_kib": 28052.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1490.979,
       "go_p50_ms": 0.43,
       "go_server_rss_kib": 57780.0,
@@ -525,6 +689,7 @@
       "rust_server_rss_kib": 80588.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 2238.38,
       "go_p50_ms": 0.45,
       "go_server_rss_kib": 46440.0,
@@ -536,6 +701,7 @@
       "rust_server_rss_kib": 27296.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1419.174,
       "go_p50_ms": 1.69,
       "go_server_rss_kib": 44164.0,
@@ -547,6 +713,7 @@
       "rust_server_rss_kib": 23240.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 1364.073,
       "go_p50_ms": 1.8,
       "go_server_rss_kib": 45176.0,
@@ -558,6 +725,7 @@
       "rust_server_rss_kib": 27016.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 0.07,
       "go_p50_ms": 0.56,
       "go_server_rss_kib": 35844.0,
@@ -569,6 +737,7 @@
       "rust_server_rss_kib": 27216.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 205.034,
       "go_p50_ms": 1.89,
       "go_server_rss_kib": 47436.0,
@@ -580,6 +749,7 @@
       "rust_server_rss_kib": 25412.0
     },
     {
+      "bulk_payload_bytes": 262144,
       "go_mbps": 303.241,
       "go_p50_ms": 1.89,
       "go_server_rss_kib": 48328.0,
