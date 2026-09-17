@@ -37,6 +37,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Mixed => ListenerProtocol::Mixed,
         ListenerKind::Redir
         | ListenerKind::Tproxy
+        | ListenerKind::Tunnel
         | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
@@ -87,6 +88,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Mixed => "DEFAULT-MIXED",
         ListenerKind::Redir
         | ListenerKind::Tproxy
+        | ListenerKind::Tunnel
         | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
@@ -287,7 +289,7 @@ pub(super) async fn serve_stream_session(
     {
         metadata.inbound_port = local.port();
     }
-    if metadata.inbound_name.is_empty() {
+    if metadata.inbound_name.is_empty() && metadata.inbound != InboundProtocol::Tunnel {
         let name = match metadata.inbound {
             InboundProtocol::Shadowsocks => "DEFAULT-SHADOWSOCKS",
             InboundProtocol::Trojan => "DEFAULT-TROJAN",
@@ -299,16 +301,30 @@ pub(super) async fn serve_stream_session(
             InboundProtocol::Tun => "DEFAULT-TUN",
             InboundProtocol::Redir => "DEFAULT-REDIR",
             InboundProtocol::Tproxy => "DEFAULT-TPROXY",
+            InboundProtocol::Tunnel => "",
             InboundProtocol::Http
             | InboundProtocol::Https
             | InboundProtocol::Socks4
             | InboundProtocol::Socks5
             | InboundProtocol::Inner => "DEFAULT-INBOUND",
         };
-        name.clone_into(&mut metadata.inbound_name);
+        if !name.is_empty() {
+            name.clone_into(&mut metadata.inbound_name);
+        }
     }
     let fake_host = apply_host_mapping(&mut metadata, config, state);
-    let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
+    let decision = if metadata.special_proxy.is_empty() {
+        evaluate_tcp_rules(&mut metadata, config, state).await
+    } else {
+        // Go resolveMetadata: SpecialProxy bypasses rules.
+        rewrite_rules::Decision {
+            target: metadata.special_proxy.clone(),
+            matched_kind: None,
+            rematch_cycle: false,
+            rematch_name: String::new(),
+            special_rules: String::new(),
+        }
+    };
     let Some((decision, outbound_target, traversed_groups)) =
         resolve_rematch_target(decision, &mut metadata, config, state)
     else {

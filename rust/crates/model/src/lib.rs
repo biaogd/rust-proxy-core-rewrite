@@ -94,6 +94,8 @@ pub enum InboundProtocol {
     Redir,
     /// Linux TProxy TCP (destination from `LocalAddr` after `IP_TRANSPARENT`).
     Tproxy,
+    /// Static tunnel TCP/UDP (destination from config `target`).
+    Tunnel,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,6 +126,7 @@ pub struct Metadata {
     pub dscp: u8,
     pub rematch_name: String,
     pub special_rules: String,
+    pub special_proxy: String,
 }
 
 impl Metadata {
@@ -152,6 +155,7 @@ impl Metadata {
             dscp: 0,
             rematch_name: String::new(),
             special_rules: String::new(),
+            special_proxy: String::new(),
         }
     }
 

@@ -10,6 +10,7 @@ mod tcp;
 mod trojan_listener;
 mod tuic_listener;
 mod tun;
+mod tunnel_listener;
 mod types;
 mod vless_listener;
 mod vmess_listener;

@@ -871,6 +871,63 @@ fn accepts_tproxy_port_on_linux_only() {
 }
 
 #[test]
+fn parses_static_tunnels_tcp_and_udp() {
+    use crate::model::TunnelNetwork;
+    use rewrite_model::{Destination, Host};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let source = r#"
+mode: rule
+ipv6: false
+rules:
+  - MATCH,DIRECT
+tunnels:
+  - tcp,127.0.0.1:19001,127.0.0.1:19002
+  - network: [tcp, udp]
+    address: 127.0.0.1:19003
+    target: echo.example:443
+"#;
+    let config = Config::from_yaml(source).expect("tunnels parse");
+    assert_eq!(config.tunnel_listeners.len(), 3);
+    assert_eq!(config.tunnel_listeners[0].network, TunnelNetwork::Tcp);
+    assert_eq!(
+        config.tunnel_listeners[0].listen,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19001)
+    );
+    assert_eq!(
+        config.tunnel_listeners[0].target,
+        Destination {
+            host: Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: 19002,
+        }
+    );
+    assert_eq!(config.tunnel_listeners[1].network, TunnelNetwork::Tcp);
+    assert_eq!(config.tunnel_listeners[2].network, TunnelNetwork::Udp);
+    assert_eq!(
+        config.tunnel_listeners[1].target.host,
+        Host::Domain("echo.example".to_owned())
+    );
+    assert_eq!(config.tunnel_tcp_keys().len(), 2);
+    assert_eq!(config.tunnel_udp_configs().len(), 1);
+}
+
+#[test]
+fn rejects_tunnel_with_missing_proxy() {
+    let source = r#"
+mode: rule
+rules:
+  - MATCH,DIRECT
+tunnels:
+  - tcp,127.0.0.1:19001,127.0.0.1:19002,missing-proxy
+"#;
+    let error = ConfigSpec::from_yaml(source).expect_err("missing proxy");
+    assert!(matches!(
+        error,
+        ConfigError::InvalidInbound(message) if message.contains("missing-proxy")
+    ));
+}
+
+#[test]
 fn builds_phase_three_listener_set_and_authentication() {
     let source = r#"
 port: 8080

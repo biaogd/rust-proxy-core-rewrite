@@ -75,7 +75,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N implements legacy `ss-config` and the declared first named Shadowsocks listener slice with fail-closed unsupported fields | Remaining Shadowsocks fields and one gate per other IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
 | CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Partial: 8A Linux parse/apply + 8B Darwin utun/route/scutil DNS + 8C Windows Wintun/route/adapter DNS | 8D remaining stacks |
-| CFG-10 | Static TCP/UDP tunnels and validation | Not started | 5B6 |
+| CFG-10 | Static TCP/UDP tunnels and validation | **Partial — W1.3:** top-level `tunnels:` parse/validate + TCP/UDP listeners; named deferred | W1.3 / 5B6 |
 | CFG-11 | NTP enable/listen/server/port/interval/dialer-proxy/write-to-system | Not started | 5E1 |
 | CFG-12 | iptables inbound-interface and bypass rules | Not started | 8A |
 | CFG-13 | TLS certificate/private key, custom roots and client authentication | Not started | 5E2 and protocol gates |
@@ -97,7 +97,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Complete in declared fixed-listener scope: native bind/rebind/LAN policy, TFO, Linux MPTCP fallback and current source-keyed association behavior are implemented | Linux native/slow CI results remain evidence gates; named listeners remain CFG-07 |
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | **Partial — W1.1:** Linux fixed `redir-port` TCP + `SO_ORIGINAL_DST`; non-Linux fail-closed; Darwin/FreeBSD/named deferred | W1.1 then 8A–8C |
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | **Partial — W1.2:** Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; dest from `LocalAddr`; UDP deferred | W1.2 then 8A |
-| IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
+| IN-05 | Static tunnel TCP/UDP listener | **Partial — W1.3:** top-level `tunnels:` TCP/UDP + SpecialProxy bypass; named deferred | W1.3 / 5B6 |
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
 | IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice plus **IN-B** standard SS2022 UDP inbound with product-path replay; Darwin arm64 6C-N differential Parity in declared scope; Linux pending | Remaining SS cipher matrix; Snell server deferred |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | **IN-D** VLESS, **IN-E** VMess |

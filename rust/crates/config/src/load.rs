@@ -16,16 +16,17 @@ use crate::model::{
     AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls,
     Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
     ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig,
-    TrojanInboundConfig, TuicInboundConfig, VlessInboundConfig, VmessInboundConfig,
+    TrojanInboundConfig, TunnelInboundConfig, TuicInboundConfig, VlessInboundConfig,
+    VmessInboundConfig,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
     expand_proxy_group, load_proxy_provider_file, parse_proxies, parse_proxy_groups,
-    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types,
-    validate_dialer_proxies,
+    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types, validate_dialer_proxies,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
 use crate::tun::parse_tun;
+use crate::tunnel::parse_tunnels;
 
 impl ConfigSpec {
     /// Parses the Phase 2 specification layer and overlays Go-compatible
@@ -240,6 +241,9 @@ impl ConfigSpec {
             &tuic_listeners,
             &anytls_listeners,
         )?;
+        let mut proxy_names: BTreeSet<String> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
+        proxy_names.extend(proxy_groups.iter().map(|group| group.name.clone()));
+        let tunnel_listeners = parse_tunnels(raw.tunnels, &proxy_names)?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -310,6 +314,7 @@ impl ConfigSpec {
             hysteria2_listeners,
             tuic_listeners,
             anytls_listeners,
+            tunnel_listeners,
             tun,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
@@ -482,6 +487,7 @@ impl TryFrom<ConfigSpec> for Config {
             hysteria2_listeners: spec.hysteria2_listeners,
             tuic_listeners: spec.tuic_listeners,
             anytls_listeners: spec.anytls_listeners,
+            tunnel_listeners: spec.tunnel_listeners,
             tun: spec.tun,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
@@ -849,10 +855,44 @@ impl Config {
         for anytls in &self.anytls_listeners {
             listeners.push((ListenerKind::AnyTls, anytls.listen.port()));
         }
-        if listeners.is_empty() && self.dns.is_none() {
+        if listeners.is_empty() && self.dns.is_none() && self.tunnel_listeners.is_empty() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
         Ok(listeners)
+    }
+
+    #[must_use]
+    pub fn tunnel_tcp_keys(&self) -> Vec<(u16, SocketAddr, String)> {
+        self.tunnel_listeners
+            .iter()
+            .filter(|tunnel| tunnel.network == crate::model::TunnelNetwork::Tcp)
+            .map(|tunnel| {
+                (
+                    tunnel.listen.port(),
+                    tunnel.listen,
+                    tunnel.reload_identity(),
+                )
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn tunnel_udp_configs(&self) -> Vec<&TunnelInboundConfig> {
+        self.tunnel_listeners
+            .iter()
+            .filter(|tunnel| tunnel.network == crate::model::TunnelNetwork::Udp)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn tunnel_listener_for_key(
+        &self,
+        listen: SocketAddr,
+        identity: &str,
+    ) -> Option<&TunnelInboundConfig> {
+        self.tunnel_listeners.iter().find(|listener| {
+            listener.listen == listen && listener.reload_identity() == identity
+        })
     }
 
     #[must_use]

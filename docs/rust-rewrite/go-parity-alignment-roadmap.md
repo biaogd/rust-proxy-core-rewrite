@@ -245,7 +245,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | --- | --- | --- |
 | A | W1.1 redir | **Partial** — Linux fixed `redir-port` TCP (this checkout); Darwin/FreeBSD/named open |
 | A | W1.2 tproxy | **Partial** — Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; UDP/named open |
-| A | W1.3 tunnel | Not started |
+| A | W1.3 tunnel | **Partial** — top-level `tunnels:` TCP/UDP + SpecialProxy; named open |
 | A | W1.4 named http/socks/mixed | Not started |
 | A | W2.1 PROCESS | Not started |
 | A | W2.2 sniffer | Not started |
@@ -303,11 +303,11 @@ excluded must pass through Waves A–C.
 Concrete next slices after this doc lands:
 
 1. **W1.1** Linux redir TCP → `serve_stream_session` ✅  
-2. **W1.2** Linux tproxy TCP (UDP next) — in progress / partial  
-3. **W2.2** sniffer config + HTTP/TLS sniff on local/TUN path  
-4. **W2.1** PROCESS rules (Linux first)  
-5. **W3.1** Trojan inbound Reality  
-6. **W5.5** dialer-proxy for VMess/VLESS/Trojan TCP  
+2. **W1.2** Linux tproxy TCP (UDP next) ✅ partial  
+3. **W1.3** static tunnels TCP/UDP ✅ partial (named open)  
+4. **W2.2** sniffer config + HTTP/TLS sniff on local/TUN path  
+5. **W2.1** PROCESS rules (Linux first)  
+6. **W3.1** Trojan inbound Reality  
 
 Parallel track: **W1.6** TUN privileged CI to Parity; **W7.6** SS AEAD perf.
 

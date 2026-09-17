@@ -118,6 +118,7 @@ impl From<&Metadata> for MetadataSnapshot {
             InboundProtocol::Inner => "Inner",
             InboundProtocol::Redir => "Redir",
             InboundProtocol::Tproxy => "TProxy",
+            InboundProtocol::Tunnel => "Tunnel",
         };
         let network = match metadata.network {
             Network::Tcp => "tcp",
@@ -153,7 +154,7 @@ impl From<&Metadata> for MetadataSnapshot {
             uid: 0,
             process: String::new(),
             process_path: String::new(),
-            special_proxy: String::new(),
+            special_proxy: metadata.special_proxy.clone(),
             special_rules: metadata.special_rules.clone(),
             remote_destination,
             dscp: metadata.dscp,

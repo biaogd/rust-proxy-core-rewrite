@@ -187,6 +187,8 @@ pub(super) async fn receive_udp(
 #[derive(Clone)]
 pub(super) enum UdpReplySink {
     Socks5(Arc<UdpSocket>),
+    /// Raw write-back for static tunnel UDP (no SOCKS5 framing).
+    Raw(Arc<UdpSocket>),
     Tun { tx: rewrite_tun::TunUdpReplyTx },
 }
 
@@ -201,6 +203,10 @@ impl UdpReplySink {
             Self::Socks5(listener) => {
                 let packet = rewrite_inbound::encode_socks5_udp(remote, payload);
                 listener.send_to(&packet, session_peer).await.map(|_| ())
+            }
+            Self::Raw(listener) => {
+                let _ = remote;
+                listener.send_to(payload, session_peer).await.map(|_| ())
             }
             Self::Tun { tx } => match tx.try_send((payload.to_vec(), remote, session_peer)) {
                 Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
@@ -344,8 +350,18 @@ impl UdpSessions {
         mut request: UdpSessionPacket,
         context: UdpSessionContext,
     ) {
-        let decision = mode_decision(&context.config, &context.state)
-            .unwrap_or_else(|| context.config.rules.evaluate(&request.metadata));
+        let decision = if request.metadata.special_proxy.is_empty() {
+            mode_decision(&context.config, &context.state)
+                .unwrap_or_else(|| context.config.rules.evaluate(&request.metadata))
+        } else {
+            rewrite_rules::Decision {
+                target: request.metadata.special_proxy.clone(),
+                matched_kind: None,
+                rematch_cycle: false,
+                rematch_name: String::new(),
+                special_rules: String::new(),
+            }
+        };
         let Some((decision, target, _)) = resolve_rematch_target(
             decision,
             &mut request.metadata,

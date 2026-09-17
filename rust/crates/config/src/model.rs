@@ -93,6 +93,7 @@ pub struct ConfigSpec {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
@@ -165,6 +166,7 @@ pub struct Config {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -1221,6 +1223,44 @@ fn wildcard_or_exact_ip(configured: std::net::IpAddr, actual: std::net::IpAddr) 
     }
 }
 
+/// One expanded static tunnel listener (`tunnels:` entry × network).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunnelInboundConfig {
+    pub listen: SocketAddr,
+    pub target: rewrite_model::Destination,
+    pub network: TunnelNetwork,
+    pub proxy: String,
+}
+
+impl TunnelInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.network.as_str(),
+            self.target.authority(),
+            self.proxy
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunnelNetwork {
+    Tcp,
+    Udp,
+}
+
+impl TunnelNetwork {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadowsocksSimpleObfsConfig {
     pub mode: String,
@@ -1543,6 +1583,7 @@ pub enum ListenerKind {
     Mixed,
     Redir,
     Tproxy,
+    Tunnel,
     Shadowsocks,
     Trojan,
     Vless,

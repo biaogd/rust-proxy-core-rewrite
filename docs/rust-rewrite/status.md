@@ -2,6 +2,16 @@
 
 Last updated: 2026-09-17
 
+### W1.3 static tunnels TCP/UDP — 2026-09-17
+
+Third Wave A ingress slice. Top-level `tunnels:` (one-liner and mapping)
+parses into expanded per-network listeners. TCP/UDP use the configured
+`target` as the fixed destination (`InboundProtocol::Tunnel`); optional
+`proxy` sets `special_proxy` and bypasses rules (Go `SpecialProxy`). Legacy
+`tunnels:` leave `inbound_name` empty (no invented `DEFAULT-TUNNEL`). Evidence:
+config/rules unit tests + `compat/scripts/phase_w13_tunnel.py`. Deferred:
+named `type: tunnel`, `routing-mark` / sub-`rule` on named tunnels.
+
 ### W1.2 Linux tproxy-port TCP — 2026-09-17
 
 Second Wave A transparent-ingress slice. Linux accepts fixed `tproxy-port`,

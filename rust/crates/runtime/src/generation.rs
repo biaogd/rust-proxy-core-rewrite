@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use rewrite_config::{
     AnyTlsInboundConfig, Config, ConfigError, Hysteria2InboundConfig, ListenerKind, ProxyGroupKind,
-    ShadowsocksInboundConfig, TrojanInboundConfig, TuicInboundConfig, VlessInboundConfig,
-    VmessInboundConfig,
+    ShadowsocksInboundConfig, TrojanInboundConfig, TunnelNetwork, TuicInboundConfig,
+    VlessInboundConfig, VmessInboundConfig,
 };
 use rewrite_state::RuntimeState;
 use tokio::net::{TcpListener, UdpSocket};
@@ -23,6 +23,9 @@ use crate::shadowsocks_listener::{ShadowsocksListener, run_shadowsocks_listener}
 use crate::trojan_listener::{TrojanListener, run_trojan_listener};
 use crate::tuic_listener::{TuicListener, run_tuic_listener};
 use crate::tun::run_tun_listener;
+use crate::tunnel_listener::{
+    TunnelTcpListener, TunnelUdpListener, run_tunnel_tcp_listener, run_tunnel_udp_listener,
+};
 use crate::types::{
     ControllerKey, ListenerKey, LocalTcpListener, PreparedController, RuntimeError, RuntimeTask,
 };
@@ -39,6 +42,8 @@ struct PreparedGeneration {
     hysteria2: Vec<(ListenerKey, Hysteria2Listener)>,
     tuic: Vec<(ListenerKey, TuicListener)>,
     anytls: Vec<(ListenerKey, AnyTlsListener)>,
+    tunnel_tcp: Vec<(ListenerKey, TunnelTcpListener)>,
+    tunnel_udp: Vec<(ListenerKey, TunnelUdpListener)>,
     controllers: Vec<PreparedController>,
     dns: Option<(SocketAddr, TcpListener, UdpSocket)>,
     retired_listeners: Vec<ListenerKey>,
@@ -57,6 +62,8 @@ impl PreparedGeneration {
         self.hysteria2.clear();
         self.tuic.clear();
         self.anytls.clear();
+        self.tunnel_tcp.clear();
+        self.tunnel_udp.clear();
         self.controllers.clear();
         self.dns = None;
     }
@@ -134,7 +141,7 @@ async fn apply_generation_inner(
     let desired_controllers = controller_keys(&next)?;
     let desired_dns = next.dns.as_ref().map(|config| config.listen);
 
-    let desired_listener_keys = desired_listeners
+    let mut desired_listener_keys = desired_listeners
         .iter()
         .map(|&(kind, port)| {
             if kind == ListenerKind::Shadowsocks {
@@ -185,6 +192,17 @@ async fn apply_generation_inner(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for (port, address, identity) in next.tunnel_tcp_keys() {
+        desired_listener_keys.push((ListenerKind::Tunnel, port, address, identity));
+    }
+    for tunnel in next.tunnel_udp_configs() {
+        desired_listener_keys.push((
+            ListenerKind::Tunnel,
+            tunnel.listen.port(),
+            tunnel.listen,
+            tunnel.reload_identity(),
+        ));
+    }
     for (kind, port, address, identity) in &desired_listener_keys {
         let kind = *kind;
         let port = *port;
@@ -271,6 +289,39 @@ async fn apply_generation_inner(
             };
             let listener = AnyTlsListener::bind(anytls, state.clock()).await?;
             prepared.anytls.push((key, listener));
+            continue;
+        }
+
+        if kind == ListenerKind::Tunnel {
+            let Some(tunnel) = next.tunnel_listener_for_key(address, identity) else {
+                continue;
+            };
+            match tunnel.network {
+                TunnelNetwork::Tcp => match TunnelTcpListener::bind(tunnel, &next) {
+                    Ok(listener) => prepared.tunnel_tcp.push((key, listener)),
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!(
+                                "Start tunnel {} error: {error}",
+                                tunnel.target.authority()
+                            ),
+                        );
+                    }
+                },
+                TunnelNetwork::Udp => match TunnelUdpListener::bind(tunnel, &next) {
+                    Ok(listener) => prepared.tunnel_udp.push((key, listener)),
+                    Err(error) => {
+                        state.log(
+                            "error",
+                            format!(
+                                "Start tunnel {} error: {error}",
+                                tunnel.target.authority()
+                            ),
+                        );
+                    }
+                },
+            }
             continue;
         }
 
@@ -445,6 +496,28 @@ async fn apply_generation_inner(
         );
     }
 
+    for (key, listener) in std::mem::take(&mut prepared.tunnel_tcp) {
+        spawn_tunnel_tcp_listener(
+            key,
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+
+    for (key, listener) in std::mem::take(&mut prepared.tunnel_udp) {
+        spawn_tunnel_udp_listener(
+            key,
+            listener,
+            config_receiver,
+            state,
+            dns_service,
+            listeners,
+        );
+    }
+
     apply_controller_tasks(
         std::mem::take(&mut prepared.controllers),
         &desired_controllers,
@@ -532,7 +605,7 @@ async fn restore_retired_sockets(
         if listeners.contains_key(&key) {
             continue;
         }
-        let (kind, port, address, _identity) = key.clone();
+        let (kind, port, address, identity) = key.clone();
         if kind == ListenerKind::Shadowsocks {
             let Some(shadowsocks) = previous.shadowsocks_listener_for_port(port) else {
                 continue;
@@ -636,6 +709,36 @@ async fn restore_retired_sockets(
                 dns_service,
                 listeners,
             );
+            continue;
+        }
+        if kind == ListenerKind::Tunnel {
+            let Some(tunnel) = previous.tunnel_listener_for_key(address, &identity) else {
+                continue;
+            };
+            match tunnel.network {
+                TunnelNetwork::Tcp => {
+                    let listener = TunnelTcpListener::bind(tunnel, previous)?;
+                    spawn_tunnel_tcp_listener(
+                        key,
+                        listener,
+                        config_receiver,
+                        state,
+                        dns_service,
+                        listeners,
+                    );
+                }
+                TunnelNetwork::Udp => {
+                    let listener = TunnelUdpListener::bind(tunnel, previous)?;
+                    spawn_tunnel_udp_listener(
+                        key,
+                        listener,
+                        config_receiver,
+                        state,
+                        dns_service,
+                        listeners,
+                    );
+                }
+            }
             continue;
         }
         let (listener, udp) = match bind_fixed_listener(previous, kind, address) {
@@ -958,6 +1061,70 @@ fn spawn_anytls_listener(
     let task_dns_service = Arc::clone(dns_service);
     let handle = tokio::spawn(async move {
         run_anytls_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_tunnel_tcp_listener(
+    key: ListenerKey,
+    listener: TunnelTcpListener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_tunnel_tcp_listener(
+            listener,
+            task_config,
+            task_state,
+            task_dns_service,
+            child_shutdown,
+        )
+        .await;
+    });
+    listeners.insert(
+        key,
+        RuntimeTask {
+            shutdown: task_shutdown,
+            handle,
+        },
+    );
+}
+
+fn spawn_tunnel_udp_listener(
+    key: ListenerKey,
+    listener: TunnelUdpListener,
+    config_receiver: &watch::Receiver<Arc<Config>>,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    listeners: &mut BTreeMap<ListenerKey, RuntimeTask>,
+) {
+    let task_shutdown = CancellationToken::new();
+    let child_shutdown = task_shutdown.clone();
+    let task_config = config_receiver.clone();
+    let task_state = Arc::clone(state);
+    let task_dns_service = Arc::clone(dns_service);
+    let handle = tokio::spawn(async move {
+        run_tunnel_udp_listener(
             listener,
             task_config,
             task_state,

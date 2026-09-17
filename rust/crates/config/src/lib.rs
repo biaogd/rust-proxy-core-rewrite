@@ -7,6 +7,7 @@ mod proxy;
 mod raw;
 mod shadowsocks_inbound;
 mod tun;
+mod tunnel;
 
 pub use error::ConfigError;
 pub use model::*;
