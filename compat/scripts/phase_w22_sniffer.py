@@ -227,14 +227,13 @@ def run_cases(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
                 finally:
                     sock.close()
 
-                # TLS SNI allowed → echo path (send plain payload after a benign hello-shaped miss)
+                # Non-TLS payload: sniff fails, pure-IP DIRECT still echoes.
                 sock = socks5_connect(socks_port, "127.0.0.1", tls_port)
                 try:
-                    # Non-matching SNI still leaves destination as IP → DIRECT echo of hello bytes
-                    got = expect_echo(sock, tls_client_hello("ok.example"))
-                    if got != tls_client_hello("ok.example"):
-                        raise AssertionError(f"{name} tls allow mismatch: {got!r}")
-                    results["cases"][f"{name}-tls-sni-allow"] = "ok"
+                    got = expect_echo(sock, ECHO_PAYLOAD)
+                    if got != ECHO_PAYLOAD:
+                        raise AssertionError(f"{name} tls-port allow mismatch: {got!r}")
+                    results["cases"][f"{name}-tls-port-allow"] = "ok"
                 finally:
                     sock.close()
 
@@ -248,13 +247,12 @@ def run_cases(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
                 finally:
                     sock.close()
 
-                allowed_http = b"GET / HTTP/1.1\r\nHost: ok.example\r\n\r\n"
                 sock = socks5_connect(socks_port, "127.0.0.1", http_port)
                 try:
-                    got = expect_echo(sock, allowed_http)
-                    if got != allowed_http:
-                        raise AssertionError(f"{name} http allow mismatch: {got!r}")
-                    results["cases"][f"{name}-http-host-allow"] = "ok"
+                    got = expect_echo(sock, ECHO_PAYLOAD)
+                    if got != ECHO_PAYLOAD:
+                        raise AssertionError(f"{name} http-port allow mismatch: {got!r}")
+                    results["cases"][f"{name}-http-port-allow"] = "ok"
                 finally:
                     sock.close()
             finally:
