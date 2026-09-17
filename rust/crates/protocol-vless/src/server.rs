@@ -6,9 +6,11 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use rewrite_model::{Destination, Host};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use uuid::Uuid;
 
 use crate::VlessFlow;
@@ -91,9 +93,12 @@ pub fn uuid_table<'a>(
         .collect()
 }
 
-/// Reads and authenticates one VLESS request header, then writes the
-/// response header (`[0, 0]`) immediately, matching the Go server which
-/// replies before relaying any data.
+/// Reads and authenticates one VLESS request header.
+///
+/// The response header (`[VERSION, 0]`) is **not** written here. Wrap the
+/// accepted stream in [`VlessServerStream`] (matching Go `serverConn`) so the
+/// response is coalesced with the first application write — critical for Gun
+/// framing where an eager 2-byte write becomes its own h2 DATA frame.
 ///
 /// # Errors
 ///
@@ -105,7 +110,7 @@ pub async fn accept_vless_request<S, H>(
     users: &HashMap<[u8; 16], VlessUserEntry, H>,
 ) -> Result<VlessServerRequest, VlessProtocolError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + Unpin,
     H: BuildHasher,
 {
     let mut version = [0_u8; 1];
@@ -207,8 +212,6 @@ where
         Destination { host, port }
     };
 
-    stream.write_all(&[VERSION, 0]).await?;
-
     Ok(VlessServerRequest {
         command,
         destination,
@@ -216,6 +219,163 @@ where
         uuid,
         flow: effective_flow,
     })
+}
+
+/// Server-side stream that lazily emits the VLESS response header.
+///
+/// Matches Go `sing_vless.serverConn`: the first `poll_write` prepends
+/// `[VERSION, 0]` to the payload so Gun/TLS see one frame instead of a
+/// solo 2-byte response DATA frame followed by bulk traffic.
+pub struct VlessServerStream<S> {
+    inner: S,
+    /// `None` once the response header has been fully written.
+    pending: Option<PendingResponseWrite>,
+}
+
+enum PendingResponseWrite {
+    /// Response header not started; coalesce on the next non-empty write.
+    Idle,
+    /// Combined `[VERSION, 0] || payload` partially flushed.
+    Flushing {
+        combined: Vec<u8>,
+        offset: usize,
+        /// Bytes of application payload represented by `combined[2..]`.
+        payload_len: usize,
+    },
+}
+
+impl<S> VlessServerStream<S> {
+    #[must_use]
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            pending: Some(PendingResponseWrite::Idle),
+        }
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for VlessServerStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        loop {
+            match self.pending.take() {
+                None => {
+                    return Pin::new(&mut self.inner).poll_write(cx, buf);
+                }
+                Some(PendingResponseWrite::Idle) => {
+                    let mut combined = Vec::with_capacity(2 + buf.len());
+                    combined.extend_from_slice(&[VERSION, 0]);
+                    combined.extend_from_slice(buf);
+                    self.pending = Some(PendingResponseWrite::Flushing {
+                        combined,
+                        offset: 0,
+                        payload_len: buf.len(),
+                    });
+                }
+                Some(PendingResponseWrite::Flushing {
+                    combined,
+                    mut offset,
+                    payload_len,
+                }) => {
+                    while offset < combined.len() {
+                        match Pin::new(&mut self.inner).poll_write(cx, &combined[offset..]) {
+                            Poll::Pending => {
+                                self.pending = Some(PendingResponseWrite::Flushing {
+                                    combined,
+                                    offset,
+                                    payload_len,
+                                });
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => {
+                                // Match Go: mark response consumed even on error so
+                                // retries do not prepend a second header.
+                                self.pending = None;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(0)) => {
+                                self.pending = None;
+                                return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                            }
+                            Poll::Ready(Ok(written)) => offset += written,
+                        }
+                    }
+                    self.pending = None;
+                    return Poll::Ready(Ok(payload_len));
+                }
+            }
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        // A flush before any payload still needs the 2-byte response (Go
+        // WriterReplaceable stays false until Write). Emit header alone.
+        if matches!(self.pending, Some(PendingResponseWrite::Idle)) {
+            self.pending = Some(PendingResponseWrite::Flushing {
+                combined: vec![VERSION, 0],
+                offset: 0,
+                payload_len: 0,
+            });
+        }
+        while let Some(PendingResponseWrite::Flushing {
+            combined,
+            mut offset,
+            payload_len,
+        }) = self.pending.take()
+        {
+            while offset < combined.len() {
+                match Pin::new(&mut self.inner).poll_write(cx, &combined[offset..]) {
+                    Poll::Pending => {
+                        self.pending = Some(PendingResponseWrite::Flushing {
+                            combined,
+                            offset,
+                            payload_len,
+                        });
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        self.pending = None;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(0)) => {
+                        self.pending = None;
+                        return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                    }
+                    Poll::Ready(Ok(written)) => offset += written,
+                }
+            }
+            self.pending = None;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 /// Reads one standard-mode VLESS UDP payload: a 2-byte big-endian length
@@ -291,7 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_tcp_request_and_writes_response_immediately() {
+    async fn accepts_tcp_request_and_coalesces_lazy_response() {
         let (mut client, mut server) = tokio::io::duplex(4096);
         let uuid = map_uuid(UUID_TEXT);
         let request_task = tokio::spawn(async move {
@@ -306,7 +466,9 @@ mod tests {
             client.write_all(&request).await.unwrap();
             let mut response = [0_u8; 2];
             client.read_exact(&mut response).await.unwrap();
-            response
+            let mut payload = [0_u8; 5];
+            client.read_exact(&mut payload).await.unwrap();
+            (response, payload)
         });
         let request = accept_vless_request(&mut server, &users(None))
             .await
@@ -322,8 +484,11 @@ mod tests {
                 port: 443,
             }
         );
-        let response = request_task.await.unwrap();
+        let mut server = VlessServerStream::new(server);
+        server.write_all(b"hello").await.unwrap();
+        let (response, payload) = request_task.await.unwrap();
         assert_eq!(response, [0, 0]);
+        assert_eq!(&payload, b"hello");
     }
 
     #[tokio::test]
@@ -348,6 +513,8 @@ mod tests {
             .await
             .expect("vision request");
         assert_eq!(request.flow, Some(VlessFlow::XtlsRprxVision));
+        let mut server = VlessServerStream::new(server);
+        server.flush().await.unwrap();
     }
 
     #[tokio::test]
@@ -421,6 +588,8 @@ mod tests {
                 port: 53,
             }
         );
+        let mut server = VlessServerStream::new(server);
+        server.flush().await.unwrap();
     }
 
     #[tokio::test]
@@ -446,6 +615,8 @@ mod tests {
             request.destination.host,
             Host::Ip(Ipv6Addr::LOCALHOST.into())
         );
+        let mut server = VlessServerStream::new(server);
+        server.flush().await.unwrap();
     }
 
     #[tokio::test]
@@ -502,6 +673,8 @@ mod tests {
             .expect("mux must be accepted for XUDP");
         assert_eq!(request.command, VlessCommand::Mux);
         assert_eq!(request.destination.port, 0);
+        let mut server = VlessServerStream::new(server);
+        server.flush().await.unwrap();
     }
 
     #[tokio::test]

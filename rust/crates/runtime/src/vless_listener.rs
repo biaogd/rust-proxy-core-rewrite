@@ -19,7 +19,7 @@ use rewrite_config::{Config, ControllerTls, VlessInboundConfig};
 use rewrite_inbound::BoxedInboundStream;
 use rewrite_model::{Destination, Host, InboundProtocol, Metadata, Network, unmap_ip};
 use rewrite_protocol_vless::{
-    VisionStream, VlessCommand, VlessFlow, VlessUserEntry, accept_vless_request,
+    VisionStream, VlessCommand, VlessFlow, VlessServerStream, VlessUserEntry, accept_vless_request,
     read_vless_udp_payload, read_xudp_client_packet, uuid_table, write_vless_udp_payload,
     write_xudp_server_packet,
 };
@@ -732,6 +732,9 @@ async fn dispatch_vless_session<S>(
             return;
         }
     };
+
+    // Go sing_vless.serverConn: coalesce [VERSION,0] with first write.
+    let stream = VlessServerStream::new(stream);
 
     match request.command {
         VlessCommand::Tcp => {

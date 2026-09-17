@@ -20,8 +20,8 @@ pub use packet::{
     write_xudp_server_packet,
 };
 pub use server::{
-    VlessCommand, VlessServerRequest, VlessUserEntry, accept_vless_request, map_uuid,
-    read_vless_udp_payload, uuid_table, write_vless_udp_payload,
+    VlessCommand, VlessServerRequest, VlessServerStream, VlessUserEntry, accept_vless_request,
+    map_uuid, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
 pub use vision::VisionStream;
 
