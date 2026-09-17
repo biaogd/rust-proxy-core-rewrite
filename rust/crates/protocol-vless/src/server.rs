@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use rewrite_io::DuplexStream;
+use rewrite_io::DuplexStream as _;
 use rewrite_model::{Destination, Host};
 use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
