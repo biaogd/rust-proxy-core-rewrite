@@ -110,23 +110,23 @@
       "rust-success-rate": 1.0
     },
     "trojan-grpc": {
-      "go-client-cpu-median": 89.96,
-      "go-client-rss-median-kib": 55052.0,
-      "go-mbps": 2260.513,
-      "go-mbps-max": 2298.782,
-      "go-mbps-min": 2260.421,
-      "go-server-cpu-median": 103.87,
-      "go-server-rss-median-kib": 45892.0,
+      "go-client-cpu-median": 97.83,
+      "go-client-rss-median-kib": 53672.0,
+      "go-mbps": 2283.308,
+      "go-mbps-max": 2309.628,
+      "go-mbps-min": 2281.083,
+      "go-server-cpu-median": 113.29,
+      "go-server-rss-median-kib": 45896.0,
       "go-success-rate": 1.0,
       "runs": 3,
-      "rust-client-cpu-median": 61.95,
-      "rust-client-rss-median-kib": 27476.0,
-      "rust-mbps": 1432.905,
-      "rust-mbps-max": 1433.483,
-      "rust-mbps-min": 1430.959,
-      "rust-over-go-mbps": 0.634,
-      "rust-server-cpu-median": 61.92,
-      "rust-server-rss-median-kib": 27652.0,
+      "rust-client-cpu-median": 61.91,
+      "rust-client-rss-median-kib": 26444.0,
+      "rust-mbps": 2624.512,
+      "rust-mbps-max": 2643.932,
+      "rust-mbps-min": 2532.783,
+      "rust-over-go-mbps": 1.149,
+      "rust-server-cpu-median": 57.92,
+      "rust-server-rss-median-kib": 26436.0,
       "rust-success-rate": 1.0
     },
     "trojan-tls": {
@@ -190,23 +190,23 @@
       "rust-success-rate": 1.0
     },
     "vless-grpc": {
-      "go-client-cpu-median": 89.96,
-      "go-client-rss-median-kib": 54940.0,
-      "go-mbps": 2238.38,
-      "go-mbps-max": 2246.525,
-      "go-mbps-min": 2203.418,
-      "go-server-cpu-median": 103.76,
-      "go-server-rss-median-kib": 46440.0,
-      "go-success-rate": 1.0,
-      "runs": 5,
-      "rust-client-cpu-median": 61.94,
-      "rust-client-rss-median-kib": 27288.0,
-      "rust-mbps": 1370.493,
-      "rust-mbps-max": 1401.362,
-      "rust-mbps-min": 1351.45,
-      "rust-over-go-mbps": 0.612,
-      "rust-server-cpu-median": 59.96,
-      "rust-server-rss-median-kib": 27296.0,
+      "go-client-cpu-median": 93.94,
+      "go-client-rss-median-kib": 55220.0,
+      "go-mbps": 2216.812,
+      "go-mbps-max": 2231.981,
+      "go-mbps-min": 2195.425,
+      "go-server-cpu-median": 109.77,
+      "go-server-rss-median-kib": 46572.0,
+      "go-success-rate": 0.987,
+      "runs": 3,
+      "rust-client-cpu-median": 35.98,
+      "rust-client-rss-median-kib": 26160.0,
+      "rust-mbps": 1442.938,
+      "rust-mbps-max": 1452.96,
+      "rust-mbps-min": 1375.704,
+      "rust-over-go-mbps": 0.651,
+      "rust-server-cpu-median": 33.97,
+      "rust-server-rss-median-kib": 25500.0,
       "rust-success-rate": 1.0
     },
     "vless-tls": {
@@ -251,22 +251,22 @@
     },
     "vmess-grpc": {
       "go-client-cpu-median": 0.0,
-      "go-client-rss-median-kib": 37236.0,
-      "go-mbps": 0.07,
-      "go-mbps-max": 0.279,
-      "go-mbps-min": 0.07,
+      "go-client-rss-median-kib": 37660.0,
+      "go-mbps": 0.557,
+      "go-mbps-max": 0.906,
+      "go-mbps-min": 0.279,
       "go-server-cpu-median": 0.0,
-      "go-server-rss-median-kib": 35844.0,
-      "go-success-rate": 0.111,
+      "go-server-rss-median-kib": 37380.0,
+      "go-success-rate": 0.5,
       "runs": 3,
-      "rust-client-cpu-median": 55.97,
-      "rust-client-rss-median-kib": 26484.0,
-      "rust-mbps": 1171.426,
-      "rust-mbps-max": 1174.452,
-      "rust-mbps-min": 1158.288,
-      "rust-over-go-mbps": 16734.657,
-      "rust-server-cpu-median": 55.96,
-      "rust-server-rss-median-kib": 27216.0,
+      "rust-client-cpu-median": 79.8,
+      "rust-client-rss-median-kib": 27728.0,
+      "rust-mbps": 2118.683,
+      "rust-mbps-max": 2156.965,
+      "rust-mbps-min": 2081.854,
+      "rust-over-go-mbps": 3803.74,
+      "rust-server-cpu-median": 77.95,
+      "rust-server-rss-median-kib": 28672.0,
       "rust-success-rate": 1.0
     },
     "vmess-tls": {
@@ -377,17 +377,17 @@
       "rust-p99-ms": 0.31
     },
     "trojan-grpc": {
-      "go-conn-per-sec": 2341.9,
-      "go-over-rust-p50-ms": 1.72,
-      "go-p50-ms": 0.43,
-      "go-p90-ms": 0.47,
-      "go-p99-ms": 0.5,
+      "go-conn-per-sec": 1976.1,
+      "go-over-rust-p50-ms": 1.923,
+      "go-p50-ms": 0.5,
+      "go-p90-ms": 0.56,
+      "go-p99-ms": 0.6,
       "runs": 3,
-      "rust-conn-per-sec": 3678.1,
-      "rust-over-go-conn-per-sec": 1.571,
-      "rust-p50-ms": 0.25,
-      "rust-p90-ms": 0.31,
-      "rust-p99-ms": 0.53
+      "rust-conn-per-sec": 3798.6,
+      "rust-over-go-conn-per-sec": 1.922,
+      "rust-p50-ms": 0.26,
+      "rust-p90-ms": 0.32,
+      "rust-p99-ms": 0.34
     },
     "trojan-tls": {
       "go-conn-per-sec": 580.6,
@@ -429,17 +429,17 @@
       "rust-p99-ms": 0.34
     },
     "vless-grpc": {
-      "go-conn-per-sec": 2210.9,
-      "go-over-rust-p50-ms": 1.8,
-      "go-p50-ms": 0.45,
-      "go-p90-ms": 0.51,
-      "go-p99-ms": 0.54,
-      "runs": 5,
-      "rust-conn-per-sec": 3944.1,
-      "rust-over-go-conn-per-sec": 1.784,
+      "go-conn-per-sec": 1949.3,
+      "go-over-rust-p50-ms": 2.0,
+      "go-p50-ms": 0.5,
+      "go-p90-ms": 0.57,
+      "go-p99-ms": 0.6,
+      "runs": 3,
+      "rust-conn-per-sec": 3944.8,
+      "rust-over-go-conn-per-sec": 2.024,
       "rust-p50-ms": 0.25,
       "rust-p90-ms": 0.3,
-      "rust-p99-ms": 0.33
+      "rust-p99-ms": 0.34
     },
     "vless-tls": {
       "go-conn-per-sec": 585.3,
@@ -468,17 +468,17 @@
       "rust-p99-ms": 0.7
     },
     "vmess-grpc": {
-      "go-conn-per-sec": 1719.1,
-      "go-over-rust-p50-ms": 1.867,
-      "go-p50-ms": 0.56,
-      "go-p90-ms": 0.67,
-      "go-p99-ms": 0.87,
+      "go-conn-per-sec": 1497.6,
+      "go-over-rust-p50-ms": 2.129,
+      "go-p50-ms": 0.66,
+      "go-p90-ms": 0.73,
+      "go-p99-ms": 0.85,
       "runs": 3,
-      "rust-conn-per-sec": 3113.5,
-      "rust-over-go-conn-per-sec": 1.811,
-      "rust-p50-ms": 0.3,
-      "rust-p90-ms": 0.37,
-      "rust-p99-ms": 0.44
+      "rust-conn-per-sec": 3180.1,
+      "rust-over-go-conn-per-sec": 2.123,
+      "rust-p50-ms": 0.31,
+      "rust-p90-ms": 0.36,
+      "rust-p99-ms": 0.42
     },
     "vmess-tls": {
       "go-conn-per-sec": 521.5,
@@ -559,6 +559,28 @@
     "runs-rerun-anytls-vlessgrpc-vmesstls": 5,
     "soak-seconds": 45
   },
+  "grpc-diagnosis": {
+    "before_after_rust_mbps": {
+      "trojan-grpc": {
+        "after": 2624.512,
+        "before": 1432.9
+      },
+      "vless-grpc": {
+        "after": 1442.938,
+        "before": 1370.5
+      },
+      "vmess-grpc": {
+        "after": 2118.683,
+        "before": 1171.4
+      }
+    },
+    "changes": [
+      "h2 client/server Builder: stream/conn windows and max_frame ~1\u20134 MiB",
+      "Gun frames sent as owned Bytes slices (no second copy_from_slice)",
+      "Gun read pull 32KiB; drain by available WINDOW_UPDATE (not wait-for-full-frame)"
+    ],
+    "verdict": "Not an h2-library weakness; Rust used bare handshake defaults (64KiB window / 16KiB frames) while Go metacubex/http pipelines at ~1MiB. Raising Builder SETTINGS + fixing Gun frame drain recovered trojan-grpc to 1.15x Go and nearly doubled vmess-grpc absolute Mbps. vless-grpc remains ~0.65x \u2014 residual looks VLESS-path specific, not generic Gun/h2."
+  },
   "notes": [
     "anytls / vless-grpc / vmess-tls medians from isolated 5-run rerun (long matrix had host contention)",
     "Go VMess Mbps anomalously low / CPU sampler often 0 in this harness; use Rust absolute Mbps for VMess",
@@ -566,7 +588,8 @@
     "Rust VMess soak hits ~65535 ok then failures (uint16 ceiling); bulk path unaffected",
     "ss-2022 bulk at 256KiB; ss-aead/ss-chacha bulk reported at 4KiB because Rust pre-2022 AEAD product path fails exchanges at >=32KiB",
     "SSR inbound does not exist on Go or Rust (outbound-only)",
-    "ss-aead Rust 4KiB bulk still highly variable (CPU sampler often 0); latency/soak remain strong"
+    "ss-aead Rust 4KiB bulk still highly variable (CPU sampler often 0); latency/soak remain strong",
+    "gRPC: root cause was untuned h2 SETTINGS (not slow h2 crate); after MiB windows + Gun drain fix, trojan-grpc 1.15x Go, vmess-grpc ~2.1Gbps; vless-grpc still ~0.65x"
   ],
   "profile": {
     "go": "go build -trimpath (+ strip for size compare)",
@@ -642,15 +665,15 @@
     },
     {
       "bulk_payload_bytes": 262144,
-      "go_mbps": 2260.513,
-      "go_p50_ms": 0.43,
-      "go_server_rss_kib": 45892.0,
+      "go_mbps": 2283.308,
+      "go_p50_ms": 0.5,
+      "go_server_rss_kib": 45896.0,
       "protocol": "trojan-grpc",
-      "rust_mbps": 1432.905,
-      "rust_over_go_conn_per_sec": 1.571,
-      "rust_over_go_mbps": 0.634,
-      "rust_p50_ms": 0.25,
-      "rust_server_rss_kib": 27652.0
+      "rust_mbps": 2624.512,
+      "rust_over_go_conn_per_sec": 1.922,
+      "rust_over_go_mbps": 1.149,
+      "rust_p50_ms": 0.26,
+      "rust_server_rss_kib": 26436.0
     },
     {
       "bulk_payload_bytes": 262144,
@@ -690,15 +713,15 @@
     },
     {
       "bulk_payload_bytes": 262144,
-      "go_mbps": 2238.38,
-      "go_p50_ms": 0.45,
-      "go_server_rss_kib": 46440.0,
+      "go_mbps": 2216.812,
+      "go_p50_ms": 0.5,
+      "go_server_rss_kib": 46572.0,
       "protocol": "vless-grpc",
-      "rust_mbps": 1370.493,
-      "rust_over_go_conn_per_sec": 1.784,
-      "rust_over_go_mbps": 0.612,
+      "rust_mbps": 1442.938,
+      "rust_over_go_conn_per_sec": 2.024,
+      "rust_over_go_mbps": 0.651,
       "rust_p50_ms": 0.25,
-      "rust_server_rss_kib": 27296.0
+      "rust_server_rss_kib": 25500.0
     },
     {
       "bulk_payload_bytes": 262144,
@@ -726,15 +749,15 @@
     },
     {
       "bulk_payload_bytes": 262144,
-      "go_mbps": 0.07,
-      "go_p50_ms": 0.56,
-      "go_server_rss_kib": 35844.0,
+      "go_mbps": 0.557,
+      "go_p50_ms": 0.66,
+      "go_server_rss_kib": 37380.0,
       "protocol": "vmess-grpc",
-      "rust_mbps": 1171.426,
-      "rust_over_go_conn_per_sec": 1.811,
-      "rust_over_go_mbps": 16734.657,
-      "rust_p50_ms": 0.3,
-      "rust_server_rss_kib": 27216.0
+      "rust_mbps": 2118.683,
+      "rust_over_go_conn_per_sec": 2.123,
+      "rust_over_go_mbps": 3803.74,
+      "rust_p50_ms": 0.31,
+      "rust_server_rss_kib": 28672.0
     },
     {
       "bulk_payload_bytes": 262144,
