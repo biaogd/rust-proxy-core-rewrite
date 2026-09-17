@@ -71,7 +71,7 @@ enum HandshakeState {
 
 /// VLESS TCP stream with lazy request/response handling.
 pub struct VlessTcpStream {
-    inner: BoxedStream,
+    inner: Option<BoxedStream>,
     handshake: HandshakeState,
 }
 
@@ -82,7 +82,7 @@ impl VlessTcpStream {
         options: VlessClientOptions,
     ) -> Result<Self, VlessProtocolError> {
         Ok(Self {
-            inner,
+            inner: Some(inner),
             handshake: HandshakeState::Active {
                 request: request_header(destination, options)?,
                 request_offset: 0,
@@ -92,6 +92,30 @@ impl VlessTcpStream {
                 response_addons_remaining: 0,
                 response_header_validated: false,
             },
+        })
+    }
+
+    /// Go `ReaderReplaceable && WriterReplaceable`: both handshake directions done.
+    #[must_use]
+    pub fn is_replaceable(&self) -> bool {
+        matches!(self.handshake, HandshakeState::Done)
+    }
+
+    /// Peel the bare carrier once the handshake is finished (Go unwrap).
+    pub fn take_inner_if_done(&mut self) -> Option<BoxedStream> {
+        if self.is_replaceable() {
+            self.inner.take()
+        } else {
+            None
+        }
+    }
+
+    fn inner_mut(&mut self) -> std::io::Result<&mut BoxedStream> {
+        self.inner.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "VLESS stream already peeled to upstream",
+            )
         })
     }
 
@@ -125,8 +149,12 @@ impl VlessTcpStream {
         mut offset: usize,
         header_len: usize,
     ) -> Poll<Result<usize, std::io::Error>> {
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
         while offset < combined.len() {
-            match Pin::new(&mut self.inner).poll_write(cx, &combined[offset..]) {
+            match Pin::new(&mut *inner).poll_write(cx, &combined[offset..]) {
                 Poll::Pending => {
                     if let HandshakeState::Active {
                         pending_first_write,
@@ -168,7 +196,11 @@ impl AsyncRead for VlessTcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         if matches!(self.handshake, HandshakeState::Done) {
-            return Pin::new(&mut self.inner).poll_read(cx, buf);
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            return Pin::new(inner).poll_read(cx, buf);
         }
         loop {
             let HandshakeState::Active {
@@ -179,14 +211,22 @@ impl AsyncRead for VlessTcpStream {
                 ..
             } = &mut self.handshake
             else {
-                return Pin::new(&mut self.inner).poll_read(cx, buf);
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                return Pin::new(inner).poll_read(cx, buf);
             };
 
             if *response_header_offset < response_header.len() {
                 let mut response = *response_header;
                 let offset = *response_header_offset;
                 let mut read_buf = ReadBuf::new(&mut response[offset..]);
-                match Pin::new(&mut self.inner).poll_read(cx, &mut read_buf) {
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match Pin::new(inner).poll_read(cx, &mut read_buf) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                     Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
@@ -229,7 +269,11 @@ impl AsyncRead for VlessTcpStream {
                 let mut addons = [0_u8; 256];
                 let length = (*response_addons_remaining).min(addons.len());
                 let mut addon_buf = ReadBuf::new(&mut addons[..length]);
-                match Pin::new(&mut self.inner).poll_read(cx, &mut addon_buf) {
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match Pin::new(inner).poll_read(cx, &mut addon_buf) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                     Poll::Ready(Ok(())) if addon_buf.filled().is_empty() => {
@@ -252,7 +296,11 @@ impl AsyncRead for VlessTcpStream {
             }
 
             self.maybe_finish_handshake();
-            return Pin::new(&mut self.inner).poll_read(cx, buf);
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            return Pin::new(inner).poll_read(cx, buf);
         }
     }
 }
@@ -264,7 +312,11 @@ impl AsyncWrite for VlessTcpStream {
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
         if matches!(self.handshake, HandshakeState::Done) {
-            return Pin::new(&mut self.inner).poll_write(cx, buf);
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            return Pin::new(inner).poll_write(cx, buf);
         }
 
         // Resume a stashed header||payload coalesce before accepting new buf.
@@ -312,23 +364,26 @@ impl AsyncWrite for VlessTcpStream {
         } = &self.handshake
             && *request_offset < request.len()
         {
-            let this = &mut *self;
-            let HandshakeState::Active {
-                request,
-                request_offset,
-                ..
-            } = &mut this.handshake
-            else {
-                break;
-            };
             let offset = *request_offset;
-            match Pin::new(&mut this.inner).poll_write(cx, &request[offset..]) {
+            let to_write = request[offset..].to_vec();
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            match Pin::new(inner).poll_write(cx, &to_write) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
-                Poll::Ready(Ok(written)) => *request_offset += written,
+                Poll::Ready(Ok(written)) => {
+                    if let HandshakeState::Active {
+                        request_offset, ..
+                    } = &mut self.handshake
+                    {
+                        *request_offset += written;
+                    }
+                }
             }
         }
 
@@ -343,21 +398,33 @@ impl AsyncWrite for VlessTcpStream {
             request.clear();
         }
         self.maybe_finish_handshake();
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_write(cx, buf)
     }
 
     fn poll_flush(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_shutdown(cx)
     }
 }
 

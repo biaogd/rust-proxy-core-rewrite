@@ -19,11 +19,26 @@ pub use packet::{
     VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream, read_xudp_client_packet,
     write_xudp_server_packet,
 };
+pub use stream::VlessTcpStream;
 pub use server::{
     VlessCommand, VlessServerRequest, VlessServerStream, VlessUserEntry, accept_vless_request,
     map_uuid, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
 pub use vision::VisionStream;
+
+/// Go-style replaceable unwrap: if `stream` is a finished [`VlessTcpStream`],
+/// replace it with the bare upstream carrier so bulk relay sees one dyn layer
+/// (matching Trojan outbound after `WriteHeader`).
+pub fn peel_replaceable_vless(stream: &mut BoxedStream) -> bool {
+    let Some(vless) = stream.as_any_mut().downcast_mut::<VlessTcpStream>() else {
+        return false;
+    };
+    let Some(inner) = vless.take_inner_if_done() else {
+        return false;
+    };
+    *stream = inner;
+    true
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VlessFlow {

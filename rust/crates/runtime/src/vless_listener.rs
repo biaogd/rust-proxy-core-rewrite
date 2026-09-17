@@ -320,15 +320,47 @@ impl VlessListener {
     }
 }
 
+enum VlessInboundBody<S> {
+    /// Response header not yet written (Go `serverConn` before first Write).
+    Pending(VlessServerStream<S>),
+    /// Response written — bare carrier (Go `WriterReplaceable` unwrap).
+    Ready(S),
+}
+
 struct VlessInboundStream<S> {
-    inner: S,
+    body: Option<VlessInboundBody<S>>,
     local: SocketAddr,
     peer: SocketAddr,
 }
 
 impl<S> VlessInboundStream<S> {
-    fn new(inner: S, local: SocketAddr, peer: SocketAddr) -> Self {
-        Self { inner, local, peer }
+    fn from_server(inner: VlessServerStream<S>, local: SocketAddr, peer: SocketAddr) -> Self {
+        Self {
+            body: Some(VlessInboundBody::Pending(inner)),
+            local,
+            peer,
+        }
+    }
+
+    fn from_ready(inner: S, local: SocketAddr, peer: SocketAddr) -> Self {
+        Self {
+            body: Some(VlessInboundBody::Ready(inner)),
+            local,
+            peer,
+        }
+    }
+
+    fn try_peel_response(&mut self) {
+        let should_peel = matches!(
+            self.body.as_ref(),
+            Some(VlessInboundBody::Pending(server)) if server.response_written()
+        );
+        if !should_peel {
+            return;
+        }
+        if let Some(VlessInboundBody::Pending(server)) = self.body.take() {
+            self.body = Some(VlessInboundBody::Ready(server.into_inner()));
+        }
     }
 }
 
@@ -341,7 +373,14 @@ where
         cx: &mut TaskContext<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        match self.body.as_mut() {
+            Some(VlessInboundBody::Pending(server)) => Pin::new(server).poll_read(cx, buf),
+            Some(VlessInboundBody::Ready(inner)) => Pin::new(inner).poll_read(cx, buf),
+            None => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "vless inbound stream peeled",
+            ))),
+        }
     }
 }
 
@@ -354,18 +393,39 @@ where
         cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let result = match self.body.as_mut() {
+            Some(VlessInboundBody::Pending(server)) => Pin::new(server).poll_write(cx, buf),
+            Some(VlessInboundBody::Ready(inner)) => Pin::new(inner).poll_write(cx, buf),
+            None => {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "vless inbound stream peeled",
+                )));
+            }
+        };
+        if matches!(result, Poll::Ready(Ok(_))) {
+            self.try_peel_response();
+        }
+        result
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        match self.body.as_mut() {
+            Some(VlessInboundBody::Pending(server)) => Pin::new(server).poll_flush(cx),
+            Some(VlessInboundBody::Ready(inner)) => Pin::new(inner).poll_flush(cx),
+            None => Poll::Ready(Ok(())),
+        }
     }
 
     fn poll_shutdown(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        match self.body.as_mut() {
+            Some(VlessInboundBody::Pending(server)) => Pin::new(server).poll_shutdown(cx),
+            Some(VlessInboundBody::Ready(inner)) => Pin::new(inner).poll_shutdown(cx),
+            None => Poll::Ready(Ok(())),
+        }
     }
 }
 
@@ -741,9 +801,7 @@ async fn dispatch_vless_session<S>(
             if request.flow == Some(VlessFlow::XtlsRprxVision) {
                 let vision = VisionStream::new(Box::new(stream), request.uuid, vision_control);
                 serve_vless_tcp(
-                    vision,
-                    peer,
-                    local,
+                    VlessInboundStream::from_ready(vision, local, peer),
                     request.destination,
                     request.username,
                     inbound_name,
@@ -755,9 +813,7 @@ async fn dispatch_vless_session<S>(
                 .await;
             } else {
                 serve_vless_tcp(
-                    stream,
-                    peer,
-                    local,
+                    VlessInboundStream::from_server(stream, local, peer),
                     request.destination,
                     request.username,
                     inbound_name,
@@ -801,9 +857,7 @@ async fn dispatch_vless_session<S>(
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_vless_tcp<S>(
-    stream: S,
-    peer: SocketAddr,
-    local: SocketAddr,
+    client: VlessInboundStream<S>,
     destination: Destination,
     username: String,
     inbound_name: String,
@@ -814,6 +868,8 @@ async fn serve_vless_tcp<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let peer = client.peer;
+    let local = client.local;
     let mut metadata = Metadata::new(destination, InboundProtocol::Vless);
     metadata.network = Network::Tcp;
     metadata.source_ip = Some(unmap_ip(peer.ip()));
@@ -821,7 +877,7 @@ async fn serve_vless_tcp<S>(
     metadata.inbound_port = local.port();
     inbound_name.clone_into(&mut metadata.inbound_name);
     metadata.inbound_user = username;
-    let client: BoxedInboundStream = Box::new(VlessInboundStream::new(stream, local, peer));
+    let client: BoxedInboundStream = Box::new(client);
     serve_shadowsocks_connection(client, metadata, config, state, dns_service, shutdown).await;
 }
 

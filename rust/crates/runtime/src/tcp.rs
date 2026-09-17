@@ -2453,10 +2453,25 @@ pub(super) async fn relay_tracked_tcp(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) {
+    // Go bufio.Copy peels VLESS once Writer/ReaderReplaceable; keep the fast
+    // tokio copy path for bare carriers (Trojan, etc.).
+    let peel_vless = remote
+        .as_any_mut()
+        .downcast_mut::<rewrite_protocol_vless::VlessTcpStream>()
+        .is_some();
     tokio::select! {
         () = shutdown.cancelled() => {}
         () = tracker.cancelled() => {}
-        result = rewrite_net::relay(&mut client, &mut remote) => match result {
+        result = async {
+            if peel_vless {
+                rewrite_net::relay_with_right_peel(&mut client, &mut remote, |remote| {
+                    let _ = rewrite_outbound::peel_replaceable_vless(remote);
+                })
+                .await
+            } else {
+                rewrite_net::relay(&mut client, &mut remote).await
+            }
+        } => match result {
             Ok((uploaded, downloaded)) => tracker.finish(uploaded, downloaded),
             Err(error) => state.log("error", format!("TCP relay failed: {error}")),
         }

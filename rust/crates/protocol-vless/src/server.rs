@@ -253,6 +253,12 @@ impl<S> VlessServerStream<S> {
         }
     }
 
+    /// Returns true once the VLESS response header has been fully written.
+    #[must_use]
+    pub fn response_written(&self) -> bool {
+        self.pending.is_none()
+    }
+
     #[must_use]
     pub fn into_inner(self) -> S {
         self.inner

@@ -82,7 +82,7 @@ pub use tuic::{TuicClient, TuicProxyError, TuicUdpAssociation, associate_tuic_ud
 pub use vless::{
     VlessFlow, VlessPacketMode, VlessProxyError, VlessTcpOptions, VlessUdpAssociation,
     associate_vless_udp_on_stream, associate_vless_udp_with_options, connect_vless_on_stream,
-    connect_vless_on_stream_with_vision_control, connect_vless_with_options,
+    connect_vless_on_stream_with_vision_control, connect_vless_with_options, peel_replaceable_vless,
 };
 pub use vmess::{
     VmessPacketMode, VmessProxyError, VmessSecurity, VmessTcpOptions, VmessUdpAssociation,
