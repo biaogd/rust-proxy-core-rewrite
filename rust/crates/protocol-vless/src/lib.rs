@@ -19,25 +19,45 @@ pub use packet::{
     VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream, read_xudp_client_packet,
     write_xudp_server_packet,
 };
-pub use stream::VlessTcpStream;
+pub use stream::{VlessResponsePendingStream, VlessTcpStream};
 pub use server::{
     VlessCommand, VlessServerRequest, VlessServerStream, VlessUserEntry, accept_vless_request,
     map_uuid, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
 pub use vision::VisionStream;
 
-/// Go-style replaceable unwrap: if `stream` is a finished [`VlessTcpStream`],
-/// replace it with the bare upstream carrier so bulk relay sees one dyn layer
-/// (matching Trojan outbound after `WriteHeader`).
+/// Go-style replaceable unwrap for VLESS outbound.
+///
+/// Matches Go `WriterReplaceable` / `ReaderReplaceable` separately:
+/// - after the request is sent, peel writes onto a thin
+///   [`VlessResponsePendingStream`] (bare carrier for writes);
+/// - after the response is consumed, peel to the bare upstream carrier.
+///
+/// Returns `true` only when the stream is fully bare (both directions done),
+/// so relays can switch to sized `copy_bidirectional`.
 pub fn peel_replaceable_vless(stream: &mut BoxedStream) -> bool {
+    if let Some(pending) = stream
+        .as_any_mut()
+        .downcast_mut::<VlessResponsePendingStream>()
+    {
+        if let Some(inner) = pending.take_inner_if_done() {
+            *stream = inner;
+            return true;
+        }
+        return false;
+    }
+
     let Some(vless) = stream.as_any_mut().downcast_mut::<VlessTcpStream>() else {
         return false;
     };
-    let Some(inner) = vless.take_inner_if_done() else {
-        return false;
-    };
-    *stream = inner;
-    true
+    if let Some(inner) = vless.take_inner_if_done() {
+        *stream = inner;
+        return true;
+    }
+    if let Some(pending) = vless.take_for_writer_peel() {
+        *stream = Box::new(pending);
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

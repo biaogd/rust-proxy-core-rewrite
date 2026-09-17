@@ -69,10 +69,35 @@ enum HandshakeState {
     Done,
 }
 
+/// Remaining server-response drain after the client request has been sent
+/// (Go `WriterReplaceable` while `!ReaderReplaceable`).
+struct ResponseDrain {
+    response_header: [u8; 2],
+    response_header_offset: usize,
+    response_addons_remaining: usize,
+    response_header_validated: bool,
+}
+
+impl ResponseDrain {
+    fn is_done(&self) -> bool {
+        self.response_header_validated
+            && self.response_header_offset >= 2
+            && self.response_addons_remaining == 0
+    }
+}
+
 /// VLESS TCP stream with lazy request/response handling.
 pub struct VlessTcpStream {
     inner: Option<BoxedStream>,
     handshake: HandshakeState,
+}
+
+/// Read-side-only wrapper after Go `WriterReplaceable`: writes hit the bare
+/// carrier; reads still strip the VLESS response header.
+pub struct VlessResponsePendingStream {
+    inner: Option<BoxedStream>,
+    drain: ResponseDrain,
+    done: bool,
 }
 
 impl VlessTcpStream {
@@ -101,6 +126,20 @@ impl VlessTcpStream {
         matches!(self.handshake, HandshakeState::Done)
     }
 
+    /// Go `WriterReplaceable` (`sent`): request fully written.
+    #[must_use]
+    pub fn writer_replaceable(&self) -> bool {
+        match &self.handshake {
+            HandshakeState::Done => true,
+            HandshakeState::Active {
+                request,
+                request_offset,
+                pending_first_write,
+                ..
+            } => pending_first_write.is_none() && *request_offset > 0 && request.is_empty(),
+        }
+    }
+
     /// Peel the bare carrier once the handshake is finished (Go unwrap).
     pub fn take_inner_if_done(&mut self) -> Option<BoxedStream> {
         if self.is_replaceable() {
@@ -108,6 +147,33 @@ impl VlessTcpStream {
         } else {
             None
         }
+    }
+
+    /// After the request is sent, peel writes to the bare carrier while keeping
+    /// a thin read wrapper for the pending VLESS response (Go writer unwrap).
+    pub fn take_for_writer_peel(&mut self) -> Option<VlessResponsePendingStream> {
+        if self.is_replaceable() || !self.writer_replaceable() {
+            return None;
+        }
+        let HandshakeState::Active {
+            response_header,
+            response_header_offset,
+            response_addons_remaining,
+            response_header_validated,
+            ..
+        } = &self.handshake
+        else {
+            return None;
+        };
+        let drain = ResponseDrain {
+            response_header: *response_header,
+            response_header_offset: *response_header_offset,
+            response_addons_remaining: *response_addons_remaining,
+            response_header_validated: *response_header_validated,
+        };
+        let inner = self.inner.take()?;
+        self.handshake = HandshakeState::Done;
+        Some(VlessResponsePendingStream::new(inner, drain))
     }
 
     fn inner_mut(&mut self) -> std::io::Result<&mut BoxedStream> {
@@ -428,6 +494,163 @@ impl AsyncWrite for VlessTcpStream {
     }
 }
 
+impl VlessResponsePendingStream {
+    fn new(inner: BoxedStream, drain: ResponseDrain) -> Self {
+        let done = drain.is_done();
+        Self {
+            inner: Some(inner),
+            drain,
+            done,
+        }
+    }
+
+    #[must_use]
+    pub fn is_replaceable(&self) -> bool {
+        self.done
+    }
+
+    pub fn take_inner_if_done(&mut self) -> Option<BoxedStream> {
+        if self.done {
+            self.inner.take()
+        } else {
+            None
+        }
+    }
+
+    fn inner_mut(&mut self) -> std::io::Result<&mut BoxedStream> {
+        self.inner.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "VLESS response stream already peeled",
+            )
+        })
+    }
+}
+
+impl AsyncRead for VlessResponsePendingStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.done {
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            return Pin::new(inner).poll_read(cx, buf);
+        }
+        loop {
+            if self.drain.response_header_offset < self.drain.response_header.len() {
+                let mut response = self.drain.response_header;
+                let offset = self.drain.response_header_offset;
+                let mut read_buf = ReadBuf::new(&mut response[offset..]);
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match Pin::new(inner).poll_read(cx, &mut read_buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "short VLESS response header",
+                        )));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        let read = read_buf.filled().len();
+                        self.drain.response_header = response;
+                        self.drain.response_header_offset += read;
+                        continue;
+                    }
+                }
+            }
+
+            if !self.drain.response_header_validated {
+                if self.drain.response_header[0] != VERSION {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "unexpected VLESS response version {}",
+                            self.drain.response_header[0]
+                        ),
+                    )));
+                }
+                self.drain.response_addons_remaining = usize::from(self.drain.response_header[1]);
+                self.drain.response_header_validated = true;
+            }
+
+            if self.drain.response_addons_remaining > 0 {
+                let mut addons = [0_u8; 256];
+                let length = self.drain.response_addons_remaining.min(addons.len());
+                let mut addon_buf = ReadBuf::new(&mut addons[..length]);
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match Pin::new(inner).poll_read(cx, &mut addon_buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(())) if addon_buf.filled().is_empty() => {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "short VLESS response addons",
+                        )));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        self.drain.response_addons_remaining -= addon_buf.filled().len();
+                        continue;
+                    }
+                }
+            }
+
+            self.done = true;
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            return Pin::new(inner).poll_read(cx, buf);
+        }
+    }
+}
+
+impl AsyncWrite for VlessResponsePendingStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        let inner = match self.inner_mut() {
+            Ok(inner) => inner,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        Pin::new(inner).poll_shutdown(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rewrite_model::Host;
@@ -470,9 +693,12 @@ mod tests {
         let mut stream =
             VlessTcpStream::new(Box::new(client), &destination, options).expect("stream");
         stream.write_all(b"request").await.expect("request");
+        assert!(stream.writer_replaceable());
+        assert!(!stream.is_replaceable());
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("response");
         assert_eq!(response, b"response");
+        assert!(stream.is_replaceable());
         authority_task.await.expect("authority");
     }
 }
