@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use rewrite_io::BoxedStream;
+use rewrite_io::{BoxedStream, DuplexStream};
 use rewrite_model::{Destination, Host};
 use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
