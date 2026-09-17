@@ -3970,8 +3970,9 @@ rules: ['MATCH,DIRECT']
     assert_eq!(inbound.users.len(), 1);
     assert_eq!(inbound.users[0].username, "alice");
     assert_eq!(inbound.users[0].password, "phase-inc-password");
-    assert_eq!(inbound.certificate, "./server.crt");
-    assert_eq!(inbound.private_key, "./server.key");
+    assert_eq!(inbound.certificate.as_deref(), Some("./server.crt"));
+    assert_eq!(inbound.private_key.as_deref(), Some("./server.key"));
+    assert!(inbound.reality.is_none());
     assert!(inbound.ws_path.is_none());
     assert!(inbound.grpc_service_name.is_none());
     let listeners = config.listener_ports().expect("listener ports");
@@ -4019,12 +4020,45 @@ rules: ['MATCH,DIRECT']
         Some("trojan")
     );
 
+    let with_reality = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: trojan-reality
+    type: trojan
+    listen: 127.0.0.1
+    port: 18424
+    reality-config:
+      dest: itunes.apple.com:443
+      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw
+      short-id:
+        - 10f897e26c4b9478
+      server-names:
+        - itunes.apple.com
+    users:
+      - password: secret
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named trojan reality listener");
+    let reality = with_reality.trojan_listeners[0]
+        .reality
+        .as_ref()
+        .expect("reality-config");
+    assert_eq!(reality.dest, "itunes.apple.com:443");
+    assert_eq!(reality.server_names, vec!["itunes.apple.com".to_owned()]);
+    let mut short_id = [0_u8; 8];
+    short_id.copy_from_slice(&hex::decode("10f897e26c4b9478").expect("short-id"));
+    assert_eq!(reality.short_ids, vec![short_id]);
+    assert!(with_reality.trojan_listeners[0].certificate.is_none());
+    assert!(with_reality.trojan_listeners[0].private_key.is_none());
+
     for unsupported in [
         "ws-path: /trojan\n    grpc-service-name: GunService",
         "ss-option:\n      enabled: true\n      method: aes-128-gcm\n      password: nested",
+        "certificate: ./server.crt\n    private-key: ./server.key\n    reality-config:\n      dest: itunes.apple.com:443\n      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw\n      short-id: [10f897e26c4b9478]\n      server-names: [itunes.apple.com]",
     ] {
         let source = format!(
-            "mode: rule\nlisteners:\n  - name: trojan-bad\n    type: trojan\n    listen: 127.0.0.1\n    port: 18421\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - password: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+            "mode: rule\nlisteners:\n  - name: trojan-bad\n    type: trojan\n    listen: 127.0.0.1\n    port: 18421\n    users:\n      - password: secret\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
         );
         assert!(
             Config::from_yaml(&source).is_err(),

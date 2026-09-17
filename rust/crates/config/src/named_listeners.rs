@@ -242,6 +242,7 @@ fn parse_trojan_listener(
             "users",
             "certificate",
             "private-key",
+            "reality-config",
             "ws-path",
             "grpc-service-name",
         ],
@@ -267,15 +268,34 @@ fn parse_trojan_listener(
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
     let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
-    let certificate = mapping_string(mapping, "certificate").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {name} is missing certificate"))
-    })?;
-    let private_key = mapping_string(mapping, "private-key").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("listener {name} is missing private-key"))
-    })?;
-    if certificate.trim().is_empty() || private_key.trim().is_empty() {
+    let certificate = mapping_string(mapping, "certificate").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let private_key = mapping_string(mapping, "private-key").and_then(|value| {
+        let trimmed = value.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let reality = parse_reality_config(mapping, &name)?;
+    match (
+        certificate.is_some() && private_key.is_some(),
+        reality.is_some(),
+    ) {
+        (true, true) => {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} cannot combine certificate/private-key with reality-config"
+            )));
+        }
+        (false, false) => {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} requires certificate and private-key, or reality-config"
+            )));
+        }
+        _ => {}
+    }
+    if certificate.is_some() ^ private_key.is_some() {
         return Err(ConfigError::InvalidInbound(format!(
-            "listener {name} requires non-empty certificate and private-key"
+            "listener {name} requires both certificate and private-key together"
         )));
     }
     let ws_path = mapping_string(mapping, "ws-path").and_then(|path| {
@@ -303,6 +323,7 @@ fn parse_trojan_listener(
         users,
         certificate,
         private_key,
+        reality,
         ws_path,
         grpc_service_name,
     })

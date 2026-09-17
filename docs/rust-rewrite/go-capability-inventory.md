@@ -101,7 +101,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
 | IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice plus **IN-B** standard SS2022 UDP inbound with product-path replay; Darwin arm64 6C-N differential Parity in declared scope; Linux pending | Remaining SS cipher matrix; Snell server deferred |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | **IN-D** VLESS, **IN-E** VMess |
-| IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Partial: named TLS + WSS + gRPC TCP/UDP UoT (**IN-C**); Reality/`ss-option`/combined ws+grpc rejected until later | **IN-C** |
+| IN-09 | Trojan server, TLS/auth/fallback/TCP/UDP | Partial: named TLS + WSS + gRPC TCP/UDP UoT + REALITY auth (**IN-C** / W3.1); `ss-option`/combined ws+grpc / dest fallback rejected until later | **IN-C** |
 | IN-10 | Hysteria2 and Hysteria2-realm server | Not started | **IN-F** (Hy2); realm later |
 | IN-11 | TUIC v4/v5 and ShadowQUIC server | Not started | **IN-F** (TUIC v5); v4/ShadowQUIC later |
 | IN-12 | AnyTLS, Mieru, Sudoku and TrustTunnel server | Not started | **IN-G** (AnyTLS); others deferred |

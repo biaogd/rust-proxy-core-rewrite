@@ -166,14 +166,24 @@ outbound default). Evidence: `phase_ind_vless_tls.py`,
 `phase_ind_vless_xudp.py`. Combined ws+grpc stays rejected; REALITY is covered by `phase_ind_vless_reality.py`.
 
 
+### IN-C Trojan REALITY inbound — 2026-09-17
+
+Named `type: trojan` with `reality-config` accepts REALITY auth via
+shadow-rustls `RealityServerConfig` / `RealityServerCertResolver` (dest
+camouflage fallback deferred), XOR with PEM `certificate` / `private-key`.
+Evidence: `phase_inc_trojan_reality.py` (product Trojan REALITY outbound vs
+Go/Rust named inbound: TCP small/large/half-close). Combined ws+grpc /
+`ss-option` stay rejected.
+
 ### IN-C Trojan gRPC inbound — 2026-09-14
 
 Named `type: trojan` with `grpc-service-name` accepts TLS then HTTP/2 Gun
 (`V2rayGrpcServerConnection`) before Trojan auth/relay. Evidence:
 `compat/scripts/phase_inc_trojan_grpc.py` (product gRPC outbound vs Go/Rust
 inbounds: TCP small/large, UDP multi-dest, wrong-password; Rust-only reject of
-combined `ws-path` + `grpc-service-name`). Reality/`ss-option` stay rejected.
-Shared HTTP mux for WS+gRPC together remains open. Shared HTTP mux for WS+gRPC together remains open.
+combined `ws-path` + `grpc-service-name`). `ss-option` stays rejected; REALITY
+is covered by `phase_inc_trojan_reality.py`. Shared HTTP mux for WS+gRPC
+together remains open.
 
 ### IN-C Trojan WebSocket inbound — 2026-09-14
 
@@ -189,7 +199,8 @@ combined ws+grpc). WSS half-close remains go↔go-only (same omission as Phase
 Named `type: trojan` TLS inbound owns password (SHA-224 hex) auth, TCP relay
 through `serve_stream_session`, and UDP-over-TLS (command 3) on the Direct path.
 `ws-path` / `grpc-service-name` are owned by the carrier slices above;
-Reality/`ss-option` stay rejected at named-listener parse. Evidence:
+`ss-option` stays rejected at named-listener parse; REALITY is covered by
+`phase_inc_trojan_reality.py`. Evidence:
 `compat/scripts/phase_inc_trojan_tls.py` (Go/Rust TCP small/large, product-client
 half-close, wrong-password fail-closed, UDP multi-dest; Rust-only `ss-option`
 reject).
@@ -202,7 +213,7 @@ named listeners. Product UDP uses `recv_from_with_ctrl` /
 checks. ChaCha8 UDP stays rejected. Evidence:
 `compat/scripts/phase_inb_shadowsocks_2022_udp.py` plus
 `protocol-shadowsocks` `udp_session` tests. Three-platform Parity not claimed.
-**IN-C** Trojan TLS/WSS/gRPC inbound is implemented in this checkout (see above).
+**IN-C** Trojan TLS/WSS/gRPC/REALITY inbound is implemented in this checkout (see above).
 
 ### IN-A inbound census — 2026-09-14
 
@@ -214,7 +225,7 @@ Shadowsocks + partial TUN, SS in-scope vs deferred vs Rust-extension rows, and
 the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP,
-**IN-C** Trojan TLS/WSS/gRPC, **IN-E** VMess TLS/WSS/gRPC/XUDP, and **IN-F**
+**IN-C** Trojan TLS/WSS/gRPC/REALITY, **IN-E** VMess TLS/WSS/gRPC/XUDP, and **IN-F**
 Hysteria2 + TUIC v5 named inbounds (TCP + Direct UDP) are implemented in this
 checkout. Hy2 realm/gecko/ECH/masquerade/Brutal and TUIC v4/ECH/ShadowQUIC
 remain deferred. Explicit non-goals: SSR/Snell/SSH/WG servers, early
@@ -774,6 +785,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan TLS inbound | Complete (declared TLS scope) | Named TLS TCP+UDP UoT; `phase_inc_trojan_tls.py` |
 | IN-C Trojan WSS inbound | Complete (declared WS scope) | Named `ws-path` WSS TCP+UDP UoT; `phase_inc_trojan_websocket.py` |
 | IN-C Trojan gRPC inbound | Complete (declared gRPC scope) | Named `grpc-service-name` TLS+Gun TCP+UDP UoT; combined ws+grpc rejected; `phase_inc_trojan_grpc.py` |
+| IN-C Trojan REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls; dest fallback deferred; `phase_inc_trojan_reality.py` |
 | IN-D VLESS Vision inbound | Complete (declared native TLS scope) | Per-user `flow: xtls-rprx-vision`; `phase_ind_vless_vision.py` |
 | IN-D VLESS REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls `.5`; dest fallback deferred; `phase_ind_vless_reality.py` |
 | IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |

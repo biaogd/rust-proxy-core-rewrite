@@ -1459,13 +1459,15 @@ Out of IN-B: Snell server, SSR inbound, full camouflage carrier zoo.
 
 ### IN-C — Trojan inbound
 
-**TLS + WebSocket + gRPC slices complete (2026-09-14):** named `type: trojan`
-with certificate / private-key, optional `ws-path` or `grpc-service-name`,
-password users, TCP via `serve_stream_session`, UDP-over-TLS command 3
-(Direct). Evidence `phase_inc_trojan_tls.py`, `phase_inc_trojan_websocket.py`,
-and `phase_inc_trojan_grpc.py`. Combined ws+grpc stays fail-closed until a
-shared HTTP mux; Reality / `ss-option` stay rejected at parse. Remaining IN-C
-work: shared mux and Reality/fallback if pulled forward.
+**TLS + WebSocket + gRPC + REALITY auth slices complete:** named `type: trojan`
+with certificate / private-key **or** `reality-config` (XOR), optional
+`ws-path` or `grpc-service-name`, password users, TCP via
+`serve_stream_session`, UDP-over-TLS command 3 (Direct). Evidence
+`phase_inc_trojan_tls.py`, `phase_inc_trojan_websocket.py`,
+`phase_inc_trojan_grpc.py`, and `phase_inc_trojan_reality.py`. Combined
+ws+grpc stays fail-closed until a shared HTTP mux; `ss-option` and REALITY
+dest camouflage fallback stay rejected / deferred. Remaining IN-C / W3.1 work:
+shared mux, `ss-option`, REALITY dest fallback.
 
 ### IN-D — VLESS inbound
 
