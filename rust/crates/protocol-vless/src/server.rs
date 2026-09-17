@@ -9,6 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use rewrite_io::DuplexStream as _;
 use rewrite_model::{Destination, Host};
 use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
@@ -291,11 +292,36 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                 }
                 Some(PendingResponseWrite::Idle) => {
                     // Prefer Gun FrontHeadroom-style single-frame write when the
-                    // carrier is GunStream (avoids an intermediate Vec copy).
-                    if let Some(gun) =
-                        (&mut self.inner as &mut dyn std::any::Any).downcast_mut::<GunStream>()
-                    {
-                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
+                    // carrier is GunStream (direct or behind BoxedStream).
+                    let gun_ptr = {
+                        let any = &mut self.inner as &mut dyn std::any::Any;
+                        if any.downcast_mut::<GunStream>().is_some() {
+                            Some(0_u8) // marker: direct
+                        } else if any.downcast_mut::<rewrite_io::BoxedStream>().is_some() {
+                            Some(1_u8) // marker: boxed
+                        } else {
+                            None
+                        }
+                    };
+                    let written = match gun_ptr {
+                        Some(0) => {
+                            let gun = (&mut self.inner as &mut dyn std::any::Any)
+                                .downcast_mut::<GunStream>()
+                                .expect("GunStream");
+                            Some(gun.poll_write_with_prefix(cx, &[VERSION, 0], buf))
+                        }
+                        Some(1) => {
+                            let boxed = (&mut self.inner as &mut dyn std::any::Any)
+                                .downcast_mut::<rewrite_io::BoxedStream>()
+                                .expect("BoxedStream");
+                            boxed.as_mut().as_any_mut().downcast_mut::<GunStream>().map(
+                                |gun| gun.poll_write_with_prefix(cx, &[VERSION, 0], buf),
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(result) = written {
+                        match result {
                             Poll::Pending => {
                                 self.pending = Some(PendingResponseWrite::GunPrefixed);
                                 return Poll::Pending;
@@ -304,9 +330,9 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                                 self.pending = None;
                                 return Poll::Ready(Err(error));
                             }
-                            Poll::Ready(Ok(written)) => {
+                            Poll::Ready(Ok(n)) => {
                                 self.pending = None;
-                                return Poll::Ready(Ok(written));
+                                return Poll::Ready(Ok(n));
                             }
                         }
                     }

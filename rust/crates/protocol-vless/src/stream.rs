@@ -389,7 +389,7 @@ impl AsyncWrite for VlessTcpStream {
                 Ok(inner) => inner,
                 Err(error) => return Poll::Ready(Err(error)),
             };
-            if let Some(gun) = inner.as_any_mut().downcast_mut::<GunStream>() {
+            if let Some(gun) = inner.as_mut().as_any_mut().downcast_mut::<GunStream>() {
                 match gun.poll_write_with_prefix(cx, &header, buf) {
                     Poll::Pending => {
                         if let HandshakeState::Active {
