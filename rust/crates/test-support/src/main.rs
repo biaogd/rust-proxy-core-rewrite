@@ -210,6 +210,7 @@ fn classify_config_error(error: &ConfigError) -> &'static str {
         | ConfigError::InvalidHosts(_)
         | ConfigError::InvalidInbound(_)
         | ConfigError::InvalidTun(_)
+        | ConfigError::InvalidFindProcessMode
         | ConfigError::UnsupportedRuntime(_) => "other",
     }
 }

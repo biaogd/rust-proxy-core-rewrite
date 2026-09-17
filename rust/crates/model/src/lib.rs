@@ -92,6 +92,10 @@ pub enum InboundProtocol {
     Inner,
     /// Linux iptables/nft `REDIRECT` / `TPROXY`-style original-destination TCP.
     Redir,
+    /// Linux TProxy TCP (destination from `LocalAddr` after `IP_TRANSPARENT`).
+    Tproxy,
+    /// Static tunnel TCP/UDP (destination from config `target`).
+    Tunnel,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +117,13 @@ pub struct Metadata {
     pub network: Network,
     pub host: String,
     pub sniff_host: String,
+    /// Set when host was recovered via DNS mapping (redir-host), matching Go `DNSMapping`.
+    pub dns_mapping: bool,
+    pub uid: u32,
+    pub process: String,
+    pub process_path: String,
+    /// True after a process lookup attempt (success or miss) for this session.
+    pub process_resolved: bool,
     pub source_ip: Option<IpAddr>,
     pub destination_ip: Option<IpAddr>,
     pub source_port: u16,
@@ -122,6 +133,7 @@ pub struct Metadata {
     pub dscp: u8,
     pub rematch_name: String,
     pub special_rules: String,
+    pub special_proxy: String,
 }
 
 impl Metadata {
@@ -141,6 +153,11 @@ impl Metadata {
             network: Network::Tcp,
             host,
             sniff_host: String::new(),
+            dns_mapping: false,
+            uid: 0,
+            process: String::new(),
+            process_path: String::new(),
+            process_resolved: false,
             source_ip: None,
             destination_ip,
             source_port: 0,
@@ -150,6 +167,7 @@ impl Metadata {
             dscp: 0,
             rematch_name: String::new(),
             special_rules: String::new(),
+            special_proxy: String::new(),
         }
     }
 

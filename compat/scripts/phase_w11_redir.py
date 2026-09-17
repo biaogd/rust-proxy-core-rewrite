@@ -2,7 +2,7 @@
 """W1.1 Linux redir-port config + optional native REDIRECT differential.
 
 Unprivileged (default):
-  - Rust `-t` accepts `redir-port` on Linux and rejects `tproxy-port`
+  - Rust `-t` accepts `redir-port` on Linux
   - Go oracle accepts `redir-port`
   - Both binaries bind `redir-port` and reject a plain TCP connect without
     iptables REDIRECT (SO_ORIGINAL_DST unavailable → connection closed)
@@ -10,6 +10,8 @@ Unprivileged (default):
 Native (PHASE_W11_REDIR_NATIVE=1 on privileged Linux):
   - netns + iptables REDIRECT → original destination recovered → DIRECT echo
   - Go and Rust must return the same payload
+
+Note: `tproxy-port` acceptance moved to `phase_w12_tproxy.py` (W1.2).
 """
 
 from __future__ import annotations
@@ -86,17 +88,6 @@ def redir_yaml(*, redir_port: int, mixed_port: int = 0) -> str:
     )
 
 
-def tproxy_yaml(*, tproxy_port: int) -> str:
-    return (
-        f"tproxy-port: {tproxy_port}\n"
-        "mode: rule\n"
-        "log-level: info\n"
-        "ipv6: false\n"
-        "rules:\n"
-        "  - MATCH,DIRECT\n"
-    )
-
-
 def wait_tcp(host: str, port: int, deadline: float = 15.0) -> None:
     end = time.time() + deadline
     last: Exception | None = None
@@ -144,28 +135,6 @@ def run_unprivileged(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
             }
             if validated.returncode != 0:
                 raise AssertionError(f"{name} rejected redir-port: {validated.stderr}")
-
-        tproxy_path = scratch / "tproxy.yaml"
-        write_config(tproxy_path, tproxy_yaml(tproxy_port=reserve_port()))
-        # `-t` only checks declared surface; runtime construction must still
-        # fail-close tproxy-port until W1.2.
-        rust_home = scratch / "rust-tproxy-home"
-        rust_home.mkdir()
-        rust_cfg = rust_home / "config.yaml"
-        shutil.copyfile(tproxy_path, rust_cfg)
-        process, _stdout, _stderr = launch(binaries["rust"], rust_cfg, rust_home)
-        try:
-            time.sleep(0.8)
-            still_running = process.poll() is None
-            results["cases"]["rust-reject-tproxy-runtime"] = {
-                "still_running": still_running,
-                "returncode": process.poll(),
-            }
-            if still_running:
-                stop(process)
-                raise AssertionError("Rust unexpectedly started with tproxy-port")
-        finally:
-            terminate_process(process)
 
         for name, binary in binaries.items():
             home = scratch / f"home-{name}"

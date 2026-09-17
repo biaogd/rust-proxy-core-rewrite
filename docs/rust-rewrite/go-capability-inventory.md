@@ -75,13 +75,13 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N implements legacy `ss-config` and the declared first named Shadowsocks listener slice with fail-closed unsupported fields | Remaining Shadowsocks fields and one gate per other IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
 | CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Partial: 8A Linux parse/apply + 8B Darwin utun/route/scutil DNS + 8C Windows Wintun/route/adapter DNS | 8D remaining stacks |
-| CFG-10 | Static TCP/UDP tunnels and validation | Not started | 5B6 |
+| CFG-10 | Static TCP/UDP tunnels and validation | **Partial — W1.3:** top-level `tunnels:` parse/validate + TCP/UDP listeners; named deferred | W1.3 / 5B6 |
 | CFG-11 | NTP enable/listen/server/port/interval/dialer-proxy/write-to-system | Not started | 5E1 |
 | CFG-12 | iptables inbound-interface and bypass rules | Not started | 8A |
 | CFG-13 | TLS certificate/private key, custom roots and client authentication | Not started | 5E2 and protocol gates |
 | CFG-14 | Profile selected-proxy/fake-IP persistence | Partial | 5E3 |
 | CFG-15 | Geodata mode/loader/matcher/URLs/update interval and ETag behavior | Not started | 5B4, 5E4 |
-| CFG-16 | Sniffer enablement, HTTP/TLS/QUIC sniffers, force/skip domains and addresses, port ranges and destination override | Not started | 5B7 |
+| CFG-16 | Sniffer enablement, HTTP/TLS/QUIC sniffers, force/skip domains and addresses, port ranges and destination override | **Partial — W2.2:** config surface + TCP TLS SNI / HTTP Host; QUIC/HTTP2/provider refs open | W2.2 / 5B7 |
 | CFG-17 | Experimental QUIC GSO/ECN, Android/CFA fields and feature-gated settings | Not started | 8E/build-profile gates |
 | CFG-18 | Transactional application/reload ordering for every resource above | Partial | Repeated exit gate for each family |
 
@@ -96,8 +96,8 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | IN-01 | Mixed HTTP plus SOCKS4/4a/5 TCP and SOCKS5 UDP | Complete in declared local TCP and source-keyed UDP scope | Broader HTTP edge cases and remote UDP/UoT remain protocol gates |
 | IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Complete in declared fixed-listener scope: native bind/rebind/LAN policy, TFO, Linux MPTCP fallback and current source-keyed association behavior are implemented | Linux native/slow CI results remain evidence gates; named listeners remain CFG-07 |
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | **Partial — W1.1:** Linux fixed `redir-port` TCP + `SO_ORIGINAL_DST`; non-Linux fail-closed; Darwin/FreeBSD/named deferred | W1.1 then 8A–8C |
-| IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | Not started | 8A |
-| IN-05 | Static tunnel TCP/UDP listener | Not started | 5B6 |
+| IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | **Partial — W1.2:** Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; dest from `LocalAddr`; UDP deferred | W1.2 then 8A |
+| IN-05 | Static tunnel TCP/UDP listener | **Partial — W1.3:** top-level `tunnels:` TCP/UDP + SpecialProxy bypass; named deferred | W1.3 / 5B6 |
 | IN-06 | TUN listener, system/gVisor/mixed stacks, routing and DNS hijack | Partial: Rust `smoltcp` Linux 8A + Darwin arm64 8B + Windows x86_64 8C; Go stacks rejected without remap | remaining stacks/OS |
 | IN-07 | Shadowsocks and Snell server, TCP/UDP/version/plugin behavior | Partial: Phase 6C-N first Shadowsocks TCP/UDP/UoT/simple-obfs/ShadowTLS-v3 slice plus **IN-B** standard SS2022 UDP inbound with product-path replay; Darwin arm64 6C-N differential Parity in declared scope; Linux pending | Remaining SS cipher matrix; Snell server deferred |
 | IN-08 | VMess and VLESS server, TCP/UDP and transport/security variants | Not started | **IN-D** VLESS, **IN-E** VMess |
@@ -121,7 +121,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | RULE-04 | IP-CIDR/IP-CIDR6/SRC-IP-CIDR and lazy/no-resolve semantics | Partial (current IPv4 live plus IPv6 pure) | Native IPv6/live-context completion |
 | RULE-05 | IP-SUFFIX/SRC-IP-SUFFIX, address unmapping and family behavior | Partial (IPv4 live including mapped/partial; IPv6 pure) | Native IPv6/live-context completion |
 | RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial (current fixed TCP+UDP metadata complete; nonzero transparent DSCP pending) | Future inbound/platform completion |
-| RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | Not started | 5B3 plus platform gates |
+| RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | **Partial — W2.1:** Linux PROCESS-NAME/PATH exact + UID + find-process-mode; regex/wildcard and other OS open | W2.1 / 5B3 |
 | RULE-08 | IN-TYPE, IN-USER and IN-NAME | Partial (current fixed local TCP+UDP set complete) | Named/remote inbound gates |
 | RULE-09 | GEOIP, GEOSITE, IP-ASN and source variants | Not started | 5B4 |
 | RULE-10 | RULE-SET classical/domain/IP strategies, MRS, providers and refresh | Not started | 5B5, 5C4 |
@@ -218,8 +218,8 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-01 | TCP routing, relay, half-close, cancellation, metadata mutation and adapter retries | Partial | Repeated routing/protocol gates |
 | RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Complete in declared local DIRECT scope: bounded client-keyed IPv4/IPv6 reuse, fan-out, multi-response, control-close/generation retention and pressure recovery pass; exact timeout is enabled in CI | Remote adapters/UoT and CI slow-gate result remain separate claims |
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
-| RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
-| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
+| RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | **Partial — W2.2:** TCP TLS/HTTP peek + sniff_host / optional override; QUIC/UDP open | W2.2 / 5B7 |
+| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F socket behavior + **W2.1 Linux process lookup** for PROCESS/UID rules; other OS finders open | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
 | RUN-08 | Power/network change handling and resolver/connection reset | Partial 8F (default-route poll + resolver reset; native CI unclaimed) | 8F |
