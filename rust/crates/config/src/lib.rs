@@ -6,6 +6,7 @@ mod named_listeners;
 mod proxy;
 mod raw;
 mod shadowsocks_inbound;
+mod sniffer;
 mod tun;
 mod tunnel;
 

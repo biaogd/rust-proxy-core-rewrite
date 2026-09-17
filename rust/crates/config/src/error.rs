@@ -13,6 +13,8 @@ pub enum ConfigError {
     InvalidMode,
     #[error("invalid log-level")]
     InvalidLogLevel,
+    #[error("invalid find-process-mode")]
+    InvalidFindProcessMode,
     #[error("rule error: {0}")]
     Rule(#[from] RuleError),
     #[error("unsupported configuration key for the current rewrite phase: {0}")]

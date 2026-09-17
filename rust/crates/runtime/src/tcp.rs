@@ -98,7 +98,18 @@ pub(super) async fn serve_connection(
         | ListenerKind::AnyTls => return,
     }
     .clone_into(&mut metadata.inbound_name);
-    let fake_host = apply_host_mapping(&mut metadata, config, state);
+    let mut fake_host = apply_host_mapping(&mut metadata, config, state);
+    let (client, replaced) = crate::sniffer::prepare_tcp_stream(
+        accepted.client,
+        &accepted.preface,
+        &mut metadata,
+        &config.sniffer,
+        state,
+    )
+    .await;
+    if replaced {
+        fake_host = None;
+    }
     let decision = evaluate_tcp_rules(&mut metadata, config, state).await;
     let Some((decision, outbound_target, traversed_groups)) =
         resolve_rematch_target(decision, &mut metadata, config, state)
@@ -125,7 +136,7 @@ pub(super) async fn serve_connection(
         return;
     }
     if route == Route::RejectDrop {
-        let _client = accepted.client;
+        let _client = client;
         tokio::select! {
             () = shutdown.cancelled() => {}
             () = tokio::time::sleep(Duration::from_mins(1)) => {}
@@ -145,11 +156,10 @@ pub(super) async fn serve_connection(
     else {
         return;
     };
-    let client = accepted.client;
     if matches!(remote, TcpOutbound::Dns) {
         relay_dns_tcp(
             client,
-            &accepted.preface,
+            &[],
             config,
             state,
             dns_service,
@@ -159,12 +169,9 @@ pub(super) async fn serve_connection(
         .await;
         return;
     }
-    let TcpOutbound::Stream(mut remote) = remote else {
+    let TcpOutbound::Stream(remote) = remote else {
         unreachable!("DNS outbound was handled")
     };
-    if !accepted.preface.is_empty() && remote.write_all(&accepted.preface).await.is_err() {
-        return;
-    }
 
     relay_tracked_tcp(client, remote, tracker, state, shutdown).await;
 }
@@ -312,7 +319,18 @@ pub(super) async fn serve_stream_session(
             name.clone_into(&mut metadata.inbound_name);
         }
     }
-    let fake_host = apply_host_mapping(&mut metadata, config, state);
+    let mut fake_host = apply_host_mapping(&mut metadata, config, state);
+    let (client, replaced) = crate::sniffer::prepare_tcp_stream(
+        client,
+        &[],
+        &mut metadata,
+        &config.sniffer,
+        state,
+    )
+    .await;
+    if replaced {
+        fake_host = None;
+    }
     let decision = if metadata.special_proxy.is_empty() {
         evaluate_tcp_rules(&mut metadata, config, state).await
     } else {
@@ -2599,6 +2617,7 @@ pub(super) async fn evaluate_tcp_rules(
     config: &Config,
     state: &RuntimeState,
 ) -> rewrite_rules::Decision {
+    fill_process_metadata(metadata, config, state);
     if let Some(decision) = mode_decision(config, state) {
         return decision;
     }
@@ -2610,6 +2629,42 @@ pub(super) async fn evaluate_tcp_rules(
                 Err(error) => state.log("error", format!("rule DNS resolution failed: {error}")),
             }
             config.rules.evaluate(metadata)
+        }
+    }
+}
+
+fn fill_process_metadata(metadata: &mut Metadata, config: &Config, state: &RuntimeState) {
+    use rewrite_config::FindProcessMode;
+
+    if metadata.process_resolved {
+        return;
+    }
+    let should_lookup = match config.find_process_mode {
+        FindProcessMode::Off => false,
+        FindProcessMode::Always => true,
+        FindProcessMode::Strict => config.rules.needs_process_lookup(),
+    };
+    if !should_lookup {
+        return;
+    }
+    metadata.process_resolved = true;
+    let Some(src_ip) = metadata.source_ip else {
+        return;
+    };
+    match rewrite_platform::find_process_name(metadata.network, src_ip, metadata.source_port) {
+        Ok(info) => {
+            metadata.uid = info.uid;
+            metadata.process = rewrite_platform::process_basename(&info.path);
+            metadata.process_path = info.path.to_string_lossy().into_owned();
+        }
+        Err(error) => {
+            state.log(
+                "debug",
+                format!(
+                    "[Process] lookup failed for {src_ip}:{}: {error}",
+                    metadata.source_port
+                ),
+            );
         }
     }
 }
@@ -2707,6 +2762,7 @@ pub(super) fn apply_host_mapping(
             }
             if let Some(host) = state.lookup_dns_mapping(address) {
                 metadata.host = host;
+                metadata.dns_mapping = true;
             }
         }
         Host::Domain(domain) => {

@@ -62,8 +62,65 @@ pub(crate) struct RawConfig {
     pub(crate) proxy_providers: Option<BTreeMap<String, RawProxyProvider>>,
     pub(crate) proxy_groups: Option<Vec<RawProxyGroup>>,
     pub(crate) rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
+    pub(crate) sniffer: Option<RawSniffer>,
+    pub(crate) find_process_mode: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawSniffer {
+    pub(crate) enable: Option<bool>,
+    pub(crate) override_destination: Option<bool>,
+    pub(crate) sniffing: Option<Vec<String>>,
+    pub(crate) force_domain: Option<Vec<String>>,
+    pub(crate) skip_src_address: Option<Vec<String>>,
+    pub(crate) skip_dst_address: Option<Vec<String>>,
+    pub(crate) skip_domain: Option<Vec<String>>,
+    #[serde(rename = "port-whitelist")]
+    pub(crate) port_whitelist: Option<Vec<String>>,
+    pub(crate) force_dns_mapping: Option<bool>,
+    pub(crate) parse_pure_ip: Option<bool>,
+    pub(crate) sniff: Option<BTreeMap<String, RawSniffingConfig>>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawSniffingConfig {
+    #[serde(default, deserialize_with = "deserialize_port_list")]
+    pub(crate) ports: Option<Vec<String>>,
+    pub(crate) override_destination: Option<bool>,
+}
+
+fn deserialize_port_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Value::Sequence(entries) = value else {
+        return Err(serde::de::Error::custom(
+            "sniffer ports must be a sequence",
+        ));
+    };
+    let mut ports = Vec::new();
+    for entry in entries {
+        match entry {
+            Value::String(text) => ports.push(text),
+            Value::Number(number) => ports.push(number.to_string()),
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid sniffer port entry {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(Some(ports))
 }
 
 #[derive(Debug, Default, Deserialize)]
