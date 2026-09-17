@@ -386,7 +386,7 @@ where
 
 impl<S> AsyncWrite for VlessInboundStream<S>
 where
-    S: AsyncWrite + Unpin + 'static,
+    S: AsyncWrite + Unpin,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,

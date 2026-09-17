@@ -9,7 +9,7 @@ Not an h2-library weakness; Rust used bare handshake defaults (64KiB window / 16
 
 vless-grpc residual after h2 windows was VLESS-path specific: Rust `accept_vless_request` eagerly wrote `[VERSION, 0]` as its own Gun DATA frame, while Go `sing_vless.serverConn` coalesces that header with the first application write. Matching that (plus stashing the client header||payload coalesce across `Poll::Pending`) lifts vless-grpc from ~0.65x to ~0.88–0.90x Go.
 
-Further VLESS-path work (32 KiB peel relay + Go `WriterReplaceable` peel into fast `copy_bidirectional`) reaches ~**2051 Mbps / 0.92x** Go. Gun `FrontHeadroom` / `poll_write_with_prefix` regressed to ~0.76x and was dropped — Vec coalesce already yields one Gun DATA frame.
+Further VLESS-path work (32 KiB peel relay + Go `WriterReplaceable` peel into fast `copy_bidirectional`) reaches ~**2051 Mbps / 0.92x** Go. Gun `FrontHeadroom` / `poll_write_with_prefix` still regresses to ~0.75–0.77x (including after `poll_complete_write` resume) and stays disabled — Vec coalesce already yields one Gun DATA frame. Remaining ~8% left as VLESS-path follow-up.
 
 Changes:
 - h2 client/server Builder: stream/conn windows and max_frame ~1–4 MiB

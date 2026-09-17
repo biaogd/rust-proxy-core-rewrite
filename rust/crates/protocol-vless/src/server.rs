@@ -3,7 +3,6 @@
 //! Accepts version-zero TCP, standard UDP, and mux/XUDP commands with optional
 //! Vision flow addons. REALITY stays out of the request decoder.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -11,7 +10,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rewrite_model::{Destination, Host};
-use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use uuid::Uuid;
 
@@ -279,7 +277,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for VlessServerStream<S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -297,26 +295,9 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // Concrete GunStream: one DATA frame with in-buffer prefix
-                    // (Go FrontHeadroom / ExtendHeader).
-                    if let Some(gun) =
-                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
-                    {
-                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
-                            Poll::Pending => {
-                                self.pending = Some(PendingResponseWrite::GunPrefixed);
-                                return Poll::Pending;
-                            }
-                            Poll::Ready(Err(error)) => {
-                                self.pending = None;
-                                return Poll::Ready(Err(error));
-                            }
-                            Poll::Ready(Ok(written)) => {
-                                self.pending = None;
-                                return Poll::Ready(Ok(written));
-                            }
-                        }
-                    }
+                    // Vec coalesce → one Gun/TLS frame. FrontHeadroom
+                    // poll_write_with_prefix still regresses bulk (~0.75–0.77x)
+                    // even with poll_complete_write resume; keep Vec.
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
@@ -327,26 +308,8 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                     });
                 }
                 Some(PendingResponseWrite::GunPrefixed) => {
-                    // Complete the in-flight prefixed frame without re-passing
-                    // `buf` into poll_write (which can re-frame without prefix).
-                    if let Some(gun) =
-                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
-                    {
-                        match gun.poll_complete_write(cx) {
-                            Poll::Pending => {
-                                self.pending = Some(PendingResponseWrite::GunPrefixed);
-                                return Poll::Pending;
-                            }
-                            Poll::Ready(Err(error)) => {
-                                self.pending = None;
-                                return Poll::Ready(Err(error));
-                            }
-                            Poll::Ready(Ok(written)) => {
-                                self.pending = None;
-                                return Poll::Ready(Ok(written));
-                            }
-                        }
-                    }
+                    // Unreachable while FrontHeadroom is disabled; kept so a
+                    // future prefix path can resume without ABI churn.
                     match Pin::new(&mut self.inner).poll_write(cx, buf) {
                         Poll::Pending => {
                             self.pending = Some(PendingResponseWrite::GunPrefixed);
