@@ -274,7 +274,19 @@ async fn apply_generation_inner(
             continue;
         }
 
-        let (listener, udp) = bind_fixed_listener(&next, kind, address)?;
+        let (listener, udp) = match bind_fixed_listener(&next, kind, address) {
+            Ok(bound) => bound,
+            Err(error) if kind == ListenerKind::Tproxy => {
+                // Match Go `ReCreateTProxy`: log and continue without aborting
+                // the generation (IP_TRANSPARENT needs CAP_NET_ADMIN).
+                state.log(
+                    "error",
+                    format!("Start TProxy server error: {error}"),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         prepared.listeners.push((key, listener, udp));
     }
     for key in &desired_controllers {
@@ -626,7 +638,17 @@ async fn restore_retired_sockets(
             );
             continue;
         }
-        let (listener, udp) = bind_fixed_listener(previous, kind, address)?;
+        let (listener, udp) = match bind_fixed_listener(previous, kind, address) {
+            Ok(bound) => bound,
+            Err(error) if kind == ListenerKind::Tproxy => {
+                state.log(
+                    "error",
+                    format!("Start TProxy server error: {error}"),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         spawn_fixed_listener(
             key,
             listener,

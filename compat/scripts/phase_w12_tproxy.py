@@ -142,37 +142,40 @@ def run_unprivileged(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
                 time.sleep(0.8)
                 still_running = process.poll() is None
                 stderr_tail = ""
-                if not still_running:
-                    stderr_path = home / "stderr.log"
-                    if stderr_path.exists():
-                        stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[
-                            -800:
-                        ]
+                stderr_path = home / "stderr.log"
+                if stderr_path.exists():
+                    stderr_tail = stderr_path.read_text(encoding="utf-8", errors="replace")[-800:]
                 entry: dict[str, Any] = {
                     "still_running": still_running,
                     "returncode": process.poll(),
                     "stderr_tail": stderr_tail,
+                    "cap_net_admin": results["cap_net_admin"],
                 }
-                if still_running:
-                    wait_tcp("127.0.0.1", mixed_port)
-                    # Plain connect without TPROXY: LocalAddr is the listen
-                    # address, so the session targets itself and should not
-                    # echo arbitrary client bytes as an HTTP service.
-                    try:
-                        with socket.create_connection(("127.0.0.1", tproxy_port), timeout=2.0):
-                            entry["plain_connect_accepted"] = True
-                    except OSError as error:
-                        entry["plain_connect_accepted"] = False
-                        entry["plain_connect_error"] = str(error)
-                    stop(process)
-                elif results["cap_net_admin"]:
+                if not still_running:
                     raise AssertionError(
-                        f"{name} failed to start tproxy-port with CAP_NET_ADMIN: "
-                        f"{entry.get('stderr_tail')}"
+                        f"{name} exited with tproxy-port config (Go soft-fails bind): "
+                        f"{stderr_tail}"
                     )
+                wait_tcp("127.0.0.1", mixed_port)
+                try:
+                    with socket.create_connection(("127.0.0.1", tproxy_port), timeout=2.0):
+                        entry["plain_connect_accepted"] = True
+                except OSError as error:
+                    entry["plain_connect_accepted"] = False
+                    entry["plain_connect_error"] = str(error)
+                if results["cap_net_admin"]:
+                    # With CAP_NET_ADMIN the transparent listener must bind.
+                    if not entry["plain_connect_accepted"]:
+                        raise AssertionError(
+                            f"{name} tproxy-port not listening with CAP_NET_ADMIN"
+                        )
                 else:
-                    entry["note"] = "bind/IP_TRANSPARENT requires CAP_NET_ADMIN"
+                    entry["note"] = (
+                        "without CAP_NET_ADMIN: process stays up (mixed); "
+                        "tproxy bind may soft-fail like Go ReCreateTProxy"
+                    )
                 results["cases"][f"{name}-runtime-tproxy"] = entry
+                stop(process)
             finally:
                 terminate_process(process)
     return results
