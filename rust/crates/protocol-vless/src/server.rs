@@ -297,10 +297,28 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // Probe: detect Gun without using prefix write — if this
-                    // alone regresses, the Any downcast is the problem.
-                    let _is_gun =
-                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>().is_some();
+                    // FrontHeadroom for modest first writes; large bulk first
+                    // writes keep Vec coalesce (prefix path regressed at 32KiB).
+                    if buf.len() <= 2048 {
+                        if let Some(gun) =
+                            (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
+                        {
+                            match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
+                                Poll::Pending => {
+                                    self.pending = Some(PendingResponseWrite::GunPrefixed);
+                                    return Poll::Pending;
+                                }
+                                Poll::Ready(Err(error)) => {
+                                    self.pending = None;
+                                    return Poll::Ready(Err(error));
+                                }
+                                Poll::Ready(Ok(written)) => {
+                                    self.pending = None;
+                                    return Poll::Ready(Ok(written));
+                                }
+                            }
+                        }
+                    }
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
@@ -311,7 +329,6 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                     });
                 }
                 Some(PendingResponseWrite::GunPrefixed) => {
-                    // Kept for ABI stability if re-enabled; should be unreachable.
                     match Pin::new(&mut self.inner).poll_write(cx, buf) {
                         Poll::Pending => {
                             self.pending = Some(PendingResponseWrite::GunPrefixed);
