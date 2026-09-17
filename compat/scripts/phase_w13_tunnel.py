@@ -96,12 +96,18 @@ def bad_proxy_yaml(*, tunnel_listen: int, target_port: int) -> str:
 
 
 def wait_tcp(host: str, port: int, deadline: float = 15.0) -> None:
+    """Wait until the TCP tunnel port accepts connections.
+
+    Avoid completing a tunnel session here (no send): a short connect/close is
+    enough for readiness and reduces races with the echo target.
+    """
     end = time.time() + deadline
     last: Exception | None = None
     while time.time() < end:
         try:
-            with socket.create_connection((host, port), timeout=0.5):
-                return
+            sock = socket.create_connection((host, port), timeout=0.5)
+            sock.close()
+            return
         except OSError as error:
             last = error
             time.sleep(0.05)
@@ -109,24 +115,38 @@ def wait_tcp(host: str, port: int, deadline: float = 15.0) -> None:
 
 
 def tcp_echo_through(listen_port: int) -> bytes:
-    with socket.create_connection(("127.0.0.1", listen_port), timeout=5.0) as client:
-        client.settimeout(5.0)
-        client.sendall(TCP_PAYLOAD)
-        received = b""
-        while len(received) < len(TCP_PAYLOAD):
-            chunk = client.recv(64)
-            if not chunk:
-                break
-            received += chunk
-        return received
+    last: Exception | None = None
+    for _ in range(5):
+        try:
+            with socket.create_connection(("127.0.0.1", listen_port), timeout=5.0) as client:
+                client.settimeout(5.0)
+                client.sendall(TCP_PAYLOAD)
+                received = b""
+                while len(received) < len(TCP_PAYLOAD):
+                    chunk = client.recv(64)
+                    if not chunk:
+                        break
+                    received += chunk
+                return received
+        except OSError as error:
+            last = error
+            time.sleep(0.1)
+    raise TimeoutError(f"TCP tunnel echo failed: {last}")
 
 
 def udp_echo_through(listen_port: int) -> bytes:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-        client.settimeout(5.0)
-        client.sendto(UDP_PAYLOAD, ("127.0.0.1", listen_port))
-        data, _ = client.recvfrom(65535)
-        return data
+    last: Exception | None = None
+    for _ in range(5):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+                client.settimeout(5.0)
+                client.sendto(UDP_PAYLOAD, ("127.0.0.1", listen_port))
+                data, _ = client.recvfrom(65535)
+                return data
+        except OSError as error:
+            last = error
+            time.sleep(0.1)
+    raise TimeoutError(f"UDP tunnel echo failed: {last}")
 
 
 def run_cases(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
