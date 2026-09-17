@@ -361,9 +361,6 @@ fn linux_inet_diag_uid_inode(
     }
 
     let mut buf = vec![0_u8; 8192];
-    let mut found_uid = 0_u32;
-    let mut found_inode = 0_u32;
-    let mut matched = false;
     let src_unmapped = match src {
         IpAddr::V6(v6) => v6
             .to_ipv4_mapped()
@@ -394,11 +391,7 @@ fn linux_inet_diag_uid_inode(
                 break;
             }
             if hdr.type_ == NLMSG_DONE {
-                return if matched {
-                    Ok((found_uid, found_inode))
-                } else {
-                    Err(io::Error::new(io::ErrorKind::NotFound, "socket not found"))
-                };
+                return Err(io::Error::new(io::ErrorKind::NotFound, "socket not found"));
             }
             if hdr.type_ == NLMSG_ERROR {
                 return Err(io::Error::new(
@@ -412,8 +405,6 @@ fn linux_inet_diag_uid_inode(
                 let msg = unsafe {
                     ptr::read_unaligned(buf.as_ptr().add(payload_off).cast::<InetDiagMsg>())
                 };
-                found_uid = msg.uid;
-                found_inode = msg.inode;
                 let port = u16::from_be_bytes(msg.src_port);
                 if port == src_port {
                     let msg_src = match msg.family as i32 {
@@ -434,7 +425,7 @@ fn linux_inet_diag_uid_inode(
                         }
                     };
                     if msg_src == src_unmapped {
-                        return Ok((found_uid, found_inode));
+                        return Ok((msg.uid, msg.inode));
                     }
                 }
             }
