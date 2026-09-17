@@ -308,6 +308,7 @@ Concrete next slices after this doc lands:
 4. **W2.2** sniffer config + HTTP/TLS sniff on local/TUN path ✅ partial (QUIC open)  
 5. **W2.1** PROCESS rules (Linux first) ✅ partial (regex/other OS open)  
 6. **W3.1** Trojan inbound Reality  
+7. **W5.5** dialer-proxy for VMess/VLESS/Trojan TCP
 
 Parallel track: **W1.6** TUN privileged CI to Parity; **W7.6** SS AEAD perf.
 
