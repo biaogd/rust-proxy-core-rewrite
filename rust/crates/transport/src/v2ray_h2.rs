@@ -10,6 +10,44 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::BoxedStream;
 
+/// Match Go metacubex/http Gun defaults: 1 MiB stream/frame windows on the
+/// server path. Spec minima (64 KiB / 16 KiB) leave bulk throughput window-
+/// stalled versus Go's MiB-scale pipeline.
+pub(crate) const H2_STREAM_WINDOW: u32 = 1 << 20;
+pub(crate) const H2_CONN_WINDOW_SERVER: u32 = 1 << 20;
+/// Client receive window: Go uses 4 MiB stream / 1 GiB conn; keep a large but
+/// bounded connection window for proxy workloads.
+pub(crate) const H2_STREAM_WINDOW_CLIENT: u32 = 4 << 20;
+pub(crate) const H2_CONN_WINDOW_CLIENT: u32 = 64 << 20;
+pub(crate) const H2_MAX_FRAME: u32 = 1 << 20;
+
+pub(crate) async fn handshake_h2_client(
+    stream: BoxedStream,
+) -> io::Result<(SendRequest<Bytes>, h2::client::Connection<BoxedStream, Bytes>)> {
+    h2::client::Builder::new()
+        .initial_window_size(H2_STREAM_WINDOW_CLIENT)
+        .initial_connection_window_size(H2_CONN_WINDOW_CLIENT)
+        .max_frame_size(H2_MAX_FRAME)
+        .handshake(stream)
+        .await
+        .map_err(h2_error)
+}
+
+pub(crate) async fn handshake_h2_server<S>(
+    stream: S,
+) -> io::Result<h2::server::Connection<S, Bytes>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    h2::server::Builder::new()
+        .initial_window_size(H2_STREAM_WINDOW)
+        .initial_connection_window_size(H2_CONN_WINDOW_SERVER)
+        .max_frame_size(H2_MAX_FRAME)
+        .handshake(stream)
+        .await
+        .map_err(h2_error)
+}
+
 /// Establishes the pinned oracle's single bidirectional `V2Ray` HTTP/2 stream.
 ///
 /// # Errors
@@ -42,7 +80,7 @@ pub(crate) async fn connect_h2_request(
     stream: BoxedStream,
     request: Request<()>,
 ) -> io::Result<BoxedStream> {
-    let (client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
+    let (client, connection) = handshake_h2_client(stream).await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -50,7 +88,7 @@ pub(crate) async fn connect_h2_request(
 }
 
 pub(crate) async fn connect_h2(stream: BoxedStream) -> io::Result<SendRequest<Bytes>> {
-    let (client, connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
+    let (client, connection) = handshake_h2_client(stream).await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -103,20 +141,21 @@ pub(crate) async fn send_h2_packet(
     Ok(())
 }
 
+pub(crate) async fn open_h2_data_stream(
+    client: SendRequest<Bytes>,
+    request: Request<()>,
+) -> io::Result<H2DataStream> {
+    let mut client = client.ready().await.map_err(h2_error)?;
+    let (response, sender) = client.send_request(request, false).map_err(h2_error)?;
+    let response = response.await.map_err(h2_error)?;
+    Ok(h2_data_stream(sender, response.into_body()))
+}
+
 pub(crate) async fn open_h2_request(
     client: SendRequest<Bytes>,
     request: Request<()>,
 ) -> io::Result<BoxedStream> {
-    let mut client = client.ready().await.map_err(h2_error)?;
-    let (response, sender) = client.send_request(request, false).map_err(h2_error)?;
-    let response = response.await.map_err(h2_error)?;
-    Ok(Box::new(H2DataStream {
-        sender,
-        receiver: response.into_body(),
-        read_chunk: Bytes::new(),
-        read_offset: 0,
-        write_closed: false,
-    }))
+    Ok(Box::new(open_h2_data_stream(client, request).await?))
 }
 
 pub(crate) struct H2DataStream {
@@ -226,6 +265,39 @@ impl AsyncWrite for H2WriteStream {
                 .map_err(h2_error)?;
             this.write_closed = true;
         }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl H2DataStream {
+    /// Send already-owned bytes without an extra `copy_from_slice`.
+    ///
+    /// Waits until h2 grants capacity for the full buffer so Gun can emit one
+    /// framed message as a single DATA write when the peer window allows it.
+    pub(crate) fn poll_write_bytes(
+        &mut self,
+        cx: &mut Context<'_>,
+        input: &Bytes,
+    ) -> Poll<io::Result<()>> {
+        if self.write_closed {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if input.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+        self.sender.reserve_capacity(input.len());
+        let capacity = match ready!(self.sender.poll_capacity(cx)) {
+            Some(Ok(capacity)) => capacity,
+            Some(Err(error)) => return Poll::Ready(Err(h2_error(error))),
+            None => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+        };
+        if capacity < input.len() {
+            self.sender.reserve_capacity(input.len());
+            return Poll::Pending;
+        }
+        self.sender
+            .send_data(input.clone(), false)
+            .map_err(h2_error)?;
         Poll::Ready(Ok(()))
     }
 }
