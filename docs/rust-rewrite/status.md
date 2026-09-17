@@ -2,6 +2,19 @@
 
 Last updated: 2026-09-17
 
+### W1.2 Linux tproxy-port TCP — 2026-09-17
+
+Second Wave A transparent-ingress slice. Linux accepts fixed `tproxy-port`,
+binds with `IP_TRANSPARENT` / `IPV6_TRANSPARENT` (+ orig-dst recv opts) via
+`rewrite-sys` → `rewrite-platform::bind_tproxy_tcp_listener`, and serves TCP
+with destination from `conn.LocalAddr()` (`InboundProtocol::Tproxy` /
+`DEFAULT-TPROXY`). Inbound port is the listener bind port (Go
+`WithInAddr(listener.Addr())`). MPTCP/TFO are forced off for tproxy.
+Non-Linux fail-closes `tproxy-port`. UDP TProxy deferred. Evidence:
+config/rules unit tests + `compat/scripts/phase_w12_tproxy.py` (unprivileged
+validate + CAP-aware bind). Deferred: named `type: tproxy`, UDP, privileged
+iptables TPROXY differential (`PHASE_W12_TPROXY_NATIVE=1`).
+
 ### W1.1 Linux redir-port TCP — 2026-09-17
 
 First Wave A transparent-ingress slice from
@@ -9,10 +22,10 @@ First Wave A transparent-ingress slice from
 fixed `redir-port`, recovers the pre-redirect destination via
 `SO_ORIGINAL_DST` (`rewrite-sys` → `rewrite-platform`), and enters
 `serve_stream_session` with `InboundProtocol::Redir` / `DEFAULT-REDIR`.
-Non-Linux still fail-closes `redir-port`. `tproxy-port` remains rejected.
-Evidence: config/rules unit tests + `compat/scripts/phase_w11_redir.py`
-(unprivileged validate/bind/plain-connect). Deferred: named `type: redir`,
-Darwin/FreeBSD pf paths, privileged iptables REDIRECT differential, tproxy.
+Non-Linux still fail-closes `redir-port`. Evidence: config/rules unit tests +
+`compat/scripts/phase_w11_redir.py` (unprivileged validate/bind/plain-connect).
+Deferred: named `type: redir`, Darwin/FreeBSD pf paths, privileged iptables
+REDIRECT differential.
 
 ### Go → Rust capability alignment roadmap — 2026-09-17
 

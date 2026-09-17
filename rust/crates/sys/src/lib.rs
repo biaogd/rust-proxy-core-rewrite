@@ -98,3 +98,96 @@ fn linux_original_destination(
         Ok(SocketAddr::new(IpAddr::V6(ip), port))
     }
 }
+
+/// Enables Linux `IP_TRANSPARENT` / `IPV6_TRANSPARENT` on a socket (TProxy).
+///
+/// # Errors
+///
+/// Returns the OS error from `setsockopt`, or unsupported on non-Linux.
+#[cfg(unix)]
+pub fn set_ip_transparent(fd: std::os::fd::RawFd, ipv6: bool) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_set_ip_transparent(fd, ipv6)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fd, ipv6);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "IP_TRANSPARENT is only implemented on Linux (W1.2 tproxy)",
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn set_ip_transparent(_fd: (), _ipv6: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "IP_TRANSPARENT is only implemented on Linux (W1.2 tproxy)",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_set_ip_transparent(fd: std::os::fd::RawFd, ipv6: bool) -> io::Result<()> {
+    // linux/include/uapi/linux/in.h / in6.h — IPV6_TRANSPARENT = 75 (0x4b)
+    const IPV6_TRANSPARENT: libc::c_int = 0x4b;
+    const IP_RECVORIGDSTADDR: libc::c_int = 20;
+    const IPV6_RECVORIGDSTADDR: libc::c_int = 74;
+
+    // SAFETY: `fd` is a live socket; setsockopt writes a single int option.
+    let enable: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_IP,
+            libc::IP_TRANSPARENT,
+            std::ptr::addr_of!(enable).cast(),
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ipv6 {
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_IPV6,
+                IPV6_TRANSPARENT,
+                std::ptr::addr_of!(enable).cast(),
+                std::mem::size_of_val(&enable) as libc::socklen_t,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_IP,
+            IP_RECVORIGDSTADDR,
+            std::ptr::addr_of!(enable).cast(),
+            std::mem::size_of_val(&enable) as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ipv6 {
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_IPV6,
+                IPV6_RECVORIGDSTADDR,
+                std::ptr::addr_of!(enable).cast(),
+                std::mem::size_of_val(&enable) as libc::socklen_t,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}

@@ -408,6 +408,7 @@ impl TryFrom<ConfigSpec> for Config {
         let unsupported = [
             #[cfg(not(target_os = "linux"))]
             (spec.redir_port != 0, "redir-port"),
+            #[cfg(not(target_os = "linux"))]
             (spec.tproxy_port != 0, "tproxy-port"),
             (spec.unified_delay, "unified-delay"),
             (
@@ -424,6 +425,7 @@ impl TryFrom<ConfigSpec> for Config {
             socks_port: spec.socks_port,
             mixed_port: spec.mixed_port,
             redir_port: spec.redir_port,
+            tproxy_port: spec.tproxy_port,
             allow_lan: spec.allow_lan,
             bind_address: spec.bind_address,
             skip_auth_prefixes: spec.skip_auth_prefixes,
@@ -815,6 +817,7 @@ impl Config {
             (ListenerKind::Socks, self.socks_port),
             (ListenerKind::Mixed, self.mixed_port),
             (ListenerKind::Redir, self.redir_port),
+            (ListenerKind::Tproxy, self.tproxy_port),
         ] {
             if value == 0 {
                 continue;

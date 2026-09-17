@@ -5,6 +5,7 @@ mod network;
 mod original_dst;
 mod route;
 mod system_dns;
+mod tproxy;
 
 pub use dhcp::{
     DHCP_TIMEOUT, DHCP_TTL, DhcpInterfaceSnapshot, DhcpOffer, DhcpRefreshDecision,
@@ -21,6 +22,7 @@ pub use network::{
     resolve_outbound_bind_interface, set_auto_detect_bind_interface, update_outbound_bypass,
 };
 pub use original_dst::tcp_original_destination;
+pub use tproxy::bind_tproxy_tcp_listener;
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
     current_route_platform, darwin_route_args, default_auto_route_destinations, host_route_prefix,
@@ -163,7 +165,7 @@ fn bind_local_tcp_listener_inner(
     Ok(socket.into())
 }
 
-fn configure_tcp_keepalive(socket: &Socket, options: LocalTcpOptions) -> io::Result<()> {
+pub(crate) fn configure_tcp_keepalive(socket: &Socket, options: LocalTcpOptions) -> io::Result<()> {
     if options.disable_keep_alive || cfg!(target_os = "android") {
         return socket.set_keepalive(false);
     }

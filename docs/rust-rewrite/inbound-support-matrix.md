@@ -95,7 +95,7 @@ SSR inbound.
 | HTTP / SOCKS / Mixed | **Implemented** (fixed ports) | `rewrite-inbound`, `runtime` local listeners | Yes | SOCKS UDP | users / USERID | None on listener | Local auth lists | Named `type: http\|socks\|mixed` **missing**; no listener TLS/Reality |
 | Shadowsocks | **Partial — 6C-N + IN-B SS2022 UDP** | `config/shadowsocks_inbound.rs`, `named_listeners.rs`, `runtime/shadowsocks_listener.rs` | Yes | Pre-2022 + standard SS2022 (not ChaCha8) | Shared password; AES-2022 EIH colon split | simple-obfs http/tls; ShadowTLS **v3 only** | EIH (AES); ShadowTLS users | Legacy `ss-config` + named `type: shadowsocks` |
 | TUN | **Partial — Phase 8A/B/C/F** | `runtime/tun.rs`, `rewrite-tun`, platform | L3 | L3 | N/A | `stack: smoltcp` only | N/A | Go stacks rejected without remap |
-| Redir / TProxy / Tunnel | **Partial — W1.1 redir-port (Linux TCP)** | `config` `redir-port`; `runtime` `serve_redir_connection`; `rewrite-sys` `SO_ORIGINAL_DST` | Yes (TCP) | — | None | orig-dst | N/A | Fixed `redir-port` on Linux only; named `type: redir`, Darwin/FreeBSD, tproxy/tunnel still missing |
+| Redir / TProxy / Tunnel | **Partial — W1.1 redir + W1.2 tproxy TCP (Linux)** | `redir-port` / `tproxy-port`; `serve_redir_connection` / `serve_tproxy_connection`; `rewrite-sys` orig-dst + `IP_TRANSPARENT` | Yes (TCP) | — | None | orig-dst / LocalAddr | N/A | Fixed ports on Linux only; named `type: redir\|tproxy`, Darwin/FreeBSD, tproxy UDP, tunnel still missing |
 | Trojan | **Partial — IN-C TLS + WSS + gRPC** | `named_listeners.rs`, `runtime/trojan_listener.rs`, `protocol-trojan`, `transport` `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | UDP-over-TLS | Password users (SHA-224) | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: trojan`; combined ws+grpc / Reality / `ss-option` rejected |
 | VLESS | **Partial — IN-D TLS + Vision + WSS + gRPC + XUDP + REALITY** | `named_listeners.rs`, `runtime/vless_listener.rs`, `protocol-vless::server`, `transport` `accept_vision_tls` / `accept_reality` / `accept_websocket_path` / `V2rayGrpcServerConnection` | Yes | Standard-mode UDP on TLS; Mux/XUDP multi-dest on TLS; Vision TCP on native TLS; REALITY TCP auth Accept | UUID users + optional `flow: xtls-rprx-vision` (not with REALITY yet) | Native TLS; REALITY via `reality-config`; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vless`; combined ws+grpc rejected; REALITY dest fallback deferred |
 | VMess | **Partial — IN-E TLS + WSS + gRPC + XUDP** | `named_listeners.rs`, `runtime/vmess_listener.rs`, `protocol-vmess` AEAD Accept + XUDP framing | Yes | Standard body-record UDP on TLS; Mux/XUDP multi-dest on TLS | UUID users; `alterId` must be 0/absent | Native TLS; WS via `ws-path`; Gun via `grpc-service-name` | Yes | Named `type: vmess`; combined ws+grpc / Reality / nonzero alterId / mKCP/Mekya rejected |
@@ -104,9 +104,9 @@ SSR inbound.
 | AnyTLS | **Partial — IN-G TLS TCP first slice** | `named_listeners.rs`, `runtime/anytls_listener.rs`, `protocol-anytls` server Accept | Yes | Deferred (UoT) | `users` username→password (SHA-256) | Native TLS + optional `padding-scheme` | Yes | Named `type: anytls`; UoT/carriers/ECH/mTLS/`allow-insecure` rejected |
 | Snell / Hy2-realm / ShadowQUIC / Mieru / Sudoku / TrustTunnel | Missing | Protocol crates are **outbound/client** oriented (Hy2/TUIC/AnyTLS inbound above) | — | — | — | — | — | Server gates = ShadowQUIC later; others deferred |
 
-`ListenerKind` today: `Http | Socks | Mixed | Redir | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls`
+`ListenerKind` today: `Http | Socks | Mixed | Redir | Tproxy | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls`
 (`rust/crates/config/src/model.rs`). `InboundProtocol` today:
-`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls | Tun | Inner | Redir`.
+`Http | Https | Socks4 | Socks5 | Shadowsocks | Trojan | Vless | Vmess | Hysteria2 | Tuic | AnyTls | Tun | Inner | Redir | Tproxy`.
 
 ## C. Shadowsocks inbound deep-dive (Rust vs Go)
 
@@ -166,7 +166,7 @@ Use these labels in later IN phases:
 | IN-01 | Mixed HTTP+SOCKS TCP/UDP | Complete in declared local scope | Phase 1/3 (preserve) |
 | IN-02 | Fixed HTTP/SOCKS auth/LAN/TFO/MPTCP | Complete in fixed-listener scope | Phase 3/5F (preserve) |
 | IN-03 | Redir | **Partial — W1.1** Linux fixed `redir-port` TCP + `SO_ORIGINAL_DST`; Darwin/FreeBSD/named deferred | W1.1 / Phase 8A–8C |
-| IN-04 | TProxy | Not started | Phase 8A |
+| IN-04 | TProxy | **Partial — W1.2** Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; UDP deferred | W1.2 / Phase 8A |
 | IN-05 | Static tunnel | Not started | 5B6 / later |
 | IN-06 | TUN | Partial smoltcp 8A/B/C/F | Phase 8 (preserve; do not duplicate) |
 | IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |

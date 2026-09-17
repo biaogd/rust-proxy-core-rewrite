@@ -117,6 +117,7 @@ impl From<&Metadata> for MetadataSnapshot {
             InboundProtocol::Tun => "TUN",
             InboundProtocol::Inner => "Inner",
             InboundProtocol::Redir => "Redir",
+            InboundProtocol::Tproxy => "TProxy",
         };
         let network = match metadata.network {
             Network::Tcp => "tcp",

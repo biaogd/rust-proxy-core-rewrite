@@ -36,6 +36,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
         ListenerKind::Redir
+        | ListenerKind::Tproxy
         | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
@@ -85,6 +86,7 @@ pub(super) async fn serve_connection(
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
         ListenerKind::Redir
+        | ListenerKind::Tproxy
         | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
@@ -233,6 +235,38 @@ pub(super) async fn serve_redir_connection(
     serve_stream_session(client, metadata, config, state, dns_service, shutdown).await;
 }
 
+/// Linux `tproxy-port` path: destination is `conn.LocalAddr()` after
+/// `IP_TRANSPARENT` (Go `listener/tproxy`). Inbound port comes from the
+/// listener bind address, not the connection local address.
+pub(super) async fn serve_tproxy_connection(
+    client: BoxedInboundStream,
+    listener_addr: Option<std::net::SocketAddr>,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) {
+    let Ok(peer) = client.peer_addr() else {
+        return;
+    };
+    if !config.permits_inbound(peer.ip()) {
+        return;
+    }
+    let Ok(local) = client.local_addr() else {
+        return;
+    };
+    let destination = Destination {
+        host: Host::Ip(unmap_ip(local.ip())),
+        port: local.port(),
+    };
+    let mut metadata = Metadata::new(destination, InboundProtocol::Tproxy);
+    "DEFAULT-TPROXY".clone_into(&mut metadata.inbound_name);
+    if let Some(addr) = listener_addr {
+        metadata.inbound_port = addr.port();
+    }
+    serve_stream_session(client, metadata, config, state, dns_service, shutdown).await;
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn serve_stream_session(
     client: BoxedInboundStream,
@@ -246,7 +280,11 @@ pub(super) async fn serve_stream_session(
         metadata.source_ip = Some(unmap_ip(peer.ip()));
         metadata.source_port = peer.port();
     }
-    if let Ok(local) = client.local_addr() {
+    // TProxy pre-sets inbound_port from the listener bind address because
+    // `client.local_addr()` is the transparent destination, not the listen port.
+    if metadata.inbound_port == 0
+        && let Ok(local) = client.local_addr()
+    {
         metadata.inbound_port = local.port();
     }
     if metadata.inbound_name.is_empty() {
@@ -260,6 +298,7 @@ pub(super) async fn serve_stream_session(
             InboundProtocol::AnyTls => "DEFAULT-ANYTLS",
             InboundProtocol::Tun => "DEFAULT-TUN",
             InboundProtocol::Redir => "DEFAULT-REDIR",
+            InboundProtocol::Tproxy => "DEFAULT-TPROXY",
             InboundProtocol::Http
             | InboundProtocol::Https
             | InboundProtocol::Socks4

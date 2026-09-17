@@ -84,10 +84,21 @@ pub(super) async fn run_listener(
                         let connection_state = Arc::clone(&state);
                         let connection_dns_service = Arc::clone(&dns_service);
                         let connection_shutdown = shutdown.child_token();
+                        let listener_addr = listener.local_addr().ok();
                         connections.spawn(async move {
                             if kind == ListenerKind::Redir {
                                 crate::tcp::serve_redir_connection(
                                     client,
+                                    &connection_config,
+                                    &connection_state,
+                                    &connection_dns_service,
+                                    &connection_shutdown,
+                                )
+                                .await;
+                            } else if kind == ListenerKind::Tproxy {
+                                crate::tcp::serve_tproxy_connection(
+                                    client,
+                                    listener_addr,
                                     &connection_config,
                                     &connection_state,
                                     &connection_dns_service,

@@ -205,7 +205,7 @@ pub(super) fn config_snapshot(config: &Config) -> serde_json::Value {
         "port": config.port,
         "socks-port": config.socks_port,
         "redir-port": config.redir_port,
-        "tproxy-port": 0,
+        "tproxy-port": config.tproxy_port,
         "mixed-port": config.mixed_port,
         "authentication": authentication,
         "allow-lan": config.allow_lan,

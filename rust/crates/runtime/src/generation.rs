@@ -665,17 +665,21 @@ fn bind_fixed_listener(
     address: SocketAddr,
 ) -> Result<(LocalTcpListener, Option<Arc<UdpSocket>>), RuntimeError> {
     let dual_stack = config.allow_lan && config.bind_address == "*";
-    let listener = rewrite_platform::bind_local_tcp_listener(
-        address,
-        rewrite_platform::LocalTcpOptions {
-            dual_stack,
-            multipath: config.inbound_mptcp,
-            keep_alive_idle: config.keep_alive_idle,
-            keep_alive_interval: config.keep_alive_interval,
-            disable_keep_alive: config.disable_keep_alive,
-        },
-    )?;
-    let listener = if config.inbound_tfo && !matches!(kind, ListenerKind::Redir) {
+    let options = rewrite_platform::LocalTcpOptions {
+        dual_stack,
+        multipath: config.inbound_mptcp,
+        keep_alive_idle: config.keep_alive_idle,
+        keep_alive_interval: config.keep_alive_interval,
+        disable_keep_alive: config.disable_keep_alive,
+    };
+    let listener = if kind == ListenerKind::Tproxy {
+        rewrite_platform::bind_tproxy_tcp_listener(address, options)?
+    } else {
+        rewrite_platform::bind_local_tcp_listener(address, options)?
+    };
+    let listener = if config.inbound_tfo
+        && !matches!(kind, ListenerKind::Redir | ListenerKind::Tproxy)
+    {
         LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
     } else {
         LocalTcpListener::Plain(TcpListener::from_std(listener)?)

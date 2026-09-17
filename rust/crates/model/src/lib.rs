@@ -92,6 +92,8 @@ pub enum InboundProtocol {
     Inner,
     /// Linux iptables/nft `REDIRECT` / `TPROXY`-style original-destination TCP.
     Redir,
+    /// Linux TProxy TCP (destination from `LocalAddr` after `IP_TRANSPARENT`).
+    Tproxy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -848,6 +848,29 @@ fn separates_specification_from_runtime_scope() {
 }
 
 #[test]
+fn accepts_tproxy_port_on_linux_only() {
+    let source = "tproxy-port: 8900\nmode: rule\nipv6: false\nrules:\n  - MATCH,DIRECT\n";
+    let spec = ConfigSpec::from_yaml(source).expect("spec parses tproxy-port");
+    assert_eq!(spec.normalized().tproxy_port, 8900);
+    #[cfg(target_os = "linux")]
+    {
+        let config = Config::try_from(spec).expect("Linux accepts tproxy-port (W1.2)");
+        assert_eq!(config.tproxy_port, 8900);
+        assert_eq!(
+            config.listener_ports().expect("tproxy listener"),
+            vec![(ListenerKind::Tproxy, 8900)]
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(matches!(
+            Config::try_from(spec),
+            Err(ConfigError::UnsupportedRuntime(feature)) if feature == "tproxy-port"
+        ));
+    }
+}
+
+#[test]
 fn builds_phase_three_listener_set_and_authentication() {
     let source = r#"
 port: 8080
