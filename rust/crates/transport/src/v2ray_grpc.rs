@@ -517,6 +517,22 @@ impl GunStream {
         Poll::Ready(Ok(std::mem::take(&mut self.pending_input)))
     }
 
+    /// Finish an in-flight write without accepting new application bytes.
+    ///
+    /// Used when a `poll_write_with_prefix` returned `Pending` and a later
+    /// `poll_flush` may have already drained the frame — calling `poll_write`
+    /// with the original buffer would risk re-framing without the prefix.
+    pub fn poll_complete_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
+        if let Some(written) = self.take_completed_write() {
+            return Poll::Ready(Ok(written));
+        }
+        if self.write_frame.is_some() {
+            ready!(self.poll_drain(cx))?;
+            return Poll::Ready(Ok(std::mem::take(&mut self.pending_input)));
+        }
+        Poll::Ready(Ok(0))
+    }
+
     /// If a prior write finished via `poll_flush`/`poll_shutdown` while the
     /// caller still saw `Pending`, return that write's application length.
     fn take_completed_write(&mut self) -> Option<usize> {

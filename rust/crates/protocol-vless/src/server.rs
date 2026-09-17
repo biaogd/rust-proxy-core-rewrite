@@ -297,22 +297,14 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // Probe: empty-prefix write of coalesced buffer via
-                    // poll_write_with_prefix (should match poll_write(combined)).
+                    // Concrete GunStream: one DATA frame with in-buffer prefix
+                    // (Go FrontHeadroom / ExtendHeader).
                     if let Some(gun) =
                         (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
                     {
-                        let mut combined = Vec::with_capacity(2 + buf.len());
-                        combined.extend_from_slice(&[VERSION, 0]);
-                        combined.extend_from_slice(buf);
-                        let payload_len = buf.len();
-                        match gun.poll_write_with_prefix(cx, &[], &combined) {
+                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
                             Poll::Pending => {
-                                self.pending = Some(PendingResponseWrite::Flushing {
-                                    combined,
-                                    offset: 0,
-                                    payload_len,
-                                });
+                                self.pending = Some(PendingResponseWrite::GunPrefixed);
                                 return Poll::Pending;
                             }
                             Poll::Ready(Err(error)) => {
@@ -320,10 +312,8 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                                 return Poll::Ready(Err(error));
                             }
                             Poll::Ready(Ok(written)) => {
-                                // written is combined.len(); report payload only.
                                 self.pending = None;
-                                let _ = written;
-                                return Poll::Ready(Ok(payload_len));
+                                return Poll::Ready(Ok(written));
                             }
                         }
                     }
@@ -337,6 +327,26 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                     });
                 }
                 Some(PendingResponseWrite::GunPrefixed) => {
+                    // Complete the in-flight prefixed frame without re-passing
+                    // `buf` into poll_write (which can re-frame without prefix).
+                    if let Some(gun) =
+                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
+                    {
+                        match gun.poll_complete_write(cx) {
+                            Poll::Pending => {
+                                self.pending = Some(PendingResponseWrite::GunPrefixed);
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => {
+                                self.pending = None;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(written)) => {
+                                self.pending = None;
+                                return Poll::Ready(Ok(written));
+                            }
+                        }
+                    }
                     match Pin::new(&mut self.inner).poll_write(cx, buf) {
                         Poll::Pending => {
                             self.pending = Some(PendingResponseWrite::GunPrefixed);
