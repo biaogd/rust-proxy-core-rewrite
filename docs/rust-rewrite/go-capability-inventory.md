@@ -292,7 +292,9 @@ separate claims.
 5. Phase 8 must test behavior natively per OS/stack/build profile. Cross-builds
    alone cannot move a runtime row to **Parity**.
 6. Phase 9 is the only replacement gate. It requires every advertised inventory
-   ID to resolve to **Parity** or an explicitly approved exclusion.
+   ID to resolve to **Parity** or an explicitly approved exclusion. Gap
+   **ordering** toward deleting Go is in
+   [`go-parity-alignment-roadmap.md`](go-parity-alignment-roadmap.md).
 
 ## Completeness gate
 
