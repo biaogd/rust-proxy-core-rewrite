@@ -10,6 +10,7 @@ use crate::{BoxedOutboundStream, DirectTcpOptions, connect_with_options};
 pub use rewrite_protocol_vless::{
     VlessClientOptions as VlessTcpOptions, VlessFlow, VlessPacketMode,
     VlessProtocolError as VlessProxyError, VlessUdpAssociation, associate_vless_udp_on_stream,
+    peel_replaceable_vless,
 };
 use rewrite_transport::VisionDirectControl;
 

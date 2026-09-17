@@ -2453,10 +2453,27 @@ pub(super) async fn relay_tracked_tcp(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) {
+    // Go bufio.Copy peels VLESS once replaceable. Peel during the 32 KiB relay
+    // (same buffer size as Trojan) — an 8 KiB warmup under-sizes Gun frames for
+    // short-conn sendall-before-recv harnesses and never reaches the fast path
+    // until the VLESS response is observed.
+    let needs_peel = remote
+        .as_any_mut()
+        .downcast_mut::<rewrite_protocol_vless::VlessTcpStream>()
+        .is_some();
     tokio::select! {
         () = shutdown.cancelled() => {}
         () = tracker.cancelled() => {}
-        result = rewrite_net::relay(&mut client, &mut remote) => match result {
+        result = async {
+            if needs_peel {
+                rewrite_net::relay_with_right_peel(&mut client, &mut remote, |remote| {
+                    rewrite_outbound::peel_replaceable_vless(remote)
+                })
+                .await
+            } else {
+                rewrite_net::relay(&mut client, &mut remote).await
+            }
+        } => match result {
             Ok((uploaded, downloaded)) => tracker.finish(uploaded, downloaded),
             Err(error) => state.log("error", format!("TCP relay failed: {error}")),
         }

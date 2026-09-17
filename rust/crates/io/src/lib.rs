@@ -1,5 +1,6 @@
 //! Minimal asynchronous I/O types shared across architectural layers.
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -48,9 +49,22 @@ impl VisionDirectControl {
 }
 
 /// An owned asynchronous byte stream accepted by protocol and transport layers.
-pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
+///
+/// `as_any_mut` supports Go-style replaceable unwrap after protocol handshakes
+/// (e.g. VLESS peeling to the bare Gun/TLS carrier for bulk relay).
+pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {
+    /// Downcast handle for optional replaceable-stream peeling.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
 
-impl<T> DuplexStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> DuplexStream for T
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 /// Type-erased duplex stream shared by inbound, outbound and protocol crates.
 pub type BoxedStream = Box<dyn DuplexStream>;
