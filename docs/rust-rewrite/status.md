@@ -1,6 +1,12 @@
 # Rust rewrite status
 
-Last updated: 2026-09-16
+Last updated: 2026-09-17
+
+### Go → Rust capability alignment roadmap — 2026-09-17
+
+Program-level ordering for closing remaining Go gaps before deleting the Go
+tree: [`go-parity-alignment-roadmap.md`](go-parity-alignment-roadmap.md)
+(Waves A–D, workstreams W1–W7, Gate D). Does not change product behavior.
 
 ### IN-H-A Trojan TLS inbound lifecycle (partial) — 2026-09-16
 
