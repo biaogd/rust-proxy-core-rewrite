@@ -297,26 +297,10 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // Concrete GunStream: one DATA frame with in-buffer prefix
-                    // (Go FrontHeadroom / ExtendHeader) — no intermediate Vec.
-                    if let Some(gun) =
-                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
-                    {
-                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
-                            Poll::Pending => {
-                                self.pending = Some(PendingResponseWrite::GunPrefixed);
-                                return Poll::Pending;
-                            }
-                            Poll::Ready(Err(error)) => {
-                                self.pending = None;
-                                return Poll::Ready(Err(error));
-                            }
-                            Poll::Ready(Ok(written)) => {
-                                self.pending = None;
-                                return Poll::Ready(Ok(written));
-                            }
-                        }
-                    }
+                    // Vec coalesce → one Gun/TLS frame. FrontHeadroom
+                    // poll_write_with_prefix still regresses bulk (~0.75x) even
+                    // after the flush double-frame fix; keep Vec until that is
+                    // understood.
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
@@ -327,8 +311,7 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                     });
                 }
                 Some(PendingResponseWrite::GunPrefixed) => {
-                    // Resume drain of the already-framed prefix||payload.
-                    // GunStream reports completion even if flush drained first.
+                    // Kept for ABI stability if re-enabled; should be unreachable.
                     match Pin::new(&mut self.inner).poll_write(cx, buf) {
                         Poll::Pending => {
                             self.pending = Some(PendingResponseWrite::GunPrefixed);
