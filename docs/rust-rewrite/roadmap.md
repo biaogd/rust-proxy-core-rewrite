@@ -7,6 +7,11 @@ Each phase must name its compatibility-matrix rows, preserve the Go oracle, add
 deterministic tests, pass all required checks, and leave unsupported behavior
 explicit. A phase is complete only when its exit gate passes.
 
+**Go deletion / full capability alignment** is planned separately in
+[`go-parity-alignment-roadmap.md`](go-parity-alignment-roadmap.md) (Waves A–D).
+Historical phase narratives below remain authoritative for completed gates;
+use the alignment roadmap for remaining gap ordering toward removing Go.
+
 ## Phase 0 — baseline and governance
 
 Deliverables:
@@ -3493,6 +3498,10 @@ run only where privileges exist, without marking absent evidence as pass.
 
 ## Phase 9 — release replacement gate
 
+Phase 9 is the **final** replacement review. Capability gap closure that must
+finish before deleting Go is ordered in
+[`go-parity-alignment-roadmap.md`](go-parity-alignment-roadmap.md) (Gate D).
+
 - **9A packaging:** verify artifact names, archive/package contents, version
   metadata and reproducibility for the release matrix.
 - **9B migration:** validate upgrade/restart, storage/profile migration and
@@ -3504,8 +3513,10 @@ run only where privileges exist, without marking absent evidence as pass.
   approved exclusion, and keep a supported rollback to the pinned/last-known-
   good Go binary.
 
-Only this gate may consider a default-binary switch. It does not require deleting
-the Go oracle.
+Only this gate may consider a default-binary switch. Deleting the Go source
+tree additionally requires Gate D in the alignment roadmap (every advertised
+inventory ID Parity or approved exclusion; CI no longer builds Go from this
+repo).
 
 ### Hysteria2 priority update — 2026-09-08
 
