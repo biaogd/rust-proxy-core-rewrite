@@ -360,6 +360,15 @@ where
     ///
     /// Returns `None` when the peer closes the HTTP/2 connection.
     pub async fn accept(&mut self) -> Option<io::Result<BoxedStream>> {
+        match self.accept_gun().await? {
+            Ok(stream) => Some(Ok(Box::new(stream))),
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// Like [`Self::accept`], but returns the concrete [`GunStream`] so callers
+    /// can avoid an extra `Box` when they need Gun-specific write helpers.
+    pub async fn accept_gun(&mut self) -> Option<io::Result<GunStream>> {
         loop {
             let (request, mut respond) = match self.connection.accept().await? {
                 Ok(pair) => pair,
@@ -375,7 +384,7 @@ where
                 Err(error) => return Some(Err(h2_error(error))),
             };
             let receiver = request.into_body();
-            return Some(Ok(Box::new(GunStream::new(h2_data_stream(sender, receiver)))));
+            return Some(Ok(GunStream::new(h2_data_stream(sender, receiver))));
         }
     }
 }
@@ -413,7 +422,8 @@ enum GunInner {
     Plain(BoxedStream),
 }
 
-struct GunStream {
+/// Framed Gun/gRPC data stream (v2ray gun transport).
+pub struct GunStream {
     inner: GunInner,
     /// Pending framed Gun message waiting for h2 send capacity.
     write_frame: Option<Bytes>,
@@ -459,11 +469,19 @@ impl GunStream {
     }
 
     fn frame(payload: &[u8]) -> io::Result<Bytes> {
+        Self::frame_with_prefix(&[], payload)
+    }
+
+    fn frame_with_prefix(prefix: &[u8], payload: &[u8]) -> io::Result<Bytes> {
+        let total = prefix
+            .len()
+            .checked_add(payload.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Gun frame is too large"))?;
         let mut encoded_length = [0_u8; 10];
-        let varint_length = encode_uvarint(payload.len() as u64, &mut encoded_length);
+        let varint_length = encode_uvarint(total as u64, &mut encoded_length);
         let grpc_length = 1_usize
             .checked_add(varint_length)
-            .and_then(|length| length.checked_add(payload.len()))
+            .and_then(|length| length.checked_add(total))
             .and_then(|length| u32::try_from(length).ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Gun frame is too large"))?;
         let mut frame = BytesMut::with_capacity(5 + grpc_length as usize);
@@ -471,8 +489,27 @@ impl GunStream {
         frame.extend_from_slice(&grpc_length.to_be_bytes());
         frame.put_u8(0x0a);
         frame.extend_from_slice(&encoded_length[..varint_length]);
+        frame.extend_from_slice(prefix);
         frame.extend_from_slice(payload);
         Ok(frame.freeze())
+    }
+
+    /// Write `prefix || input` as one Gun frame. Returns `input.len()` (prefix
+    /// is not counted — AsyncWrite contract for the application payload).
+    pub fn poll_write_with_prefix(
+        &mut self,
+        cx: &mut Context<'_>,
+        prefix: &[u8],
+        input: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.write_frame.is_some() {
+            ready!(self.poll_drain(cx))?;
+            return Poll::Ready(Ok(std::mem::take(&mut self.pending_input)));
+        }
+        self.write_frame = Some(Self::frame_with_prefix(prefix, input)?);
+        self.pending_input = input.len();
+        ready!(self.poll_drain(cx))?;
+        Poll::Ready(Ok(std::mem::take(&mut self.pending_input)))
     }
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -709,6 +746,28 @@ mod tests {
             [
                 0, 0, 0, 0, 14, 0x0a, 12, b'v', b'm', b'e', b's', b's', b'-', b'h', b'e', b'a',
                 b'd', b'e', b'r',
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn frames_prefix_and_payload_as_one_gun_message() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let mut client = GunStream::new_plain(Box::new(client) as BoxedStream);
+        let server_task = tokio::spawn(async move {
+            let mut request = [0_u8; 14];
+            server.read_exact(&mut request).await.expect("Gun request");
+            request
+        });
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match client.poll_write_with_prefix(&mut cx, &[0, 0], b"hello") {
+            std::task::Poll::Ready(Ok(5)) => {}
+            other => panic!("unexpected poll_write_with_prefix: {other:?}"),
+        }
+        assert_eq!(
+            server_task.await.expect("server task"),
+            [
+                0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',
             ]
         );
     }

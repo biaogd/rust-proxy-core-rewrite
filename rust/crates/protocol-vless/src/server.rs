@@ -3,6 +3,7 @@
 //! Accepts version-zero TCP, standard UDP, and mux/XUDP commands with optional
 //! Vision flow addons. REALITY stays out of the request decoder.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -10,6 +11,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rewrite_model::{Destination, Host};
+use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use uuid::Uuid;
 
@@ -235,6 +237,8 @@ pub struct VlessServerStream<S> {
 enum PendingResponseWrite {
     /// Response header not started; coalesce on the next non-empty write.
     Idle,
+    /// GunStream accepted `prefix||payload` as one frame; drain in progress.
+    GunPrefixed,
     /// Combined `[VERSION, 0] || payload` partially flushed.
     Flushing {
         combined: Vec<u8>,
@@ -275,7 +279,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for VlessServerStream<S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
+impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -287,6 +291,32 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                     return Pin::new(&mut self.inner).poll_write(cx, buf);
                 }
                 Some(PendingResponseWrite::Idle) => {
+                    // Empty writes must not emit a solo `[VERSION, 0]` frame
+                    // (matches Go: header only rides with a real WriteBuffer).
+                    if buf.is_empty() {
+                        self.pending = Some(PendingResponseWrite::Idle);
+                        return Poll::Ready(Ok(0));
+                    }
+                    // Concrete GunStream: one DATA frame with in-buffer prefix
+                    // (Go FrontHeadroom / ExtendHeader) — no intermediate Vec.
+                    if let Some(gun) =
+                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
+                    {
+                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
+                            Poll::Pending => {
+                                self.pending = Some(PendingResponseWrite::GunPrefixed);
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => {
+                                self.pending = None;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(written)) => {
+                                self.pending = None;
+                                return Poll::Ready(Ok(written));
+                            }
+                        }
+                    }
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
@@ -295,6 +325,22 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                         offset: 0,
                         payload_len: buf.len(),
                     });
+                }
+                Some(PendingResponseWrite::GunPrefixed) => {
+                    match Pin::new(&mut self.inner).poll_write(cx, buf) {
+                        Poll::Pending => {
+                            self.pending = Some(PendingResponseWrite::GunPrefixed);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Err(error)) => {
+                            self.pending = None;
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(written)) => {
+                            self.pending = None;
+                            return Poll::Ready(Ok(written));
+                        }
+                    }
                 }
                 Some(PendingResponseWrite::Flushing {
                     combined,
@@ -312,8 +358,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                                 return Poll::Pending;
                             }
                             Poll::Ready(Err(error)) => {
-                                // Match Go: mark response consumed even on error so
-                                // retries do not prepend a second header.
                                 self.pending = None;
                                 return Poll::Ready(Err(error));
                             }
@@ -372,6 +416,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                 }
             }
             self.pending = None;
+        } else if matches!(self.pending.as_ref(), Some(PendingResponseWrite::GunPrefixed)) {
+            match Pin::new(&mut self.inner).poll_flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                other => {
+                    self.pending = None;
+                    return other;
+                }
+            }
         }
         Pin::new(&mut self.inner).poll_flush(cx)
     }

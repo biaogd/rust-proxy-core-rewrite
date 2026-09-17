@@ -386,7 +386,7 @@ where
 
 impl<S> AsyncWrite for VlessInboundStream<S>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + 'static,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -431,7 +431,7 @@ where
 
 impl<S> rewrite_inbound::InboundStream for VlessInboundStream<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
         Ok(self.local)
@@ -707,7 +707,9 @@ async fn serve_vless_grpc_connection<S>(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            accepted = connection.accept() => {
+            // Concrete GunStream (not BoxedStream) so VlessServerStream can
+            // TypeId-match and emit [VERSION,0]||payload as one Gun frame.
+            accepted = connection.accept_gun() => {
                 match accepted {
                     Some(Ok(stream)) => {
                         if streams.len() >= VLESS_MAX_GRPC_STREAMS {
