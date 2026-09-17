@@ -247,7 +247,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | A | W1.2 tproxy | **Partial** — Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; UDP/named open |
 | A | W1.3 tunnel | **Partial** — top-level `tunnels:` TCP/UDP + SpecialProxy; named open |
 | A | W1.4 named http/socks/mixed | Not started |
-| A | W2.1 PROCESS | Not started |
+| A | W2.1 PROCESS | **Partial** — Linux PROCESS-NAME/PATH + UID; regex/other OS open |
 | A | W2.2 sniffer | **Partial** — config + TCP TLS SNI / HTTP Host; QUIC/HTTP2 open |
 | A | W2.3–W2.4 geodata/MMDB/ASN | Partial |
 | A | W1.5–W1.6 TUN policy + CI Parity | Partial |
@@ -306,7 +306,7 @@ Concrete next slices after this doc lands:
 2. **W1.2** Linux tproxy TCP (UDP next) ✅ partial  
 3. **W1.3** static tunnels TCP/UDP ✅ partial (named open)  
 4. **W2.2** sniffer config + HTTP/TLS sniff on local/TUN path ✅ partial (QUIC open)  
-5. **W2.1** PROCESS rules (Linux first)  
+5. **W2.1** PROCESS rules (Linux first) ✅ partial (regex/other OS open)  
 6. **W3.1** Trojan inbound Reality  
 
 Parallel track: **W1.6** TUN privileged CI to Parity; **W7.6** SS AEAD perf.

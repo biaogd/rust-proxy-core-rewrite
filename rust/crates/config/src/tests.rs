@@ -5060,3 +5060,29 @@ fn provider_replace_revalidates_dialer_proxies() {
     // Failed replace must leave the caller generation unchanged.
     assert!(config.proxy_providers[0].proxies.is_empty());
 }
+
+
+#[test]
+fn parses_find_process_mode() {
+    let source = r#"
+mode: rule
+ipv6: false
+find-process-mode: always
+rules:
+  - MATCH,DIRECT
+"#;
+    let config = Config::from_yaml(source).expect("find-process-mode");
+    assert_eq!(config.find_process_mode, crate::FindProcessMode::Always);
+}
+
+#[test]
+fn rejects_invalid_find_process_mode() {
+    let source = r#"
+mode: rule
+rules:
+  - MATCH,DIRECT
+find-process-mode: weird
+"#;
+    let error = Config::from_yaml(source).expect_err("bad mode");
+    assert!(matches!(error, ConfigError::InvalidFindProcessMode));
+}

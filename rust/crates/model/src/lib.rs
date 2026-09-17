@@ -119,6 +119,11 @@ pub struct Metadata {
     pub sniff_host: String,
     /// Set when host was recovered via DNS mapping (redir-host), matching Go `DNSMapping`.
     pub dns_mapping: bool,
+    pub uid: u32,
+    pub process: String,
+    pub process_path: String,
+    /// True after a process lookup attempt (success or miss) for this session.
+    pub process_resolved: bool,
     pub source_ip: Option<IpAddr>,
     pub destination_ip: Option<IpAddr>,
     pub source_port: u16,
@@ -149,6 +154,10 @@ impl Metadata {
             host,
             sniff_host: String::new(),
             dns_mapping: false,
+            uid: 0,
+            process: String::new(),
+            process_path: String::new(),
+            process_resolved: false,
             source_ip: None,
             destination_ip,
             source_port: 0,

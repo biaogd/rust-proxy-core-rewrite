@@ -121,7 +121,7 @@ central TCP/UDP data plane is in [`tunnel`](../../tunnel).
 | RULE-04 | IP-CIDR/IP-CIDR6/SRC-IP-CIDR and lazy/no-resolve semantics | Partial (current IPv4 live plus IPv6 pure) | Native IPv6/live-context completion |
 | RULE-05 | IP-SUFFIX/SRC-IP-SUFFIX, address unmapping and family behavior | Partial (IPv4 live including mapped/partial; IPv6 pure) | Native IPv6/live-context completion |
 | RULE-06 | SRC/DST/IN-PORT, NETWORK and DSCP | Partial (current fixed TCP+UDP metadata complete; nonzero transparent DSCP pending) | Future inbound/platform completion |
-| RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | Not started | 5B3 plus platform gates |
+| RULE-07 | PROCESS name/path exact/regex/wildcard and UID across supported OSes | **Partial — W2.1:** Linux PROCESS-NAME/PATH exact + UID + find-process-mode; regex/wildcard and other OS open | W2.1 / 5B3 |
 | RULE-08 | IN-TYPE, IN-USER and IN-NAME | Partial (current fixed local TCP+UDP set complete) | Named/remote inbound gates |
 | RULE-09 | GEOIP, GEOSITE, IP-ASN and source variants | Not started | 5B4 |
 | RULE-10 | RULE-SET classical/domain/IP strategies, MRS, providers and refresh | Not started | 5B5, 5C4 |
@@ -219,7 +219,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Complete in declared local DIRECT scope: bounded client-keyed IPv4/IPv6 reuse, fan-out, multi-response, control-close/generation retention and pressure recovery pass; exact timeout is enabled in CI | Remote adapters/UoT and CI slow-gate result remain separate claims |
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
 | RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | **Partial — W2.2:** TCP TLS/HTTP peek + sniff_host / optional override; QUIC/UDP open | W2.2 / 5B7 |
-| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
+| RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F socket behavior + **W2.1 Linux process lookup** for PROCESS/UID rules; other OS finders open | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |
 | RUN-08 | Power/network change handling and resolver/connection reset | Partial 8F (default-route poll + resolver reset; native CI unclaimed) | 8F |

@@ -13,8 +13,8 @@ use crate::dns::{
 };
 use crate::error::ConfigError;
 use crate::model::{
-    AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls,
-    Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
+    AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, FindProcessMode,
+    GeoXUrls, Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
     ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig,
     TrojanInboundConfig, TunnelInboundConfig, TuicInboundConfig, VlessInboundConfig,
     VmessInboundConfig,
@@ -246,6 +246,7 @@ impl ConfigSpec {
         proxy_names.extend(proxy_groups.iter().map(|group| group.name.clone()));
         let tunnel_listeners = parse_tunnels(raw.tunnels, &proxy_names)?;
         let sniffer = parse_sniffer(raw.sniffer)?;
+        let find_process_mode = parse_find_process_mode(raw.find_process_mode.as_deref())?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -319,6 +320,7 @@ impl ConfigSpec {
             tunnel_listeners,
             tun,
             sniffer,
+            find_process_mode,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
             home_directory: provider_directory.map(Path::to_path_buf),
@@ -493,6 +495,7 @@ impl TryFrom<ConfigSpec> for Config {
             tunnel_listeners: spec.tunnel_listeners,
             tun: spec.tun,
             sniffer: spec.sniffer,
+            find_process_mode: spec.find_process_mode,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
         })
@@ -1286,6 +1289,15 @@ fn parse_mode(value: &str) -> Result<Mode, ConfigError> {
         "rule" => Ok(Mode::Rule),
         "direct" => Ok(Mode::Direct),
         _ => Err(ConfigError::InvalidMode),
+    }
+}
+
+fn parse_find_process_mode(value: Option<&str>) -> Result<FindProcessMode, ConfigError> {
+    match value.unwrap_or("strict").to_lowercase().as_str() {
+        "strict" => Ok(FindProcessMode::Strict),
+        "always" => Ok(FindProcessMode::Always),
+        "off" => Ok(FindProcessMode::Off),
+        _ => Err(ConfigError::InvalidFindProcessMode),
     }
 }
 
