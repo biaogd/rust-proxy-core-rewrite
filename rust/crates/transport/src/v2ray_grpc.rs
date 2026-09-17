@@ -793,6 +793,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prefix_and_vec_coalesce_frames_match_at_32kib() {
+        let payload = vec![0xab_u8; 32 * 1024];
+        let mut combined = Vec::with_capacity(2 + payload.len());
+        combined.extend_from_slice(&[0, 0]);
+        combined.extend_from_slice(&payload);
+        let via_prefix = GunStream::frame_with_prefix(&[0, 0], &payload).expect("prefix");
+        let via_vec = GunStream::frame(&combined).expect("vec");
+        assert_eq!(via_prefix, via_vec);
+    }
+
     #[tokio::test]
     async fn flush_during_pending_write_does_not_duplicate_frame() {
         use std::pin::Pin;

@@ -297,10 +297,10 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // Vec coalesce → one Gun/TLS frame. FrontHeadroom
-                    // poll_write_with_prefix still regresses bulk (~0.75x) even
-                    // after the flush double-frame fix; keep Vec until that is
-                    // understood.
+                    // Probe: detect Gun without using prefix write — if this
+                    // alone regresses, the Any downcast is the problem.
+                    let _is_gun =
+                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>().is_some();
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
