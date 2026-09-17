@@ -189,7 +189,9 @@ pub(super) enum UdpReplySink {
     Socks5(Arc<UdpSocket>),
     /// Raw write-back for static tunnel UDP (no SOCKS5 framing).
     Raw(Arc<UdpSocket>),
-    Tun { tx: rewrite_tun::TunUdpReplyTx },
+    Tun {
+        tx: rewrite_tun::TunUdpReplyTx,
+    },
 }
 
 impl UdpReplySink {

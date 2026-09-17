@@ -803,9 +803,7 @@ mod tests {
         }
         assert_eq!(
             server_task.await.expect("server task"),
-            [
-                0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',
-            ]
+            [0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',]
         );
     }
 
@@ -886,11 +884,7 @@ mod tests {
         assert_eq!(seen[6], 18);
         assert_eq!(&seen[7..9], &[0, 0]);
         assert_eq!(&seen[9..25], payload);
-        assert_eq!(
-            seen.len(),
-            25,
-            "must not emit a second duplicate Gun frame"
-        );
+        assert_eq!(seen.len(), 25, "must not emit a second duplicate Gun frame");
     }
 
     #[tokio::test]

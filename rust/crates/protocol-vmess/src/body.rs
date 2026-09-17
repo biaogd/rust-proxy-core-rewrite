@@ -589,11 +589,7 @@ impl BodyReader {
                         }
                     }
                 }
-                PendingRecordRead::Fill {
-                    buf,
-                    filled,
-                    stage,
-                } => {
+                PendingRecordRead::Fill { buf, filled, stage } => {
                     match poll_fill_exact(cx, reader, buf, filled) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => {
@@ -669,8 +665,7 @@ impl BodyReader {
                                 unreachable!("AEAD length stage requires AEAD reader");
                             };
                             let framed_length = if authenticated {
-                                let Some(length_cipher) = &aead.framing.authenticated_length
-                                else {
+                                let Some(length_cipher) = &aead.framing.authenticated_length else {
                                     unreachable!("authenticated length cipher missing");
                                 };
                                 let length = match length_cipher.open(
@@ -692,15 +687,13 @@ impl BodyReader {
                                         .mask_length(u16::from_be_bytes([buf[0], buf[1]])),
                                 )
                             };
-                            let Some(ciphertext_length) =
-                                framed_length.checked_sub(padding_length)
+                            let Some(ciphertext_length) = framed_length.checked_sub(padding_length)
                             else {
                                 return Poll::Ready(Err(std::io::Error::other(
                                     "invalid VMess body padding length",
                                 )));
                             };
-                            if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length)
-                            {
+                            if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length) {
                                 return Poll::Ready(Err(std::io::Error::other(
                                     "invalid VMess body record length",
                                 )));

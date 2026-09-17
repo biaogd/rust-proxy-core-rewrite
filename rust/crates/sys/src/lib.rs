@@ -38,10 +38,7 @@ pub fn tcp_original_destination(_fd: (), local: SocketAddr) -> io::Result<Socket
 }
 
 #[cfg(target_os = "linux")]
-fn linux_original_destination(
-    fd: std::os::fd::RawFd,
-    local: SocketAddr,
-) -> io::Result<SocketAddr> {
+fn linux_original_destination(fd: std::os::fd::RawFd, local: SocketAddr) -> io::Result<SocketAddr> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     const SO_ORIGINAL_DST: libc::c_int = 80;
@@ -371,14 +368,7 @@ fn linux_inet_diag_uid_inode(
 
     loop {
         // SAFETY: recvfrom into owned buffer.
-        let n = unsafe {
-            libc::recv(
-                fd.as_raw_fd(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                0,
-            )
-        };
+        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
         if n < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -394,10 +384,7 @@ fn linux_inet_diag_uid_inode(
                 return Err(io::Error::new(io::ErrorKind::NotFound, "socket not found"));
             }
             if hdr.type_ == NLMSG_ERROR {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "inet_diag netlink error",
-                ));
+                return Err(io::Error::other("inet_diag netlink error"));
             }
             let payload_off = offset + hdr_len;
             let payload_len = hdr.len as usize - hdr_len;

@@ -6,9 +6,7 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 
 use crate::error::ConfigError;
-use crate::model::{
-    SniffProtocol, SnifferConfig, SnifferDomainMatcher, SnifferProtocolConfig,
-};
+use crate::model::{SniffProtocol, SnifferConfig, SnifferDomainMatcher, SnifferProtocolConfig};
 use crate::raw::{RawSniffer, RawSniffingConfig};
 
 /// Parses Go `sniffer:` with defaults matching `DefaultRawConfig`.

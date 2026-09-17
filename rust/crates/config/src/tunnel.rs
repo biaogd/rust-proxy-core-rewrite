@@ -52,7 +52,10 @@ fn parse_tunnel_one_liner(
     let networks = parse_networks(parts[0], index)?;
     let listen = parse_listen_addr(parts[1], index)?;
     let target = parse_target(parts[2], index)?;
-    let proxy = parts.get(3).map(|value| (*value).to_owned()).unwrap_or_default();
+    let proxy = parts
+        .get(3)
+        .map(|value| (*value).to_owned())
+        .unwrap_or_default();
     validate_proxy(&proxy, proxy_names, index)?;
     Ok(expand(networks, listen, target, proxy))
 }
@@ -85,12 +88,10 @@ fn parse_tunnel_mapping(
             )));
         }
     };
-    let address = mapping_string(&mapping, "address").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("tunnel {index} missing address"))
-    })?;
-    let target_raw = mapping_string(&mapping, "target").ok_or_else(|| {
-        ConfigError::InvalidInbound(format!("tunnel {index} missing target"))
-    })?;
+    let address = mapping_string(&mapping, "address")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("tunnel {index} missing address")))?;
+    let target_raw = mapping_string(&mapping, "target")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("tunnel {index} missing target")))?;
     let proxy = mapping_string(&mapping, "proxy").unwrap_or_default();
     let listen = parse_listen_addr(&address, index)?;
     let target = parse_target(&target_raw, index)?;
@@ -152,17 +153,13 @@ fn dedupe_networks(networks: Vec<TunnelNetwork>) -> Vec<TunnelNetwork> {
 
 fn parse_listen_addr(value: &str, index: usize) -> Result<SocketAddr, ConfigError> {
     value.parse().map_err(|_| {
-        ConfigError::InvalidInbound(format!(
-            "invalid tunnel address {value} (tunnel {index})"
-        ))
+        ConfigError::InvalidInbound(format!("invalid tunnel address {value} (tunnel {index})"))
     })
 }
 
 fn parse_target(value: &str, index: usize) -> Result<Destination, ConfigError> {
     let (host, port) = split_host_port(value).ok_or_else(|| {
-        ConfigError::InvalidInbound(format!(
-            "invalid tunnel target {value} (tunnel {index})"
-        ))
+        ConfigError::InvalidInbound(format!("invalid tunnel target {value} (tunnel {index})"))
     })?;
     Ok(Destination { host, port })
 }

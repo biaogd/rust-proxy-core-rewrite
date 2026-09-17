@@ -399,7 +399,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                 }
             }
             self.pending = None;
-        } else if matches!(self.pending.as_ref(), Some(PendingResponseWrite::GunPrefixed)) {
+        } else if matches!(
+            self.pending.as_ref(),
+            Some(PendingResponseWrite::GunPrefixed)
+        ) {
             // Drain the in-flight prefixed frame but keep GunPrefixed so the
             // pending poll_write observes completion (does not re-frame).
             return Pin::new(&mut self.inner).poll_flush(cx);

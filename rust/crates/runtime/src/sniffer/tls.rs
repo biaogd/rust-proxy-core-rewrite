@@ -173,8 +173,7 @@ fn client_hello_size(data: &[u8]) -> Result<usize, SniffError> {
     if data[0] != TLS_HANDSHAKE_TYPE_CLIENT_HELLO {
         return Err(SniffError::Fatal);
     }
-    let body_len =
-        usize::from(data[1]) << 16 | usize::from(data[2]) << 8 | usize::from(data[3]);
+    let body_len = usize::from(data[1]) << 16 | usize::from(data[2]) << 8 | usize::from(data[3]);
     Ok(TLS_HANDSHAKE_HEADER_LEN + body_len)
 }
 

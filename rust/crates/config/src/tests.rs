@@ -5095,7 +5095,6 @@ fn provider_replace_revalidates_dialer_proxies() {
     assert!(config.proxy_providers[0].proxies.is_empty());
 }
 
-
 #[test]
 fn parses_find_process_mode() {
     let source = r#"

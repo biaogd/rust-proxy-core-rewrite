@@ -321,10 +321,7 @@ impl AsyncRead for VlessTcpStream {
                 if response_header[0] != VERSION {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!(
-                            "unexpected VLESS response version {}",
-                            response_header[0]
-                        ),
+                        format!("unexpected VLESS response version {}", response_header[0]),
                     )));
                 }
                 *response_addons_remaining = usize::from(response_header[1]);
@@ -443,10 +440,7 @@ impl AsyncWrite for VlessTcpStream {
                     return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
                 }
                 Poll::Ready(Ok(written)) => {
-                    if let HandshakeState::Active {
-                        request_offset, ..
-                    } = &mut self.handshake
-                    {
+                    if let HandshakeState::Active { request_offset, .. } = &mut self.handshake {
                         *request_offset += written;
                     }
                 }
@@ -510,11 +504,7 @@ impl VlessResponsePendingStream {
     }
 
     pub fn take_inner_if_done(&mut self) -> Option<BoxedStream> {
-        if self.done {
-            self.inner.take()
-        } else {
-            None
-        }
+        if self.done { self.inner.take() } else { None }
     }
 
     fn inner_mut(&mut self) -> std::io::Result<&mut BoxedStream> {

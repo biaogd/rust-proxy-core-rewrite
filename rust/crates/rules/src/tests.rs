@@ -223,7 +223,10 @@ fn matches_redir_inbound_type() {
 
 #[test]
 fn matches_tproxy_inbound_type() {
-    let rules = vec!["IN-TYPE,TPROXY,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let rules = vec![
+        "IN-TYPE,TPROXY,REJECT".to_owned(),
+        "MATCH,DIRECT".to_owned(),
+    ];
     let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
     let mut input = metadata("tproxy.test", 443);
     input.inbound = InboundProtocol::Tproxy;
@@ -234,7 +237,10 @@ fn matches_tproxy_inbound_type() {
 
 #[test]
 fn matches_tunnel_inbound_type() {
-    let rules = vec!["IN-TYPE,TUNNEL,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let rules = vec![
+        "IN-TYPE,TUNNEL,REJECT".to_owned(),
+        "MATCH,DIRECT".to_owned(),
+    ];
     let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
     let mut input = metadata("tunnel.test", 443);
     input.inbound = InboundProtocol::Tunnel;
@@ -429,7 +435,10 @@ fn parses_process_name_path_and_uid() {
 #[test]
 fn process_name_matches_case_insensitively() {
     let program = RuleSet::parse(
-        &["PROCESS-NAME,CuRl,DIRECT".to_owned(), "MATCH,REJECT".to_owned()],
+        &[
+            "PROCESS-NAME,CuRl,DIRECT".to_owned(),
+            "MATCH,REJECT".to_owned(),
+        ],
         &Default::default(),
         &[],
     )

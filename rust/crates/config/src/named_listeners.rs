@@ -4,9 +4,9 @@ use crate::ConfigError;
 use crate::model::{
     AnyTlsInboundConfig, AnyTlsInboundUser, Hysteria2InboundConfig, Hysteria2InboundUser,
     RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
-    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig, TrojanInboundUser,
-    TuicInboundConfig, TuicInboundUser, VlessFlow, VlessInboundConfig, VlessInboundUser,
-    VmessInboundConfig, VmessInboundUser,
+    ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
+    TrojanInboundUser, TuicInboundConfig, TuicInboundUser, VlessFlow, VlessInboundConfig,
+    VlessInboundUser, VmessInboundConfig, VmessInboundUser,
 };
 use crate::proxy::{
     shadowsocks_2022_cipher, shadowsocks_2022_udp_cipher, supported_shadowsocks_cipher,

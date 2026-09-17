@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rewrite_config::{
     AnyTlsInboundConfig, Config, ConfigError, Hysteria2InboundConfig, ListenerKind, ProxyGroupKind,
-    ShadowsocksInboundConfig, TrojanInboundConfig, TunnelNetwork, TuicInboundConfig,
+    ShadowsocksInboundConfig, TrojanInboundConfig, TuicInboundConfig, TunnelNetwork,
     VlessInboundConfig, VmessInboundConfig,
 };
 use rewrite_state::RuntimeState;
@@ -302,10 +302,7 @@ async fn apply_generation_inner(
                     Err(error) => {
                         state.log(
                             "error",
-                            format!(
-                                "Start tunnel {} error: {error}",
-                                tunnel.target.authority()
-                            ),
+                            format!("Start tunnel {} error: {error}", tunnel.target.authority()),
                         );
                     }
                 },
@@ -314,10 +311,7 @@ async fn apply_generation_inner(
                     Err(error) => {
                         state.log(
                             "error",
-                            format!(
-                                "Start tunnel {} error: {error}",
-                                tunnel.target.authority()
-                            ),
+                            format!("Start tunnel {} error: {error}", tunnel.target.authority()),
                         );
                     }
                 },
@@ -330,10 +324,7 @@ async fn apply_generation_inner(
             Err(error) if kind == ListenerKind::Tproxy => {
                 // Match Go `ReCreateTProxy`: log and continue without aborting
                 // the generation (IP_TRANSPARENT needs CAP_NET_ADMIN).
-                state.log(
-                    "error",
-                    format!("Start TProxy server error: {error}"),
-                );
+                state.log("error", format!("Start TProxy server error: {error}"));
                 continue;
             }
             Err(error) => return Err(error),
@@ -744,10 +735,7 @@ async fn restore_retired_sockets(
         let (listener, udp) = match bind_fixed_listener(previous, kind, address) {
             Ok(bound) => bound,
             Err(error) if kind == ListenerKind::Tproxy => {
-                state.log(
-                    "error",
-                    format!("Start TProxy server error: {error}"),
-                );
+                state.log("error", format!("Start TProxy server error: {error}"));
                 continue;
             }
             Err(error) => return Err(error),
@@ -802,13 +790,12 @@ fn bind_fixed_listener(
     } else {
         rewrite_platform::bind_local_tcp_listener(address, options)?
     };
-    let listener = if config.inbound_tfo
-        && !matches!(kind, ListenerKind::Redir | ListenerKind::Tproxy)
-    {
-        LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
-    } else {
-        LocalTcpListener::Plain(TcpListener::from_std(listener)?)
-    };
+    let listener =
+        if config.inbound_tfo && !matches!(kind, ListenerKind::Redir | ListenerKind::Tproxy) {
+            LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
+        } else {
+            LocalTcpListener::Plain(TcpListener::from_std(listener)?)
+        };
     let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
         let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
         Some(Arc::new(UdpSocket::from_std(udp)?))

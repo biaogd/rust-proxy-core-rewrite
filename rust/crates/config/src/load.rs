@@ -16,13 +16,14 @@ use crate::model::{
     AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, FindProcessMode,
     GeoXUrls, Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
     ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig,
-    TrojanInboundConfig, TunnelInboundConfig, TuicInboundConfig, VlessInboundConfig,
+    TrojanInboundConfig, TuicInboundConfig, TunnelInboundConfig, VlessInboundConfig,
     VmessInboundConfig,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
     expand_proxy_group, load_proxy_provider_file, parse_proxies, parse_proxy_groups,
-    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types, validate_dialer_proxies,
+    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types,
+    validate_dialer_proxies,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
 use crate::sniffer::parse_sniffer;
@@ -242,7 +243,8 @@ impl ConfigSpec {
             &tuic_listeners,
             &anytls_listeners,
         )?;
-        let mut proxy_names: BTreeSet<String> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
+        let mut proxy_names: BTreeSet<String> =
+            proxies.iter().map(|proxy| proxy.name.clone()).collect();
         proxy_names.extend(proxy_groups.iter().map(|group| group.name.clone()));
         let tunnel_listeners = parse_tunnels(raw.tunnels, &proxy_names)?;
         let sniffer = parse_sniffer(raw.sniffer)?;
@@ -897,9 +899,9 @@ impl Config {
         listen: SocketAddr,
         identity: &str,
     ) -> Option<&TunnelInboundConfig> {
-        self.tunnel_listeners.iter().find(|listener| {
-            listener.listen == listen && listener.reload_identity() == identity
-        })
+        self.tunnel_listeners
+            .iter()
+            .find(|listener| listener.listen == listen && listener.reload_identity() == identity)
     }
 
     #[must_use]
