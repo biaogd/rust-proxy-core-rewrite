@@ -31,8 +31,8 @@ from phase5b1a import build_binaries
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-w21-process-diff.json"
 SCRIPT = pathlib.Path(__file__).resolve()
 ECHO_PAYLOAD = b"phase-w21-process-echo\n"
-PROCESS_NAME = pathlib.Path(sys.executable).name
 PROCESS_PATH = str(pathlib.Path(sys.executable).resolve())
+PROCESS_NAME = pathlib.Path(PROCESS_PATH).name
 UID = os.getuid()
 
 
@@ -132,25 +132,31 @@ def socks5_connect(socks_port: int, dest_host: str, dest_port: int) -> socket.so
     return sock
 
 
-def expect_echo(sock: socket.socket, payload: bytes) -> bytes:
-    sock.sendall(payload)
-    received = b""
-    while len(received) < len(payload):
-        chunk = sock.recv(64)
-        if not chunk:
-            break
-        received += chunk
-    return received
-
-
 def expect_reject(sock: socket.socket, payload: bytes) -> None:
-    sock.sendall(payload)
     try:
+        sock.sendall(payload)
         data = sock.recv(64)
     except OSError:
         return
     if data:
         raise AssertionError(f"expected reject, got {data!r}")
+
+
+def expect_echo(sock: socket.socket, payload: bytes) -> bytes:
+    try:
+        sock.sendall(payload)
+    except OSError as error:
+        raise AssertionError(f"echo send failed: {error}") from error
+    received = b""
+    while len(received) < len(payload):
+        try:
+            chunk = sock.recv(64)
+        except OSError as error:
+            raise AssertionError(f"echo recv failed after {received!r}: {error}") from error
+        if not chunk:
+            break
+        received += chunk
+    return received
 
 
 def run_cases(binaries: dict[str, pathlib.Path]) -> dict[str, Any]:
