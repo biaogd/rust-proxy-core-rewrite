@@ -31,6 +31,14 @@ pub trait InboundStream: AsyncRead + AsyncWrite + Unpin + Send {
     ///
     /// Returns the operating-system socket query error.
     fn peer_addr(&self) -> std::io::Result<SocketAddr>;
+
+    /// Returns the raw file descriptor when this stream is a TCP socket (Unix).
+    ///
+    /// Used by Linux redir to read `SO_ORIGINAL_DST`.
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
 }
 
 impl InboundStream for TcpStream {
@@ -41,6 +49,11 @@ impl InboundStream for TcpStream {
     fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         Self::peer_addr(self)
     }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        Some(std::os::fd::AsRawFd::as_raw_fd(self))
+    }
 }
 
 impl InboundStream for tokio_tfo::TfoStream {
@@ -50,6 +63,12 @@ impl InboundStream for tokio_tfo::TfoStream {
 
     fn peer_addr(&self) -> std::io::Result<SocketAddr> {
         Self::peer_addr(self)
+    }
+
+    // W1.1 redir binds as Plain TCP; TFO + SO_ORIGINAL_DST is not claimed.
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
     }
 }
 

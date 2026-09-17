@@ -388,6 +388,7 @@ pub(crate) fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
             "ANYTLS" => types.push(rewrite_model::InboundProtocol::AnyTls),
             "TUN" => types.push(rewrite_model::InboundProtocol::Tun),
             "INNER" => types.push(rewrite_model::InboundProtocol::Inner),
+            "REDIR" => types.push(rewrite_model::InboundProtocol::Redir),
             "SOCKS" => types.extend([
                 rewrite_model::InboundProtocol::Socks4,
                 rewrite_model::InboundProtocol::Socks5,

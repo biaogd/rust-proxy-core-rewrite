@@ -2,6 +2,7 @@
 
 mod dhcp;
 mod network;
+mod original_dst;
 mod route;
 mod system_dns;
 
@@ -19,6 +20,7 @@ pub use network::{
     planned_bypass_host_route, protect_outbound_destination, resolve_outbound_bind_identity,
     resolve_outbound_bind_interface, set_auto_detect_bind_interface, update_outbound_bypass,
 };
+pub use original_dst::tcp_original_destination;
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
     current_route_platform, darwin_route_args, default_auto_route_destinations, host_route_prefix,

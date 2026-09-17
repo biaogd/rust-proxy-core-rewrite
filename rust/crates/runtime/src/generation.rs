@@ -675,7 +675,7 @@ fn bind_fixed_listener(
             disable_keep_alive: config.disable_keep_alive,
         },
     )?;
-    let listener = if config.inbound_tfo {
+    let listener = if config.inbound_tfo && !matches!(kind, ListenerKind::Redir) {
         LocalTcpListener::FastOpen(tokio_tfo::TfoListener::from_std(listener)?)
     } else {
         LocalTcpListener::Plain(TcpListener::from_std(listener)?)

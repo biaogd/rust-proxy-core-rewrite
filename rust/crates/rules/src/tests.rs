@@ -211,6 +211,17 @@ fn matches_tun_inbound_type() {
 }
 
 #[test]
+fn matches_redir_inbound_type() {
+    let rules = vec!["IN-TYPE,REDIR,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("redir.test", 443);
+    input.inbound = InboundProtocol::Redir;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+    input.inbound = InboundProtocol::Http;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+}
+
+#[test]
 fn matches_inbound_users_exactly() {
     let rules = vec![
         "IN-USER,alice/socks4,REJECT".to_owned(),

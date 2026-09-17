@@ -243,7 +243,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 
 | Wave | Item | Status |
 | --- | --- | --- |
-| A | W1.1 redir | Not started |
+| A | W1.1 redir | **Partial** — Linux fixed `redir-port` TCP (this checkout); Darwin/FreeBSD/named open |
 | A | W1.2 tproxy | Not started |
 | A | W1.3 tunnel | Not started |
 | A | W1.4 named http/socks/mixed | Not started |

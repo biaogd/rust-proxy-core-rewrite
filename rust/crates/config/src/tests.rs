@@ -826,13 +826,25 @@ fn mirrors_oracle_test_mode_port_acceptance() {
 
 #[test]
 fn separates_specification_from_runtime_scope() {
-    let source = format!("{MINIMAL}\nredir-port: 8080\n");
-    let spec = ConfigSpec::from_yaml(&source).expect("Phase 2 specification parses");
+    let source = "redir-port: 8080\nmode: rule\nipv6: false\nrules:\n  - MATCH,DIRECT\n";
+    let spec = ConfigSpec::from_yaml(source).expect("Phase 2 specification parses");
     assert_eq!(spec.normalized().redir_port, 8080);
-    assert!(matches!(
-        Config::try_from(spec),
-        Err(ConfigError::UnsupportedRuntime(feature)) if feature == "redir-port"
-    ));
+    #[cfg(target_os = "linux")]
+    {
+        let config = Config::try_from(spec).expect("Linux accepts redir-port (W1.1)");
+        assert_eq!(config.redir_port, 8080);
+        assert_eq!(
+            config.listener_ports().expect("redir listener"),
+            vec![(ListenerKind::Redir, 8080)]
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(matches!(
+            Config::try_from(spec),
+            Err(ConfigError::UnsupportedRuntime(feature)) if feature == "redir-port"
+        ));
+    }
 }
 
 #[test]

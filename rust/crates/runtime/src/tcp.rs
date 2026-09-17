@@ -35,7 +35,8 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => ListenerProtocol::Http,
         ListenerKind::Socks => ListenerProtocol::Socks,
         ListenerKind::Mixed => ListenerProtocol::Mixed,
-        ListenerKind::Shadowsocks
+        ListenerKind::Redir
+        | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
         | ListenerKind::Vmess
@@ -83,7 +84,8 @@ pub(super) async fn serve_connection(
         ListenerKind::Http => "DEFAULT-HTTP",
         ListenerKind::Socks => "DEFAULT-SOCKS",
         ListenerKind::Mixed => "DEFAULT-MIXED",
-        ListenerKind::Shadowsocks
+        ListenerKind::Redir
+        | ListenerKind::Shadowsocks
         | ListenerKind::Trojan
         | ListenerKind::Vless
         | ListenerKind::Vmess
@@ -175,6 +177,62 @@ pub(super) async fn serve_shadowsocks_connection(
     serve_stream_session(client, metadata, config, state, dns_service, shutdown).await;
 }
 
+/// Linux `redir-port` path: recover the pre-redirect destination via
+/// `SO_ORIGINAL_DST`, then share the post-handshake TCP session path.
+pub(super) async fn serve_redir_connection(
+    client: BoxedInboundStream,
+    config: &Config,
+    state: &Arc<RuntimeState>,
+    dns_service: &Arc<rewrite_dns::DnsService>,
+    shutdown: &CancellationToken,
+) {
+    let Ok(peer) = client.peer_addr() else {
+        return;
+    };
+    if !config.permits_inbound(peer.ip()) {
+        return;
+    }
+    let Ok(local) = client.local_addr() else {
+        return;
+    };
+    #[cfg(unix)]
+    let original = {
+        let Some(fd) = client.as_raw_fd() else {
+            state.log(
+                "error",
+                "redir inbound missing TCP file descriptor for SO_ORIGINAL_DST",
+            );
+            return;
+        };
+        match rewrite_platform::tcp_original_destination(fd, local) {
+            Ok(address) => address,
+            Err(error) => {
+                state.log(
+                    "error",
+                    format!("redir original destination failed: {error}"),
+                );
+                return;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let original = {
+        let _ = local;
+        state.log(
+            "error",
+            "redir inbound is only supported on Linux (W1.1)",
+        );
+        return;
+    };
+    let destination = Destination {
+        host: Host::Ip(unmap_ip(original.ip())),
+        port: original.port(),
+    };
+    let mut metadata = Metadata::new(destination, InboundProtocol::Redir);
+    "DEFAULT-REDIR".clone_into(&mut metadata.inbound_name);
+    serve_stream_session(client, metadata, config, state, dns_service, shutdown).await;
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn serve_stream_session(
     client: BoxedInboundStream,
@@ -201,6 +259,7 @@ pub(super) async fn serve_stream_session(
             InboundProtocol::Tuic => "DEFAULT-TUIC",
             InboundProtocol::AnyTls => "DEFAULT-ANYTLS",
             InboundProtocol::Tun => "DEFAULT-TUN",
+            InboundProtocol::Redir => "DEFAULT-REDIR",
             InboundProtocol::Http
             | InboundProtocol::Https
             | InboundProtocol::Socks4

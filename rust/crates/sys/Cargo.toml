@@ -1,0 +1,18 @@
+[package]
+name = "rewrite-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+description = "Tiny OS FFI helpers that require unsafe (isolated from workspace forbid)"
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# Intentionally does NOT inherit workspace lints: this crate exists solely to
+# confine `unsafe` for Linux `SO_ORIGINAL_DST` (W1.1 redir).
+[lints.rust]
+unsafe_code = "allow"

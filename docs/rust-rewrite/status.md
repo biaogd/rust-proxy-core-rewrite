@@ -2,6 +2,18 @@
 
 Last updated: 2026-09-17
 
+### W1.1 Linux redir-port TCP — 2026-09-17
+
+First Wave A transparent-ingress slice from
+[`go-parity-alignment-roadmap.md`](go-parity-alignment-roadmap.md). Linux accepts
+fixed `redir-port`, recovers the pre-redirect destination via
+`SO_ORIGINAL_DST` (`rewrite-sys` → `rewrite-platform`), and enters
+`serve_stream_session` with `InboundProtocol::Redir` / `DEFAULT-REDIR`.
+Non-Linux still fail-closes `redir-port`. `tproxy-port` remains rejected.
+Evidence: config/rules unit tests + `compat/scripts/phase_w11_redir.py`
+(unprivileged validate/bind/plain-connect). Deferred: named `type: redir`,
+Darwin/FreeBSD pf paths, privileged iptables REDIRECT differential, tproxy.
+
 ### Go → Rust capability alignment roadmap — 2026-09-17
 
 Program-level ordering for closing remaining Go gaps before deleting the Go

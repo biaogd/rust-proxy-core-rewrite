@@ -90,6 +90,8 @@ pub enum InboundProtocol {
     AnyTls,
     Tun,
     Inner,
+    /// Linux iptables/nft `REDIRECT` / `TPROXY`-style original-destination TCP.
+    Redir,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

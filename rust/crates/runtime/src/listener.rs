@@ -85,14 +85,26 @@ pub(super) async fn run_listener(
                         let connection_dns_service = Arc::clone(&dns_service);
                         let connection_shutdown = shutdown.child_token();
                         connections.spawn(async move {
-                            serve_connection(
-                                client,
-                                kind,
-                                &connection_config,
-                                &connection_state,
-                                &connection_dns_service,
-                                &connection_shutdown,
-                            ).await;
+                            if kind == ListenerKind::Redir {
+                                crate::tcp::serve_redir_connection(
+                                    client,
+                                    &connection_config,
+                                    &connection_state,
+                                    &connection_dns_service,
+                                    &connection_shutdown,
+                                )
+                                .await;
+                            } else {
+                                serve_connection(
+                                    client,
+                                    kind,
+                                    &connection_config,
+                                    &connection_state,
+                                    &connection_dns_service,
+                                    &connection_shutdown,
+                                )
+                                .await;
+                            }
                         });
                     }
                     Err(error) => {
