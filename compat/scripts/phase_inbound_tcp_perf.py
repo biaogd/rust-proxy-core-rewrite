@@ -843,12 +843,24 @@ def main() -> int:
         "compare-soak": {},
     }
 
+    # Force balanced release knobs even if a prior shell left OPT_LEVEL=z etc.
+    os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = "3"
+    os.environ["CARGO_PROFILE_RELEASE_LTO"] = "fat"
+    os.environ["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"] = "1"
+    os.environ["CARGO_PROFILE_RELEASE_STRIP"] = "symbols"
+    os.environ["CARGO_PROFILE_RELEASE_PANIC"] = "abort"
+    # Prefer the balanced target dir when the caller did not override it.
+    os.environ.setdefault(
+        "PHASE_INBOUND_PERF_CARGO_TARGET",
+        str(ROOT / "rust" / "target" / "compat" / "phase-inbound-tcp-perf-balanced"),
+    )
+
     with tempfile.TemporaryDirectory(prefix="inbound-tcp-perf-") as temporary:
         root = pathlib.Path(temporary)
         binaries = build_binaries(
             root,
             "PHASE_INBOUND_PERF_CARGO_TARGET",
-            "phase-inbound-tcp-perf",
+            "phase-inbound-tcp-perf-balanced",
             profile="release",
         )
         report["binary-size-mib"] = {
