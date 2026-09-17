@@ -10,7 +10,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rewrite_model::{Destination, Host};
-use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use uuid::Uuid;
 
@@ -236,9 +235,7 @@ pub struct VlessServerStream<S> {
 enum PendingResponseWrite {
     /// Response header not started; coalesce on the next non-empty write.
     Idle,
-    /// GunStream accepted `prefix||payload` as one frame; drain in progress.
-    GunPrefixed,
-    /// Combined `[VERSION, 0] || payload` partially flushed (non-Gun carriers).
+    /// Combined `[VERSION, 0] || payload` partially flushed.
     Flushing {
         combined: Vec<u8>,
         offset: usize,
@@ -278,7 +275,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for VlessServerStream<S> {
     }
 }
 
-impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -290,26 +287,6 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                     return Pin::new(&mut self.inner).poll_write(cx, buf);
                 }
                 Some(PendingResponseWrite::Idle) => {
-                    // Prefer Gun FrontHeadroom-style single-frame write when the
-                    // carrier is GunStream (avoids an intermediate Vec copy).
-                    if let Some(gun) =
-                        (&mut self.inner as &mut dyn std::any::Any).downcast_mut::<GunStream>()
-                    {
-                        match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
-                            Poll::Pending => {
-                                self.pending = Some(PendingResponseWrite::GunPrefixed);
-                                return Poll::Pending;
-                            }
-                            Poll::Ready(Err(error)) => {
-                                self.pending = None;
-                                return Poll::Ready(Err(error));
-                            }
-                            Poll::Ready(Ok(written)) => {
-                                self.pending = None;
-                                return Poll::Ready(Ok(written));
-                            }
-                        }
-                    }
                     let mut combined = Vec::with_capacity(2 + buf.len());
                     combined.extend_from_slice(&[VERSION, 0]);
                     combined.extend_from_slice(buf);
@@ -318,23 +295,6 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         offset: 0,
                         payload_len: buf.len(),
                     });
-                }
-                Some(PendingResponseWrite::GunPrefixed) => {
-                    // Resume drain of the already-framed prefix||payload.
-                    match Pin::new(&mut self.inner).poll_write(cx, buf) {
-                        Poll::Pending => {
-                            self.pending = Some(PendingResponseWrite::GunPrefixed);
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(Err(error)) => {
-                            self.pending = None;
-                            return Poll::Ready(Err(error));
-                        }
-                        Poll::Ready(Ok(written)) => {
-                            self.pending = None;
-                            return Poll::Ready(Ok(written));
-                        }
-                    }
                 }
                 Some(PendingResponseWrite::Flushing {
                     combined,
@@ -412,17 +372,6 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                 }
             }
             self.pending = None;
-        } else if matches!(self.pending.as_ref(), Some(PendingResponseWrite::GunPrefixed)) {
-            match Pin::new(&mut self.inner).poll_flush(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => {
-                    self.pending = None;
-                    return Poll::Ready(Err(error));
-                }
-                Poll::Ready(Ok(())) => {
-                    self.pending = None;
-                }
-            }
         }
         Pin::new(&mut self.inner).poll_flush(cx)
     }

@@ -37,8 +37,8 @@ pub use shadow_tls_server::{
 pub use simple_obfs::{HttpObfsClient, HttpObfsServer, TlsObfsClient, TlsObfsServer};
 pub use tls::{ClientTlsOptions, TlsClientError, client_config, client_config_arc};
 pub use v2ray_grpc::{
-    GunStream, V2rayGrpcClient, V2rayGrpcClientOptions, V2rayGrpcServerConnection,
-    connect_v2ray_grpc, service_name_to_path,
+    V2rayGrpcClient, V2rayGrpcClientOptions, V2rayGrpcServerConnection, connect_v2ray_grpc,
+    service_name_to_path,
 };
 pub use v2ray_h2::connect_v2ray_h2;
 pub use v2ray_http::connect_v2ray_http;

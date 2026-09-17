@@ -366,7 +366,7 @@ impl<S> VlessInboundStream<S> {
 
 impl<S> AsyncRead for VlessInboundStream<S>
 where
-    S: AsyncRead + Unpin + 'static,
+    S: AsyncRead + Unpin,
 {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -386,7 +386,7 @@ where
 
 impl<S> AsyncWrite for VlessInboundStream<S>
 where
-    S: AsyncWrite + Unpin + 'static,
+    S: AsyncWrite + Unpin,
 {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -431,7 +431,7 @@ where
 
 impl<S> rewrite_inbound::InboundStream for VlessInboundStream<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
         Ok(self.local)

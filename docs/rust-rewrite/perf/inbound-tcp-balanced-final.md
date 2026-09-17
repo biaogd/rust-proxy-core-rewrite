@@ -9,16 +9,13 @@ Not an h2-library weakness; Rust used bare handshake defaults (64KiB window / 16
 
 vless-grpc residual after h2 windows was VLESS-path specific: Rust `accept_vless_request` eagerly wrote `[VERSION, 0]` as its own Gun DATA frame, while Go `sing_vless.serverConn` coalesces that header with the first application write. Matching that (plus stashing the client header||payload coalesce across `Poll::Pending`) lifts vless-grpc from ~0.65x to ~0.88–0.90x Go.
 
-Also landed Go-style replaceable peel (outbound `VlessTcpStream` / inbound `VlessServerStream`) for long-lived relays; the inbound TCP harness uses one exchange per connection so peel does not move short-conn bulk much.
-
 Changes:
 - h2 client/server Builder: stream/conn windows and max_frame ~1–4 MiB
 - Gun frames sent as owned Bytes slices (no second copy_from_slice)
 - Gun read pull 32KiB; drain by available WINDOW_UPDATE (not wait-for-full-frame)
 - VLESS: lazy server response via `VlessServerStream`; client Pending coalesce stash
-- VLESS: peel replaceable wrappers after handshake (long-lived path)
 
-| protocol | before h2 fix | after h2 fix | after VLESS coalesce | Rust/Go (best) |
+| protocol | before h2 fix | after h2 fix | after VLESS coalesce | Rust/Go (latest) |
 |---|---:|---:|---:|---:|
 | trojan-grpc | 1432.9 | 2624.5 | 2674.0 | 1.193 |
 | vless-grpc | 1370.5 | 1442.9 | 1943.5 | 0.903 |
@@ -53,4 +50,4 @@ Changes:
 - SSR inbound does not exist on Go or Rust (outbound-only)
 - ss-aead Rust 4KiB bulk still highly variable (CPU sampler often 0); latency/soak remain strong
 - gRPC: root cause was untuned h2 SETTINGS (not slow h2 crate); after MiB windows + Gun drain fix, trojan-grpc ≥1.15x Go, vmess-grpc ~2.1Gbps
-- vless-grpc: eager `[0,0]` Gun frame was the main leftover; lazy `VlessServerStream` coalesce → ~1944 Mbps / ~0.90x Go. Remaining ~10% still VLESS-path (short-conn harness does one exchange per dial; Go `WriteBuffer`/`FrontHeadroom` zero-copy prepend not yet mirrored)
+- vless-grpc: eager `[0,0]` Gun frame was the main leftover; lazy `VlessServerStream` coalesce → ~1944 Mbps / ~0.90x Go (bulk reconfirm ~1912 / 0.88x). Remaining ~10% gap is still VLESS-path, not generic Gun/h2

@@ -413,8 +413,7 @@ enum GunInner {
     Plain(BoxedStream),
 }
 
-/// Framed Gun/gRPC data stream (v2ray gun transport).
-pub struct GunStream {
+struct GunStream {
     inner: GunInner,
     /// Pending framed Gun message waiting for h2 send capacity.
     write_frame: Option<Bytes>,
@@ -460,23 +459,11 @@ impl GunStream {
     }
 
     fn frame(payload: &[u8]) -> io::Result<Bytes> {
-        Self::frame_with_prefix(&[], payload)
-    }
-
-    /// Build one Gun DATA payload with an optional protocol prefix (Go
-    /// `FrontHeadroom` / `ExtendHeader` style) so VLESS `[VERSION,0]` and the
-    /// first application bytes share a single gRPC frame without an extra
-    /// intermediate Vec copy of the whole payload.
-    fn frame_with_prefix(prefix: &[u8], payload: &[u8]) -> io::Result<Bytes> {
-        let total = prefix
-            .len()
-            .checked_add(payload.len())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Gun frame is too large"))?;
         let mut encoded_length = [0_u8; 10];
-        let varint_length = encode_uvarint(total as u64, &mut encoded_length);
+        let varint_length = encode_uvarint(payload.len() as u64, &mut encoded_length);
         let grpc_length = 1_usize
             .checked_add(varint_length)
-            .and_then(|length| length.checked_add(total))
+            .and_then(|length| length.checked_add(payload.len()))
             .and_then(|length| u32::try_from(length).ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Gun frame is too large"))?;
         let mut frame = BytesMut::with_capacity(5 + grpc_length as usize);
@@ -484,27 +471,8 @@ impl GunStream {
         frame.extend_from_slice(&grpc_length.to_be_bytes());
         frame.put_u8(0x0a);
         frame.extend_from_slice(&encoded_length[..varint_length]);
-        frame.extend_from_slice(prefix);
         frame.extend_from_slice(payload);
         Ok(frame.freeze())
-    }
-
-    /// Write `prefix || input` as a single Gun frame. Returns `input.len()` on
-    /// success (prefix bytes are not counted toward the AsyncWrite contract).
-    pub fn poll_write_with_prefix(
-        &mut self,
-        cx: &mut Context<'_>,
-        prefix: &[u8],
-        input: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if self.write_frame.is_some() {
-            ready!(self.poll_drain(cx))?;
-            return Poll::Ready(Ok(std::mem::take(&mut self.pending_input)));
-        }
-        self.write_frame = Some(Self::frame_with_prefix(prefix, input)?);
-        self.pending_input = input.len();
-        ready!(self.poll_drain(cx))?;
-        Poll::Ready(Ok(std::mem::take(&mut self.pending_input)))
     }
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
