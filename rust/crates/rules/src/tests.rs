@@ -211,6 +211,39 @@ fn matches_tun_inbound_type() {
 }
 
 #[test]
+fn matches_redir_inbound_type() {
+    let rules = vec!["IN-TYPE,REDIR,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("redir.test", 443);
+    input.inbound = InboundProtocol::Redir;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+    input.inbound = InboundProtocol::Http;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+}
+
+#[test]
+fn matches_tproxy_inbound_type() {
+    let rules = vec!["IN-TYPE,TPROXY,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("tproxy.test", 443);
+    input.inbound = InboundProtocol::Tproxy;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+    input.inbound = InboundProtocol::Http;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+}
+
+#[test]
+fn matches_tunnel_inbound_type() {
+    let rules = vec!["IN-TYPE,TUNNEL,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
+    let mut input = metadata("tunnel.test", 443);
+    input.inbound = InboundProtocol::Tunnel;
+    assert_eq!(program.evaluate(&input).target, "REJECT");
+    input.inbound = InboundProtocol::Http;
+    assert_eq!(program.evaluate(&input).target, "DIRECT");
+}
+
+#[test]
 fn matches_inbound_users_exactly() {
     let rules = vec![
         "IN-USER,alice/socks4,REJECT".to_owned(),
@@ -369,4 +402,69 @@ fn matches_validated_geosite_and_geoip_resources() {
     assert_eq!(program.snapshots()[0].kind, "GeoSite");
     assert_eq!(program.snapshots()[1].kind, "GeoIP");
     assert_eq!(program.snapshots()[2].kind, "SrcGeoIP");
+}
+
+#[test]
+fn parses_process_name_path_and_uid() {
+    let program = RuleSet::parse(
+        &[
+            "PROCESS-NAME,curl,DIRECT".to_owned(),
+            "PROCESS-PATH,/usr/bin/curl,DIRECT".to_owned(),
+            "UID,1000-1001/0,REJECT".to_owned(),
+            "MATCH,REJECT".to_owned(),
+        ],
+        &Default::default(),
+        &[],
+    )
+    .expect("process rules");
+    assert!(program.needs_process_lookup());
+    let snapshots = program.snapshots();
+    assert_eq!(snapshots[0].kind, "Process");
+    assert_eq!(snapshots[0].payload, "curl");
+    assert_eq!(snapshots[1].kind, "ProcessPath");
+    assert_eq!(snapshots[2].kind, "Uid");
+    assert_eq!(snapshots[2].payload, "1000-1001/0");
+}
+
+#[test]
+fn process_name_matches_case_insensitively() {
+    let program = RuleSet::parse(
+        &["PROCESS-NAME,CuRl,DIRECT".to_owned(), "MATCH,REJECT".to_owned()],
+        &Default::default(),
+        &[],
+    )
+    .expect("process name");
+    let mut metadata = metadata("example.com", 443);
+    metadata.process = "curl".to_owned();
+    let decision = program.evaluate(&metadata);
+    assert_eq!(decision.target, "DIRECT");
+}
+
+#[test]
+fn uid_requires_nonzero() {
+    let program = RuleSet::parse(
+        &["UID,1000,DIRECT".to_owned(), "MATCH,REJECT".to_owned()],
+        &Default::default(),
+        &[],
+    )
+    .expect("uid");
+    let mut metadata = metadata("example.com", 443);
+    metadata.uid = 0;
+    assert_eq!(program.evaluate(&metadata).target, "REJECT");
+    metadata.uid = 1000;
+    assert_eq!(program.evaluate(&metadata).target, "DIRECT");
+}
+
+#[test]
+fn rejects_process_regex_kinds() {
+    let error = RuleSet::parse(
+        &["PROCESS-NAME-REGEX,curl,DIRECT".to_owned()],
+        &Default::default(),
+        &[],
+    )
+    .expect_err("regex deferred");
+    assert!(matches!(
+        error,
+        RuleError::Unsupported(kind) if kind == "PROCESS-NAME-REGEX"
+    ));
 }

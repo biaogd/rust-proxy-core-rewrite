@@ -93,7 +93,10 @@ pub struct ConfigSpec {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
+    pub sniffer: SnifferConfig,
+    pub find_process_mode: FindProcessMode,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -107,6 +110,8 @@ pub struct Config {
     pub port: i64,
     pub socks_port: i64,
     pub mixed_port: i64,
+    pub redir_port: i64,
+    pub tproxy_port: i64,
     pub allow_lan: bool,
     pub bind_address: String,
     pub skip_auth_prefixes: Vec<IpNet>,
@@ -163,7 +168,10 @@ pub struct Config {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
+    pub sniffer: SnifferConfig,
+    pub find_process_mode: FindProcessMode,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -1219,6 +1227,168 @@ fn wildcard_or_exact_ip(configured: std::net::IpAddr, actual: std::net::IpAddr) 
     }
 }
 
+/// Go `find-process-mode` (default `strict`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FindProcessMode {
+    Always,
+    #[default]
+    Strict,
+    Off,
+}
+
+impl FindProcessMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Strict => "strict",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Top-level `sniffer:` runtime policy (CFG-16).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SnifferConfig {
+    pub enable: bool,
+    pub force_dns_mapping: bool,
+    pub parse_pure_ip: bool,
+    pub protocols: BTreeMap<SniffProtocol, SnifferProtocolConfig>,
+    pub force_domain: Vec<SnifferDomainMatcher>,
+    pub skip_domain: Vec<SnifferDomainMatcher>,
+    pub skip_src_address: Vec<IpNet>,
+    pub skip_dst_address: Vec<IpNet>,
+}
+
+impl SnifferConfig {
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enable: false,
+            force_dns_mapping: true,
+            parse_pure_ip: true,
+            protocols: BTreeMap::new(),
+            force_domain: Vec::new(),
+            skip_domain: Vec::new(),
+            skip_src_address: Vec::new(),
+            skip_dst_address: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SniffProtocol {
+    Tls,
+    Http,
+    Quic,
+}
+
+impl SniffProtocol {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tls => "TLS",
+            Self::Http => "HTTP",
+            Self::Quic => "QUIC",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnifferProtocolConfig {
+    /// Inclusive port ranges. Empty means protocol defaults (TLS/QUIC 443, HTTP 80).
+    pub ports: Vec<(u16, u16)>,
+    pub override_destination: bool,
+}
+
+impl SnifferProtocolConfig {
+    #[must_use]
+    pub fn supports_port(&self, port: u16, protocol: SniffProtocol) -> bool {
+        if self.ports.is_empty() {
+            return match protocol {
+                SniffProtocol::Tls | SniffProtocol::Quic => port == 443,
+                SniffProtocol::Http => port == 80,
+            };
+        }
+        self.ports
+            .iter()
+            .any(|&(start, end)| port >= start && port <= end)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SnifferDomainMatcher {
+    Exact(String),
+    Suffix(String),
+    Wildcard(String),
+}
+
+impl SnifferDomainMatcher {
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        match self {
+            Self::Exact(value) => host == *value,
+            Self::Suffix(suffix) => {
+                host == *suffix
+                    || host
+                        .strip_suffix(suffix.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+            Self::Wildcard(pattern) => domain_wildcard_matches(pattern, &host),
+        }
+    }
+}
+
+fn domain_wildcard_matches(pattern: &str, host: &str) -> bool {
+    // Minimal `*` glob: one `*` matches any run of labels/chars.
+    let Some((left, right)) = pattern.split_once('*') else {
+        return pattern == host;
+    };
+    if pattern.matches('*').count() != 1 {
+        return false;
+    }
+    host.starts_with(left) && host.ends_with(right) && host.len() >= left.len() + right.len()
+}
+
+/// One expanded static tunnel listener (`tunnels:` entry × network).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunnelInboundConfig {
+    pub listen: SocketAddr,
+    pub target: rewrite_model::Destination,
+    pub network: TunnelNetwork,
+    pub proxy: String,
+}
+
+impl TunnelInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        format!(
+            "{}/{}/{}",
+            self.network.as_str(),
+            self.target.authority(),
+            self.proxy
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TunnelNetwork {
+    Tcp,
+    Udp,
+}
+
+impl TunnelNetwork {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadowsocksSimpleObfsConfig {
     pub mode: String,
@@ -1539,6 +1709,9 @@ pub enum ListenerKind {
     Http,
     Socks,
     Mixed,
+    Redir,
+    Tproxy,
+    Tunnel,
     Shadowsocks,
     Trojan,
     Vless,

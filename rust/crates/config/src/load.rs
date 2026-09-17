@@ -13,19 +13,21 @@ use crate::dns::{
 };
 use crate::error::ConfigError;
 use crate::model::{
-    AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, GeoXUrls,
-    Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
+    AnyTlsInboundConfig, Config, ConfigSpec, ControllerCors, ControllerTls, FindProcessMode,
+    GeoXUrls, Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
     ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig,
-    TrojanInboundConfig, TuicInboundConfig, VlessInboundConfig, VmessInboundConfig,
+    TrojanInboundConfig, TunnelInboundConfig, TuicInboundConfig, VlessInboundConfig,
+    VmessInboundConfig,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
     expand_proxy_group, load_proxy_provider_file, parse_proxies, parse_proxy_groups,
-    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types,
-    validate_dialer_proxies,
+    parse_proxy_provider_source, parse_proxy_providers, proxy_member_types, validate_dialer_proxies,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
+use crate::sniffer::parse_sniffer;
 use crate::tun::parse_tun;
+use crate::tunnel::parse_tunnels;
 
 impl ConfigSpec {
     /// Parses the Phase 2 specification layer and overlays Go-compatible
@@ -240,6 +242,11 @@ impl ConfigSpec {
             &tuic_listeners,
             &anytls_listeners,
         )?;
+        let mut proxy_names: BTreeSet<String> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
+        proxy_names.extend(proxy_groups.iter().map(|group| group.name.clone()));
+        let tunnel_listeners = parse_tunnels(raw.tunnels, &proxy_names)?;
+        let sniffer = parse_sniffer(raw.sniffer)?;
+        let find_process_mode = parse_find_process_mode(raw.find_process_mode.as_deref())?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -310,7 +317,10 @@ impl ConfigSpec {
             hysteria2_listeners,
             tuic_listeners,
             anytls_listeners,
+            tunnel_listeners,
             tun,
+            sniffer,
+            find_process_mode,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
             home_directory: provider_directory.map(Path::to_path_buf),
@@ -406,7 +416,9 @@ impl TryFrom<ConfigSpec> for Config {
             .chain(spec.proxy_groups.iter().map(|group| group.name.clone()))
             .collect();
         let unsupported = [
+            #[cfg(not(target_os = "linux"))]
             (spec.redir_port != 0, "redir-port"),
+            #[cfg(not(target_os = "linux"))]
             (spec.tproxy_port != 0, "tproxy-port"),
             (spec.unified_delay, "unified-delay"),
             (
@@ -422,6 +434,8 @@ impl TryFrom<ConfigSpec> for Config {
             port: spec.port,
             socks_port: spec.socks_port,
             mixed_port: spec.mixed_port,
+            redir_port: spec.redir_port,
+            tproxy_port: spec.tproxy_port,
             allow_lan: spec.allow_lan,
             bind_address: spec.bind_address,
             skip_auth_prefixes: spec.skip_auth_prefixes,
@@ -478,7 +492,10 @@ impl TryFrom<ConfigSpec> for Config {
             hysteria2_listeners: spec.hysteria2_listeners,
             tuic_listeners: spec.tuic_listeners,
             anytls_listeners: spec.anytls_listeners,
+            tunnel_listeners: spec.tunnel_listeners,
             tun: spec.tun,
+            sniffer: spec.sniffer,
+            find_process_mode: spec.find_process_mode,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
         })
@@ -812,6 +829,8 @@ impl Config {
             (ListenerKind::Http, self.port),
             (ListenerKind::Socks, self.socks_port),
             (ListenerKind::Mixed, self.mixed_port),
+            (ListenerKind::Redir, self.redir_port),
+            (ListenerKind::Tproxy, self.tproxy_port),
         ] {
             if value == 0 {
                 continue;
@@ -843,10 +862,44 @@ impl Config {
         for anytls in &self.anytls_listeners {
             listeners.push((ListenerKind::AnyTls, anytls.listen.port()));
         }
-        if listeners.is_empty() && self.dns.is_none() {
+        if listeners.is_empty() && self.dns.is_none() && self.tunnel_listeners.is_empty() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
         Ok(listeners)
+    }
+
+    #[must_use]
+    pub fn tunnel_tcp_keys(&self) -> Vec<(u16, SocketAddr, String)> {
+        self.tunnel_listeners
+            .iter()
+            .filter(|tunnel| tunnel.network == crate::model::TunnelNetwork::Tcp)
+            .map(|tunnel| {
+                (
+                    tunnel.listen.port(),
+                    tunnel.listen,
+                    tunnel.reload_identity(),
+                )
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn tunnel_udp_configs(&self) -> Vec<&TunnelInboundConfig> {
+        self.tunnel_listeners
+            .iter()
+            .filter(|tunnel| tunnel.network == crate::model::TunnelNetwork::Udp)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn tunnel_listener_for_key(
+        &self,
+        listen: SocketAddr,
+        identity: &str,
+    ) -> Option<&TunnelInboundConfig> {
+        self.tunnel_listeners.iter().find(|listener| {
+            listener.listen == listen && listener.reload_identity() == identity
+        })
     }
 
     #[must_use]
@@ -1236,6 +1289,15 @@ fn parse_mode(value: &str) -> Result<Mode, ConfigError> {
         "rule" => Ok(Mode::Rule),
         "direct" => Ok(Mode::Direct),
         _ => Err(ConfigError::InvalidMode),
+    }
+}
+
+fn parse_find_process_mode(value: Option<&str>) -> Result<FindProcessMode, ConfigError> {
+    match value.unwrap_or("strict").to_lowercase().as_str() {
+        "strict" => Ok(FindProcessMode::Strict),
+        "always" => Ok(FindProcessMode::Always),
+        "off" => Ok(FindProcessMode::Off),
+        _ => Err(ConfigError::InvalidFindProcessMode),
     }
 }
 

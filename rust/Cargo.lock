@@ -3984,6 +3984,8 @@ dependencies = [
  "ipconfig",
  "ipnet",
  "network-interface",
+ "rewrite-model",
+ "rewrite-sys",
  "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
@@ -4278,6 +4280,13 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "rewrite-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

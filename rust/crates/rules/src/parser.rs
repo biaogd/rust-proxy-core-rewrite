@@ -271,6 +271,9 @@ pub(crate) fn parse_matcher(
                 Ok(Matcher::RematchName(names))
             }
         }
+        "PROCESS-NAME" => require_payload(payload, |value| Matcher::ProcessName(value.to_owned())),
+        "PROCESS-PATH" => require_payload(payload, |value| Matcher::ProcessPath(value.to_owned())),
+        "UID" => parse_uid(payload),
         "AND" => Ok(Matcher::And(parse_logic_children(payload)?)),
         "OR" => Ok(Matcher::Or(parse_logic_children(payload)?)),
         "NOT" => {
@@ -286,6 +289,48 @@ pub(crate) fn parse_matcher(
         }
         "" => Err(RuleError::FormatInvalid),
         other => Err(RuleError::Unsupported(other.to_owned())),
+    }
+}
+
+pub(crate) fn parse_uid(payload: &str) -> Result<Matcher, RuleError> {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = payload;
+        return Err(RuleError::Unsupported("UID".to_owned()));
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        if payload.is_empty() {
+            return Err(RuleError::InvalidPayload);
+        }
+        let mut ranges = Vec::new();
+        for part in payload.split('/').filter(|part| !part.is_empty()) {
+            let bounds = part.split('-').map(str::trim).collect::<Vec<_>>();
+            let (start, end) = match bounds.as_slice() {
+                [single] => {
+                    let value = single
+                        .parse::<u32>()
+                        .map_err(|_| RuleError::InvalidPayload)?;
+                    (value, value)
+                }
+                [start, end] => {
+                    let start = start
+                        .parse::<u32>()
+                        .map_err(|_| RuleError::InvalidPayload)?;
+                    let end = end.parse::<u32>().map_err(|_| RuleError::InvalidPayload)?;
+                    (start.min(end), start.max(end))
+                }
+                _ => return Err(RuleError::InvalidPayload),
+            };
+            ranges.push((start, end));
+            if ranges.len() > 28 {
+                return Err(RuleError::InvalidPayload);
+            }
+        }
+        if ranges.is_empty() {
+            return Err(RuleError::InvalidPayload);
+        }
+        Ok(Matcher::Uid(ranges))
     }
 }
 
@@ -388,6 +433,9 @@ pub(crate) fn parse_in_type(payload: &str) -> Result<Matcher, RuleError> {
             "ANYTLS" => types.push(rewrite_model::InboundProtocol::AnyTls),
             "TUN" => types.push(rewrite_model::InboundProtocol::Tun),
             "INNER" => types.push(rewrite_model::InboundProtocol::Inner),
+            "REDIR" => types.push(rewrite_model::InboundProtocol::Redir),
+            "TPROXY" => types.push(rewrite_model::InboundProtocol::Tproxy),
+            "TUNNEL" => types.push(rewrite_model::InboundProtocol::Tunnel),
             "SOCKS" => types.extend([
                 rewrite_model::InboundProtocol::Socks4,
                 rewrite_model::InboundProtocol::Socks5,

@@ -45,6 +45,13 @@ impl LocalTcpListener {
                 .map(|(stream, address)| (Box::new(stream) as BoxedInboundStream, address)),
         }
     }
+
+    pub(crate) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Plain(listener) => listener.local_addr(),
+            Self::FastOpen(listener) => listener.local_addr(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -28,6 +28,7 @@ members = [
   "crates/runtime",
   "crates/services",
   "crates/state",
+  "crates/sys",
   "crates/test-support",
   "crates/transport",
   "crates/tun",
