@@ -329,21 +329,21 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        // A flush before any payload still needs the 2-byte response (Go
-        // WriterReplaceable stays false until Write). Emit header alone.
-        if matches!(self.pending, Some(PendingResponseWrite::Idle)) {
-            self.pending = Some(PendingResponseWrite::Flushing {
-                combined: vec![VERSION, 0],
-                offset: 0,
-                payload_len: 0,
-            });
-        }
-        while let Some(PendingResponseWrite::Flushing {
-            combined,
-            mut offset,
-            payload_len,
-        }) = self.pending.take()
-        {
+        // Do not emit the response header on flush alone (Go serverConn only
+        // writes it from Write/WriteBuffer). An early copy_bidirectional flush
+        // would otherwise recreate the solo 2-byte Gun DATA frame.
+        if matches!(
+            self.pending.as_ref(),
+            Some(PendingResponseWrite::Flushing { .. })
+        ) {
+            let Some(PendingResponseWrite::Flushing {
+                combined,
+                mut offset,
+                payload_len,
+            }) = self.pending.take()
+            else {
+                unreachable!();
+            };
             while offset < combined.len() {
                 match Pin::new(&mut self.inner).poll_write(cx, &combined[offset..]) {
                     Poll::Pending => {
@@ -514,7 +514,7 @@ mod tests {
             .expect("vision request");
         assert_eq!(request.flow, Some(VlessFlow::XtlsRprxVision));
         let mut server = VlessServerStream::new(server);
-        server.flush().await.unwrap();
+        server.write_all(b".").await.unwrap();
     }
 
     #[tokio::test]
@@ -589,7 +589,7 @@ mod tests {
             }
         );
         let mut server = VlessServerStream::new(server);
-        server.flush().await.unwrap();
+        server.write_all(b".").await.unwrap();
     }
 
     #[tokio::test]
@@ -616,7 +616,7 @@ mod tests {
             Host::Ip(Ipv6Addr::LOCALHOST.into())
         );
         let mut server = VlessServerStream::new(server);
-        server.flush().await.unwrap();
+        server.write_all(b".").await.unwrap();
     }
 
     #[tokio::test]
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(request.command, VlessCommand::Mux);
         assert_eq!(request.destination.port, 0);
         let mut server = VlessServerStream::new(server);
-        server.flush().await.unwrap();
+        server.write_all(b".").await.unwrap();
     }
 
     #[tokio::test]
