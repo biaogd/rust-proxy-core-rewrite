@@ -2,6 +2,16 @@
 
 Last updated: 2026-09-17
 
+### W2.1 PROCESS-NAME / PATH / UID (Linux first) — 2026-09-17
+
+Wave A routing-metadata slice. Parses `PROCESS-NAME`, `PROCESS-PATH`, and
+`UID` (linux/android only for UID) plus top-level `find-process-mode`
+(`strict`/`always`/`off`). Before TCP rule evaluation, Linux resolves the
+client socket via `NETLINK_INET_DIAG` + `/proc` exe and fills
+`metadata.{uid,process,process_path}`. Evidence: rules unit tests +
+`compat/scripts/phase_w21_process.py`. Deferred: PROCESS-*-REGEX/WILDCARD,
+Darwin/Windows/FreeBSD finders, Android package names.
+
 ### W2.2 sniffer HTTP/TLS (first slice) — 2026-09-17
 
 Wave A routing-metadata slice. Top-level `sniffer:` parses enable,

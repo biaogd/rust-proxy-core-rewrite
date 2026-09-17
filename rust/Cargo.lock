@@ -3984,6 +3984,7 @@ dependencies = [
  "ipconfig",
  "ipnet",
  "network-interface",
+ "rewrite-model",
  "rewrite-sys",
  "socket2 0.6.5",
  "thiserror 2.0.20",

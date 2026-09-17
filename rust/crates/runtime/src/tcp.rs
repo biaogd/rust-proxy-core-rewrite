@@ -2617,6 +2617,7 @@ pub(super) async fn evaluate_tcp_rules(
     config: &Config,
     state: &RuntimeState,
 ) -> rewrite_rules::Decision {
+    fill_process_metadata(metadata, config, state);
     if let Some(decision) = mode_decision(config, state) {
         return decision;
     }
@@ -2628,6 +2629,42 @@ pub(super) async fn evaluate_tcp_rules(
                 Err(error) => state.log("error", format!("rule DNS resolution failed: {error}")),
             }
             config.rules.evaluate(metadata)
+        }
+    }
+}
+
+fn fill_process_metadata(metadata: &mut Metadata, config: &Config, state: &RuntimeState) {
+    use rewrite_config::FindProcessMode;
+
+    if metadata.process_resolved {
+        return;
+    }
+    let should_lookup = match config.find_process_mode {
+        FindProcessMode::Off => false,
+        FindProcessMode::Always => true,
+        FindProcessMode::Strict => config.rules.needs_process_lookup(),
+    };
+    if !should_lookup {
+        return;
+    }
+    metadata.process_resolved = true;
+    let Some(src_ip) = metadata.source_ip else {
+        return;
+    };
+    match rewrite_platform::find_process_name(metadata.network, src_ip, metadata.source_port) {
+        Ok(info) => {
+            metadata.uid = info.uid;
+            metadata.process = rewrite_platform::process_basename(&info.path);
+            metadata.process_path = info.path.to_string_lossy().into_owned();
+        }
+        Err(error) => {
+            state.log(
+                "debug",
+                format!(
+                    "[Process] lookup failed for {src_ip}:{}: {error}",
+                    metadata.source_port
+                ),
+            );
         }
     }
 }

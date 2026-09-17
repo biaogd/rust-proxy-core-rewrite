@@ -91,6 +91,18 @@ impl Matcher {
             Self::RematchName(names) => {
                 MatchResult::from_bool(names.contains(&metadata.rematch_name))
             }
+            Self::ProcessName(pattern) => {
+                MatchResult::from_bool(eq_ignore_ascii_case(&metadata.process, pattern))
+            }
+            Self::ProcessPath(pattern) => {
+                MatchResult::from_bool(eq_ignore_ascii_case(&metadata.process_path, pattern))
+            }
+            Self::Uid(ranges) => MatchResult::from_bool(
+                metadata.uid != 0
+                    && ranges
+                        .iter()
+                        .any(|&(start, end)| (start..=end).contains(&metadata.uid)),
+            ),
             Self::And(matchers) => match_all(matchers, metadata, allow_resolution),
             Self::Or(matchers) => match_any(matchers, metadata, allow_resolution),
             Self::Not(matcher) => match matcher.match_result(metadata, allow_resolution) {
@@ -105,6 +117,23 @@ impl Matcher {
                 ..
             } => match_provider(matchers, metadata, allow_resolution && !no_resolve),
             Self::Geo { matchers, .. } => match_provider(matchers, metadata, allow_resolution),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn needs_process_lookup(&self) -> bool {
+        match self {
+            Self::ProcessName(_) | Self::ProcessPath(_) | Self::Uid(_) => true,
+            Self::And(matchers) | Self::Or(matchers) => {
+                matchers.iter().any(Self::needs_process_lookup)
+            }
+            Self::Not(matcher) | Self::SubRule { condition: matcher, .. } => {
+                matcher.needs_process_lookup()
+            }
+            Self::RuleSet { matchers, .. } | Self::Geo { matchers, .. } => {
+                matchers.iter().any(Self::needs_process_lookup)
+            }
+            _ => false,
         }
     }
 
@@ -138,6 +167,9 @@ impl Matcher {
             Self::InName(_) => "InName",
             Self::Dscp(_) => "DSCP",
             Self::RematchName(_) => "RematchName",
+            Self::ProcessName(_) => "Process",
+            Self::ProcessPath(_) => "ProcessPath",
+            Self::Uid(_) => "Uid",
             Self::And(_) => "AND",
             Self::Or(_) => "OR",
             Self::Not(_) => "NOT",
@@ -188,6 +220,18 @@ impl Matcher {
                 .collect::<Vec<_>>()
                 .join("/"),
             Self::InName(names) | Self::InUser(names) | Self::RematchName(names) => names.join("/"),
+            Self::ProcessName(value) | Self::ProcessPath(value) => value.clone(),
+            Self::Uid(ranges) => ranges
+                .iter()
+                .map(|&(start, end)| {
+                    if start == end {
+                        start.to_string()
+                    } else {
+                        format!("{start}-{end}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
             Self::RuleSet { name, .. } => name.clone(),
             Self::Geo { payload, .. } => payload.clone(),
             Self::Dscp(ranges) => ranges
@@ -206,6 +250,14 @@ impl Matcher {
             }
         }
     }
+}
+
+fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
 }
 
 pub(crate) fn match_all(

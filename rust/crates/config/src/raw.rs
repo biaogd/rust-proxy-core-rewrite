@@ -63,6 +63,7 @@ pub(crate) struct RawConfig {
     pub(crate) proxy_groups: Option<Vec<RawProxyGroup>>,
     pub(crate) rule_providers: Option<BTreeMap<String, RawRuleProvider>>,
     pub(crate) sniffer: Option<RawSniffer>,
+    pub(crate) find_process_mode: Option<String>,
     #[serde(flatten)]
     pub(crate) extra: BTreeMap<String, Value>,
 }

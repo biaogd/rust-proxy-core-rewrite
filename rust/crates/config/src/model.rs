@@ -96,6 +96,7 @@ pub struct ConfigSpec {
     pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub sniffer: SnifferConfig,
+    pub find_process_mode: FindProcessMode,
     pub(crate) unsupported_keys: Vec<String>,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
@@ -170,6 +171,7 @@ pub struct Config {
     pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub sniffer: SnifferConfig,
+    pub find_process_mode: FindProcessMode,
     pub(crate) source_path: Option<PathBuf>,
     pub(crate) home_directory: Option<PathBuf>,
 }
@@ -1222,6 +1224,26 @@ fn wildcard_or_exact_ip(configured: std::net::IpAddr, actual: std::net::IpAddr) 
         std::net::IpAddr::V4(address) if address.is_unspecified() => actual.is_ipv4(),
         std::net::IpAddr::V6(address) if address.is_unspecified() => actual.is_ipv6(),
         other => other == actual,
+    }
+}
+
+/// Go `find-process-mode` (default `strict`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FindProcessMode {
+    Always,
+    #[default]
+    Strict,
+    Off,
+}
+
+impl FindProcessMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::Strict => "strict",
+            Self::Off => "off",
+        }
     }
 }
 
