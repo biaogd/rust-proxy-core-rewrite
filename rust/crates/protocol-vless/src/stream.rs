@@ -3,6 +3,7 @@ use std::task::{Context, Poll};
 
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
+use rewrite_transport::GunStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::addons::encode_flow_addon;
@@ -401,24 +402,94 @@ impl AsyncWrite for VlessTcpStream {
             {
                 *pending_first_write = None;
             }
+            // Empty combined marks a Gun-prefixed write whose frame is already
+            // buffered; resume by draining via poll_write (Gun reports
+            // completion even if flush drained first).
+            if combined.is_empty() {
+                let inner = match self.inner_mut() {
+                    Ok(inner) => inner,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
+                match Pin::new(inner).poll_write(cx, buf) {
+                    Poll::Pending => {
+                        if let HandshakeState::Active {
+                            pending_first_write,
+                            ..
+                        } = &mut self.handshake
+                        {
+                            *pending_first_write = Some((Vec::new(), 0, header_len));
+                        }
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(written)) => {
+                        if let HandshakeState::Active { request, .. } = &mut self.handshake {
+                            request.clear();
+                        }
+                        self.maybe_finish_handshake();
+                        return Poll::Ready(Ok(written));
+                    }
+                }
+            }
             return self.poll_flush_first_write(cx, combined, offset, header_len);
         }
 
         // Coalesce header + first payload (Go sendRequest) into one Gun/TLS frame.
-        if let HandshakeState::Active {
+        let coalesce = if let HandshakeState::Active {
             request,
             request_offset,
             pending_first_write,
             ..
-        } = &mut self.handshake
+        } = &self.handshake
             && *request_offset == 0
             && !request.is_empty()
             && !buf.is_empty()
             && pending_first_write.is_none()
         {
-            let header_len = request.len();
+            Some((request.clone(), request.len()))
+        } else {
+            None
+        };
+        if let Some((header, header_len)) = coalesce {
+            // Gun FrontHeadroom: one frame, one copy into the Gun buffer.
+            let inner = match self.inner_mut() {
+                Ok(inner) => inner,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            if let Some(gun) = inner.as_any_mut().downcast_mut::<GunStream>() {
+                match gun.poll_write_with_prefix(cx, &header, buf) {
+                    Poll::Pending => {
+                        if let HandshakeState::Active {
+                            request_offset,
+                            pending_first_write,
+                            ..
+                        } = &mut self.handshake
+                        {
+                            *request_offset = header_len;
+                            *pending_first_write = Some((Vec::new(), 0, header_len));
+                        }
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(written)) => {
+                        if let HandshakeState::Active {
+                            request,
+                            request_offset,
+                            pending_first_write,
+                            ..
+                        } = &mut self.handshake
+                        {
+                            *request_offset = header_len;
+                            request.clear();
+                            *pending_first_write = None;
+                        }
+                        self.maybe_finish_handshake();
+                        return Poll::Ready(Ok(written));
+                    }
+                }
+            }
             let mut combined = Vec::with_capacity(header_len + buf.len());
-            combined.extend_from_slice(request);
+            combined.extend_from_slice(&header);
             combined.extend_from_slice(buf);
             return self.poll_flush_first_write(cx, combined, 0, header_len);
         }

@@ -502,6 +502,11 @@ impl GunStream {
         prefix: &[u8],
         input: &[u8],
     ) -> Poll<io::Result<usize>> {
+        // Flush may have drained `write_frame` while a prior write was still
+        // Pending — report that completion instead of framing `input` again.
+        if let Some(written) = self.take_completed_write() {
+            return Poll::Ready(Ok(written));
+        }
         if self.write_frame.is_some() {
             ready!(self.poll_drain(cx))?;
             return Poll::Ready(Ok(std::mem::take(&mut self.pending_input)));
@@ -510,6 +515,16 @@ impl GunStream {
         self.pending_input = input.len();
         ready!(self.poll_drain(cx))?;
         Poll::Ready(Ok(std::mem::take(&mut self.pending_input)))
+    }
+
+    /// If a prior write finished via `poll_flush`/`poll_shutdown` while the
+    /// caller still saw `Pending`, return that write's application length.
+    fn take_completed_write(&mut self) -> Option<usize> {
+        if self.write_frame.is_none() && self.pending_input > 0 {
+            Some(std::mem::take(&mut self.pending_input))
+        } else {
+            None
+        }
     }
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -654,6 +669,12 @@ impl AsyncWrite for GunStream {
         input: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        // Flush may have drained `write_frame` while a prior write was still
+        // Pending — report that completion instead of framing `input` again
+        // (which would duplicate the payload without any VLESS/Gun prefix).
+        if let Some(written) = this.take_completed_write() {
+            return Poll::Ready(Ok(written));
+        }
         if this.write_frame.is_some() {
             ready!(this.poll_drain(cx))?;
             return Poll::Ready(Ok(std::mem::take(&mut this.pending_input)));
@@ -769,6 +790,79 @@ mod tests {
             [
                 0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_during_pending_write_does_not_duplicate_frame() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+        use tokio::io::{AsyncReadExt as _, AsyncWrite};
+
+        let (client, mut server) = tokio::io::duplex(8);
+        let mut client = GunStream::new_plain(Box::new(client) as BoxedStream);
+        let payload = b"0123456789abcdef"; // larger than duplex capacity → Pending
+        let reader = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            let mut tmp = [0_u8; 64];
+            loop {
+                match server.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        seen.extend_from_slice(&tmp[..n]);
+                        if seen.len() >= 25 {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            seen
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        // Drive write until Pending or Ready, then flush to completion.
+        let mut parked = false;
+        for _ in 0..64 {
+            match client.poll_write_with_prefix(&mut cx, &[0, 0], payload) {
+                Poll::Pending => {
+                    parked = true;
+                    break;
+                }
+                Poll::Ready(Ok(16)) => break,
+                Poll::Ready(Ok(n)) => panic!("unexpected write len {n}"),
+                Poll::Ready(Err(error)) => panic!("write failed: {error}"),
+            }
+        }
+        loop {
+            match Pin::new(&mut client).poll_flush(&mut cx) {
+                Poll::Ready(Ok(())) => break,
+                Poll::Pending => tokio::task::yield_now().await,
+                Poll::Ready(Err(error)) => panic!("flush failed: {error}"),
+            }
+        }
+        if parked {
+            match client.poll_write_with_prefix(&mut cx, &[0, 0], payload) {
+                Poll::Ready(Ok(16)) => {}
+                other => panic!("retry after flush must complete once: {other:?}"),
+            }
+        }
+        drop(client);
+        let seen = reader.await.expect("reader");
+        assert!(
+            seen.len() >= 25,
+            "expected one Gun frame (>=25 bytes), got {}",
+            seen.len()
+        );
+        assert_eq!(seen[0], 0);
+        assert_eq!(&seen[1..5], &20_u32.to_be_bytes());
+        assert_eq!(seen[5], 0x0a);
+        assert_eq!(seen[6], 18);
+        assert_eq!(&seen[7..9], &[0, 0]);
+        assert_eq!(&seen[9..25], payload);
+        assert_eq!(
+            seen.len(),
+            25,
+            "must not emit a second duplicate Gun frame"
         );
     }
 
