@@ -2453,9 +2453,10 @@ pub(super) async fn relay_tracked_tcp(
     state: &RuntimeState,
     shutdown: &CancellationToken,
 ) {
-    // Go bufio.Copy peels VLESS once replaceable. Warm up just enough to finish
-    // the lazy handshake and unwrap to the bare carrier, then use Tokio's fast
-    // copy_bidirectional for bulk (same path as Trojan).
+    // Go bufio.Copy peels VLESS once replaceable. Peel during the 32 KiB relay
+    // (same buffer size as Trojan) — an 8 KiB warmup under-sizes Gun frames for
+    // short-conn sendall-before-recv harnesses and never reaches the fast path
+    // until the VLESS response is observed.
     let needs_peel = remote
         .as_any_mut()
         .downcast_mut::<rewrite_protocol_vless::VlessTcpStream>()
@@ -2465,62 +2466,18 @@ pub(super) async fn relay_tracked_tcp(
         () = tracker.cancelled() => {}
         result = async {
             if needs_peel {
-                warmup_peel_vless(&mut client, &mut remote).await?;
+                rewrite_net::relay_with_right_peel(&mut client, &mut remote, |remote| {
+                    rewrite_outbound::peel_replaceable_vless(remote)
+                })
+                .await
+            } else {
+                rewrite_net::relay(&mut client, &mut remote).await
             }
-            rewrite_net::relay(&mut client, &mut remote).await
         } => match result {
             Ok((uploaded, downloaded)) => tracker.finish(uploaded, downloaded),
             Err(error) => state.log("error", format!("TCP relay failed: {error}")),
         }
     }
-}
-
-/// Exchange a little traffic so VLESS request/response complete, then peel the
-/// outbound wrapper to the bare Gun/TLS stream before bulk copy.
-async fn warmup_peel_vless(
-    client: &mut BoxedInboundStream,
-    remote: &mut rewrite_outbound::BoxedOutboundStream,
-) -> std::io::Result<()> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let mut client_buf = [0_u8; 8192];
-    let mut remote_buf = [0_u8; 8192];
-    for _ in 0..32 {
-        if rewrite_outbound::peel_replaceable_vless(remote) {
-            return Ok(());
-        }
-        tokio::select! {
-            result = client.read(&mut client_buf) => {
-                match result? {
-                    0 => {
-                        let _ = rewrite_outbound::peel_replaceable_vless(remote);
-                        return Ok(());
-                    }
-                    n => {
-                        remote.write_all(&client_buf[..n]).await?;
-                        let _ = rewrite_outbound::peel_replaceable_vless(remote);
-                    }
-                }
-            }
-            result = remote.read(&mut remote_buf) => {
-                match result? {
-                    0 => {
-                        let _ = rewrite_outbound::peel_replaceable_vless(remote);
-                        return Ok(());
-                    }
-                    n => {
-                        client.write_all(&remote_buf[..n]).await?;
-                        let _ = rewrite_outbound::peel_replaceable_vless(remote);
-                    }
-                }
-            }
-        }
-        if rewrite_outbound::peel_replaceable_vless(remote) {
-            return Ok(());
-        }
-    }
-    let _ = rewrite_outbound::peel_replaceable_vless(remote);
-    Ok(())
 }
 
 pub(super) async fn evaluate_tcp_rules(
