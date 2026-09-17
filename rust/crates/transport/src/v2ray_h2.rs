@@ -272,18 +272,17 @@ impl AsyncWrite for H2WriteStream {
 impl H2DataStream {
     /// Send already-owned bytes without an extra `copy_from_slice`.
     ///
-    /// Waits until h2 grants capacity for the full buffer so Gun can emit one
-    /// framed message as a single DATA write when the peer window allows it.
+    /// Returns how many bytes of `input` were accepted into an h2 DATA frame.
     pub(crate) fn poll_write_bytes(
         &mut self,
         cx: &mut Context<'_>,
         input: &Bytes,
-    ) -> Poll<io::Result<()>> {
+    ) -> Poll<io::Result<usize>> {
         if self.write_closed {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
         if input.is_empty() {
-            return Poll::Ready(Ok(()));
+            return Poll::Ready(Ok(0));
         }
         self.sender.reserve_capacity(input.len());
         let capacity = match ready!(self.sender.poll_capacity(cx)) {
@@ -291,14 +290,15 @@ impl H2DataStream {
             Some(Err(error)) => return Poll::Ready(Err(h2_error(error))),
             None => return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
         };
-        if capacity < input.len() {
+        let length = capacity.min(input.len());
+        if length == 0 {
             self.sender.reserve_capacity(input.len());
             return Poll::Pending;
         }
         self.sender
-            .send_data(input.clone(), false)
+            .send_data(input.slice(..length), false)
             .map_err(h2_error)?;
-        Poll::Ready(Ok(()))
+        Poll::Ready(Ok(length))
     }
 }
 

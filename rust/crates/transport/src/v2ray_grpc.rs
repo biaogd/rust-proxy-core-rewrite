@@ -476,27 +476,40 @@ impl GunStream {
     }
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let Some(frame) = self.write_frame.as_ref() else {
-            return Poll::Ready(Ok(()));
-        };
-        match &mut self.inner {
-            GunInner::H2(inner) => {
-                ready!(inner.poll_write_bytes(cx, frame))?;
+        loop {
+            let Some(frame) = self.write_frame.as_ref() else {
+                return Poll::Ready(Ok(()));
+            };
+            if frame.is_empty() {
+                self.write_frame = None;
+                return Poll::Ready(Ok(()));
             }
-            #[cfg(test)]
-            GunInner::Plain(inner) => {
-                let mut offset = 0;
-                while offset < frame.len() {
-                    let written = ready!(Pin::new(&mut *inner).poll_write(cx, &frame[offset..]))?;
+            match &mut self.inner {
+                GunInner::H2(inner) => {
+                    let written = ready!(inner.poll_write_bytes(cx, frame))?;
                     if written == 0 {
                         return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                     }
-                    offset += written;
+                    if written >= frame.len() {
+                        self.write_frame = None;
+                    } else {
+                        self.write_frame = Some(frame.slice(written..));
+                    }
+                }
+                #[cfg(test)]
+                GunInner::Plain(inner) => {
+                    let written = ready!(Pin::new(&mut *inner).poll_write(cx, frame))?;
+                    if written == 0 {
+                        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                    }
+                    if written >= frame.len() {
+                        self.write_frame = None;
+                    } else {
+                        self.write_frame = Some(frame.slice(written..));
+                    }
                 }
             }
         }
-        self.write_frame = None;
-        Poll::Ready(Ok(()))
     }
 
     fn poll_read_inner(
