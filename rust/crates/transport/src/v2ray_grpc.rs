@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use bytes::{Buf as _, Bytes, BytesMut};
+use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use h2::Ping;
 use h2::client::SendRequest;
 use http::{Method, Request, Uri};
@@ -14,7 +14,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::BoxedStream;
-use crate::v2ray_h2::{connect_h2_request, h2_data_stream, h2_error, open_h2_request};
+use crate::v2ray_h2::{
+    H2DataStream, h2_data_stream, h2_error, handshake_h2_client, handshake_h2_server,
+    open_h2_data_stream,
+};
 
 const PING_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -91,7 +94,7 @@ impl V2rayGrpcClient {
 
         let lease = ActiveGrpcLease::new(transport);
         let request = grpc_request(&self.options)?;
-        match open_h2_request(lease.transport().sender.clone(), request).await {
+        match open_h2_data_stream(lease.transport().sender.clone(), request).await {
             Ok(stream) => Ok(Box::new(GunStream::with_transport(
                 stream,
                 lease.into_held(),
@@ -185,7 +188,7 @@ struct GrpcTransport {
 
 impl GrpcTransport {
     async fn connect(stream: BoxedStream, ping_interval: i64) -> io::Result<Self> {
-        let (sender, mut connection) = h2::client::handshake(stream).await.map_err(h2_error)?;
+        let (sender, mut connection) = handshake_h2_client(stream).await?;
         let ping_duration = ping_duration(ping_interval);
         let ping_pong = ping_duration
             .is_some()
@@ -297,7 +300,11 @@ pub async fn connect_v2ray_grpc(
         min_streams: 0,
         max_streams: 0,
     })?;
-    let stream = connect_h2_request(stream, request).await?;
+    let (client, connection) = handshake_h2_client(stream).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let stream = open_h2_data_stream(client, request).await?;
     Ok(Box::new(GunStream::new(stream)))
 }
 
@@ -342,7 +349,7 @@ where
     ///
     /// Returns an I/O error when the HTTP/2 handshake fails.
     pub async fn handshake(stream: S, service_name: &str) -> io::Result<Self> {
-        let connection = h2::server::handshake(stream).await.map_err(h2_error)?;
+        let connection = handshake_h2_server(stream).await?;
         Ok(Self {
             connection,
             expected_path: service_name_to_path(service_name),
@@ -368,8 +375,7 @@ where
                 Err(error) => return Some(Err(h2_error(error))),
             };
             let receiver = request.into_body();
-            let duplex = Box::new(h2_data_stream(sender, receiver));
-            return Some(Ok(Box::new(GunStream::new(duplex))));
+            return Some(Ok(Box::new(GunStream::new(h2_data_stream(sender, receiver)))));
         }
     }
 }
@@ -400,10 +406,17 @@ fn is_gun_request(request: &http::Request<h2::RecvStream>, expected_path: &str) 
         .is_some_and(|value| value.starts_with("application/grpc"))
 }
 
+enum GunInner {
+    H2(H2DataStream),
+    /// Unit-test framing harness over a plain duplex (no HTTP/2).
+    #[cfg(test)]
+    Plain(BoxedStream),
+}
+
 struct GunStream {
-    inner: BoxedStream,
-    write_buffer: Vec<u8>,
-    write_offset: usize,
+    inner: GunInner,
+    /// Pending framed Gun message waiting for h2 send capacity.
+    write_frame: Option<Bytes>,
     pending_input: usize,
     read_buffer: BytesMut,
     payload_remaining: Option<usize>,
@@ -411,11 +424,10 @@ struct GunStream {
 }
 
 impl GunStream {
-    fn new(inner: BoxedStream) -> Self {
+    fn new(inner: H2DataStream) -> Self {
         Self {
-            inner,
-            write_buffer: Vec::new(),
-            write_offset: 0,
+            inner: GunInner::H2(inner),
+            write_frame: None,
             pending_input: 0,
             read_buffer: BytesMut::new(),
             payload_remaining: None,
@@ -423,11 +435,22 @@ impl GunStream {
         }
     }
 
-    fn with_transport(inner: BoxedStream, transport: Arc<GrpcTransport>) -> Self {
+    #[cfg(test)]
+    fn new_plain(inner: BoxedStream) -> Self {
         Self {
-            inner,
-            write_buffer: Vec::new(),
-            write_offset: 0,
+            inner: GunInner::Plain(inner),
+            write_frame: None,
+            pending_input: 0,
+            read_buffer: BytesMut::new(),
+            payload_remaining: None,
+            transport: None,
+        }
+    }
+
+    fn with_transport(inner: H2DataStream, transport: Arc<GrpcTransport>) -> Self {
+        Self {
+            inner: GunInner::H2(inner),
+            write_frame: None,
             pending_input: 0,
             read_buffer: BytesMut::new(),
             payload_remaining: None,
@@ -435,7 +458,7 @@ impl GunStream {
         }
     }
 
-    fn frame(payload: &[u8]) -> io::Result<Vec<u8>> {
+    fn frame(payload: &[u8]) -> io::Result<Bytes> {
         let mut encoded_length = [0_u8; 10];
         let varint_length = encode_uvarint(payload.len() as u64, &mut encoded_length);
         let grpc_length = 1_usize
@@ -443,28 +466,78 @@ impl GunStream {
             .and_then(|length| length.checked_add(payload.len()))
             .and_then(|length| u32::try_from(length).ok())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Gun frame is too large"))?;
-        let mut frame = Vec::with_capacity(5 + grpc_length as usize);
-        frame.push(0);
+        let mut frame = BytesMut::with_capacity(5 + grpc_length as usize);
+        frame.put_u8(0);
         frame.extend_from_slice(&grpc_length.to_be_bytes());
-        frame.push(0x0a);
+        frame.put_u8(0x0a);
         frame.extend_from_slice(&encoded_length[..varint_length]);
         frame.extend_from_slice(payload);
-        Ok(frame)
+        Ok(frame.freeze())
     }
 
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        while self.write_offset < self.write_buffer.len() {
-            let written = ready!(
-                Pin::new(&mut self.inner).poll_write(cx, &self.write_buffer[self.write_offset..])
-            )?;
-            if written == 0 {
-                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        loop {
+            let Some(frame) = self.write_frame.as_ref() else {
+                return Poll::Ready(Ok(()));
+            };
+            if frame.is_empty() {
+                self.write_frame = None;
+                return Poll::Ready(Ok(()));
             }
-            self.write_offset += written;
+            match &mut self.inner {
+                GunInner::H2(inner) => {
+                    let written = ready!(inner.poll_write_bytes(cx, frame))?;
+                    if written == 0 {
+                        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                    }
+                    if written >= frame.len() {
+                        self.write_frame = None;
+                    } else {
+                        self.write_frame = Some(frame.slice(written..));
+                    }
+                }
+                #[cfg(test)]
+                GunInner::Plain(inner) => {
+                    let written = ready!(Pin::new(&mut *inner).poll_write(cx, frame))?;
+                    if written == 0 {
+                        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                    }
+                    if written >= frame.len() {
+                        self.write_frame = None;
+                    } else {
+                        self.write_frame = Some(frame.slice(written..));
+                    }
+                }
+            }
         }
-        self.write_buffer.clear();
-        self.write_offset = 0;
-        Poll::Ready(Ok(()))
+    }
+
+    fn poll_read_inner(
+        &mut self,
+        cx: &mut Context<'_>,
+        input: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut self.inner {
+            GunInner::H2(inner) => Pin::new(inner).poll_read(cx, input),
+            #[cfg(test)]
+            GunInner::Plain(inner) => Pin::new(&mut *inner).poll_read(cx, input),
+        }
+    }
+
+    fn poll_flush_inner(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.inner {
+            GunInner::H2(inner) => Pin::new(inner).poll_flush(cx),
+            #[cfg(test)]
+            GunInner::Plain(inner) => Pin::new(&mut *inner).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown_inner(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut self.inner {
+            GunInner::H2(inner) => Pin::new(inner).poll_shutdown(cx),
+            #[cfg(test)]
+            GunInner::Plain(inner) => Pin::new(&mut *inner).poll_shutdown(cx),
+        }
     }
 }
 
@@ -521,9 +594,11 @@ impl AsyncRead for GunStream {
                 }
             }
 
-            let mut temporary = [0_u8; 4096];
+            // Pull larger h2 DATA chunks so WINDOW_UPDATE advances in bigger
+            // steps under bulk load (was 4 KiB).
+            let mut temporary = [0_u8; 32 * 1024];
             let mut input = ReadBuf::new(&mut temporary);
-            ready!(Pin::new(&mut this.inner).poll_read(cx, &mut input))?;
+            ready!(this.poll_read_inner(cx, &mut input))?;
             if input.filled().is_empty() {
                 if this.read_buffer.is_empty() && this.payload_remaining.is_none() {
                     return Poll::Ready(Ok(()));
@@ -542,11 +617,11 @@ impl AsyncWrite for GunStream {
         input: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if !this.write_buffer.is_empty() {
+        if this.write_frame.is_some() {
             ready!(this.poll_drain(cx))?;
             return Poll::Ready(Ok(std::mem::take(&mut this.pending_input)));
         }
-        this.write_buffer = Self::frame(input)?;
+        this.write_frame = Some(Self::frame(input)?);
         this.pending_input = input.len();
         ready!(this.poll_drain(cx))?;
         Poll::Ready(Ok(std::mem::take(&mut this.pending_input)))
@@ -554,18 +629,18 @@ impl AsyncWrite for GunStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.write_buffer.is_empty() {
+        if this.write_frame.is_some() {
             ready!(this.poll_drain(cx))?;
         }
-        Pin::new(&mut this.inner).poll_flush(cx)
+        this.poll_flush_inner(cx)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.write_buffer.is_empty() {
+        if this.write_frame.is_some() {
             ready!(this.poll_drain(cx))?;
         }
-        Pin::new(&mut this.inner).poll_shutdown(cx)
+        this.poll_shutdown_inner(cx)
     }
 }
 
@@ -613,7 +688,7 @@ mod tests {
     #[tokio::test]
     async fn frames_each_write_and_removes_response_envelopes() {
         let (client, mut server) = tokio::io::duplex(4096);
-        let mut client = GunStream::new(Box::new(client) as BoxedStream);
+        let mut client = GunStream::new_plain(Box::new(client) as BoxedStream);
         let server_task = tokio::spawn(async move {
             let mut request = [0_u8; 19];
             server.read_exact(&mut request).await.expect("Gun request");

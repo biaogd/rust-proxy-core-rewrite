@@ -25,7 +25,7 @@ pub(crate) const DEFAULT_CONNECTION_RECEIVE_WINDOW: u64 = 67_108_864;
 pub(crate) const DEFAULT_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) fn build_rustls_client_config(options: &ClientOptions) -> ClientConfig {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let skip = options.tls.skip_certificate_verification || options.tls.disable_sni;
     let builder = ClientConfig::builder();
     let mut crypto = if skip {
@@ -141,7 +141,7 @@ struct SkipServerVerification {
 impl SkipServerVerification {
     fn new() -> Self {
         Self {
-            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+            algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }
@@ -211,7 +211,7 @@ mod tests {
         let cert = CertificateDer::from(certified.cert.der().to_vec());
         let key =
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
-        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         let _ = (*provider).clone().install_default();
         let mut rustls_server = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])

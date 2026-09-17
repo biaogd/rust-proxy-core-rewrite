@@ -2,14 +2,12 @@
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use rewrite_io::BoxedStream;
 use rewrite_model::{Destination, Host};
 use sha2::{Digest as _, Sha224};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod packet;
 
@@ -71,16 +69,37 @@ pub fn password_table(
 ///
 /// Returns [`TrojanProtocolError::DomainTooLong`] when a domain cannot fit in
 /// the SOCKS address used by the Trojan wire format.
-pub fn connect_trojan_on_stream(
+/// Starts a Trojan TCP session by writing the request header immediately
+/// (Go `WriteHeader`), then returning the raw carrier for bulk relay.
+///
+/// # Errors
+///
+/// Returns [`TrojanProtocolError::DomainTooLong`] when a domain cannot fit in
+/// the SOCKS address used by the Trojan wire format, or I/O errors writing the
+/// header.
+pub async fn connect_trojan_on_stream(
     remote: BoxedStream,
     destination: &Destination,
     password: &str,
 ) -> Result<BoxedStream, TrojanProtocolError> {
-    Ok(Box::new(TrojanStream {
-        inner: remote,
-        request: request_header(destination, password)?,
-        offset: 0,
-    }))
+    connect_trojan_on_stream_with_key(remote, destination, &password_key(password)).await
+}
+
+/// Like [`connect_trojan_on_stream`], but uses a precomputed SHA-224 hex key
+/// (Go `hexPassword`) so dials avoid hashing the password again.
+///
+/// # Errors
+///
+/// Returns [`TrojanProtocolError::DomainTooLong`] or header write I/O errors.
+pub async fn connect_trojan_on_stream_with_key(
+    mut remote: BoxedStream,
+    destination: &Destination,
+    password_key: &[u8; PASSWORD_HEX_LEN],
+) -> Result<BoxedStream, TrojanProtocolError> {
+    let header = request_header_with_key(destination, password_key, COMMAND_TCP)?;
+    remote.write_all(&header).await?;
+    // Match Go: after WriteHeader the outbound is the bare TLS/carrier stream.
+    Ok(remote)
 }
 
 /// Reads and authenticates one Trojan request from an accepted server stream.
@@ -139,7 +158,7 @@ fn request_header(
     destination: &Destination,
     password: &str,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
-    request_header_with_command(destination, password, COMMAND_TCP)
+    request_header_with_key(destination, &password_key(password), COMMAND_TCP)
 }
 
 fn request_header_with_command(
@@ -147,8 +166,16 @@ fn request_header_with_command(
     password: &str,
     command: u8,
 ) -> Result<Vec<u8>, TrojanProtocolError> {
+    request_header_with_key(destination, &password_key(password), command)
+}
+
+fn request_header_with_key(
+    destination: &Destination,
+    password_key: &[u8; PASSWORD_HEX_LEN],
+    command: u8,
+) -> Result<Vec<u8>, TrojanProtocolError> {
     let mut request = Vec::with_capacity(80);
-    request.extend_from_slice(&password_key(password));
+    request.extend_from_slice(password_key);
     request.extend_from_slice(b"\r\n");
     request.push(command);
     append_socks_address(&mut request, destination)?;
@@ -178,58 +205,6 @@ fn append_socks_address(
     }
     request.extend_from_slice(&destination.port.to_be_bytes());
     Ok(())
-}
-
-struct TrojanStream {
-    inner: BoxedStream,
-    request: Vec<u8>,
-    offset: usize,
-}
-
-impl AsyncRead for TrojanStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(context, buffer)
-    }
-}
-
-impl AsyncWrite for TrojanStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        while self.offset < self.request.len() {
-            let request = self.request.clone();
-            let offset = self.offset;
-            match Pin::new(&mut self.inner).poll_write(context, &request[offset..]) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
-                }
-                Poll::Ready(Ok(written)) => self.offset += written,
-            }
-        }
-        Pin::new(&mut self.inner).poll_write(context, buffer)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
-    }
 }
 
 #[cfg(test)]

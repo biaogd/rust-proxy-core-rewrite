@@ -833,6 +833,7 @@ pub(super) async fn measure_http_delay(
                         &destination,
                         &trojan.password,
                     )
+                    .await
                     .map_err(|_| ())?
                 }
                 rewrite_config::ProxyKind::AnyTls => {

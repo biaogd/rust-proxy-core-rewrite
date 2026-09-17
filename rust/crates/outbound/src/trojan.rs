@@ -25,14 +25,35 @@ pub fn associate_trojan_udp_on_stream(
 
 /// Starts a Trojan TCP request over an established carrier.
 ///
+/// Writes the Trojan header immediately (Go `WriteHeader`) and returns the
+/// bare carrier for relay.
+///
 /// # Errors
 ///
-/// Returns a protocol error when the destination cannot be encoded.
-pub fn connect_trojan_on_stream(
+/// Returns a protocol error when the destination cannot be encoded or the
+/// header write fails.
+pub async fn connect_trojan_on_stream(
     remote: BoxedOutboundStream,
     destination: &Destination,
     password: &str,
 ) -> Result<BoxedOutboundStream, TrojanProxyError> {
     rewrite_protocol_trojan::connect_trojan_on_stream(remote, destination, password)
+        .await
+        .map_err(Into::into)
+}
+
+/// Starts a Trojan TCP request using a precomputed password key.
+///
+/// # Errors
+///
+/// Returns a protocol error when the destination cannot be encoded or the
+/// header write fails.
+pub async fn connect_trojan_on_stream_with_key(
+    remote: BoxedOutboundStream,
+    destination: &Destination,
+    password_key: &[u8; 56],
+) -> Result<BoxedOutboundStream, TrojanProxyError> {
+    rewrite_protocol_trojan::connect_trojan_on_stream_with_key(remote, destination, password_key)
+        .await
         .map_err(Into::into)
 }

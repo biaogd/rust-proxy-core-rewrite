@@ -32,17 +32,43 @@ impl Frame {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_OVERHEAD + self.data.len());
-        out.push(self.cmd);
-        out.extend_from_slice(&self.sid.to_be_bytes());
-        out.extend_from_slice(
-            &u16::try_from(self.data.len())
-                .unwrap_or(u16::MAX)
-                .to_be_bytes(),
-        );
-        out.extend_from_slice(&self.data);
-        out
+        encode_frame(self.cmd, self.sid, &self.data)
     }
+}
+
+/// Encode one frame header + payload in a single allocation (one data copy).
+pub(crate) fn encode_frame(cmd: u8, sid: u32, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_OVERHEAD + data.len());
+    out.push(cmd);
+    out.extend_from_slice(&sid.to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(data.len())
+            .unwrap_or(u16::MAX)
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(data);
+    out
+}
+
+/// Encode PSH frames for `data`, splitting at [`MAX_FRAME_DATA_LEN`].
+///
+/// Empty input yields an empty buffer (caller should skip the write).
+pub(crate) fn encode_psh_payload(sid: u32, data: &[u8]) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    if data.len() <= MAX_FRAME_DATA_LEN {
+        return encode_frame(CMD_PSH, sid, data);
+    }
+    let frame_count = data.len().div_ceil(MAX_FRAME_DATA_LEN);
+    let mut encoded = Vec::with_capacity(data.len() + HEADER_OVERHEAD * frame_count);
+    let mut offset = 0;
+    while offset < data.len() {
+        let end = (offset + MAX_FRAME_DATA_LEN).min(data.len());
+        encoded.extend_from_slice(&encode_frame(CMD_PSH, sid, &data[offset..end]));
+        offset = end;
+    }
+    encoded
 }
 
 pub(crate) fn encode_settings(client_metadata: &str, padding_md5: &str) -> Vec<u8> {

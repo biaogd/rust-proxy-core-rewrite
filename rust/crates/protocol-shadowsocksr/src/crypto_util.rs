@@ -3,7 +3,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit as _};
+use aes::cipher::{BlockCipherEncrypt, KeyInit as _};
 use hmac::{Hmac, Mac};
 use md5::{Digest as _, Md5};
 use sha1::Sha1;

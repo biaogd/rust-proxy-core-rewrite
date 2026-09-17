@@ -35,7 +35,7 @@ pub use shadow_tls_server::{
     ShadowTlsAcceptResult, ShadowTlsHandshakeDial, ShadowTlsServerConfig, accept_shadow_tls_v3,
 };
 pub use simple_obfs::{HttpObfsClient, HttpObfsServer, TlsObfsClient, TlsObfsServer};
-pub use tls::{ClientTlsOptions, TlsClientError, client_config};
+pub use tls::{ClientTlsOptions, TlsClientError, client_config, client_config_arc};
 pub use v2ray_grpc::{
     V2rayGrpcClient, V2rayGrpcClientOptions, V2rayGrpcServerConnection, connect_v2ray_grpc,
     service_name_to_path,

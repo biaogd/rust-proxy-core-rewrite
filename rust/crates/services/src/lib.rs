@@ -134,7 +134,7 @@ fn updater_lock() -> &'static Mutex<()> {
 /// Selects the normal Ring provider when Rustls is built with both Ring and
 /// AWS-LC (the latter is used only by per-connection ECH configs).
 pub fn install_default_crypto_provider() {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 fn updater_client() -> Result<reqwest::Client, ServiceError> {

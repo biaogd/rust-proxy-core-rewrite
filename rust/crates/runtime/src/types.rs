@@ -34,10 +34,11 @@ pub(crate) enum LocalTcpListener {
 impl LocalTcpListener {
     pub(crate) async fn accept(&self) -> std::io::Result<(BoxedInboundStream, SocketAddr)> {
         match self {
-            Self::Plain(listener) => listener
-                .accept()
-                .await
-                .map(|(stream, address)| (Box::new(stream) as BoxedInboundStream, address)),
+            Self::Plain(listener) => listener.accept().await.map(|(stream, address)| {
+                // Match Go net.TCPConn: TCP_NODELAY on by default.
+                let _ = stream.set_nodelay(true);
+                (Box::new(stream) as BoxedInboundStream, address)
+            }),
             Self::FastOpen(listener) => listener
                 .accept()
                 .await

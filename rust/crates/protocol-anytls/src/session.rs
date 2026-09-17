@@ -18,7 +18,7 @@ use tokio::task::AbortHandle;
 use crate::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS,
     CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING_SCHEME, CMD_WASTE, Frame,
-    HEADER_OVERHEAD, MAX_FRAME_DATA_LEN, encode_settings, encode_socks_address,
+    HEADER_OVERHEAD, encode_psh_payload, encode_settings, encode_socks_address,
 };
 use crate::padding::{CHECK_MARK, PaddingFactory, SharedPadding};
 use crate::{AnyTlsConnectOptions, AnyTlsProtocolError};
@@ -534,12 +534,12 @@ impl AsyncWrite for AnyTlsStream {
                 return Poll::Ready(Err(error));
             }
             let session = Arc::clone(&self.session);
-            let sid = self.sid;
-            let payload = buffer.to_vec();
+            // Encode once in poll_write so the async path only does write_conn.
+            let encoded = encode_psh_payload(self.sid, buffer);
             let accepted = buffer.len();
             self.pending_write = Some(Box::pin(async move {
                 session
-                    .write_data_frame(sid, &payload)
+                    .write_encoded(encoded)
                     .await
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 Ok(accepted)
@@ -623,19 +623,13 @@ impl SessionInner {
         if data.is_empty() {
             return Ok(());
         }
-        if data.len() <= MAX_FRAME_DATA_LEN {
-            let mut frame = Frame::new(CMD_PSH, sid);
-            frame.data = data.to_vec();
-            return self.write_conn(&frame.encode()).await;
-        }
-        let mut encoded = Vec::with_capacity(data.len() + HEADER_OVERHEAD * 4);
-        let mut offset = 0;
-        while offset < data.len() {
-            let end = (offset + MAX_FRAME_DATA_LEN).min(data.len());
-            let mut frame = Frame::new(CMD_PSH, sid);
-            frame.data = data[offset..end].to_vec();
-            encoded.extend_from_slice(&frame.encode());
-            offset = end;
+        // Single encode allocation (header + payload); avoid Frame + second to_vec.
+        self.write_conn(&encode_psh_payload(sid, data)).await
+    }
+
+    async fn write_encoded(&self, encoded: Vec<u8>) -> Result<(), AnyTlsProtocolError> {
+        if encoded.is_empty() {
+            return Ok(());
         }
         self.write_conn(&encoded).await
     }

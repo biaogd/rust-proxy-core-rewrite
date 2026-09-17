@@ -10,14 +10,9 @@ mod server;
 mod stream;
 mod vision;
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 use rewrite_io::{BoxedStream, VisionDirectControl};
 use rewrite_model::Destination;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio_util::sync::CancellationToken;
 
 pub use addons::decode_flow_addon;
 pub use packet::{
@@ -29,8 +24,6 @@ pub use server::{
     read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
 pub use vision::VisionStream;
-
-const VERSION: u8 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VlessFlow {
@@ -56,7 +49,8 @@ pub enum VlessProtocolError {
 /// Starts a VLESS TCP session over an established outer stream.
 ///
 /// The request remains lazy like the Go oracle: the VLESS header and first
-/// application payload are emitted by the same first relay write.
+/// application payload are emitted by the same first relay write. Non-Vision
+/// sessions use [`stream::VlessTcpStream`] in-place (no duplex relay copy).
 ///
 /// # Errors
 ///
@@ -82,29 +76,15 @@ pub fn connect_vless_on_stream_with_vision_control(
     options: VlessClientOptions,
     vision_control: Option<VisionDirectControl>,
 ) -> Result<BoxedStream, VlessProtocolError> {
+    let vless = stream::VlessTcpStream::new(remote, destination, options)?;
     if options.flow == Some(VlessFlow::XtlsRprxVision) {
-        let vless = stream::VlessTcpStream::new(remote, destination, options)?;
         return Ok(Box::new(vision::VisionStream::new(
             Box::new(vless),
             options.uuid,
             vision_control,
         )));
     }
-
-    let request = request_header(destination, options)?;
-    let (application, relay) = tokio::io::duplex(64 * 1024);
-    let cancellation = CancellationToken::new();
-    let task_cancellation = cancellation.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            () = task_cancellation.cancelled() => {}
-            _ = relay_session(remote, relay, &request) => {}
-        }
-    });
-    Ok(Box::new(VlessRelayStream {
-        inner: application,
-        cancellation,
-    }))
+    Ok(Box::new(vless))
 }
 
 fn request_header(
@@ -114,88 +94,12 @@ fn request_header(
     stream::request_header(destination, options)
 }
 
-async fn relay_session(
-    mut remote: BoxedStream,
-    mut relay: tokio::io::DuplexStream,
-    request: &[u8],
-) -> Result<(), VlessProtocolError> {
-    let mut initial = vec![0_u8; 64 * 1024];
-    let size = relay.read(&mut initial).await?;
-    if size == 0 {
-        remote.shutdown().await?;
-        return Ok(());
-    }
-    let mut first_write = Vec::with_capacity(request.len() + size);
-    first_write.extend_from_slice(request);
-    first_write.extend_from_slice(&initial[..size]);
-    remote.write_all(&first_write).await?;
-
-    let mut response = [0_u8; 2];
-    remote.read_exact(&mut response).await?;
-    if response[0] != VERSION {
-        return Err(VlessProtocolError::Protocol(format!(
-            "unexpected response version {}",
-            response[0]
-        )));
-    }
-    if response[1] != 0 {
-        let mut addons = vec![0_u8; usize::from(response[1])];
-        remote.read_exact(&mut addons).await?;
-    }
-    tokio::io::copy_bidirectional(&mut relay, &mut remote).await?;
-    Ok(())
-}
-
-struct VlessRelayStream {
-    inner: tokio::io::DuplexStream,
-    cancellation: CancellationToken,
-}
-
-impl Drop for VlessRelayStream {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-    }
-}
-
-impl AsyncRead for VlessRelayStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(context, buffer)
-    }
-}
-
-impl AsyncWrite for VlessRelayStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        Pin::new(&mut self.inner).poll_write(context, buffer)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rewrite_model::Host;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     const UUID: [u8; 16] = [
         0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08,
@@ -296,6 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_response_corpus_is_bounded_and_never_panics() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
         let mut corpus = vec![vec![], vec![0], vec![1, 0], vec![0, 1], vec![0, 255]];
         for length in 0..=64_usize {
             corpus.push(
@@ -308,28 +214,23 @@ mod tests {
             );
         }
 
+        let destination = Destination {
+            host: Host::Domain("corpus.example".to_owned()),
+            port: 443,
+        };
         for response in corpus {
             let (remote, mut authority) = tokio::io::duplex(1024);
-            let (mut application, relay) = tokio::io::duplex(1024);
-            let request = b"request".to_vec();
-            let request_length = request.len();
-            let task =
-                tokio::spawn(async move { relay_session(Box::new(remote), relay, &request).await });
-            application
-                .write_all(b"x")
-                .await
-                .expect("application write");
-            let mut observed = vec![0_u8; request_length + 1];
-            authority
-                .read_exact(&mut observed)
-                .await
-                .expect("request reaches authority");
-            authority
-                .write_all(&response)
-                .await
-                .expect("corpus response write");
-            authority.shutdown().await.expect("authority shutdown");
-            drop(application);
+            let mut stream = connect_vless_on_stream(Box::new(remote), &destination, options())
+                .expect("VLESS stream");
+            let task = tokio::spawn(async move {
+                let _ = stream.write_all(b"x").await;
+                let mut sink = Vec::new();
+                let _ = stream.read_to_end(&mut sink).await;
+            });
+            let mut observed = vec![0_u8; 64];
+            let _ = authority.read(&mut observed).await;
+            let _ = authority.write_all(&response).await;
+            let _ = authority.shutdown().await;
             let joined = tokio::time::timeout(std::time::Duration::from_secs(1), task)
                 .await
                 .expect("malformed response handling is bounded");

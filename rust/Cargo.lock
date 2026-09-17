@@ -639,11 +639,11 @@ dependencies = [
 
 [[package]]
 name = "cfb-mode"
-version = "0.8.2"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "738b8d467867f80a71351933f70461f5b56f24d5c93e0cf216e59229c968d330"
+checksum = "ac64b0984be8510caae81455ea2c8c23e5af6be61c36129df62f3380d5d64e1f"
 dependencies = [
- "cipher 0.4.4",
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -1857,6 +1857,7 @@ version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643"
 dependencies = [
+ "aws-lc-rs",
  "bitflags 2.13.1",
  "data-encoding",
  "idna",
@@ -2061,7 +2062,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -3539,7 +3540,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.43 (registry+https://github.com/rust-lang/crates.io-index)",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3552,6 +3553,7 @@ version = "0.11.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "getrandom 0.4.3",
  "lru-slab",
@@ -3577,7 +3579,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -3833,6 +3835,7 @@ dependencies = [
  "rewrite-ruleset",
  "serde",
  "serde_yaml_ng",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "url",
  "uuid",
@@ -4043,7 +4046,7 @@ name = "rewrite-protocol-shadowsocksr"
 version = "0.1.0"
 dependencies = [
  "adler2",
- "aes 0.8.4",
+ "aes 0.9.3",
  "base64 0.22.1",
  "bytes",
  "crc32fast",
@@ -4063,9 +4066,9 @@ dependencies = [
 name = "rewrite-protocol-snell"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.10.3",
+ "aes-gcm 0.11.1",
  "argon2",
- "chacha20poly1305 0.10.1",
+ "chacha20poly1305 0.11.0",
  "rand 0.10.2",
  "rewrite-model",
  "rewrite-transport",
@@ -4138,10 +4141,10 @@ dependencies = [
 name = "rewrite-protocol-vmess"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
- "aes-gcm 0.10.3",
+ "aes 0.9.3",
+ "aes-gcm 0.11.1",
  "cfb-mode",
- "chacha20poly1305 0.10.1",
+ "chacha20poly1305 0.11.0",
  "crc32fast",
  "hex",
  "hmac 0.12.1",
@@ -4312,7 +4315,7 @@ dependencies = [
 name = "rewrite-transport"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.10.3",
+ "aes-gcm 0.11.1",
  "base64 0.22.1",
  "bytes",
  "futures-util",
@@ -4582,7 +4585,6 @@ dependencies = [
  "brotli",
  "brotli-decompressor",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -4599,7 +4601,6 @@ dependencies = [
  "brotli-decompressor",
  "log",
  "once_cell",
- "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

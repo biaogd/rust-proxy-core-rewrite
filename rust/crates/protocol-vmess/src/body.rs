@@ -1,3 +1,6 @@
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes128Gcm, Nonce};
 use cfb_mode::cipher::KeyIvInit as _;
@@ -6,7 +9,7 @@ use md5::{Digest as _, Md5};
 use rand::RngExt as _;
 use sha3::Shake128;
 use sha3::digest::{ExtendableOutput as _, Update as _, XofReader as _};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use super::header::response_body_material;
 use super::kdf::derive_16;
@@ -273,19 +276,23 @@ impl BodyWriter {
         )
     }
 
-    pub(super) async fn write_record<W: AsyncWrite + Unpin>(
-        &mut self,
-        writer: &mut W,
-        plaintext: &[u8],
-    ) -> std::io::Result<()> {
+    /// Seals one body record into wire bytes without flushing the carrier.
+    ///
+    /// Callers that batch into larger TLS/TCP writes should prefer this over
+    /// [`Self::write_record`] so the outer stream controls flush timing.
+    pub(super) fn encode_record(&mut self, plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
         match &mut self.mode {
             WriterMode::None { chunked } => {
                 if *chunked {
                     let length = u16::try_from(plaintext.len())
                         .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
-                    writer.write_all(&length.to_be_bytes()).await?;
+                    let mut wire = Vec::with_capacity(2 + plaintext.len());
+                    wire.extend_from_slice(&length.to_be_bytes());
+                    wire.extend_from_slice(plaintext);
+                    Ok(wire)
+                } else {
+                    Ok(plaintext.to_vec())
                 }
-                writer.write_all(plaintext).await?;
             }
             WriterMode::Aes128Cfb(cipher) => {
                 let framed_length = plaintext
@@ -298,7 +305,7 @@ impl BodyWriter {
                 wire.extend_from_slice(&fnv1a32(plaintext).to_be_bytes());
                 wire.extend_from_slice(plaintext);
                 cipher.encrypt(&mut wire);
-                writer.write_all(&wire).await?;
+                Ok(wire)
             }
             WriterMode::Aead(aead) => {
                 let nonce = record_nonce(&aead.iv, aead.counter);
@@ -308,34 +315,44 @@ impl BodyWriter {
                     .len()
                     .checked_add(padding_length)
                     .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
+                let mut wire = Vec::with_capacity(2 + AEAD_OVERHEAD + framed_length);
 
                 if let Some(length_cipher) = &aead.framing.authenticated_length {
                     let plaintext_length = framed_length
                         .checked_sub(AEAD_OVERHEAD)
                         .and_then(|length| u16::try_from(length).ok())
                         .ok_or_else(|| std::io::Error::other("VMess body record is too large"))?;
-                    writer
-                        .write_all(&length_cipher.seal(
-                            &aead.framing.authenticated_length_nonce(aead.counter),
-                            &plaintext_length.to_be_bytes(),
-                        )?)
-                        .await?;
+                    wire.extend_from_slice(&length_cipher.seal(
+                        &aead.framing.authenticated_length_nonce(aead.counter),
+                        &plaintext_length.to_be_bytes(),
+                    )?);
                 } else {
                     let length = u16::try_from(framed_length)
                         .map_err(|_| std::io::Error::other("VMess body record is too large"))?;
                     let masked = aead.framing.mask_length(length);
-                    writer.write_all(&masked.to_be_bytes()).await?;
+                    wire.extend_from_slice(&masked.to_be_bytes());
                 }
-                writer.write_all(&ciphertext).await?;
+                wire.extend_from_slice(&ciphertext);
                 if padding_length != 0 {
-                    let mut padding = vec![0_u8; padding_length];
-                    rand::rng().fill(padding.as_mut_slice());
-                    writer.write_all(&padding).await?;
+                    let padding_start = wire.len();
+                    wire.resize(padding_start + padding_length, 0);
+                    rand::rng().fill(&mut wire[padding_start..]);
                 }
                 aead.counter = aead.counter.wrapping_add(1);
+                Ok(wire)
             }
         }
-        writer.flush().await
+    }
+
+    pub(super) async fn write_record<W: AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+        plaintext: &[u8],
+    ) -> std::io::Result<()> {
+        // Do not flush per record — outer copy/relay batches into larger writes
+        // (matches Go buffering; per-record flush forced a TLS record per chunk).
+        let wire = self.encode_record(plaintext)?;
+        writer.write_all(&wire).await
     }
 
     pub(super) const fn maximum_plaintext() -> usize {
@@ -358,6 +375,66 @@ enum ReaderMode {
 
 pub(super) struct BodyReader {
     mode: ReaderMode,
+}
+
+#[derive(Default)]
+pub(super) enum PendingRecordRead {
+    #[default]
+    Idle,
+    NoneRaw {
+        buf: Vec<u8>,
+    },
+    Fill {
+        buf: Vec<u8>,
+        filled: usize,
+        stage: FillStage,
+    },
+}
+
+pub(super) enum FillStage {
+    NoneLength,
+    NonePayload,
+    CfbLength,
+    CfbFramed,
+    AeadLength {
+        nonce: [u8; 12],
+        padding_length: usize,
+        authenticated: bool,
+    },
+    AeadCiphertext {
+        nonce: [u8; 12],
+        padding_length: usize,
+    },
+    AeadPadding {
+        nonce: [u8; 12],
+        ciphertext: Vec<u8>,
+    },
+}
+
+fn poll_fill_exact<R: AsyncRead + Unpin>(
+    cx: &mut Context<'_>,
+    reader: &mut R,
+    buf: &mut [u8],
+    filled: &mut usize,
+) -> Poll<std::io::Result<()>> {
+    while *filled < buf.len() {
+        let mut read_buf = ReadBuf::new(&mut buf[*filled..]);
+        match Pin::new(&mut *reader).poll_read(cx, &mut read_buf) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                let read = read_buf.filled().len();
+                if read == 0 {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "short VMess body record",
+                    )));
+                }
+                *filled += read;
+            }
+        }
+    }
+    Poll::Ready(Ok(()))
 }
 
 impl BodyReader {
@@ -439,89 +516,234 @@ impl BodyReader {
         &mut self,
         reader: &mut R,
     ) -> std::io::Result<Vec<u8>> {
-        match &mut self.mode {
-            ReaderMode::None { chunked } => {
-                if *chunked {
-                    let length = usize::from(reader.read_u16().await?);
-                    if !(1..=MAX_READ_CIPHERTEXT).contains(&length) {
-                        return Err(std::io::Error::other(
-                            "invalid VMess plain body record length",
-                        ));
+        let mut pending = PendingRecordRead::Idle;
+        std::future::poll_fn(|cx| self.poll_read_record(cx, reader, &mut pending)).await
+    }
+
+    /// Poll-oriented body record reader for in-place TCP streams (no duplex).
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn poll_read_record<R: AsyncRead + Unpin>(
+        &mut self,
+        cx: &mut Context<'_>,
+        reader: &mut R,
+        pending: &mut PendingRecordRead,
+    ) -> Poll<std::io::Result<Vec<u8>>> {
+        loop {
+            match pending {
+                PendingRecordRead::Idle => match &mut self.mode {
+                    ReaderMode::None { chunked } if *chunked => {
+                        *pending = PendingRecordRead::Fill {
+                            buf: vec![0_u8; 2],
+                            filled: 0,
+                            stage: FillStage::NoneLength,
+                        };
                     }
-                    let mut plaintext = vec![0_u8; length];
-                    reader.read_exact(&mut plaintext).await?;
-                    Ok(plaintext)
-                } else {
-                    let mut plaintext = vec![0_u8; MAX_READ_CIPHERTEXT];
-                    let length = reader.read(&mut plaintext).await?;
-                    if length == 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "VMess raw body ended",
-                        ));
+                    ReaderMode::None { .. } => {
+                        *pending = PendingRecordRead::NoneRaw {
+                            buf: vec![0_u8; MAX_READ_CIPHERTEXT],
+                        };
                     }
-                    plaintext.truncate(length);
-                    Ok(plaintext)
+                    ReaderMode::Aes128Cfb(_) => {
+                        *pending = PendingRecordRead::Fill {
+                            buf: vec![0_u8; 2],
+                            filled: 0,
+                            stage: FillStage::CfbLength,
+                        };
+                    }
+                    ReaderMode::Aead(aead) => {
+                        let nonce = record_nonce(&aead.iv, aead.counter);
+                        let padding_length = aead.framing.padding_length();
+                        let auth = aead.framing.authenticated_length.is_some();
+                        *pending = PendingRecordRead::Fill {
+                            buf: vec![0_u8; if auth { 2 + AEAD_OVERHEAD } else { 2 }],
+                            filled: 0,
+                            stage: FillStage::AeadLength {
+                                nonce,
+                                padding_length,
+                                authenticated: auth,
+                            },
+                        };
+                    }
+                },
+                PendingRecordRead::NoneRaw { buf } => {
+                    let mut read_buf = ReadBuf::new(buf.as_mut_slice());
+                    match Pin::new(&mut *reader).poll_read(cx, &mut read_buf) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            *pending = PendingRecordRead::Idle;
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            let length = read_buf.filled().len();
+                            if length == 0 {
+                                *pending = PendingRecordRead::Idle;
+                                return Poll::Ready(Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "VMess raw body ended",
+                                )));
+                            }
+                            let mut plaintext = std::mem::take(buf);
+                            plaintext.truncate(length);
+                            *pending = PendingRecordRead::Idle;
+                            return Poll::Ready(Ok(plaintext));
+                        }
+                    }
                 }
-            }
-            ReaderMode::Aes128Cfb(cipher) => {
-                let mut encrypted_length = [0_u8; 2];
-                reader.read_exact(&mut encrypted_length).await?;
-                cipher.decrypt(&mut encrypted_length);
-                let framed_length = usize::from(u16::from_be_bytes(encrypted_length));
-                if !(4..=MAX_READ_CIPHERTEXT).contains(&framed_length) {
-                    return Err(std::io::Error::other(
-                        "invalid VMess CFB body record length",
-                    ));
-                }
-                let mut framed = vec![0_u8; framed_length];
-                reader.read_exact(&mut framed).await?;
-                cipher.decrypt(&mut framed);
-                let expected = u32::from_be_bytes(
-                    framed[..4]
-                        .try_into()
-                        .expect("VMess CFB record checksum is four bytes"),
-                );
-                let plaintext = framed.split_off(4);
-                if fnv1a32(&plaintext) != expected {
-                    return Err(std::io::Error::other("VMess CFB body checksum failed"));
-                }
-                Ok(plaintext)
-            }
-            ReaderMode::Aead(aead) => {
-                let nonce = record_nonce(&aead.iv, aead.counter);
-                let padding_length = aead.framing.padding_length();
-                let framed_length = if let Some(length_cipher) = &aead.framing.authenticated_length
-                {
-                    let mut sealed_length = [0_u8; 2 + AEAD_OVERHEAD];
-                    reader.read_exact(&mut sealed_length).await?;
-                    let length = length_cipher.open(
-                        &aead.framing.authenticated_length_nonce(aead.counter),
-                        &sealed_length,
-                    )?;
-                    let [high, low] = length.as_slice() else {
-                        return Err(std::io::Error::other("invalid VMess authenticated length"));
+                PendingRecordRead::Fill {
+                    buf,
+                    filled,
+                    stage,
+                } => {
+                    match poll_fill_exact(cx, reader, buf, filled) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => {
+                            *pending = PendingRecordRead::Idle;
+                            return Poll::Ready(Err(error));
+                        }
+                        Poll::Ready(Ok(())) => {}
+                    }
+                    let taken = std::mem::replace(pending, PendingRecordRead::Idle);
+                    let PendingRecordRead::Fill { buf, stage, .. } = taken else {
+                        unreachable!("fill stage pending");
                     };
-                    usize::from(u16::from_be_bytes([*high, *low])) + AEAD_OVERHEAD
-                } else {
-                    let mut length = [0_u8; 2];
-                    reader.read_exact(&mut length).await?;
-                    usize::from(aead.framing.mask_length(u16::from_be_bytes(length)))
-                };
-                let ciphertext_length = framed_length
-                    .checked_sub(padding_length)
-                    .ok_or_else(|| std::io::Error::other("invalid VMess body padding length"))?;
-                if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length) {
-                    return Err(std::io::Error::other("invalid VMess body record length"));
+                    match stage {
+                        FillStage::NoneLength => {
+                            let length = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
+                            if !(1..=MAX_READ_CIPHERTEXT).contains(&length) {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "invalid VMess plain body record length",
+                                )));
+                            }
+                            *pending = PendingRecordRead::Fill {
+                                buf: vec![0_u8; length],
+                                filled: 0,
+                                stage: FillStage::NonePayload,
+                            };
+                        }
+                        FillStage::NonePayload => {
+                            return Poll::Ready(Ok(buf));
+                        }
+                        FillStage::CfbLength => {
+                            let ReaderMode::Aes128Cfb(cipher) = &mut self.mode else {
+                                unreachable!("CFB length stage requires CFB reader");
+                            };
+                            let mut encrypted_length = [buf[0], buf[1]];
+                            cipher.decrypt(&mut encrypted_length);
+                            let framed_length = usize::from(u16::from_be_bytes(encrypted_length));
+                            if !(4..=MAX_READ_CIPHERTEXT).contains(&framed_length) {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "invalid VMess CFB body record length",
+                                )));
+                            }
+                            *pending = PendingRecordRead::Fill {
+                                buf: vec![0_u8; framed_length],
+                                filled: 0,
+                                stage: FillStage::CfbFramed,
+                            };
+                        }
+                        FillStage::CfbFramed => {
+                            let ReaderMode::Aes128Cfb(cipher) = &mut self.mode else {
+                                unreachable!("CFB framed stage requires CFB reader");
+                            };
+                            let mut framed = buf;
+                            cipher.decrypt(&mut framed);
+                            let expected = u32::from_be_bytes(
+                                framed[..4]
+                                    .try_into()
+                                    .expect("VMess CFB record checksum is four bytes"),
+                            );
+                            let plaintext = framed.split_off(4);
+                            if fnv1a32(&plaintext) != expected {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "VMess CFB body checksum failed",
+                                )));
+                            }
+                            return Poll::Ready(Ok(plaintext));
+                        }
+                        FillStage::AeadLength {
+                            nonce,
+                            padding_length,
+                            authenticated,
+                        } => {
+                            let ReaderMode::Aead(aead) = &mut self.mode else {
+                                unreachable!("AEAD length stage requires AEAD reader");
+                            };
+                            let framed_length = if authenticated {
+                                let Some(length_cipher) = &aead.framing.authenticated_length
+                                else {
+                                    unreachable!("authenticated length cipher missing");
+                                };
+                                let length = match length_cipher.open(
+                                    &aead.framing.authenticated_length_nonce(aead.counter),
+                                    &buf,
+                                ) {
+                                    Ok(length) => length,
+                                    Err(error) => return Poll::Ready(Err(error)),
+                                };
+                                let [high, low] = length.as_slice() else {
+                                    return Poll::Ready(Err(std::io::Error::other(
+                                        "invalid VMess authenticated length",
+                                    )));
+                                };
+                                usize::from(u16::from_be_bytes([*high, *low])) + AEAD_OVERHEAD
+                            } else {
+                                usize::from(
+                                    aead.framing
+                                        .mask_length(u16::from_be_bytes([buf[0], buf[1]])),
+                                )
+                            };
+                            let Some(ciphertext_length) =
+                                framed_length.checked_sub(padding_length)
+                            else {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "invalid VMess body padding length",
+                                )));
+                            };
+                            if !(AEAD_OVERHEAD..=MAX_READ_CIPHERTEXT).contains(&ciphertext_length)
+                            {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "invalid VMess body record length",
+                                )));
+                            }
+                            *pending = PendingRecordRead::Fill {
+                                buf: vec![0_u8; ciphertext_length],
+                                filled: 0,
+                                stage: FillStage::AeadCiphertext {
+                                    nonce,
+                                    padding_length,
+                                },
+                            };
+                        }
+                        FillStage::AeadCiphertext {
+                            nonce,
+                            padding_length,
+                        } => {
+                            if padding_length != 0 {
+                                *pending = PendingRecordRead::Fill {
+                                    buf: vec![0_u8; padding_length],
+                                    filled: 0,
+                                    stage: FillStage::AeadPadding {
+                                        nonce,
+                                        ciphertext: buf,
+                                    },
+                                };
+                            } else {
+                                let ReaderMode::Aead(aead) = &mut self.mode else {
+                                    unreachable!("AEAD ciphertext stage requires AEAD reader");
+                                };
+                                aead.counter = aead.counter.wrapping_add(1);
+                                return Poll::Ready(aead.cipher.open(&nonce, &buf));
+                            }
+                        }
+                        FillStage::AeadPadding { nonce, ciphertext } => {
+                            let ReaderMode::Aead(aead) = &mut self.mode else {
+                                unreachable!("AEAD padding stage requires AEAD reader");
+                            };
+                            aead.counter = aead.counter.wrapping_add(1);
+                            return Poll::Ready(aead.cipher.open(&nonce, &ciphertext));
+                        }
+                    }
                 }
-                let mut ciphertext = vec![0_u8; ciphertext_length];
-                reader.read_exact(&mut ciphertext).await?;
-                if padding_length != 0 {
-                    let mut padding = vec![0_u8; padding_length];
-                    reader.read_exact(&mut padding).await?;
-                }
-                aead.counter = aead.counter.wrapping_add(1);
-                aead.cipher.open(&nonce, &ciphertext)
             }
         }
     }

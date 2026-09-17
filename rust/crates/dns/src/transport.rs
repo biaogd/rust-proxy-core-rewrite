@@ -198,7 +198,7 @@ pub(crate) fn verified_client_config(tls: &DnsTlsConfig) -> Result<ClientConfig,
 }
 
 fn install_default_crypto_provider() {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 pub(crate) fn go_style_env_flag(name: &str) -> bool {

@@ -17,7 +17,7 @@ pub use server::serve_unix;
 #[cfg(windows)]
 pub use server::{prepare_named_pipe, serve_named_pipe};
 pub use server::{serve, serve_tcp, serve_tls};
-pub use tls::prepare_tls_config;
+pub use tls::{apply_inbound_alpn, prepare_tls_config};
 
 #[cfg(test)]
 mod tests {

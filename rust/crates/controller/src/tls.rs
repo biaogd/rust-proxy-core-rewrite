@@ -133,7 +133,7 @@ pub fn prepare_tls_config(
         None
     };
     let builder = tokio_rustls::rustls::ServerConfig::builder_with_details(
-        Arc::new(tokio_rustls::rustls::crypto::ring::default_provider()),
+        Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()),
         clock,
     )
     .with_safe_default_protocol_versions()
@@ -144,8 +144,26 @@ pub fn prepare_tls_config(
     }
     .with_single_cert(certificates, private_key)
     .map_err(std::io::Error::other)?;
+    // Default for controller / carriers that speak HTTP; plain TCP inbounds
+    // should clear this via [`apply_inbound_alpn`].
     server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(server)
+}
+
+/// Adjusts ALPN to match Go inbound TLS: empty for native TCP, `http/1.1` for
+/// WebSocket, and `h2` (+ optional `http/1.1`) for gRPC Gun.
+pub fn apply_inbound_alpn(
+    server: &mut tokio_rustls::rustls::ServerConfig,
+    websocket: bool,
+    grpc: bool,
+) {
+    if grpc {
+        server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    } else if websocket {
+        server.alpn_protocols = vec![b"http/1.1".to_vec()];
+    } else {
+        server.alpn_protocols.clear();
+    }
 }
 
 pub(super) fn load_pem_or_path(value: &str) -> std::io::Result<Vec<u8>> {

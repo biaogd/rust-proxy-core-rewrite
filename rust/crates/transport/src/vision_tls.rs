@@ -364,7 +364,7 @@ mod tests {
                 .expect("server key PEM")
                 .expect("server private key");
         ServerConfig::builder_with_provider(Arc::new(
-            tokio_rustls::rustls::crypto::ring::default_provider(),
+            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS13])
         .expect("TLS 1.3 provider")

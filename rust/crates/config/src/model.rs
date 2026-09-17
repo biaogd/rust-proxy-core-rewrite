@@ -412,6 +412,8 @@ pub enum AnyTlsCarrier {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrojanProxyConfig {
     pub password: String,
+    /// Precomputed SHA-224 hex key (Go `hexPassword`); avoids hashing every dial.
+    pub password_key: [u8; 56],
     pub alpn: Vec<String>,
     pub transport: TrojanTransport,
 }

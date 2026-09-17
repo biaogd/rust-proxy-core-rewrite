@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
-use tokio_rustls::rustls::client::{EchConfig, EchMode};
+use tokio_rustls::rustls::client::{EchConfig, EchMode, Resumption};
 use tokio_rustls::rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES;
 use tokio_rustls::rustls::crypto::{
     WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
@@ -52,7 +53,7 @@ struct NoCertificateVerification {
 impl NoCertificateVerification {
     fn new() -> Self {
         Self {
-            algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+            algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                 .signature_verification_algorithms,
         }
     }
@@ -209,23 +210,12 @@ impl ServerCertVerifier for FingerprintVerification {
 }
 
 fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, TlsClientError> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    for certificate in native.certs {
-        roots
-            .add(certificate)
-            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
+    // System + embedded roots are expensive to parse; share across dials when no
+    // per-proxy PEMs are attached (Go caches via GetCertPool).
+    if custom_roots.is_empty() {
+        return shared_native_root_store().map(|roots| (*roots).clone());
     }
-    let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
-        "../../../../component/ca/ca-certificates.crt"
-    )))
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
-    for certificate in embedded {
-        roots
-            .add(certificate)
-            .map_err(|error| TlsClientError::Configuration(error.to_string()))?;
-    }
+    let mut roots = (*shared_native_root_store()?).clone();
     for pem in custom_roots {
         let certificates = rustls_pemfile::certs(&mut Cursor::new(pem.as_bytes()))
             .collect::<Result<Vec<_>, _>>()
@@ -239,6 +229,89 @@ fn load_root_store(custom_roots: &[String]) -> Result<RootCertStore, TlsClientEr
     Ok(roots)
 }
 
+fn shared_native_root_store() -> Result<Arc<RootCertStore>, TlsClientError> {
+    static ROOTS: OnceLock<Result<Arc<RootCertStore>, String>> = OnceLock::new();
+    match ROOTS.get_or_init(|| {
+        let mut roots = RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for certificate in native.certs {
+            roots
+                .add(certificate)
+                .map_err(|error| error.to_string())?;
+        }
+        let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
+            "../../../../component/ca/ca-certificates.crt"
+        )))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+        for certificate in embedded {
+            roots
+                .add(certificate)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(Arc::new(roots))
+    }) {
+        Ok(roots) => Ok(Arc::clone(roots)),
+        Err(error) => Err(TlsClientError::Configuration(error.clone())),
+    }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct SkipVerifyCacheKey {
+    alpn: Vec<Vec<u8>>,
+    tls12_only: bool,
+    tls13_only: bool,
+}
+
+fn skip_verify_config_cache() -> &'static Mutex<HashMap<SkipVerifyCacheKey, Arc<ClientConfig>>> {
+    static CACHE: OnceLock<Mutex<HashMap<SkipVerifyCacheKey, Arc<ClientConfig>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Builds a shared rustls client config, caching the common skip-verify path so
+/// repeated Trojan/VLESS dials do not re-parse CA material or rebuild crypto.
+///
+/// # Errors
+///
+/// Returns configuration failures from [`client_config`].
+pub fn client_config_arc(
+    tls: ClientTlsOptions<'_>,
+    clock: Option<Arc<rewrite_services::AdjustedClock>>,
+) -> Result<Arc<ClientConfig>, TlsClientError> {
+    let cacheable = tls.skip_certificate_verification
+        && tls.fingerprint.is_none()
+        && tls.verification_name.is_none()
+        && tls.certificate.is_none()
+        && tls.private_key.is_none()
+        && tls.custom_roots.is_empty()
+        && tls.ech_config.is_none();
+    if cacheable {
+        let key = SkipVerifyCacheKey {
+            alpn: tls
+                .alpn_protocols
+                .iter()
+                .map(|value| value.to_vec())
+                .collect(),
+            tls12_only: tls.tls12_only,
+            tls13_only: tls.tls13_only,
+        };
+        if let Ok(guard) = skip_verify_config_cache().lock()
+            && let Some(config) = guard.get(&key)
+        {
+            return Ok(Arc::clone(config));
+        }
+        // Skip-verify ignores AdjustedClock; share one Arc so tickets resume.
+        let mut config = client_config(tls, None)?;
+        config.resumption = Resumption::in_memory_sessions(256);
+        let config = Arc::new(config);
+        if let Ok(mut guard) = skip_verify_config_cache().lock() {
+            guard.insert(key, Arc::clone(&config));
+        }
+        return Ok(config);
+    }
+    Ok(Arc::new(client_config(tls, clock)?))
+}
+
 /// Builds the shared rustls client configuration for an outer transport.
 ///
 /// # Errors
@@ -250,7 +323,15 @@ pub fn client_config(
     clock: Option<Arc<rewrite_services::AdjustedClock>>,
 ) -> Result<ClientConfig, TlsClientError> {
     let clock = clock.unwrap_or_else(|| Arc::new(rewrite_services::AdjustedClock::default()));
-    let roots = load_root_store(tls.custom_roots)?;
+    // Skip-verify never consults the root store — avoid parsing CA bundles.
+    let roots = if tls.skip_certificate_verification
+        && tls.fingerprint.is_none()
+        && tls.verification_name.is_none()
+    {
+        RootCertStore::empty()
+    } else {
+        load_root_store(tls.custom_roots)?
+    };
     let builder = if let Some(ech_config) = tls.ech_config {
         let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         let ech_config = EchConfig::new(EchConfigListBytes::from(ech_config), ALL_SUPPORTED_SUITES)
@@ -259,7 +340,7 @@ pub fn client_config(
             .with_ech(EchMode::Enable(ech_config))
             .map_err(|error| TlsClientError::Configuration(error.to_string()))?
     } else {
-        let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+        let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
         if tls.tls12_only {
             ClientConfig::builder_with_details(provider, clock)
                 .with_protocol_versions(&[&tokio_rustls::rustls::version::TLS12])
@@ -294,7 +375,7 @@ pub fn client_config(
             .with_custom_certificate_verifier(Arc::new(FingerprintVerification {
                 fingerprint,
                 verification_name,
-                algorithms: tokio_rustls::rustls::crypto::ring::default_provider()
+                algorithms: tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
                     .signature_verification_algorithms,
             }))
     } else if let Some(verification_name) = tls.verification_name {

@@ -83,7 +83,7 @@ fn server_config(max_uni: u32) -> quinn::ServerConfig {
 }
 
 fn server_config_with_datagrams(max_uni: u32, datagram_limit: usize) -> quinn::ServerConfig {
-    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
     let _ = (*provider).clone().install_default();
     let (cert, key) = tls_pair();
     let mut crypto = ServerConfig::builder_with_provider(provider)
