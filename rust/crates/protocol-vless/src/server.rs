@@ -297,25 +297,33 @@ impl<S: AsyncWrite + Unpin + 'static> AsyncWrite for VlessServerStream<S> {
                         self.pending = Some(PendingResponseWrite::Idle);
                         return Poll::Ready(Ok(0));
                     }
-                    // FrontHeadroom for modest first writes; large bulk first
-                    // writes keep Vec coalesce (prefix path regressed at 32KiB).
-                    if buf.len() <= 2048 {
-                        if let Some(gun) =
-                            (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
-                        {
-                            match gun.poll_write_with_prefix(cx, &[VERSION, 0], buf) {
-                                Poll::Pending => {
-                                    self.pending = Some(PendingResponseWrite::GunPrefixed);
-                                    return Poll::Pending;
-                                }
-                                Poll::Ready(Err(error)) => {
-                                    self.pending = None;
-                                    return Poll::Ready(Err(error));
-                                }
-                                Poll::Ready(Ok(written)) => {
-                                    self.pending = None;
-                                    return Poll::Ready(Ok(written));
-                                }
+                    // Probe: empty-prefix write of coalesced buffer via
+                    // poll_write_with_prefix (should match poll_write(combined)).
+                    if let Some(gun) =
+                        (&mut self.inner as &mut dyn Any).downcast_mut::<GunStream>()
+                    {
+                        let mut combined = Vec::with_capacity(2 + buf.len());
+                        combined.extend_from_slice(&[VERSION, 0]);
+                        combined.extend_from_slice(buf);
+                        let payload_len = buf.len();
+                        match gun.poll_write_with_prefix(cx, &[], &combined) {
+                            Poll::Pending => {
+                                self.pending = Some(PendingResponseWrite::Flushing {
+                                    combined,
+                                    offset: 0,
+                                    payload_len,
+                                });
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(error)) => {
+                                self.pending = None;
+                                return Poll::Ready(Err(error));
+                            }
+                            Poll::Ready(Ok(written)) => {
+                                // written is combined.len(); report payload only.
+                                self.pending = None;
+                                let _ = written;
+                                return Poll::Ready(Ok(payload_len));
                             }
                         }
                     }
