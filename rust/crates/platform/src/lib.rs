@@ -3,6 +3,7 @@
 mod dhcp;
 mod network;
 mod original_dst;
+mod process;
 mod route;
 mod system_dns;
 mod tproxy;
@@ -22,6 +23,7 @@ pub use network::{
     resolve_outbound_bind_interface, set_auto_detect_bind_interface, update_outbound_bypass,
 };
 pub use original_dst::tcp_original_destination;
+pub use process::{ProcessInfo, find_process_name, process_basename};
 pub use tproxy::bind_tproxy_tcp_listener;
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,

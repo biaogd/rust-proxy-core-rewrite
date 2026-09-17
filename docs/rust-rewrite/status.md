@@ -2,6 +2,38 @@
 
 Last updated: 2026-09-17
 
+### W2.1 PROCESS-NAME / PATH / UID (Linux first) — 2026-09-17
+
+Wave A routing-metadata slice. Parses `PROCESS-NAME`, `PROCESS-PATH`, and
+`UID` (linux/android only for UID) plus top-level `find-process-mode`
+(`strict`/`always`/`off`). Before TCP rule evaluation, Linux resolves the
+client socket via `NETLINK_INET_DIAG` + `/proc` exe and fills
+`metadata.{uid,process,process_path}`. Evidence: rules unit tests +
+`compat/scripts/phase_w21_process.py`. Deferred: PROCESS-*-REGEX/WILDCARD,
+Darwin/Windows/FreeBSD finders, Android package names.
+
+### W2.2 sniffer HTTP/TLS (first slice) — 2026-09-17
+
+Wave A routing-metadata slice. Top-level `sniffer:` parses enable,
+override-destination, parse-pure-ip, force-dns-mapping, `sniff` HTTP/TLS/QUIC
+port maps, force/skip domain matchers, and skip src/dst CIDRs (provider refs
+still fail-closed). TCP sessions peek TLS SNI then HTTP Host (Go order) after
+host mapping and before rules; results set `sniff_host` and optionally replace
+destination. Peeked bytes replay via `PrefixedInboundStream`. Evidence: config
+unit tests + runtime TLS/HTTP unit tests + `compat/scripts/phase_w22_sniffer.py`.
+Deferred: QUIC/UDP sniff, HTTP/2 `:authority`, sniff failure LRU skip-list,
+geoip/rule-set matchers inside sniffer lists.
+
+### W1.3 static tunnels TCP/UDP — 2026-09-17
+
+Third Wave A ingress slice. Top-level `tunnels:` (one-liner and mapping)
+parses into expanded per-network listeners. TCP/UDP use the configured
+`target` as the fixed destination (`InboundProtocol::Tunnel`); optional
+`proxy` sets `special_proxy` and bypasses rules (Go `SpecialProxy`). Legacy
+`tunnels:` leave `inbound_name` empty (no invented `DEFAULT-TUNNEL`). Evidence:
+config/rules unit tests + `compat/scripts/phase_w13_tunnel.py`. Deferred:
+named `type: tunnel`, `routing-mark` / sub-`rule` on named tunnels.
+
 ### W1.2 Linux tproxy-port TCP — 2026-09-17
 
 Second Wave A transparent-ingress slice. Linux accepts fixed `tproxy-port`,

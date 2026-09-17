@@ -262,6 +262,18 @@ impl RuleSet {
                 .all(|rule| rule.has_executable_tcp_target(&self.actions, targets))
     }
 
+    #[must_use]
+    pub fn needs_process_lookup(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| rule.matcher.needs_process_lookup())
+            || self
+                .sub_rules
+                .values()
+                .flatten()
+                .any(|rule| rule.matcher.needs_process_lookup())
+    }
+
     pub(crate) fn match_sub_rules(
         &self,
         name: &str,
