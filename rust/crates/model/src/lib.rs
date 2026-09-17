@@ -117,6 +117,8 @@ pub struct Metadata {
     pub network: Network,
     pub host: String,
     pub sniff_host: String,
+    /// Set when host was recovered via DNS mapping (redir-host), matching Go `DNSMapping`.
+    pub dns_mapping: bool,
     pub source_ip: Option<IpAddr>,
     pub destination_ip: Option<IpAddr>,
     pub source_port: u16,
@@ -146,6 +148,7 @@ impl Metadata {
             network: Network::Tcp,
             host,
             sniff_host: String::new(),
+            dns_mapping: false,
             source_ip: None,
             destination_ip,
             source_port: 0,

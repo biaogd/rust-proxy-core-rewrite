@@ -81,7 +81,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-13 | TLS certificate/private key, custom roots and client authentication | Not started | 5E2 and protocol gates |
 | CFG-14 | Profile selected-proxy/fake-IP persistence | Partial | 5E3 |
 | CFG-15 | Geodata mode/loader/matcher/URLs/update interval and ETag behavior | Not started | 5B4, 5E4 |
-| CFG-16 | Sniffer enablement, HTTP/TLS/QUIC sniffers, force/skip domains and addresses, port ranges and destination override | Not started | 5B7 |
+| CFG-16 | Sniffer enablement, HTTP/TLS/QUIC sniffers, force/skip domains and addresses, port ranges and destination override | **Partial — W2.2:** config surface + TCP TLS SNI / HTTP Host; QUIC/HTTP2/provider refs open | W2.2 / 5B7 |
 | CFG-17 | Experimental QUIC GSO/ECN, Android/CFA fields and feature-gated settings | Not started | 8E/build-profile gates |
 | CFG-18 | Transactional application/reload ordering for every resource above | Partial | Repeated exit gate for each family |
 
@@ -218,7 +218,7 @@ Primary anchors: [`tunnel`](../../tunnel),
 | RUN-01 | TCP routing, relay, half-close, cancellation, metadata mutation and adapter retries | Partial | Repeated routing/protocol gates |
 | RUN-02 | UDP NAT/session lifecycle, packet routing, write-back, timeout and rule changes | Complete in declared local DIRECT scope: bounded client-keyed IPv4/IPv6 reuse, fan-out, multi-response, control-close/generation retention and pressure recovery pass; exact timeout is enabled in CI | Remote adapters/UoT and CI slow-gate result remain separate claims |
 | RUN-03 | Mode/global proxy changes and live rule/sub-rule/provider updates | Not started | 5B/5C/5D |
-| RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | Not started | 5B7 |
+| RUN-04 | Sniffing and destination replacement for HTTP/TLS/QUIC | **Partial — W2.2:** TCP TLS/HTTP peek + sniff_host / optional override; QUIC/UDP open | W2.2 / 5B7 |
 | RUN-05 | Process lookup, interface binding, routing marks, socket options, TFO/MPTCP and keepalive | Partial: Phase 5F implements every listed socket behavior for current listeners/dials; process lookup is not claimed | PROCESS rules/original-flow metadata and privileged/native evidence gates |
 | RUN-06 | Connection tracking, upload/download totals, memory and traffic/log streams | Complete in current local controller/data-plane scope: real RSS, sustained traffic/memory frames, structured/plain logs and connection lifecycle pass; stress/backpressure remains RUN-09 | 5D complete boundary |
 | RUN-07 | Graceful resource replacement for listeners, DNS, adapters, groups, providers, TUN, NTP and controller | Partial local subset | Repeated family gate |

@@ -2,6 +2,18 @@
 
 Last updated: 2026-09-17
 
+### W2.2 sniffer HTTP/TLS (first slice) — 2026-09-17
+
+Wave A routing-metadata slice. Top-level `sniffer:` parses enable,
+override-destination, parse-pure-ip, force-dns-mapping, `sniff` HTTP/TLS/QUIC
+port maps, force/skip domain matchers, and skip src/dst CIDRs (provider refs
+still fail-closed). TCP sessions peek TLS SNI then HTTP Host (Go order) after
+host mapping and before rules; results set `sniff_host` and optionally replace
+destination. Peeked bytes replay via `PrefixedInboundStream`. Evidence: config
+unit tests + runtime TLS/HTTP unit tests + `compat/scripts/phase_w22_sniffer.py`.
+Deferred: QUIC/UDP sniff, HTTP/2 `:authority`, sniff failure LRU skip-list,
+geoip/rule-set matchers inside sniffer lists.
+
 ### W1.3 static tunnels TCP/UDP — 2026-09-17
 
 Third Wave A ingress slice. Top-level `tunnels:` (one-liner and mapping)

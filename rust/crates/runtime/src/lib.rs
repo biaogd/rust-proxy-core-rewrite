@@ -6,6 +6,7 @@ mod lifecycle;
 mod listener;
 mod services;
 mod shadowsocks_listener;
+mod sniffer;
 mod tcp;
 mod trojan_listener;
 mod tuic_listener;

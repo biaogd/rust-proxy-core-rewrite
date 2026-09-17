@@ -25,6 +25,7 @@ use crate::proxy::{
     parse_proxy_provider_source, parse_proxy_providers, proxy_member_types, validate_dialer_proxies,
 };
 use crate::raw::{RawConfig, RawControllerCors, RawGeoXUrls, RawNtp, RawProfile, RawTls};
+use crate::sniffer::parse_sniffer;
 use crate::tun::parse_tun;
 use crate::tunnel::parse_tunnels;
 
@@ -244,6 +245,7 @@ impl ConfigSpec {
         let mut proxy_names: BTreeSet<String> = proxies.iter().map(|proxy| proxy.name.clone()).collect();
         proxy_names.extend(proxy_groups.iter().map(|group| group.name.clone()));
         let tunnel_listeners = parse_tunnels(raw.tunnels, &proxy_names)?;
+        let sniffer = parse_sniffer(raw.sniffer)?;
 
         Ok(Self {
             port: raw.port.unwrap_or(0),
@@ -316,6 +318,7 @@ impl ConfigSpec {
             anytls_listeners,
             tunnel_listeners,
             tun,
+            sniffer,
             unsupported_keys: raw.extra.into_keys().collect(),
             source_path: None,
             home_directory: provider_directory.map(Path::to_path_buf),
@@ -489,6 +492,7 @@ impl TryFrom<ConfigSpec> for Config {
             anytls_listeners: spec.anytls_listeners,
             tunnel_listeners: spec.tunnel_listeners,
             tun: spec.tun,
+            sniffer: spec.sniffer,
             source_path: spec.source_path,
             home_directory: spec.home_directory,
         })

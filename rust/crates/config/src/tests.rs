@@ -956,11 +956,80 @@ rules:
 
 #[test]
 fn refuses_undeclared_features() {
-    let source = format!("{MINIMAL}\nsniffer:\n  enable: true\n");
+    let source = format!("{MINIMAL}\niptables:\n  enable: true\n");
     let spec = ConfigSpec::from_yaml(&source).expect("spec preserves unknown keys");
     assert!(matches!(
         spec.validate_declared_surface(),
-        Err(ConfigError::UnsupportedKey(key)) if key == "sniffer"
+        Err(ConfigError::UnsupportedKey(key)) if key == "iptables"
+    ));
+}
+
+#[test]
+fn parses_sniffer_http_tls_surface() {
+    let source = r#"
+mode: rule
+ipv6: false
+rules:
+  - MATCH,DIRECT
+sniffer:
+  enable: true
+  override-destination: true
+  sniff:
+    TLS:
+      ports: [443, 8443]
+    HTTP:
+      ports: [80, "8080-8088"]
+      override-destination: false
+    QUIC:
+  force-domain:
+    - +.example.com
+  skip-src-address:
+    - 10.0.0.1/32
+"#;
+    let config = Config::from_yaml(source).expect("sniffer config");
+    assert!(config.sniffer.enable);
+    assert!(config.sniffer.parse_pure_ip);
+    assert!(config.sniffer.force_dns_mapping);
+    let tls = config
+        .sniffer
+        .protocols
+        .get(&crate::SniffProtocol::Tls)
+        .expect("tls");
+    assert_eq!(tls.ports, vec![(443, 443), (8443, 8443)]);
+    assert!(tls.override_destination);
+    let http = config
+        .sniffer
+        .protocols
+        .get(&crate::SniffProtocol::Http)
+        .expect("http");
+    assert_eq!(http.ports, vec![(80, 80), (8080, 8088)]);
+    assert!(!http.override_destination);
+    assert!(
+        config
+            .sniffer
+            .protocols
+            .contains_key(&crate::SniffProtocol::Quic)
+    );
+    assert_eq!(config.sniffer.force_domain.len(), 1);
+    assert_eq!(config.sniffer.skip_src_address.len(), 1);
+}
+
+#[test]
+fn rejects_unknown_sniffer_protocol() {
+    let source = r#"
+mode: rule
+ipv6: false
+rules:
+  - MATCH,DIRECT
+sniffer:
+  enable: true
+  sniff:
+    FTP:
+"#;
+    let error = Config::from_yaml(source).expect_err("unknown sniffer");
+    assert!(matches!(
+        error,
+        ConfigError::InvalidInbound(message) if message.contains("FTP")
     ));
 }
 
