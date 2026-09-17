@@ -33,8 +33,9 @@ pub use vision::VisionStream;
 ///   [`VlessResponsePendingStream`] (bare carrier for writes);
 /// - after the response is consumed, peel to the bare upstream carrier.
 ///
-/// Returns `true` only when the stream is fully bare (both directions done),
-/// so relays can switch to sized `copy_bidirectional`.
+/// Returns `true` once the write side is replaceable (Go `sent`) so relays can
+/// enter sized `copy_bidirectional` for the bulk upload instead of staying on
+/// the handshake select loop for a full sendall-before-recv exchange.
 pub fn peel_replaceable_vless(stream: &mut BoxedStream) -> bool {
     if let Some(pending) = stream
         .as_any_mut()
@@ -42,9 +43,9 @@ pub fn peel_replaceable_vless(stream: &mut BoxedStream) -> bool {
     {
         if let Some(inner) = pending.take_inner_if_done() {
             *stream = inner;
-            return true;
         }
-        return false;
+        // Already writer-peeled (and maybe fully bare): fast path is fine.
+        return true;
     }
 
     let Some(vless) = stream.as_any_mut().downcast_mut::<VlessTcpStream>() else {
@@ -56,6 +57,7 @@ pub fn peel_replaceable_vless(stream: &mut BoxedStream) -> bool {
     }
     if let Some(pending) = vless.take_for_writer_peel() {
         *stream = Box::new(pending);
+        return true;
     }
     false
 }
