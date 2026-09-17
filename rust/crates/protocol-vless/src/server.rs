@@ -287,14 +287,46 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                     return Pin::new(&mut self.inner).poll_write(cx, buf);
                 }
                 Some(PendingResponseWrite::Idle) => {
-                    let mut combined = Vec::with_capacity(2 + buf.len());
-                    combined.extend_from_slice(&[VERSION, 0]);
-                    combined.extend_from_slice(buf);
-                    self.pending = Some(PendingResponseWrite::Flushing {
-                        combined,
-                        offset: 0,
-                        payload_len: buf.len(),
-                    });
+                    // Small first writes: coalesce [VERSION,0]||payload (Go WriteBuffer).
+                    // Large writes: emit the 2-byte header then the payload without
+                    // copying the full buffer into an intermediate Vec.
+                    const COALESCE_MAX: usize = 8 * 1024;
+                    if buf.len() <= COALESCE_MAX {
+                        let mut combined = Vec::with_capacity(2 + buf.len());
+                        combined.extend_from_slice(&[VERSION, 0]);
+                        combined.extend_from_slice(buf);
+                        self.pending = Some(PendingResponseWrite::Flushing {
+                            combined,
+                            offset: 0,
+                            payload_len: buf.len(),
+                        });
+                    } else {
+                        let mut offset = 0_usize;
+                        let header = [VERSION, 0];
+                        while offset < header.len() {
+                            match Pin::new(&mut self.inner).poll_write(cx, &header[offset..]) {
+                                Poll::Pending => {
+                                    self.pending = Some(PendingResponseWrite::Flushing {
+                                        combined: header.to_vec(),
+                                        offset,
+                                        payload_len: 0,
+                                    });
+                                    return Poll::Pending;
+                                }
+                                Poll::Ready(Err(error)) => {
+                                    self.pending = None;
+                                    return Poll::Ready(Err(error));
+                                }
+                                Poll::Ready(Ok(0)) => {
+                                    self.pending = None;
+                                    return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into()));
+                                }
+                                Poll::Ready(Ok(written)) => offset += written,
+                            }
+                        }
+                        self.pending = None;
+                        return Pin::new(&mut self.inner).poll_write(cx, buf);
+                    }
                 }
                 Some(PendingResponseWrite::Flushing {
                     combined,
@@ -325,6 +357,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                         }
                     }
                     self.pending = None;
+                    if payload_len == 0 {
+                        // Finished a header-only flush (large first write path);
+                        // now send the caller payload without a second copy.
+                        return Pin::new(&mut self.inner).poll_write(cx, buf);
+                    }
                     return Poll::Ready(Ok(payload_len));
                 }
             }

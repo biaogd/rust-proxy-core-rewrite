@@ -338,7 +338,11 @@ impl AsyncWrite for VlessTcpStream {
             return self.poll_flush_first_write(cx, combined, offset, header_len);
         }
 
-        // Coalesce header + first payload (Go sendRequest) into one TLS/Gun frame.
+        // Coalesce header + first payload (Go sendRequest) for small writes.
+        // Large first payloads skip coalesce to avoid an extra full-buffer memcpy
+        // (bulk harness uses 256KiB); header is written then payload in the
+        // fall-through path below — same shape as Trojan WriteHeader + write.
+        const COALESCE_MAX: usize = 8 * 1024;
         if let HandshakeState::Active {
             request,
             request_offset,
@@ -348,6 +352,7 @@ impl AsyncWrite for VlessTcpStream {
             && *request_offset == 0
             && !request.is_empty()
             && !buf.is_empty()
+            && buf.len() <= COALESCE_MAX
             && pending_first_write.is_none()
         {
             let header_len = request.len();
