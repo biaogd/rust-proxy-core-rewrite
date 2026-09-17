@@ -133,3 +133,12 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Balanced size + runtime (opt-level=3). Prefer this over opt-level=z for shipping
+# throughput; fat LTO / single CGU / strip / abort cut binary size without the
+# VMess-class regression seen under size-first builds.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
