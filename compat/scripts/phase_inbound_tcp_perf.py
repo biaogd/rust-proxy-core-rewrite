@@ -4,11 +4,14 @@
 Same-engine product outbound → named inbound under concurrent load.
 
 Coverage (gap-fill vs early harness):
-  - Bulk Mbps: TLS + QUIC + WS/gRPC carriers
+  - Bulk Mbps: TLS + QUIC + WS/gRPC carriers + Shadowsocks AEAD/ChaCha/2022
   - Short-conn latency: tiny payload, connect/exchange percentiles
   - Multi-run median aggregation
   - Short soak stability on a subset
   - Binary size of the release artifacts under test
+
+SSR inbound is not covered: neither Go nor Rust exposes a named SSR listener
+(outbound-only; see compatibility-matrix).
 
 Environment:
   PHASE_INBOUND_PERF_SECONDS     bulk load window (default 12)
@@ -96,6 +99,8 @@ from phase_ing_anytls_tcp import (
 ARTIFACT = ROOT / "compat" / "artifacts" / "phase-inbound-tcp-perf.json"
 COMPARE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase-inbound-tcp-perf-compare.json"
 SNI = "dot.phase4.test"
+SS_PASSWORD = "phase-inbound-ss-password"
+SS_2022_KEY = "AAECAwQFBgcICQoLDA0ODw=="  # 16-byte base64; matches 6C-N / IN-B fixtures
 
 
 def env_int(name: str, default: int) -> int:
@@ -115,7 +120,7 @@ LATENCY_WARMUP = 8
 LATENCY_PAYLOAD = b"x"
 SOAK_SECONDS = env_int("PHASE_INBOUND_PERF_SOAK_SECONDS", 45)
 SAMPLE_EVERY = 0.5
-SOAK_PROTOCOLS = ("trojan-tls", "anytls", "vmess-tls")
+SOAK_PROTOCOLS = ("trojan-tls", "anytls", "vmess-tls", "ss-aead")
 
 
 def anytls_outbound(mixed_port: int, server_port: int) -> str:
@@ -130,11 +135,62 @@ def with_warning_logs(yaml_text: str) -> str:
     return yaml_text.replace("log-level: info", "log-level: warning")
 
 
+def ss_inbound_yaml(
+    cipher: str,
+    password: str,
+) -> Callable[[int, pathlib.Path, pathlib.Path], str]:
+    def inbound(port: int, _certificate: pathlib.Path, _private_key: pathlib.Path) -> str:
+        # Named shadowsocks listener; TLS material unused (same Protocol shape).
+        return f"""listeners:
+  - name: ss-inbound
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: {port}
+    cipher: {cipher}
+    password: {password}
+    udp: false
+mode: rule
+log-level: warning
+ipv6: false
+rules:
+  - MATCH,DIRECT
+"""
+
+    return inbound
+
+
+def ss_outbound_yaml(
+    cipher: str,
+    password: str,
+) -> Callable[[int, int], str]:
+    def outbound(mixed_port: int, ss_port: int) -> str:
+        return f"""mixed-port: {mixed_port}
+mode: rule
+log-level: warning
+ipv6: false
+proxies:
+  - name: ss-out
+    type: ss
+    server: 127.0.0.1
+    port: {ss_port}
+    cipher: {cipher}
+    password: {password}
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: [ss-out]
+rules:
+  - MATCH,PROXY
+"""
+
+    return outbound
+
+
 @dataclass(frozen=True)
 class Protocol:
     name: str
     transport: str  # "tcp" or "quic"
-    family: str  # tls / ws / grpc / quic / anytls
+    family: str  # tls / ws / grpc / quic / anytls / ss
     inbound: Callable[[int, pathlib.Path, pathlib.Path], str]
     outbound: Callable[[int, int], str]
 
@@ -146,6 +202,29 @@ CORE_PROTOCOLS: dict[str, Protocol] = {
     "anytls": Protocol("anytls", "tcp", "anytls", anytls_inbound, anytls_outbound),
     "hysteria2": Protocol("hysteria2", "quic", "quic", hy2_inbound, hy2_outbound),
     "tuic": Protocol("tuic", "quic", "quic", tuic_inbound, tuic_outbound),
+    # Shadowsocks named inbound (product outbound → listener). SSR has no inbound
+    # on Go or Rust — outbound-only; see roadmap / compatibility-matrix.
+    "ss-aead": Protocol(
+        "ss-aead",
+        "tcp",
+        "ss",
+        ss_inbound_yaml("aes-128-gcm", SS_PASSWORD),
+        ss_outbound_yaml("aes-128-gcm", SS_PASSWORD),
+    ),
+    "ss-chacha": Protocol(
+        "ss-chacha",
+        "tcp",
+        "ss",
+        ss_inbound_yaml("chacha20-ietf-poly1305", SS_PASSWORD),
+        ss_outbound_yaml("chacha20-ietf-poly1305", SS_PASSWORD),
+    ),
+    "ss-2022": Protocol(
+        "ss-2022",
+        "tcp",
+        "ss",
+        ss_inbound_yaml("2022-blake3-aes-128-gcm", SS_2022_KEY),
+        ss_outbound_yaml("2022-blake3-aes-128-gcm", SS_2022_KEY),
+    ),
 }
 
 CARRIER_PROTOCOLS: dict[str, Protocol] = {
