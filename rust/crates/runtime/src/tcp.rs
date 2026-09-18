@@ -811,7 +811,6 @@ pub(super) async fn connect_configured_proxy_with_chain(
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Snell => {
             if proxy_has_dialer_proxy(proxy) {
-
                 let transport = crate::dialer_proxy::dial_proxy_server(
                     proxy,
                     config,
@@ -1210,8 +1209,7 @@ async fn connect_trojan_proxy_on_dialer_stream(
         .as_ref()
         .ok_or_else(|| "Trojan proxy configuration is missing".to_owned())?;
     let configured = proxy_server(proxy);
-    let mut outer =
-        wrap_trojan_physical_outer(proxy, stream, trojan, state, custom_roots).await?;
+    let mut outer = wrap_trojan_physical_outer(proxy, stream, trojan, state, custom_roots).await?;
     match &trojan.transport {
         rewrite_config::TrojanTransport::Grpc {
             service_name,
@@ -1917,7 +1915,8 @@ async fn connect_vmess_proxy_on_dialer_stream(
         ));
     }
     let configured = proxy_server(proxy);
-    let outer = wrap_vmess_physical_outer(proxy, stream, vmess, state.clock(), custom_roots).await?;
+    let outer =
+        wrap_vmess_physical_outer(proxy, stream, vmess, state.clock(), custom_roots).await?;
     let outer = wrap_vmess_transport(outer, proxy, &configured, vmess).await?;
     rewrite_outbound::connect_vmess_on_stream(
         outer,

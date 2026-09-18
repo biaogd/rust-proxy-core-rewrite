@@ -5050,28 +5050,19 @@ fn dialer_proxy_configuration_contract() {
         "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: vmess-via\n    type: vmess\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    alterId: 0\n    cipher: auto\n    dialer-proxy: hop-a\n"
     ))
     .expect("VMess dialer-proxy");
-    assert_eq!(
-        vmess_via.proxies[1].dialer_proxy.as_deref(),
-        Some("hop-a")
-    );
+    assert_eq!(vmess_via.proxies[1].dialer_proxy.as_deref(), Some("hop-a"));
 
     let vless_via = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: vless-via\n    type: vless\n    server: 127.0.0.1\n    port: 1\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    dialer-proxy: hop-a\n"
     ))
     .expect("VLESS dialer-proxy");
-    assert_eq!(
-        vless_via.proxies[1].dialer_proxy.as_deref(),
-        Some("hop-a")
-    );
+    assert_eq!(vless_via.proxies[1].dialer_proxy.as_deref(), Some("hop-a"));
 
     let trojan_via = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: trojan-via\n    type: trojan\n    server: 127.0.0.1\n    port: 1\n    password: secret\n    sni: example.test\n    skip-cert-verify: true\n    dialer-proxy: hop-a\n"
     ))
     .expect("Trojan dialer-proxy");
-    assert_eq!(
-        trojan_via.proxies[1].dialer_proxy.as_deref(),
-        Some("hop-a")
-    );
+    assert_eq!(trojan_via.proxies[1].dialer_proxy.as_deref(), Some("hop-a"));
 
     let udp_combo = Config::from_yaml(&format!(
         "{MINIMAL}\nproxies:\n  - name: hop-a\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n  - name: snell-via\n    type: snell\n    server: 127.0.0.1\n    port: 1\n    psk: secret\n    version: 3\n    udp: true\n    dialer-proxy: hop-a\n"

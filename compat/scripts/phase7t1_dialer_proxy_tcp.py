@@ -431,7 +431,9 @@ rules:
             time.sleep(0.05)
         if not ready:
             raise TimeoutError("socks5→snell half-close route did not become ready")
-        hop_a.observations.clear()
+        # Keep warm-up hop observations: Go may reuse the dialer-supplied
+        # carrier for the follow-up half-close, so clearing here falsely fails
+        # the path proof even when A already dialed B's server.
         half_ok = proxied_half_close(mixed_port, half_close_port, HALF_CLOSE_PAYLOAD)
         a_saw_snell = any(
             item.get("target_host") == "127.0.0.1"
