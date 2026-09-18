@@ -137,6 +137,8 @@ pub(crate) enum Matcher {
     RematchName(Vec<String>),
     ProcessName(String),
     ProcessPath(String),
+    /// Linux/Android only — constructed by [`crate::parser::parse_uid`].
+    #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
     Uid(Vec<(u32, u32)>),
     And(Vec<Matcher>),
     Or(Vec<Matcher>),
