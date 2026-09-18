@@ -130,7 +130,7 @@ exposes one.
 | W5.2 | TLSMirror / remaining JLS / ECH consumers | `OUT-22` rows |
 | W5.3 | xHTTP/H3 completion for inbound+outbound consumers | Matrix rows |
 | W5.4 | Chrome / uTLS fingerprint wire identity (or documented subset) | Fingerprint rows |
-| W5.5 | Finish **dialer-proxy** TCP for VMess/VLESS/Trojan/AnyTLS | `OUT-21` TCP complete |
+| W5.5 | Finish **dialer-proxy** TCP for VMess/VLESS/Trojan (AnyTLS deferred) | `OUT-21` TCP majors wired; AnyTLS still runtime-rejected |
 | W5.6 | UDP dialer-proxy policy (implement or permanently reject) | Explicit |
 | W5.7 | **sing-mux** | Implement or approved exclusion |
 
@@ -252,7 +252,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | A | W2.3–W2.4 geodata/MMDB/ASN | Partial |
 | A | W1.5–W1.6 TUN policy + CI Parity | Partial |
 | A | W3.1–W3.3 Trojan/VLESS/VMess carriers | Partial (Trojan REALITY auth landed; `ss-option`/mux open) |
-| A | W5.5 dialer-proxy majors | Partial |
+| A | W5.5 dialer-proxy majors | **Partial** — VMess/VLESS/Trojan TCP dialer-proxy wired; AnyTLS deferred |
 | B | W5 ReSTLS/ECH/fingerprint/xHTTP | Partial |
 | B | W3.4–W3.7 SS/Hy2/TUIC/AnyTLS inbound | Partial |
 | B | W6 outbound leftovers | Partial |

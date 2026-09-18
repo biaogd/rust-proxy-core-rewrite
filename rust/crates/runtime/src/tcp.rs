@@ -604,10 +604,7 @@ pub(super) async fn connect_configured_proxy_with_chain(
     let allow_ipv6 = config.ipv6;
     let custom_roots = config.trust_certificates.as_slice();
     let dns = config.dns.as_ref();
-    if proxy
-        .dialer_proxy
-        .as_deref()
-        .is_some_and(|name| !name.trim().is_empty())
+    if proxy_has_dialer_proxy(proxy)
         && !matches!(
             proxy.kind,
             ProxyKind::Http
@@ -615,6 +612,9 @@ pub(super) async fn connect_configured_proxy_with_chain(
                 | ProxyKind::Shadowsocks
                 | ProxyKind::ShadowsocksR
                 | ProxyKind::Snell
+                | ProxyKind::Vmess
+                | ProxyKind::Vless
+                | ProxyKind::Trojan
         )
     {
         return Err(format!(
@@ -690,49 +690,106 @@ pub(super) async fn connect_configured_proxy_with_chain(
             connect_ssr_proxy_on_stream(proxy, transport, &configured, destination, state).await
         }
         ProxyKind::Vmess => {
-            let server =
-                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
-                    .await?;
-            connect_vmess_proxy(
-                proxy,
-                &server,
-                destination,
-                allow_ipv6,
-                state,
-                custom_roots,
-                socket_options,
-            )
-            .await
+            if proxy_has_dialer_proxy(proxy) {
+                let transport = crate::dialer_proxy::dial_proxy_server(
+                    proxy,
+                    config,
+                    state,
+                    socket_options,
+                    chain,
+                )
+                .await?;
+                connect_vmess_proxy_on_dialer_stream(
+                    proxy,
+                    transport,
+                    destination,
+                    state,
+                    custom_roots,
+                )
+                .await
+            } else {
+                let server =
+                    resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                        .await?;
+                connect_vmess_proxy(
+                    proxy,
+                    &server,
+                    destination,
+                    allow_ipv6,
+                    state,
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+            }
         }
         ProxyKind::Vless => {
-            let server =
-                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
-                    .await?;
-            connect_vless_proxy(
-                proxy,
-                &server,
-                destination,
-                allow_ipv6,
-                state,
-                custom_roots,
-                socket_options,
-            )
-            .await
+            if proxy_has_dialer_proxy(proxy) {
+                let transport = crate::dialer_proxy::dial_proxy_server(
+                    proxy,
+                    config,
+                    state,
+                    socket_options,
+                    chain,
+                )
+                .await?;
+                connect_vless_proxy_on_dialer_stream(
+                    proxy,
+                    transport,
+                    destination,
+                    state,
+                    custom_roots,
+                )
+                .await
+            } else {
+                let server =
+                    resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                        .await?;
+                connect_vless_proxy(
+                    proxy,
+                    &server,
+                    destination,
+                    allow_ipv6,
+                    state,
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+            }
         }
         ProxyKind::Trojan => {
-            let server =
-                resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
-                    .await?;
-            connect_trojan_proxy(
-                proxy,
-                &server,
-                destination,
-                allow_ipv6,
-                state,
-                custom_roots,
-                socket_options,
-            )
-            .await
+            if proxy_has_dialer_proxy(proxy) {
+                let transport = crate::dialer_proxy::dial_proxy_server(
+                    proxy,
+                    config,
+                    state,
+                    socket_options,
+                    chain,
+                )
+                .await?;
+                connect_trojan_proxy_on_dialer_stream(
+                    proxy,
+                    transport,
+                    destination,
+                    state,
+                    custom_roots,
+                )
+                .await
+            } else {
+                let server =
+                    resolve_proxy_dial_server(proxy_server(proxy), &config.hosts, dns, allow_ipv6)
+                        .await?;
+                connect_trojan_proxy(
+                    proxy,
+                    &server,
+                    destination,
+                    allow_ipv6,
+                    state,
+                    custom_roots,
+                    socket_options,
+                )
+                .await
+            }
         }
         ProxyKind::AnyTls => {
             let server =
@@ -753,11 +810,8 @@ pub(super) async fn connect_configured_proxy_with_chain(
         ProxyKind::Tuic => connect_tuic_proxy(proxy, destination, config, state).await,
         ProxyKind::WireGuard => connect_wireguard_proxy(proxy, destination, config, state).await,
         ProxyKind::Snell => {
-            if proxy
-                .dialer_proxy
-                .as_deref()
-                .is_some_and(|name| !name.trim().is_empty())
-            {
+            if proxy_has_dialer_proxy(proxy) {
+
                 let transport = crate::dialer_proxy::dial_proxy_server(
                     proxy,
                     config,
@@ -1142,6 +1196,51 @@ async fn connect_trojan_proxy(
         .map_err(|error| format!("Trojan proxy connection failed: {error}"))
 }
 
+/// Chained Trojan dials stay outside the gRPC pool so a changed dialer-proxy
+/// cannot reclaim a socket opened on a different upstream path.
+async fn connect_trojan_proxy_on_dialer_stream(
+    proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
+    destination: &Destination,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let trojan = proxy
+        .trojan
+        .as_ref()
+        .ok_or_else(|| "Trojan proxy configuration is missing".to_owned())?;
+    let configured = proxy_server(proxy);
+    let mut outer =
+        wrap_trojan_physical_outer(proxy, stream, trojan, state, custom_roots).await?;
+    match &trojan.transport {
+        rewrite_config::TrojanTransport::Grpc {
+            service_name,
+            user_agent,
+            ..
+        } => {
+            let host = proxy.sni.clone().unwrap_or_else(|| configured.authority());
+            outer = rewrite_outbound::connect_vmess_grpc(outer, &host, service_name, user_agent)
+                .await
+                .map_err(|error| format!("Trojan gRPC transport failed: {error}"))?;
+        }
+        rewrite_config::TrojanTransport::WebSocket { path, headers } => {
+            outer = rewrite_outbound::connect_websocket_with_headers(
+                outer,
+                &proxy.server,
+                proxy.port,
+                path,
+                headers,
+            )
+            .await
+            .map_err(|error| format!("Trojan WebSocket transport failed: {error}"))?;
+        }
+        rewrite_config::TrojanTransport::Tcp => {}
+    }
+    rewrite_outbound::connect_trojan_on_stream_with_key(outer, destination, &trojan.password_key)
+        .await
+        .map_err(|error| format!("Trojan proxy connection failed: {error}"))
+}
+
 pub(super) async fn connect_trojan_outer(
     proxy: &rewrite_config::ProxyConfig,
     server: &Destination,
@@ -1226,9 +1325,19 @@ async fn connect_trojan_physical_outer(
     let outer = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("Trojan outer TCP connection failed: {error}"))?;
+    wrap_trojan_physical_outer(proxy, Box::new(outer), trojan, state, custom_roots).await
+}
+
+async fn wrap_trojan_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    outer: rewrite_outbound::BoxedOutboundStream,
+    trojan: &rewrite_config::TrojanProxyConfig,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     if let Some(reality) = proxy.reality.as_ref() {
         let server_name = proxy.sni.as_deref().unwrap_or(&proxy.server);
-        return rewrite_outbound::wrap_client_reality(Box::new(outer), server_name, reality, false)
+        return rewrite_outbound::wrap_client_reality(outer, server_name, reality, false)
             .await
             .map_err(|error| format!("Trojan REALITY connection failed: {error}"));
     }
@@ -1247,11 +1356,9 @@ async fn connect_trojan_physical_outer(
         tls12_only: false,
         tls13_only: false,
     };
-    let outer =
-        rewrite_outbound::wrap_client_tls_with_options(Box::new(outer), tls, Some(state.clock()))
-            .await
-            .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))?;
-    Ok(outer)
+    rewrite_outbound::wrap_client_tls_with_options(outer, tls, Some(state.clock()))
+        .await
+        .map_err(|error| format!("Trojan outer TLS connection failed: {error}"))
 }
 
 pub(super) fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
@@ -1262,6 +1369,13 @@ pub(super) fn proxy_server(proxy: &rewrite_config::ProxyConfig) -> Destination {
             .map_or_else(|_| Host::Domain(proxy.server.clone()), Host::Ip),
         port: proxy.port,
     }
+}
+
+fn proxy_has_dialer_proxy(proxy: &rewrite_config::ProxyConfig) -> bool {
+    proxy
+        .dialer_proxy
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
 }
 
 /// Resolves a proxy adapter's dial host through configured hosts + PSN
@@ -1332,6 +1446,39 @@ async fn connect_vless_proxy(
         socket_options,
     )
     .await?;
+    rewrite_outbound::connect_vless_on_stream_with_vision_control(
+        outer,
+        destination,
+        rewrite_outbound::VlessTcpOptions {
+            uuid: vless.uuid,
+            flow: vless.flow.map(|flow| match flow {
+                rewrite_config::VlessFlow::XtlsRprxVision => {
+                    rewrite_outbound::VlessFlow::XtlsRprxVision
+                }
+            }),
+        },
+        vision_control,
+    )
+    .map_err(|error| format!("VLESS proxy connection failed: {error}"))
+}
+
+/// Chained VLESS dials stay outside gRPC / xHTTP pools so a changed
+/// dialer-proxy cannot reclaim a socket opened on a different upstream path.
+async fn connect_vless_proxy_on_dialer_stream(
+    proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
+    destination: &Destination,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let vless = proxy
+        .vless
+        .as_ref()
+        .ok_or_else(|| "VLESS proxy configuration is missing".to_owned())?;
+    let configured = proxy_server(proxy);
+    let (outer, vision_control) =
+        wrap_vless_physical_outer(proxy, stream, vless, state, custom_roots).await?;
+    let outer = wrap_vless_transport(outer, proxy, &configured, vless).await?;
     rewrite_outbound::connect_vless_on_stream_with_vision_control(
         outer,
         destination,
@@ -1531,11 +1678,27 @@ pub(super) async fn connect_vless_physical_outer(
     ),
     String,
 > {
-    let mut outer = Box::new(
+    let outer = Box::new(
         rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
             .await
             .map_err(|error| format!("VLESS TCP connection failed: {error}"))?,
     ) as rewrite_outbound::BoxedOutboundStream;
+    wrap_vless_physical_outer(proxy, outer, vless, state, custom_roots).await
+}
+
+async fn wrap_vless_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    mut outer: rewrite_outbound::BoxedOutboundStream,
+    vless: &rewrite_config::VlessProxyConfig,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<
+    (
+        rewrite_outbound::BoxedOutboundStream,
+        Option<rewrite_outbound::VisionDirectControl>,
+    ),
+    String,
+> {
     let websocket_host = match &vless.transport {
         rewrite_config::VlessTransport::WebSocket { headers, .. } => headers
             .iter()
@@ -1716,6 +1879,46 @@ async fn connect_vmess_proxy(
         socket_options,
     )
     .await?;
+    rewrite_outbound::connect_vmess_on_stream(
+        outer,
+        destination,
+        rewrite_outbound::VmessTcpOptions {
+            uuid: vmess.uuid,
+            alter_id: vmess.alter_id,
+            security: outbound_vmess_security(vmess.security),
+            global_padding: vmess.global_padding,
+            authenticated_length: vmess.authenticated_length,
+        },
+    )
+    .await
+    .map_err(|error| format!("VMess proxy connection failed: {error}"))
+}
+
+/// Chained VMess dials stay outside the gRPC pool and reject UDP carriers
+/// (mKCP / Mekya) so dialer-proxy remains a TCP-only composition.
+async fn connect_vmess_proxy_on_dialer_stream(
+    proxy: &rewrite_config::ProxyConfig,
+    stream: rewrite_outbound::BoxedOutboundStream,
+    destination: &Destination,
+    state: &RuntimeState,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
+    let vmess = proxy
+        .vmess
+        .as_ref()
+        .ok_or_else(|| "VMess proxy configuration is missing".to_owned())?;
+    if matches!(
+        vmess.transport,
+        rewrite_config::VmessTransport::Mkcp(_) | rewrite_config::VmessTransport::Mekya(_)
+    ) {
+        return Err(format!(
+            "proxy [{}] dialer-proxy is not supported for VMess mKCP/Mekya",
+            proxy.name
+        ));
+    }
+    let configured = proxy_server(proxy);
+    let outer = wrap_vmess_physical_outer(proxy, stream, vmess, state.clock(), custom_roots).await?;
+    let outer = wrap_vmess_transport(outer, proxy, &configured, vmess).await?;
     rewrite_outbound::connect_vmess_on_stream(
         outer,
         destination,
@@ -2024,7 +2227,23 @@ async fn connect_vmess_physical_outer(
     let remote = rewrite_outbound::connect_with_options(server, allow_ipv6, socket_options)
         .await
         .map_err(|error| format!("VMess outer TCP connection failed: {error}"))?;
-    let mut outer = Box::new(remote) as rewrite_outbound::BoxedOutboundStream;
+    wrap_vmess_physical_outer(
+        proxy,
+        Box::new(remote) as rewrite_outbound::BoxedOutboundStream,
+        vmess,
+        clock,
+        custom_roots,
+    )
+    .await
+}
+
+async fn wrap_vmess_physical_outer(
+    proxy: &rewrite_config::ProxyConfig,
+    mut outer: rewrite_outbound::BoxedOutboundStream,
+    vmess: &rewrite_config::VmessProxyConfig,
+    clock: Arc<rewrite_services::AdjustedClock>,
+    custom_roots: &[String],
+) -> Result<rewrite_outbound::BoxedOutboundStream, String> {
     let websocket = match &vmess.transport {
         rewrite_config::VmessTransport::Tcp
         | rewrite_config::VmessTransport::Mkcp(_)
