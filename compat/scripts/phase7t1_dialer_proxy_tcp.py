@@ -581,6 +581,7 @@ def exercise(binary, scratch: Path, snell_authority: Path, vmess_authority: Path
         )
         trojan.start()
         vless.start()
+        (scratch / "vmess-authority").mkdir(parents=True, exist_ok=True)
         vmess_process, vmess_stdout, vmess_stderr, vmess_log = start_vmess_authority(
             vmess_authority,
             scratch / "vmess-authority",
