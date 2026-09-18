@@ -530,6 +530,7 @@ jobs:
             compat/scripts/phase_ine_vmess_websocket.py \
             compat/scripts/phase_ine_vmess_grpc.py \
             compat/scripts/phase_ine_vmess_xudp.py \
+            compat/scripts/phase_ine_vmess_reality.py \
             compat/scripts/phase6g_anytls_tcp.py \
             compat/scripts/phase6g_anytls_mux.py \
             compat/scripts/phase6g_anytls_udp.py \

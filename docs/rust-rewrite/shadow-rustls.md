@@ -54,4 +54,6 @@ See [shadow-rustls/docs/PATCHES.md](https://github.com/biaogd/shadow-rustls/blob
 
 ## Rewrite consumer
 
-`rewrite-transport` exposes `reality_acceptor` / `accept_reality` for named VLESS `reality-config` inbound (IN-D). Dest dial + record camouflage stay application-owned and are deferred.
+`rewrite-transport` exposes `reality_acceptor` / `accept_reality` for named
+VLESS / Trojan / VMess `reality-config` inbound (IN-D / IN-C / IN-E). Dest dial
++ record camouflage stay application-owned and are deferred.

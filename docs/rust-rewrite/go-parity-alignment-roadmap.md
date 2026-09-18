@@ -94,7 +94,7 @@ Finish Go-compatible options that today fail-closed on named listeners.
 | --- | --- | --- | --- |
 | W3.1 | Trojan | Reality, `ss-option`, combined ws+grpc / mux | `IN-09` declared complete |
 | W3.2 | VLESS | REALITY dest camouflage fallback; Vision+REALITY; xHTTP; combined carriers | `IN-08` VLESS complete |
-| W3.3 | VMess | Reality; plain TCP; mKCP/Mekya if still advertised; reject nonzero alterId unless required | `IN-08` VMess complete |
+| W3.3 | VMess | **Partial** — REALITY auth Accept landed (`phase_ine_vmess_reality.py`); plain TCP / mKCP/Mekya deferred; nonzero alterId rejected | `IN-08` VMess complete |
 | W3.4 | SS | Remaining ciphers; ShadowTLS v1/v2; mux / ReSTLS / JLS / kcp-tun; port ranges; `rule`/`proxy`/`routing-mark` | `IN-07` SS complete |
 | W3.5 | Hy2 | realm listener; gecko/ECH/masquerade; Brutal policy (accurate or reject) | `IN-10` |
 | W3.6 | TUIC | v4 token path; ECH/client-auth; congestion knobs policy | `IN-11` TUIC |
@@ -251,7 +251,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | A | W2.2 sniffer | **Partial** — config + TCP TLS SNI / HTTP Host; QUIC/HTTP2 open |
 | A | W2.3–W2.4 geodata/MMDB/ASN | Partial |
 | A | W1.5–W1.6 TUN policy + CI Parity | Partial |
-| A | W3.1–W3.3 Trojan/VLESS/VMess carriers | Partial (Trojan REALITY auth landed; `ss-option`/mux open) |
+| A | W3.1–W3.3 Trojan/VLESS/VMess carriers | Partial (Trojan/VLESS/VMess REALITY auth landed; `ss-option`/mux / dest fallback / plain TCP / mKCP open) |
 | A | W5.5 dialer-proxy majors | **Partial** — VMess/VLESS/Trojan TCP dialer-proxy wired; AnyTLS deferred |
 | B | W5 ReSTLS/ECH/fingerprint/xHTTP | Partial |
 | B | W3.4–W3.7 SS/Hy2/TUIC/AnyTLS inbound | Partial |

@@ -127,22 +127,24 @@ small/large TCP, half-close, wrong-password; required cases must pass) and
 `phase_inf_hysteria2_udp.py` (SOCKS UDP small/large, multi-dest, Rust
 allow→reject). Deferred: realm, gecko, ECH, masquerade, Brutal accuracy.
 
-### IN-E VMess TLS + WSS + gRPC + XUDP inbound — 2026-09-15
+### IN-E VMess TLS + WSS + gRPC + XUDP + REALITY inbound — 2026-09-18
 
 Named `type: vmess` accepts plain TLS (`certificate` + `private-key`), optional
-`ws-path` (WSS), or optional `grpc-service-name` (Gun). AEAD only (`alterId`
-absent or `0`; nonzero rejected). TCP relays via `into_tcp_relay` →
-`serve_shadowsocks_connection`; UDP covers standard body-record datagrams on
-TLS plus Mux/XUDP (VLESS-identical framing inside VMess body records) with
-per-session sockets. Product Accept enables a listener-scoped AuthID replay
-cache (sing-vmess style ±120s TTL; in-window entries never evicted). Soft
-per-user budget (65 536) and a 1 048 576 global ceiling isolate overload so
-≫1024 short handshakes/120s succeed; one user cannot starve others. Body
-framing honors request `ChunkStream` / `ChunkMasking` bits. Evidence:
-`phase_ine_vmess_tls.py`, `phase_ine_vmess_websocket.py`,
-`phase_ine_vmess_grpc.py`, `phase_ine_vmess_xudp.py` (CI shard
-`controller-services-outbound` via `_ine`). Reality/mKCP/Mekya and combined
-ws+grpc stay rejected. Protocol Accept landed earlier as `9b963029`.
+`ws-path` (WSS), optional `grpc-service-name` (Gun), or `reality-config`
+(REALITY XOR with PEM). AEAD only (`alterId` absent or `0`; nonzero rejected).
+TCP relays via `into_tcp_relay` → `serve_shadowsocks_connection`; UDP covers
+standard body-record datagrams on TLS plus Mux/XUDP (VLESS-identical framing
+inside VMess body records) with per-session sockets. Product Accept enables a
+listener-scoped AuthID replay cache (sing-vmess style ±120s TTL; in-window
+entries never evicted). Soft per-user budget (65 536) and a 1 048 576 global
+ceiling isolate overload so ≫1024 short handshakes/120s succeed; one user
+cannot starve others. Body framing honors request `ChunkStream` /
+`ChunkMasking` bits. Evidence: `phase_ine_vmess_tls.py`,
+`phase_ine_vmess_websocket.py`, `phase_ine_vmess_grpc.py`,
+`phase_ine_vmess_xudp.py`, `phase_ine_vmess_reality.py` (CI shard
+`controller-services-outbound` via `_ine`). REALITY dest camouflage fallback,
+mKCP/Mekya, plain TCP without TLS, and combined ws+grpc stay deferred.
+Protocol Accept landed earlier as `9b963029`.
 
 ### IN-D VLESS Vision TLS inbound — 2026-09-15
 
@@ -225,7 +227,7 @@ Shadowsocks + partial TUN, SS in-scope vs deferred vs Rust-extension rows, and
 the shared post-handshake access boundary
 (`serve_shadowsocks_connection` → `serve_stream_session`). No new remote-server
 framework and no re-implementation of mixed/SS/TUN. **IN-B** SS2022 UDP,
-**IN-C** Trojan TLS/WSS/gRPC/REALITY, **IN-E** VMess TLS/WSS/gRPC/XUDP, and **IN-F**
+**IN-C** Trojan TLS/WSS/gRPC/REALITY, **IN-E** VMess TLS/WSS/gRPC/XUDP/REALITY, and **IN-F**
 Hysteria2 + TUIC v5 named inbounds (TCP + Direct UDP) are implemented in this
 checkout. Hy2 realm/gecko/ECH/masquerade/Brutal and TUIC v4/ECH/ShadowQUIC
 remain deferred. Explicit non-goals: SSR/Snell/SSH/WG servers, early
@@ -798,6 +800,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-E VMess WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; `phase_ine_vmess_websocket.py` |
 | IN-E VMess gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; combined ws+grpc rejected; `phase_ine_vmess_grpc.py` |
 | IN-E VMess XUDP inbound | Complete (declared Mux/XUDP UDP scope) | Named TLS Mux/XUDP multi-destination UDP via product outbound; `phase_ine_vmess_xudp.py` |
+| IN-E VMess REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls; dest fallback deferred; `phase_ine_vmess_reality.py` |
 | IN-F Hysteria2 inbound | Partial (first slice) | Named QUIC TCP+Direct UDP; stock BBR; salamander optional; timeouts/defrag/session idle; per-dest re-route; `phase_inf_hysteria2_tcp.py`, `phase_inf_hysteria2_udp.py` |
 | Phase 6C-O Shadowsocks 2022 UDP outbound | Complete in declared standard-cipher outbound scope; ChaCha8 UDP stays rejected | AES-128/256-GCM, ChaCha20-Poly1305 and AES single-hop EIH pass mixed/SOCKS5 IPv4/IPv6/domain UDP, native association, controller `udp`/`uot`, wrong-key timeout and server-restart comparison against the pinned Go oracle; the historical AES-2022 panic is classified as fixture plus Go-library plus missing session control. ChaCha8 UDP, 2022 UoT, multi-hop EIH and inbound 2022 UDP remain rejected |
 | Phase 6D-A VMess AEAD native TCP | Complete in declared client scope | Top-level and file-provider/selector VMess with AEAD `auto`, AlterID 0, domain/IPv4 TCP, small/large records, half-close, controller fields and failure lifecycle pass one native Go/Rust differential against an independent Go authority; all transports, UDP/XUDP, mux, other security/AlterID and inbound remain open |

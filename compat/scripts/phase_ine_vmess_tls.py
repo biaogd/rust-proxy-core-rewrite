@@ -7,8 +7,9 @@ half-close and wrong-UUID fail-closed, plus standard-mode UDP (no
 packet-encoding / XUDP). Mux/XUDP is covered by `phase_ine_vmess_xudp.py`;
 WSS/gRPC by sibling IN-E scripts.
 
-Scope: plain TLS only (certificate + private-key). Reality/mKCP/Mekya and
-nonzero alterId stay rejected on Rust; combined ws+grpc stays rejected.
+Scope: plain TLS only (certificate + private-key). Reality is covered by
+`phase_ine_vmess_reality.py`; mKCP/Mekya and nonzero alterId stay rejected on
+Rust; combined ws+grpc stays rejected.
 """
 
 from __future__ import annotations

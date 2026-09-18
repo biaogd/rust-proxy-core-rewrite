@@ -4257,8 +4257,9 @@ rules: ['MATCH,DIRECT']
         inbound.users[0].uuid,
         "b831381d-6324-4d53-ad4f-8cda48b30811"
     );
-    assert_eq!(inbound.certificate, "./server.crt");
-    assert_eq!(inbound.private_key, "./server.key");
+    assert_eq!(inbound.certificate.as_deref(), Some("./server.crt"));
+    assert_eq!(inbound.private_key.as_deref(), Some("./server.key"));
+    assert!(inbound.reality.is_none());
     assert!(inbound.ws_path.is_none());
     assert!(inbound.grpc_service_name.is_none());
     let listeners = config.listener_ports().expect("listener ports");
@@ -4344,12 +4345,44 @@ rules: ['MATCH,DIRECT']
         Some("GunService")
     );
 
+    let with_reality = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vmess-reality
+    type: vmess
+    listen: 127.0.0.1
+    port: 18449
+    reality-config:
+      dest: itunes.apple.com:443
+      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw
+      short-id:
+        - 10f897e26c4b9478
+      server-names:
+        - itunes.apple.com
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vmess reality listener");
+    let reality = with_reality.vmess_listeners[0]
+        .reality
+        .as_ref()
+        .expect("reality-config");
+    assert_eq!(reality.dest, "itunes.apple.com:443");
+    assert_eq!(reality.server_names, vec!["itunes.apple.com".to_owned()]);
+    let mut short_id = [0_u8; 8];
+    short_id.copy_from_slice(&hex::decode("10f897e26c4b9478").expect("short-id"));
+    assert_eq!(reality.short_ids, vec![short_id]);
+    assert!(with_reality.vmess_listeners[0].certificate.is_none());
+    assert!(with_reality.vmess_listeners[0].private_key.is_none());
+
     for unsupported in [
         "ws-path: /vmess\n    grpc-service-name: GunService",
-        "reality-config:\n      dest: itunes.apple.com:443\n      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw",
+        "certificate: ./server.crt\n    private-key: ./server.key\n    reality-config:\n      dest: itunes.apple.com:443\n      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw\n      short-id: [10f897e26c4b9478]\n      server-names: [itunes.apple.com]",
     ] {
         let source = format!(
-            "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18445\n    certificate: ./server.crt\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+            "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18445\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
         );
         assert!(
             Config::from_yaml(&source).is_err(),
@@ -4372,7 +4405,13 @@ rules: ['MATCH,DIRECT']
     let missing_cert = "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18448\n    private-key: ./server.key\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\nrules: ['MATCH,DIRECT']\n";
     assert!(
         Config::from_yaml(missing_cert).is_err(),
-        "certificate is required"
+        "certificate and private-key must be paired, or reality-config used"
+    );
+
+    let missing_security = "mode: rule\nlisteners:\n  - name: vmess-bad\n    type: vmess\n    listen: 127.0.0.1\n    port: 18450\n    users:\n      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811\nrules: ['MATCH,DIRECT']\n";
+    assert!(
+        Config::from_yaml(missing_security).is_err(),
+        "certificate/private-key or reality-config is required"
     );
 }
 

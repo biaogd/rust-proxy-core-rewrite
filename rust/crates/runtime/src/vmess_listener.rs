@@ -1,8 +1,8 @@
-//! IN-E named `type: vmess` inbound (TLS, optional WSS / gRPC Gun).
+//! IN-E named `type: vmess` inbound (TLS / REALITY, optional WSS / gRPC Gun).
 //!
-//! After the TLS handshake (and optional WebSocket upgrade or Gun stream),
-//! `accept_vmess_request` authenticates the AEAD AuthID (`alterId = 0` only)
-//! and decodes the destination; TCP joins `serve_shadowsocks_connection`
+//! After the TLS or REALITY handshake (and optional WebSocket upgrade or Gun
+//! stream), `accept_vmess_request` authenticates the AEAD AuthID (`alterId = 0`
+//! only) and decodes the destination; TCP joins `serve_shadowsocks_connection`
 //! after `into_tcp_relay`, and UDP uses standard body-record datagrams or
 //! Mux/XUDP multi-destination frames (wire-identical to VLESS XUDP inside
 //! VMess body records).
@@ -25,7 +25,10 @@ use rewrite_protocol_vmess::{
 };
 use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
-use rewrite_transport::{BoxedStream, V2rayGrpcServerConnection, accept_websocket_path};
+use rewrite_transport::{
+    BoxedStream, RealityAcceptOptions, RealityTlsAcceptor, V2rayGrpcServerConnection,
+    accept_reality, accept_websocket_path, reality_acceptor,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
@@ -218,9 +221,15 @@ async fn ensure_xudp_session(
     Some(table.insert_session(session_id, socket, reply_tx.clone()))
 }
 
+#[derive(Clone)]
+enum VmessTlsAcceptor {
+    Certificate(TlsAcceptor),
+    Reality(RealityTlsAcceptor),
+}
+
 pub(crate) struct VmessListener {
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: VmessTlsAcceptor,
     users: HashMap<[u8; 16], VmessUserEntry>,
     inbound_name: String,
     listen: SocketAddr,
@@ -233,28 +242,48 @@ impl VmessListener {
         config: &VmessInboundConfig,
         clock: Arc<rewrite_services::AdjustedClock>,
     ) -> Result<Self, RuntimeError> {
-        let mut tls = rewrite_controller::prepare_tls_config(
-            &ControllerTls {
-                certificate: config.certificate.clone(),
-                private_key: config.private_key.clone(),
-                client_auth_type: String::new(),
-                client_auth_cert: String::new(),
-                ech_key: String::new(),
-            },
-            clock,
-        )
-        .map_err(RuntimeError::Listener)?;
-        rewrite_controller::apply_inbound_alpn(
-            &mut tls,
-            config.ws_path.is_some(),
-            config.grpc_service_name.is_some(),
-        );
+        let acceptor = if let Some(reality) = config.reality.as_ref() {
+            let options = RealityAcceptOptions {
+                private_key: reality.private_key,
+                short_ids: reality.short_ids.clone(),
+                server_names: reality.server_names.clone(),
+                max_time_difference: reality.max_time_difference,
+            };
+            let acceptor = reality_acceptor(&options).map_err(|error| {
+                RuntimeError::Listener(std::io::Error::other(error.to_string()))
+            })?;
+            VmessTlsAcceptor::Reality(acceptor)
+        } else {
+            let certificate = config.certificate.clone().ok_or_else(|| {
+                RuntimeError::Listener(std::io::Error::other("vmess inbound missing certificate"))
+            })?;
+            let private_key = config.private_key.clone().ok_or_else(|| {
+                RuntimeError::Listener(std::io::Error::other("vmess inbound missing private-key"))
+            })?;
+            let mut tls = rewrite_controller::prepare_tls_config(
+                &ControllerTls {
+                    certificate,
+                    private_key,
+                    client_auth_type: String::new(),
+                    client_auth_cert: String::new(),
+                    ech_key: String::new(),
+                },
+                clock,
+            )
+            .map_err(RuntimeError::Listener)?;
+            rewrite_controller::apply_inbound_alpn(
+                &mut tls,
+                config.ws_path.is_some(),
+                config.grpc_service_name.is_some(),
+            );
+            VmessTlsAcceptor::Certificate(TlsAcceptor::from(Arc::new(tls)))
+        };
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(RuntimeError::Listener)?;
         Ok(Self {
             listener,
-            acceptor: TlsAcceptor::from(Arc::new(tls)),
+            acceptor,
             users: uuid_table(config.users.iter().map(|user| {
                 (
                     user.uuid.as_str(),
@@ -419,7 +448,7 @@ async fn handle_vmess_inbound(
     tcp: TcpStream,
     peer: SocketAddr,
     local: SocketAddr,
-    acceptor: TlsAcceptor,
+    acceptor: VmessTlsAcceptor,
     users: HashMap<[u8; 16], VmessUserEntry>,
     config: Arc<Config>,
     state: Arc<RuntimeState>,
@@ -430,18 +459,34 @@ async fn handle_vmess_inbound(
     grpc_service_name: Option<String>,
     replay_cache: Arc<std::sync::Mutex<AuthIdReplayCache>>,
 ) {
-    let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            state.log(
-                "error",
-                format!("vmess inbound TLS handshake failed: {error}"),
-            );
-            return;
+    let tls: BoxedStream = match acceptor {
+        VmessTlsAcceptor::Reality(reality_acceptor) => {
+            match accept_reality(&reality_acceptor, tcp).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("vmess inbound REALITY handshake failed: {error}"),
+                    );
+                    return;
+                }
+            }
         }
-        Err(_) => {
-            state.log("error", "vmess inbound TLS handshake timed out");
-            return;
+        VmessTlsAcceptor::Certificate(acceptor) => {
+            match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+                Ok(Ok(stream)) => Box::new(stream),
+                Ok(Err(error)) => {
+                    state.log(
+                        "error",
+                        format!("vmess inbound TLS handshake failed: {error}"),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    state.log("error", "vmess inbound TLS handshake timed out");
+                    return;
+                }
+            }
         }
     };
 

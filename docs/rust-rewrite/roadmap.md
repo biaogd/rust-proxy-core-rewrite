@@ -1488,14 +1488,15 @@ Combined ws+grpc stays rejected.
 
 ### IN-E — VMess inbound
 
-**Partial — this checkout:** AEAD `alterId: 0` named TLS inbound with optional
-WSS or gRPC (not both), TCP relay, standard UDP, and Mux/XUDP. Product path
-enables shared AuthID replay defense with per-user soft budgets and a high
+**Partial — this checkout:** AEAD `alterId: 0` named TLS or REALITY inbound with
+optional WSS or gRPC (not both), TCP relay, standard UDP, and Mux/XUDP. Product
+path enables shared AuthID replay defense with per-user soft budgets and a high
 global ceiling (never evicts in-window AuthIDs). Body framing follows request
 ChunkStream/ChunkMasking bits. Evidence: `phase_ine_vmess_tls.py`,
 `phase_ine_vmess_websocket.py`, `phase_ine_vmess_grpc.py`,
-`phase_ine_vmess_xudp.py`. Nonzero/legacy AlterID, Reality, mKCP, Mekya, and
-plain TCP without TLS stay out of this slice.
+`phase_ine_vmess_xudp.py`, `phase_ine_vmess_reality.py`. Nonzero/legacy AlterID,
+REALITY dest camouflage fallback, mKCP, Mekya, and plain TCP without TLS stay
+out of this slice.
 
 ### IN-F — QUIC servers (Hysteria2, TUIC v5)
 

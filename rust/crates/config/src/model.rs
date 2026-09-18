@@ -1493,7 +1493,7 @@ pub struct VlessInboundUser {
 }
 
 /// Named `reality-config` for REALITY inbound (mutually exclusive with PEM TLS).
-/// Shared by VLESS and Trojan named listeners.
+/// Shared by VLESS, Trojan, and VMess named listeners.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RealityInboundConfig {
     /// Camouflage dial target (`host:port`); required for Go parity, used later for fallback.
@@ -1553,19 +1553,20 @@ pub struct VmessInboundUser {
     pub uuid: String,
 }
 
-/// Named `type: vmess` TLS inbound accepted in IN-E.
+/// Named `type: vmess` TLS inbound accepted in IN-E / W3.3.
 ///
 /// AEAD only (`alterId` must be absent or `0`). Optional `ws-path` /
 /// `grpc-service-name` select the Trojan-style carriers (not both).
-/// Plain TLS (`certificate` + `private-key`) is required; Reality/mKCP/Mekya
-/// stay rejected.
+/// `reality-config` selects REALITY (XOR with `certificate` / `private-key`).
+/// mKCP/Mekya stay rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmessInboundConfig {
     pub name: String,
     pub listen: SocketAddr,
     pub users: Vec<VmessInboundUser>,
-    pub certificate: String,
-    pub private_key: String,
+    pub certificate: Option<String>,
+    pub private_key: Option<String>,
+    pub reality: Option<RealityInboundConfig>,
     /// When set, clients must WebSocket-upgrade on this path before VMess bytes.
     pub ws_path: Option<String>,
     /// When set, clients must open a Gun/gRPC stream on this service before VMess bytes.
@@ -1577,12 +1578,13 @@ impl VmessInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|reality={:?}|ws-path={}|grpc-service-name={}",
             self.name,
             self.listen,
             self.users,
-            self.certificate,
-            self.private_key,
+            self.certificate.as_deref().unwrap_or(""),
+            self.private_key.as_deref().unwrap_or(""),
+            self.reality,
             self.ws_path.as_deref().unwrap_or(""),
             self.grpc_service_name.as_deref().unwrap_or("")
         )

@@ -2277,35 +2277,40 @@ async fn wrap_vmess_physical_outer(
             .as_deref()
             .or(websocket_host)
             .unwrap_or(&proxy.server);
-        let alpn: &[&[u8]] = match &vmess.transport {
-            rewrite_config::VmessTransport::WebSocket { .. }
-            | rewrite_config::VmessTransport::Http { .. } => &[b"http/1.1"],
-            rewrite_config::VmessTransport::Http2 { .. }
-            | rewrite_config::VmessTransport::Grpc { .. } => &[b"h2"],
-            rewrite_config::VmessTransport::Tcp => &[],
-            rewrite_config::VmessTransport::Mkcp(_) | rewrite_config::VmessTransport::Mekya(_) => {
-                &[]
-            }
-        };
-        outer = rewrite_outbound::wrap_client_tls_with_options(
-            outer,
-            rewrite_outbound::HttpProxyTls {
-                server_name,
-                verification_name: proxy.name_cert_verify.as_deref(),
-                skip_certificate_verification: proxy.skip_cert_verify,
-                fingerprint: proxy.fingerprint.as_deref(),
-                certificate: proxy.certificate.as_deref(),
-                private_key: proxy.private_key.as_deref(),
-                custom_roots,
-                ech_config: None,
-                alpn_protocols: alpn,
-                tls12_only: false,
-                tls13_only: false,
-            },
-            Some(clock),
-        )
-        .await
-        .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
+        if let Some(reality) = proxy.reality.as_ref() {
+            outer = rewrite_outbound::wrap_client_reality(outer, server_name, reality, false)
+                .await
+                .map_err(|error| format!("VMess REALITY connection failed: {error}"))?;
+        } else {
+            let alpn: &[&[u8]] = match &vmess.transport {
+                rewrite_config::VmessTransport::WebSocket { .. }
+                | rewrite_config::VmessTransport::Http { .. } => &[b"http/1.1"],
+                rewrite_config::VmessTransport::Http2 { .. }
+                | rewrite_config::VmessTransport::Grpc { .. } => &[b"h2"],
+                rewrite_config::VmessTransport::Tcp => &[],
+                rewrite_config::VmessTransport::Mkcp(_)
+                | rewrite_config::VmessTransport::Mekya(_) => &[],
+            };
+            outer = rewrite_outbound::wrap_client_tls_with_options(
+                outer,
+                rewrite_outbound::HttpProxyTls {
+                    server_name,
+                    verification_name: proxy.name_cert_verify.as_deref(),
+                    skip_certificate_verification: proxy.skip_cert_verify,
+                    fingerprint: proxy.fingerprint.as_deref(),
+                    certificate: proxy.certificate.as_deref(),
+                    private_key: proxy.private_key.as_deref(),
+                    custom_roots,
+                    ech_config: None,
+                    alpn_protocols: alpn,
+                    tls12_only: false,
+                    tls13_only: false,
+                },
+                Some(clock),
+            )
+            .await
+            .map_err(|error| format!("VMess outer TLS connection failed: {error}"))?;
+        }
     }
     Ok(outer)
 }

@@ -2248,6 +2248,7 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
     let network = proxy.network.as_deref().unwrap_or("tcp");
     let tls = proxy.tls.unwrap_or(false);
     let udp = proxy.udp.unwrap_or(false);
+    let reality = parse_vless_reality_options(&proxy, &name)?;
     let has_tls_options = proxy.sni.is_some()
         || proxy.skip_cert_verify.unwrap_or(false)
         || proxy.name_cert_verify.is_some()
@@ -2264,7 +2265,6 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         || proxy.udp_over_tcp_version.is_some()
         || proxy.plugin.is_some()
         || proxy.plugin_opts.is_some()
-        || proxy.client_fingerprint.is_some()
         || proxy.fingerprint.is_some()
         || proxy.certificate.is_some()
         || proxy.private_key.is_some()
@@ -2286,9 +2286,17 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         // UDP associations reuse the TCP carriers that already exist for native
         // TLS, plaintext WS, WSS and Gun/gRPC (same shape as VLESS Phase 6E-I).
         || (udp && !matches!(network, "tcp" | "ws" | "grpc"))
+        || (reality.is_none() && proxy.client_fingerprint.is_some())
         || !proxy.extra.is_empty()
     {
         return Err(ConfigError::UnsupportedProxy(name));
+    }
+    if reality.is_some() {
+        // W3.3 evidence surface: native TCP REALITY only (no UDP / WS / Gun).
+        if !tls || network != "tcp" || udp {
+            return Err(ConfigError::UnsupportedProxy(name));
+        }
+        validate_vless_reality_client_fingerprint(&name, proxy.client_fingerprint.as_deref())?;
     }
     let (security, cipher) = parse_vmess_security(proxy.cipher.as_deref(), &name)?;
     let packet_mode = parse_vmess_packet_mode(&proxy, &name)?;
@@ -2323,8 +2331,8 @@ fn parse_vmess_proxy(name: String, mut proxy: RawProxy) -> Result<ProxyConfig, C
         fingerprint: None,
         certificate: None,
         private_key: None,
-        client_fingerprint: None,
-        reality: None,
+        client_fingerprint: proxy.client_fingerprint.filter(|value| !value.is_empty()),
+        reality,
         udp,
         udp_over_tcp: false,
         udp_over_tcp_version: 1,
