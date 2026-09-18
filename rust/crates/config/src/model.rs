@@ -1513,7 +1513,8 @@ pub struct RealityInboundConfig {
 /// Named `type: vless` TLS inbound accepted in IN-D.
 ///
 /// Optional `ws-path` / `grpc-service-name` select the Trojan-style carriers.
-/// Per-user `flow: xtls-rprx-vision` is accepted on certificate TLS.
+/// Per-user `flow: xtls-rprx-vision` is accepted on certificate TLS and on
+/// native-TCP REALITY (`reality-config`).
 /// `reality-config` selects REALITY (XOR with `certificate` / `private-key`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VlessInboundConfig {

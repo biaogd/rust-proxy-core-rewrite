@@ -93,7 +93,7 @@ Finish Go-compatible options that today fail-closed on named listeners.
 | ID | Family | Work | Exit |
 | --- | --- | --- | --- |
 | W3.1 | Trojan | Reality, `ss-option`, combined ws+grpc / mux | `IN-09` declared complete |
-| W3.2 | VLESS | REALITY dest camouflage fallback; Vision+REALITY; xHTTP; combined carriers | `IN-08` VLESS complete |
+| W3.2 | VLESS | **Partial:** Vision+REALITY shipped (`phase_ind_vless_reality_vision.py`); still open: REALITY dest camouflage fallback; xHTTP; combined carriers | `IN-08` VLESS complete |
 | W3.3 | VMess | Reality; plain TCP; mKCP/Mekya if still advertised; reject nonzero alterId unless required | `IN-08` VMess complete |
 | W3.4 | SS | Remaining ciphers; ShadowTLS v1/v2; mux / ReSTLS / JLS / kcp-tun; port ranges; `rule`/`proxy`/`routing-mark` | `IN-07` SS complete |
 | W3.5 | Hy2 | realm listener; gecko/ECH/masquerade; Brutal policy (accurate or reject) | `IN-10` |

@@ -459,15 +459,6 @@ fn parse_vless_listener(
             "listener {name} requires at least one user uuid"
         )));
     }
-    if reality.is_some()
-        && users
-            .iter()
-            .any(|user| user.flow == Some(VlessFlow::XtlsRprxVision))
-    {
-        return Err(ConfigError::InvalidInbound(format!(
-            "listener {name} does not support xtls-rprx-vision with reality-config yet"
-        )));
-    }
     Ok(VlessInboundConfig {
         name,
         listen,

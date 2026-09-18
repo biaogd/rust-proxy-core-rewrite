@@ -5,7 +5,7 @@
 //! destination; TCP joins the shared `serve_shadowsocks_connection` boundary
 //! and UDP uses the standard fixed-destination framing or Mux/XUDP
 //! multi-destination frames. Vision (`flow: xtls-rprx-vision`) is supported on
-//! certificate TLS; REALITY is native-TCP only in this slice (no Vision).
+//! certificate TLS and native-TCP REALITY.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -27,8 +27,8 @@ use rewrite_rules::Route;
 use rewrite_state::RuntimeState;
 use rewrite_transport::{
     BoxedStream, RealityAcceptOptions, RealityTlsAcceptor, V2rayGrpcServerConnection,
-    VisionDirectControl, accept_reality, accept_vision_tls, accept_websocket_path,
-    reality_acceptor,
+    VisionDirectControl, accept_reality, accept_reality_vision, accept_vision_tls,
+    accept_websocket_path, reality_acceptor,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -541,11 +541,23 @@ async fn handle_vless_inbound(
 ) {
     let vision_control = vision_capable.then(VisionDirectControl::default);
     let tls: BoxedStream = match acceptor {
-        VlessTlsAcceptor::Reality(reality_acceptor) => {
-            if vision_capable {
-                state.log("error", "vless inbound REALITY does not support Vision yet");
-                return;
+        VlessTlsAcceptor::Reality(reality_acceptor) if vision_capable => {
+            let control = vision_control
+                .as_ref()
+                .expect("vision control is present when vision_capable")
+                .clone();
+            match accept_reality_vision(&reality_acceptor, Box::new(tcp), control).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    state.log(
+                        "error",
+                        format!("vless inbound REALITY+Vision handshake failed: {error}"),
+                    );
+                    return;
+                }
             }
+        }
+        VlessTlsAcceptor::Reality(reality_acceptor) => {
             match accept_reality(&reality_acceptor, tcp).await {
                 Ok(stream) => stream,
                 Err(error) => {

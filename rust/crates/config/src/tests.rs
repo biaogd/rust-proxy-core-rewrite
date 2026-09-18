@@ -4228,6 +4228,33 @@ rules: ['MATCH,DIRECT']
         .expect("8-byte short id");
     assert_eq!(reality.short_ids, vec![short_id]);
     assert!(with_reality.vless_listeners[0].certificate.is_none());
+
+    let with_reality_vision = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: vless-reality-vision
+    type: vless
+    listen: 127.0.0.1
+    port: 18438
+    reality-config:
+      dest: itunes.apple.com:443
+      private-key: yMqyglp3FKXPpjcrwNfBYCQS-UrXduKhlDVqqlnMrWw
+      short-id:
+        - 10f897e26c4b9478
+      server-names:
+        - itunes.apple.com
+    users:
+      - uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+        flow: xtls-rprx-vision
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named vless REALITY+Vision listener");
+    assert_eq!(
+        with_reality_vision.vless_listeners[0].users[0].flow,
+        Some(VlessFlow::XtlsRprxVision)
+    );
+    assert!(with_reality_vision.vless_listeners[0].reality.is_some());
 }
 
 #[test]

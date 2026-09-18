@@ -156,6 +156,15 @@ is accepted on native TCP via shadow-rustls `RealityServerConfig` /
 `RealityServerCertResolver` (dest camouflage fallback deferred); evidence:
 `phase_ind_vless_reality.py`.
 
+### IN-D VLESS REALITY + Vision inbound — 2026-09-18
+
+Named `type: vless` with `reality-config` and per-user `flow: xtls-rprx-vision`
+uses `accept_reality_vision` (record-bounded REALITY TLS + Vision DIRECT
+promotion) then the same `VisionStream` path as certificate Vision. Evidence:
+`phase_ind_vless_reality_vision.py` (product REALITY+Vision outbound vs
+Go/Rust named inbound: TCP small/large/half-close and nested TLS DIRECT).
+Dest camouflage fallback, xHTTP, and combined carriers remain later W3.2 work.
+
 ### IN-D VLESS TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
 Named `type: vless` accepts native TLS, optional `ws-path` (WSS), or optional
@@ -790,6 +799,7 @@ older `codex/restls-client` worktree; historical slice records remain below.
 | IN-C Trojan REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls; dest fallback deferred; `phase_inc_trojan_reality.py` |
 | IN-D VLESS Vision inbound | Complete (declared native TLS scope) | Per-user `flow: xtls-rprx-vision`; `phase_ind_vless_vision.py` |
 | IN-D VLESS REALITY inbound | Complete (declared native TCP auth scope) | Named `reality-config`; auth Accept via shadow-rustls `.5`; dest fallback deferred; `phase_ind_vless_reality.py` |
+| IN-D VLESS REALITY+Vision inbound | Complete (declared native TCP composition) | `reality-config` + `flow: xtls-rprx-vision`; `accept_reality_vision`; `phase_ind_vless_reality_vision.py` |
 | IN-D VLESS TLS inbound | Complete (declared TLS scope) | Named TLS TCP+standard UDP; `phase_ind_vless_tls.py` |
 | IN-D VLESS WSS inbound | Complete (declared WS TCP scope) | Named `ws-path` WSS TCP; standard UDP remains on TLS evidence; `phase_ind_vless_websocket.py` |
 | IN-D VLESS gRPC inbound | Complete (declared gRPC TCP scope) | Named `grpc-service-name` TLS+Gun TCP; standard UDP remains on TLS evidence; combined ws+grpc rejected; `phase_ind_vless_grpc.py` |

@@ -28,7 +28,8 @@ pub use mekya::{MekyaConnection, MekyaConnector, MekyaOptions, connect_mekya};
 pub use mkcp::{MkcpConfig, connect_mkcp};
 pub use reality::{RealityConnectOptions, connect_reality, connect_reality_vision};
 pub use reality_server::{
-    RealityAcceptOptions, RealityTlsAcceptor, accept_reality, reality_acceptor,
+    RealityAcceptOptions, RealityTlsAcceptor, accept_reality, accept_reality_vision,
+    reality_acceptor,
 };
 pub use shadow_tls::{ShadowTlsConnectOptions, ShadowTlsError, connect_shadow_tls};
 pub use shadow_tls_server::{
