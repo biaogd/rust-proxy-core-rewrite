@@ -19,11 +19,11 @@ pub use packet::{
     VlessPacketMode, VlessUdpAssociation, associate_vless_udp_on_stream, read_xudp_client_packet,
     write_xudp_server_packet,
 };
-pub use stream::{VlessResponsePendingStream, VlessTcpStream};
 pub use server::{
     VlessCommand, VlessServerRequest, VlessServerStream, VlessUserEntry, accept_vless_request,
     map_uuid, read_vless_udp_payload, uuid_table, write_vless_udp_payload,
 };
+pub use stream::{VlessResponsePendingStream, VlessTcpStream};
 pub use vision::VisionStream;
 
 /// Go-style replaceable unwrap for VLESS outbound.
@@ -124,6 +124,7 @@ pub fn connect_vless_on_stream_with_vision_control(
     Ok(Box::new(vless))
 }
 
+#[cfg(test)]
 fn request_header(
     destination: &Destination,
     options: VlessClientOptions,

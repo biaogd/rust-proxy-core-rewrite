@@ -118,14 +118,7 @@ pub fn is_auth_request(method: &http::Method, uri: &http::Uri) -> bool {
     if path != AUTH_PATH {
         return false;
     }
-    let host = uri
-        .host()
-        .or_else(|| {
-            // Some stacks put the authority only in the Host header; callers
-            // should prefer [`auth_password_from_headers`] + host checks.
-            None
-        })
-        .unwrap_or("");
+    let host = uri.host().unwrap_or("");
     host.eq_ignore_ascii_case(AUTH_HOST)
 }
 

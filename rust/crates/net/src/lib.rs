@@ -1,4 +1,6 @@
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, copy_bidirectional_with_sizes};
+use tokio::io::{
+    AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, copy_bidirectional_with_sizes,
+};
 
 /// Match Go `common/pool.RelayBufferSize` (standard build): 32 KiB per direction.
 pub const RELAY_BUFFER_SIZE: usize = 32 * 1024;

@@ -223,7 +223,10 @@ fn matches_redir_inbound_type() {
 
 #[test]
 fn matches_tproxy_inbound_type() {
-    let rules = vec!["IN-TYPE,TPROXY,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let rules = vec![
+        "IN-TYPE,TPROXY,REJECT".to_owned(),
+        "MATCH,DIRECT".to_owned(),
+    ];
     let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
     let mut input = metadata("tproxy.test", 443);
     input.inbound = InboundProtocol::Tproxy;
@@ -234,7 +237,10 @@ fn matches_tproxy_inbound_type() {
 
 #[test]
 fn matches_tunnel_inbound_type() {
-    let rules = vec!["IN-TYPE,TUNNEL,REJECT".to_owned(), "MATCH,DIRECT".to_owned()];
+    let rules = vec![
+        "IN-TYPE,TUNNEL,REJECT".to_owned(),
+        "MATCH,DIRECT".to_owned(),
+    ];
     let program = RuleSet::parse(&rules, &BTreeMap::new(), &[]).expect("valid rules");
     let mut input = metadata("tunnel.test", 443);
     input.inbound = InboundProtocol::Tunnel;
@@ -406,30 +412,48 @@ fn matches_validated_geosite_and_geoip_resources() {
 
 #[test]
 fn parses_process_name_path_and_uid() {
-    let program = RuleSet::parse(
-        &[
-            "PROCESS-NAME,curl,DIRECT".to_owned(),
-            "PROCESS-PATH,/usr/bin/curl,DIRECT".to_owned(),
-            "UID,1000-1001/0,REJECT".to_owned(),
-            "MATCH,REJECT".to_owned(),
-        ],
-        &Default::default(),
-        &[],
-    )
-    .expect("process rules");
+    let mut rules = vec![
+        "PROCESS-NAME,curl,DIRECT".to_owned(),
+        "PROCESS-PATH,/usr/bin/curl,DIRECT".to_owned(),
+    ];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    rules.push("UID,1000-1001/0,REJECT".to_owned());
+    rules.push("MATCH,REJECT".to_owned());
+    let program = RuleSet::parse(&rules, &Default::default(), &[]).expect("process rules");
     assert!(program.needs_process_lookup());
     let snapshots = program.snapshots();
     assert_eq!(snapshots[0].kind, "Process");
     assert_eq!(snapshots[0].payload, "curl");
     assert_eq!(snapshots[1].kind, "ProcessPath");
-    assert_eq!(snapshots[2].kind, "Uid");
-    assert_eq!(snapshots[2].payload, "1000-1001/0");
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        assert_eq!(snapshots[2].kind, "Uid");
+        assert_eq!(snapshots[2].payload, "1000-1001/0");
+    }
+}
+
+#[test]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn uid_rule_is_unsupported_off_linux() {
+    let error = RuleSet::parse(
+        &["UID,1000,REJECT".to_owned(), "MATCH,DIRECT".to_owned()],
+        &Default::default(),
+        &[],
+    )
+    .expect_err("UID rejected off linux");
+    assert!(matches!(
+        error,
+        RuleError::Unsupported(kind) if kind == "UID"
+    ));
 }
 
 #[test]
 fn process_name_matches_case_insensitively() {
     let program = RuleSet::parse(
-        &["PROCESS-NAME,CuRl,DIRECT".to_owned(), "MATCH,REJECT".to_owned()],
+        &[
+            "PROCESS-NAME,CuRl,DIRECT".to_owned(),
+            "MATCH,REJECT".to_owned(),
+        ],
         &Default::default(),
         &[],
     )

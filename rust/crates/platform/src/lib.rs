@@ -24,7 +24,6 @@ pub use network::{
 };
 pub use original_dst::tcp_original_destination;
 pub use process::{ProcessInfo, find_process_name, process_basename};
-pub use tproxy::bind_tproxy_tcp_listener;
 pub use route::{
     AutoRoutePlan, OwnedRoute, RouteOwner, RoutePlatform, bypass_host_route,
     current_route_platform, darwin_route_args, default_auto_route_destinations, host_route_prefix,
@@ -41,6 +40,7 @@ pub use system_dns::{
     parse_netsh_dnsservers, parse_scutil_dns_dictionary, parse_scutil_primary_service,
     windows_restore_dhcp_dns_args, windows_set_tun_dns_args,
 };
+pub use tproxy::bind_tproxy_tcp_listener;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, TcpKeepalive, Type};
 use std::collections::{BTreeMap, BTreeSet};

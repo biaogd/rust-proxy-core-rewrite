@@ -41,11 +41,7 @@ pub(crate) fn encode_frame(cmd: u8, sid: u32, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_OVERHEAD + data.len());
     out.push(cmd);
     out.extend_from_slice(&sid.to_be_bytes());
-    out.extend_from_slice(
-        &u16::try_from(data.len())
-            .unwrap_or(u16::MAX)
-            .to_be_bytes(),
-    );
+    out.extend_from_slice(&u16::try_from(data.len()).unwrap_or(u16::MAX).to_be_bytes());
     out.extend_from_slice(data);
     out
 }

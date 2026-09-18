@@ -5,15 +5,7 @@ use std::net::IpAddr;
 use super::SniffError;
 
 const HTTP_METHODS: &[&[u8]] = &[
-    b"GET",
-    b"POST",
-    b"HEAD",
-    b"PUT",
-    b"DELETE",
-    b"OPTIONS",
-    b"CONNECT",
-    b"PATCH",
-    b"TRACE",
+    b"GET", b"POST", b"HEAD", b"PUT", b"DELETE", b"OPTIONS", b"CONNECT", b"PATCH", b"TRACE",
 ];
 
 const H2_CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";

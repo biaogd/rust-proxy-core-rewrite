@@ -1449,13 +1449,18 @@ pub struct TrojanInboundUser {
     pub password: String,
 }
 
+/// Named `type: trojan` TLS inbound accepted in IN-C / W3.1.
+///
+/// Optional `ws-path` / `grpc-service-name` select carriers (not both).
+/// `reality-config` selects REALITY (XOR with `certificate` / `private-key`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrojanInboundConfig {
     pub name: String,
     pub listen: SocketAddr,
     pub users: Vec<TrojanInboundUser>,
-    pub certificate: String,
-    pub private_key: String,
+    pub certificate: Option<String>,
+    pub private_key: Option<String>,
+    pub reality: Option<RealityInboundConfig>,
     /// When set, clients must WebSocket-upgrade on this path before Trojan bytes.
     pub ws_path: Option<String>,
     /// When set, clients must open a Gun/gRPC stream on this service before Trojan bytes.
@@ -1467,12 +1472,13 @@ impl TrojanInboundConfig {
     #[must_use]
     pub fn reload_identity(&self) -> String {
         format!(
-            "name={}|listen={}|users={:?}|certificate={}|private-key={}|ws-path={}|grpc-service-name={}",
+            "name={}|listen={}|users={:?}|certificate={}|private-key={}|reality={:?}|ws-path={}|grpc-service-name={}",
             self.name,
             self.listen,
             self.users,
-            self.certificate,
-            self.private_key,
+            self.certificate.as_deref().unwrap_or(""),
+            self.private_key.as_deref().unwrap_or(""),
+            self.reality,
             self.ws_path.as_deref().unwrap_or(""),
             self.grpc_service_name.as_deref().unwrap_or("")
         )
@@ -1486,7 +1492,8 @@ pub struct VlessInboundUser {
     pub flow: Option<VlessFlow>,
 }
 
-/// Named `reality-config` for VLESS REALITY inbound (mutually exclusive with PEM TLS).
+/// Named `reality-config` for REALITY inbound (mutually exclusive with PEM TLS).
+/// Shared by VLESS and Trojan named listeners.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RealityInboundConfig {
     /// Camouflage dial target (`host:port`); required for Go parity, used later for fallback.

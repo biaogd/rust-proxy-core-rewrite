@@ -154,6 +154,7 @@ where
     })
 }
 
+#[cfg(test)]
 fn request_header(
     destination: &Destination,
     password: &str,

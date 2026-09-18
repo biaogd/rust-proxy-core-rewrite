@@ -157,16 +157,7 @@ pub(super) async fn serve_connection(
         return;
     };
     if matches!(remote, TcpOutbound::Dns) {
-        relay_dns_tcp(
-            client,
-            &[],
-            config,
-            state,
-            dns_service,
-            tracker,
-            shutdown,
-        )
-        .await;
+        relay_dns_tcp(client, &[], config, state, dns_service, tracker, shutdown).await;
         return;
     }
     let TcpOutbound::Stream(remote) = remote else {
@@ -229,10 +220,7 @@ pub(super) async fn serve_redir_connection(
     #[cfg(not(unix))]
     let original = {
         let _ = local;
-        state.log(
-            "error",
-            "redir inbound is only supported on Linux (W1.1)",
-        );
+        state.log("error", "redir inbound is only supported on Linux (W1.1)");
         return;
     };
     let destination = Destination {
@@ -320,14 +308,9 @@ pub(super) async fn serve_stream_session(
         }
     }
     let mut fake_host = apply_host_mapping(&mut metadata, config, state);
-    let (client, replaced) = crate::sniffer::prepare_tcp_stream(
-        client,
-        &[],
-        &mut metadata,
-        &config.sniffer,
-        state,
-    )
-    .await;
+    let (client, replaced) =
+        crate::sniffer::prepare_tcp_stream(client, &[], &mut metadata, &config.sniffer, state)
+            .await;
     if replaced {
         fake_host = None;
     }

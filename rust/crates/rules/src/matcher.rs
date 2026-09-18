@@ -124,15 +124,14 @@ impl Matcher {
     pub(crate) fn needs_process_lookup(&self) -> bool {
         match self {
             Self::ProcessName(_) | Self::ProcessPath(_) | Self::Uid(_) => true,
-            Self::And(matchers) | Self::Or(matchers) => {
-                matchers.iter().any(Self::needs_process_lookup)
-            }
-            Self::Not(matcher) | Self::SubRule { condition: matcher, .. } => {
-                matcher.needs_process_lookup()
-            }
-            Self::RuleSet { matchers, .. } | Self::Geo { matchers, .. } => {
-                matchers.iter().any(Self::needs_process_lookup)
-            }
+            Self::And(matchers)
+            | Self::Or(matchers)
+            | Self::RuleSet { matchers, .. }
+            | Self::Geo { matchers, .. } => matchers.iter().any(Self::needs_process_lookup),
+            Self::Not(matcher)
+            | Self::SubRule {
+                condition: matcher, ..
+            } => matcher.needs_process_lookup(),
             _ => false,
         }
     }
@@ -195,7 +194,9 @@ impl Matcher {
             Self::Domain(value)
             | Self::DomainSuffix(value)
             | Self::DomainKeyword(value)
-            | Self::DomainWildcard(value) => value.clone(),
+            | Self::DomainWildcard(value)
+            | Self::ProcessName(value)
+            | Self::ProcessPath(value) => value.clone(),
             Self::DomainRegex(regex) => regex.pattern.clone(),
             Self::IpCidr { network, .. } => network.to_string(),
             Self::IpSuffix { address, bits, .. } => format!("{address}/{bits}"),
@@ -220,7 +221,6 @@ impl Matcher {
                 .collect::<Vec<_>>()
                 .join("/"),
             Self::InName(names) | Self::InUser(names) | Self::RematchName(names) => names.join("/"),
-            Self::ProcessName(value) | Self::ProcessPath(value) => value.clone(),
             Self::Uid(ranges) => ranges
                 .iter()
                 .map(|&(start, end)| {
@@ -253,11 +253,7 @@ impl Matcher {
 }
 
 fn eq_ignore_ascii_case(left: &str, right: &str) -> bool {
-    left.len() == right.len()
-        && left
-            .bytes()
-            .zip(right.bytes())
-            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+    left.eq_ignore_ascii_case(right)
 }
 
 pub(crate) fn match_all(

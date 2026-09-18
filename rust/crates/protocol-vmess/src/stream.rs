@@ -358,9 +358,7 @@ impl AsyncRead for VmessTcpStream {
                 .poll_read_record(cx, &mut this.remote, &mut this.read_pending)
             {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
+                Poll::Ready(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),

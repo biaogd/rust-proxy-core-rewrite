@@ -23,7 +23,10 @@ pub(crate) const H2_MAX_FRAME: u32 = 1 << 20;
 
 pub(crate) async fn handshake_h2_client(
     stream: BoxedStream,
-) -> io::Result<(SendRequest<Bytes>, h2::client::Connection<BoxedStream, Bytes>)> {
+) -> io::Result<(
+    SendRequest<Bytes>,
+    h2::client::Connection<BoxedStream, Bytes>,
+)> {
     h2::client::Builder::new()
         .initial_window_size(H2_STREAM_WINDOW_CLIENT)
         .initial_connection_window_size(H2_CONN_WINDOW_CLIENT)

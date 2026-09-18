@@ -1,4 +1,4 @@
-//! Linux TProxy TCP listener binding (`IP_TRANSPARENT`).
+//! Linux `TProxy` TCP listener binding (`IP_TRANSPARENT`).
 
 use std::io;
 use std::net::SocketAddr;
@@ -7,7 +7,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{LocalTcpOptions, configure_tcp_keepalive};
 
-/// Binds a TCP listener with Linux TProxy socket options.
+/// Binds a TCP listener with Linux `TProxy` socket options.
 ///
 /// Matches Go `listener/tproxy`: `SO_REUSEADDR`, `IP_TRANSPARENT` /
 /// `IPV6_TRANSPARENT`, and original-destination recv opts. MPTCP is forced

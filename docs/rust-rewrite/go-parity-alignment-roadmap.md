@@ -251,7 +251,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | A | W2.2 sniffer | **Partial** — config + TCP TLS SNI / HTTP Host; QUIC/HTTP2 open |
 | A | W2.3–W2.4 geodata/MMDB/ASN | Partial |
 | A | W1.5–W1.6 TUN policy + CI Parity | Partial |
-| A | W3.1–W3.3 Trojan/VLESS/VMess carriers | Partial |
+| A | W3.1–W3.3 Trojan/VLESS/VMess carriers | Partial (Trojan REALITY auth landed; `ss-option`/mux open) |
 | A | W5.5 dialer-proxy majors | Partial |
 | B | W5 ReSTLS/ECH/fingerprint/xHTTP | Partial |
 | B | W3.4–W3.7 SS/Hy2/TUIC/AnyTLS inbound | Partial |
@@ -307,7 +307,7 @@ Concrete next slices after this doc lands:
 3. **W1.3** static tunnels TCP/UDP ✅ partial (named open)  
 4. **W2.2** sniffer config + HTTP/TLS sniff on local/TUN path ✅ partial (QUIC open)  
 5. **W2.1** PROCESS rules (Linux first) ✅ partial (regex/other OS open)  
-6. **W3.1** Trojan inbound Reality  
+6. **W3.1** Trojan inbound Reality ✅ (auth Accept; `ss-option`/mux remain)  
 7. **W5.5** dialer-proxy for VMess/VLESS/Trojan TCP
 
 Parallel track: **W1.6** TUN privileged CI to Parity; **W7.6** SS AEAD perf.

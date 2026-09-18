@@ -92,7 +92,7 @@ pub enum InboundProtocol {
     Inner,
     /// Linux iptables/nft `REDIRECT` / `TPROXY`-style original-destination TCP.
     Redir,
-    /// Linux TProxy TCP (destination from `LocalAddr` after `IP_TRANSPARENT`).
+    /// Linux `TProxy` TCP (destination from `LocalAddr` after `IP_TRANSPARENT`).
     Tproxy,
     /// Static tunnel TCP/UDP (destination from config `target`).
     Tunnel,

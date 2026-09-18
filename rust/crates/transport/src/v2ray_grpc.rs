@@ -803,9 +803,7 @@ mod tests {
         }
         assert_eq!(
             server_task.await.expect("server task"),
-            [
-                0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',
-            ]
+            [0, 0, 0, 0, 9, 0x0a, 7, 0, 0, b'h', b'e', b'l', b'l', b'o',]
         );
     }
 
@@ -821,6 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::never_loop)] // poll_write may Pending or Ready on first try; loop is defensive.
     async fn flush_during_pending_write_does_not_duplicate_frame() {
         use std::pin::Pin;
         use std::task::{Context, Poll, Waker};
@@ -886,11 +885,7 @@ mod tests {
         assert_eq!(seen[6], 18);
         assert_eq!(&seen[7..9], &[0, 0]);
         assert_eq!(&seen[9..25], payload);
-        assert_eq!(
-            seen.len(),
-            25,
-            "must not emit a second duplicate Gun frame"
-        );
+        assert_eq!(seen.len(), 25, "must not emit a second duplicate Gun frame");
     }
 
     #[tokio::test]

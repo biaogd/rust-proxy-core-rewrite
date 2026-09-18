@@ -43,11 +43,7 @@ pub fn find_process_name(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_find_process(
-    network: Network,
-    src_ip: IpAddr,
-    src_port: u16,
-) -> io::Result<ProcessInfo> {
+fn linux_find_process(network: Network, src_ip: IpAddr, src_port: u16) -> io::Result<ProcessInfo> {
     let tcp = matches!(network, Network::Tcp);
     let (uid, inode) = rewrite_sys::inet_diag_uid_inode(tcp, src_ip, src_port)?;
     let path = resolve_process_path_by_proc(inode, uid)?;
@@ -64,9 +60,8 @@ fn resolve_process_path_by_proc(inode: u32, uid: u32) -> io::Result<PathBuf> {
         if !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let meta = match entry.metadata() {
-            Ok(meta) => meta,
-            Err(_) => continue,
+        let Ok(meta) = entry.metadata() else {
+            continue;
         };
         #[cfg(unix)]
         {

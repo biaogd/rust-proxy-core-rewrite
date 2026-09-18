@@ -235,9 +235,7 @@ fn shared_native_root_store() -> Result<Arc<RootCertStore>, TlsClientError> {
         let mut roots = RootCertStore::empty();
         let native = rustls_native_certs::load_native_certs();
         for certificate in native.certs {
-            roots
-                .add(certificate)
-                .map_err(|error| error.to_string())?;
+            roots.add(certificate).map_err(|error| error.to_string())?;
         }
         let embedded = rustls_pemfile::certs(&mut Cursor::new(include_bytes!(
             "../../../../component/ca/ca-certificates.crt"
@@ -245,9 +243,7 @@ fn shared_native_root_store() -> Result<Arc<RootCertStore>, TlsClientError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
         for certificate in embedded {
-            roots
-                .add(certificate)
-                .map_err(|error| error.to_string())?;
+            roots.add(certificate).map_err(|error| error.to_string())?;
         }
         Ok(Arc::new(roots))
     }) {

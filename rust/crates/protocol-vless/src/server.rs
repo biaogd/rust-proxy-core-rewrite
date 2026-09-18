@@ -236,6 +236,8 @@ enum PendingResponseWrite {
     /// Response header not started; coalesce on the next non-empty write.
     Idle,
     /// GunStream accepted `prefix||payload` as one frame; drain in progress.
+    /// Retained for a future FrontHeadroom path (currently unused).
+    #[allow(dead_code)]
     GunPrefixed,
     /// Combined `[VERSION, 0] || payload` partially flushed (non-Gun carriers).
     Flushing {
@@ -399,7 +401,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VlessServerStream<S> {
                 }
             }
             self.pending = None;
-        } else if matches!(self.pending.as_ref(), Some(PendingResponseWrite::GunPrefixed)) {
+        } else if matches!(
+            self.pending.as_ref(),
+            Some(PendingResponseWrite::GunPrefixed)
+        ) {
             // Drain the in-flight prefixed frame but keep GunPrefixed so the
             // pending poll_write observes completion (does not re-frame).
             return Pin::new(&mut self.inner).poll_flush(cx);

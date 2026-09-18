@@ -104,9 +104,7 @@ where
         return Ok(None);
     };
     let Value::Sequence(entries) = value else {
-        return Err(serde::de::Error::custom(
-            "sniffer ports must be a sequence",
-        ));
+        return Err(serde::de::Error::custom("sniffer ports must be a sequence"));
     };
     let mut ports = Vec::new();
     for entry in entries {
