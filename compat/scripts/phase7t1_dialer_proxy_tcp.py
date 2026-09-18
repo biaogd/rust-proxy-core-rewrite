@@ -5,6 +5,8 @@ Proves hop path (not echo-only):
 
   SOCKS5 A → HTTP B → TCP echo
   HTTP A   → SOCKS5 B → TCP echo
+  SOCKS5 A → Snell v2 B → half-close destination
+  SOCKS5 A → VMess / VLESS / Trojan B → authority echo (W5.5)
 
 Each fixture records which hop received which target so B must reach its
 server through A.
@@ -21,6 +23,7 @@ import socket
 import socketserver
 import subprocess
 import tempfile
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -40,7 +43,15 @@ from phase1 import (
     wait_ready,
 )
 from phase3 import launch, stop
+from phase4e2 import ROOT_CERTIFICATE
 from phase5b1a import connect_domain, debug_files
+from phase6d_vmess_tcp import UUID as VMESS_UUID
+from phase6d_vmess_tcp import build_authority as build_vmess_authority
+from phase6d_vmess_tcp import start_authority as start_vmess_authority
+from phase6e_vless_tcp import STANDARD_UUID as VLESS_UUID
+from phase6e_vless_tcp import VlessAuthority
+from phase6f_trojan_tcp import PASSWORD as TROJAN_PASSWORD
+from phase6f_trojan_tcp import TrojanAuthority
 
 
 FAILURE_ARTIFACT = ROOT / "compat" / "artifacts" / "phase7t1-dialer-proxy-tcp-diff.json"
@@ -49,6 +60,13 @@ SNELL_PSK = "phase7t1-snell-psk"
 HALF_CLOSE_PAYLOAD = b"phase7t1-snell-half-close"
 CARGO_TARGET_ENV = "PHASE7T1_DIALER_PROXY_CARGO_TARGET"
 CARGO_TARGET_NAME = "phase7t1-dialer-proxy"
+PROTOCOL_DEST_HOST = "dialer.phase7t1"
+PROTOCOL_DEST_PORT = 28071
+
+
+def trojan_roots() -> str:
+    root = Path(ROOT_CERTIFICATE).read_text().strip()
+    return "tls:\n  custom-certifactes:\n    - |-\n" + textwrap.indent(root, "      ") + "\n"
 
 
 def relay(left: socket.socket, right: socket.socket) -> None:
@@ -413,7 +431,9 @@ rules:
             time.sleep(0.05)
         if not ready:
             raise TimeoutError("socks5→snell half-close route did not become ready")
-        hop_a.observations.clear()
+        # Keep warm-up hop observations: Go may reuse the dialer-supplied
+        # carrier for the follow-up half-close, so clearing here falsely fails
+        # the path proof even when A already dialed B's server.
         half_ok = proxied_half_close(mixed_port, half_close_port, HALF_CLOSE_PAYLOAD)
         a_saw_snell = any(
             item.get("target_host") == "127.0.0.1"
@@ -424,6 +444,89 @@ rules:
         return {
             "half-close": half_ok,
             "a-saw-snell-server": a_saw_snell,
+            "survived": survived,
+        }
+    finally:
+        stop(process)
+        stdout.close()
+        stderr.close()
+
+
+def run_socks5_protocol_b(
+    binary,
+    scratch: Path,
+    *,
+    label: str,
+    hop_a: RecordingSocks5Proxy,
+    hop_b_yaml: str,
+    authority_ready,
+    authority_saw_dest,
+    config_prefix: str = "",
+) -> dict[str, Any]:
+    """SOCKS5 A → protocol B (dialer-proxy) → authority-echo destination."""
+    mixed_port = reserve_port()
+    config = scratch / f"{label}.yaml"
+    config.write_text(
+        f"""{config_prefix}mixed-port: {mixed_port}
+mode: rule
+log-level: info
+ipv6: false
+proxies:
+  - name: hop-a
+    type: socks5
+    server: 127.0.0.1
+    port: {hop_a.port}
+    username: socks-user
+    password: socks-pass
+{hop_b_yaml}
+rules:
+  - DOMAIN,{PROTOCOL_DEST_HOST},hop-b
+  - MATCH,REJECT
+"""
+    )
+    hop_a.observations.clear()
+    run_scratch = scratch / label
+    run_scratch.mkdir(parents=True, exist_ok=True)
+    process, stdout, stderr = launch(binary, config, run_scratch)
+
+    def exchange(payload: bytes) -> bool:
+        with connect_domain(mixed_port, PROTOCOL_DEST_HOST, PROTOCOL_DEST_PORT) as stream:
+            stream.sendall(payload)
+            try:
+                return recv_exact(stream, len(payload)) == payload
+            except (EOFError, ConnectionResetError):
+                return False
+
+    try:
+        wait_ready(process, mixed_port)
+        deadline = time.monotonic() + IO_DEADLINE
+        ready = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                if exchange(b"ready"):
+                    ready = True
+                    break
+            except (AssertionError, OSError, EOFError, TimeoutError):
+                pass
+            time.sleep(0.05)
+        if not ready:
+            raise TimeoutError(f"{label} dialer-proxy route did not become ready")
+        hop_a.observations.clear()
+        authority_ready()
+        payload = f"phase7t1-{label}".encode()
+        echoed = exchange(payload)
+        a_saw_b = any(
+            item.get("target_host") == "127.0.0.1" and item.get("kind") == "socks5"
+            for item in hop_a.observations
+        )
+        b_saw = authority_saw_dest()
+        survived = process.poll() is None
+        return {
+            "echo": echoed,
+            "a-saw-b-server": a_saw_b,
+            "b-saw-dest": b_saw,
             "survived": survived,
         }
     finally:
@@ -452,7 +555,7 @@ def path_proves_chain(chain: str, hop_a: list[dict[str, Any]], hop_b: list[dict[
     )
 
 
-def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
+def exercise(binary, scratch: Path, snell_authority: Path, vmess_authority: Path) -> dict[str, Any]:
     echo = start_server(EchoHandler)
     half_close = start_server(HalfCloseHandler)
     socks_a = RecordingSocks5Proxy("hop-a-socks")
@@ -463,6 +566,13 @@ def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
     authority_process = None
     authority_stdout = None
     authority_stderr = None
+    trojan = TrojanAuthority()
+    vless = VlessAuthority()
+    vmess_port = reserve_port()
+    vmess_process = None
+    vmess_stdout = None
+    vmess_stderr = None
+    vmess_log = None
     try:
         authority_process, authority_stdout, authority_stderr = start_snell_authority(
             snell_authority,
@@ -471,6 +581,50 @@ def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
             SNELL_PSK,
             2,
         )
+        trojan.start()
+        vless.start()
+        (scratch / "vmess-authority").mkdir(parents=True, exist_ok=True)
+        vmess_process, vmess_stdout, vmess_stderr, vmess_log = start_vmess_authority(
+            vmess_authority,
+            scratch / "vmess-authority",
+            vmess_port,
+        )
+
+        def trojan_ready() -> None:
+            with trojan.lock:
+                trojan.observations.clear()
+
+        def trojan_saw() -> bool:
+            return any(
+                f"CONNECT {PROTOCOL_DEST_HOST}:{PROTOCOL_DEST_PORT}" in item
+                for item in trojan.snapshot()
+            )
+
+        def vless_ready() -> None:
+            with vless.lock:
+                vless.observations.clear()
+
+        def vless_saw() -> bool:
+            with vless.lock:
+                observed = set(vless.observations)
+            return any(
+                f"CONNECT {PROTOCOL_DEST_HOST}:{PROTOCOL_DEST_PORT}" in item
+                for item in observed
+            )
+
+        def vmess_ready() -> None:
+            if vmess_log is not None and vmess_log.exists():
+                # Truncate observation window by noting current size.
+                vmess_ready.offset = vmess_log.stat().st_size  # type: ignore[attr-defined]
+
+        def vmess_saw() -> bool:
+            if vmess_log is None or not vmess_log.exists():
+                return False
+            offset = getattr(vmess_ready, "offset", 0)
+            text = vmess_log.read_text(errors="replace")[offset:]
+            needle = f"{PROTOCOL_DEST_HOST}:{PROTOCOL_DEST_PORT}"
+            return needle in text
+
         return {
             "socks5-http": run_chain(
                 binary,
@@ -495,6 +649,56 @@ def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
                 snell_port=snell_port,
                 half_close_port=half_close.port,
             ),
+            "socks5-trojan": run_socks5_protocol_b(
+                binary,
+                scratch,
+                label="socks5-trojan",
+                hop_a=socks_a,
+                config_prefix=trojan_roots(),
+                hop_b_yaml=f"""  - name: hop-b
+    type: trojan
+    server: 127.0.0.1
+    port: {trojan.port}
+    password: {TROJAN_PASSWORD}
+    sni: dot.phase4.test
+    alpn: [h2, http/1.1]
+    dialer-proxy: hop-a
+""",
+                authority_ready=trojan_ready,
+                authority_saw_dest=trojan_saw,
+            ),
+            "socks5-vless": run_socks5_protocol_b(
+                binary,
+                scratch,
+                label="socks5-vless",
+                hop_a=socks_a,
+                hop_b_yaml=f"""  - name: hop-b
+    type: vless
+    server: 127.0.0.1
+    port: {vless.port}
+    uuid: {VLESS_UUID}
+    dialer-proxy: hop-a
+""",
+                authority_ready=vless_ready,
+                authority_saw_dest=vless_saw,
+            ),
+            "socks5-vmess": run_socks5_protocol_b(
+                binary,
+                scratch,
+                label="socks5-vmess",
+                hop_a=socks_a,
+                hop_b_yaml=f"""  - name: hop-b
+    type: vmess
+    server: 127.0.0.1
+    port: {vmess_port}
+    uuid: {VMESS_UUID}
+    alterId: 0
+    cipher: auto
+    dialer-proxy: hop-a
+""",
+                authority_ready=vmess_ready,
+                authority_saw_dest=vmess_saw,
+            ),
             "reject-missing-ref": ConfigReject.check(binary, scratch),
         }
     finally:
@@ -504,6 +708,14 @@ def exercise(binary, scratch: Path, snell_authority: Path) -> dict[str, Any]:
             authority_stdout.close()
         if authority_stderr is not None:
             authority_stderr.close()
+        if vmess_process is not None:
+            stop(vmess_process)
+        if vmess_stdout is not None:
+            vmess_stdout.close()
+        if vmess_stderr is not None:
+            vmess_stderr.close()
+        trojan.close()
+        vless.close()
         socks_a.close()
         http_b.close()
         http_a.close()
@@ -561,11 +773,12 @@ def main() -> int:
                 "rewrite-snell-authority was not built: "
                 f"{authority} (profile={profile})"
             )
+        vmess_authority = build_vmess_authority(root)
         try:
             for name, binary in binaries.items():
                 scratch = root / name
                 scratch.mkdir()
-                observations[name] = exercise(binary, scratch, authority)
+                observations[name] = exercise(binary, scratch, authority, vmess_authority)
         except Exception as error:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(
@@ -605,6 +818,17 @@ def main() -> int:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
             return 1
+        for protocol in ("socks5-trojan", "socks5-vless", "socks5-vmess"):
+            result = observations[side][protocol]
+            if not (
+                result["echo"]
+                and result["a-saw-b-server"]
+                and result["b-saw-dest"]
+                and result["survived"]
+            ):
+                FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+                FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))
+                return 1
         if not observations[side]["reject-missing-ref"]["exit-nonzero"]:
             FAILURE_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
             FAILURE_ARTIFACT.write_text(json.dumps(observations, indent=2, sort_keys=True))

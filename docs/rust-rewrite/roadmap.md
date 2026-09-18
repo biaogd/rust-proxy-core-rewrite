@@ -3351,13 +3351,15 @@ Cross-cutting TCP outbound chaining only. See
 - **Order:** (1) Go contract + config validation, (2) shared TCP dial entry,
   (3) HTTP↔SOCKS5 path-proving slice, (4) wire existing TCP protocols through
   the same dial entry, (5) dynamic group/provider/lifecycle acceptance.
-- **In scope:** HTTP, SOCKS5, SS/SSR, VMess, VLESS, Trojan, AnyTLS, Snell as
-  chain members on TCP. Groups/providers as dialer-proxy **targets**.
+- **In scope:** HTTP, SOCKS5, SS/SSR, VMess, VLESS, Trojan, Snell as chain
+  members on TCP. Groups/providers as dialer-proxy **targets**. AnyTLS remains
+  parse-ok / runtime-rejected until pooled DialOut carries chain context.
 - **Out of scope:** UDP chains, sing-mux, SSH forced reuse (session-owned
   dial stays rejected until separately assessed), Hy2/TUIC/WG UDP server dial,
-  NTP `dialer-proxy`.
+  NTP `dialer-proxy`, VMess mKCP/Mekya with dialer-proxy.
 - **Evidence:** `compat/scripts/phase7t1_dialer_proxy_tcp.py` plus config
   contract tests. Hop fixtures must prove B reached its server via A.
+  W5.5 adds SOCKS5→VMess / VLESS / Trojan path-proving cases.
 
 ### Phase 7E — Snell outbound acceptance plan
 

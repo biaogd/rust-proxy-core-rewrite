@@ -238,13 +238,15 @@ accepts `dialer-proxy` on supported TCP leaf proxies with missing/self/cycle
 fail-closed validation, shared runtime dial entry, and HTTP↔SOCKS5 path-proving
 differentials (local pass). SS/SSR/Snell also dial through the shared entry.
 Unchained Snell v2 keeps its ConnectV2 pool; chained Snell dials on-stream but
-still enables ConnectV2 zero-chunk half-close. `dialer-proxy` + `udp`/
-`udp-over-tcp` is rejected at load (UDP session mode also refuses). Provider
-refresh re-runs dialer-proxy validation before commit. Delay/health probes use
-the same dial entry via a `RuntimeState` hook. VMess/VLESS/Trojan/AnyTLS may
-parse the field but are runtime-rejected until wired. SSH / Hysteria2 / TUIC /
-WireGuard keep rejecting the field. UDP chains and sing-mux stay later. Not
-Parity.
+still enables ConnectV2 zero-chunk half-close. **W5.5:** VMess / VLESS / Trojan
+TCP carriers (TLS / WS / one-shot Gun / xHTTP) accept `dialer-proxy`; chained
+dials stay outside gRPC / xHTTP pools; VMess mKCP / Mekya remain rejected.
+`dialer-proxy` + `udp`/`udp-over-tcp` is rejected at load (UDP session mode also
+refuses). Provider refresh re-runs dialer-proxy validation before commit.
+Delay/health probes use the same dial entry via a `RuntimeState` hook. AnyTLS
+may parse the field but stays runtime-rejected until pooled DialOut can carry
+chain context. SSH / Hysteria2 / TUIC / WireGuard keep rejecting the field. UDP
+chains and sing-mux stay later. Not Parity.
 
 ### PR 20 Snell review corrections — 2026-09-14
 

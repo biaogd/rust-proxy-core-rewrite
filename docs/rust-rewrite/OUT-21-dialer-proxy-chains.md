@@ -44,18 +44,20 @@ normal TCP destination:
 
 | B \ A | HTTP | SOCKS5 | SS | SSR | VMess | VLESS | Trojan | AnyTLS | Snell | SSH | Hy2/TUIC/WG | DIRECT |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| HTTP / SOCKS5 | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
-| SS / SSR / Snell | yes | yes | yes | yes | later | later | later | no* | yes | no | no | yes |
-| VMess / VLESS / Trojan | later\* | later\* | later\* | later\* | later\* | later\* | later\* | no\* | later\* | no | no | later\* |
-| AnyTLS | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no\* | no | no | no\* |
+| HTTP / SOCKS5 | yes | yes | yes | yes | yes | yes | yes | no* | yes | no | no | yes |
+| SS / SSR / Snell | yes | yes | yes | yes | yes | yes | yes | no* | yes | no | no | yes |
+| VMess / VLESS / Trojan | yes | yes | yes | yes | yes | yes | yes | no* | yes | no | no | yes |
+| AnyTLS | no* | no* | no* | no* | no* | no* | no* | no* | no* | no | no | no* |
 | SSH | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 | Hy2 / TUIC / WG | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected | rejected |
 
-\* **Parse vs runtime:** VMess / VLESS / Trojan / AnyTLS may still **parse** a
-`dialer-proxy` field on the leaf, but the shared TCP dial entry **rejects** that
-combination at runtime until those carriers are wired. Treat them as unsupported
-for 7T1-A. AnyTLS stays deferred until the pooled DialOut path can carry chain
-context without silent DIRECT fallback.
+\* **Parse vs runtime:** AnyTLS may still **parse** a `dialer-proxy` field on the
+leaf, but the shared TCP dial entry **rejects** that combination at runtime
+until the pooled DialOut path can carry chain context without silent DIRECT
+fallback. VMess / VLESS / Trojan accept `dialer-proxy` for TCP carriers
+(including TLS / WS / one-shot Gun / xHTTP); chained dials stay outside gRPC /
+xHTTP / Snell v2 pools. VMess mKCP / Mekya with `dialer-proxy` remain rejected
+(UDP carriers).
 
 ## Explicit rejects
 
