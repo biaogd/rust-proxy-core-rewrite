@@ -43,7 +43,7 @@ from phase1 import (
     wait_ready,
 )
 from phase3 import launch, stop
-from phase4e2 import ROOT_CERTIFICATE, SERVER_CERTIFICATE, SERVER_KEY
+from phase4e2 import ROOT_CERTIFICATE
 from phase5b1a import connect_domain, debug_files
 from phase6d_vmess_tcp import UUID as VMESS_UUID
 from phase6d_vmess_tcp import build_authority as build_vmess_authority
@@ -588,7 +588,8 @@ def exercise(binary, scratch: Path, snell_authority: Path, vmess_authority: Path
         )
 
         def trojan_ready() -> None:
-            trojan.observations.clear()
+            with trojan.lock:
+                trojan.observations.clear()
 
         def trojan_saw() -> bool:
             return any(
@@ -597,12 +598,15 @@ def exercise(binary, scratch: Path, snell_authority: Path, vmess_authority: Path
             )
 
         def vless_ready() -> None:
-            vless.observations.clear()
+            with vless.lock:
+                vless.observations.clear()
 
         def vless_saw() -> bool:
+            with vless.lock:
+                observed = set(vless.observations)
             return any(
                 f"CONNECT {PROTOCOL_DEST_HOST}:{PROTOCOL_DEST_PORT}" in item
-                for item in vless.snapshot()
+                for item in observed
             )
 
         def vmess_ready() -> None:
