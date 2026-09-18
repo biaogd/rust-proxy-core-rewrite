@@ -186,6 +186,16 @@ async fn apply_generation_inner(
                     .anytls_listener_for_port(port)
                     .map_or_else(String::new, AnyTlsInboundConfig::reload_identity);
                 Ok((kind, port, address, identity))
+            } else if matches!(
+                kind,
+                ListenerKind::Http | ListenerKind::Socks | ListenerKind::Mixed
+            ) {
+                if let Some(named) = next.named_local_listener(kind, port) {
+                    Ok((kind, port, named.listen, named.reload_identity()))
+                } else {
+                    next.listener_address(port)
+                        .map(|address| (kind, port, address, String::new()))
+                }
             } else {
                 next.listener_address(port)
                     .map(|address| (kind, port, address, String::new()))
@@ -796,7 +806,13 @@ fn bind_fixed_listener(
         } else {
             LocalTcpListener::Plain(TcpListener::from_std(listener)?)
         };
-    let udp = if matches!(kind, ListenerKind::Socks | ListenerKind::Mixed) {
+    let enable_udp = match kind {
+        ListenerKind::Socks | ListenerKind::Mixed => config
+            .named_local_listener(kind, address.port())
+            .map_or(true, |named| named.udp),
+        _ => false,
+    };
+    let udp = if enable_udp {
         let udp = rewrite_platform::bind_local_udp_socket(address, dual_stack)?;
         Some(Arc::new(UdpSocket::from_std(udp)?))
     } else {

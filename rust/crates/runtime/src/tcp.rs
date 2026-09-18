@@ -46,10 +46,15 @@ pub(super) async fn serve_connection(
         | ListenerKind::Tuic
         | ListenerKind::AnyTls => return,
     };
-    let authentication = if config.skips_inbound_auth(peer.ip()) {
-        &[]
-    } else {
-        config.authentication.as_slice()
+    let local_port = client
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or(0);
+    let named = config.named_local_listener(kind, local_port);
+    let authentication = match named.and_then(|listener| listener.users.as_ref()) {
+        Some(users) => users.as_slice(),
+        None if config.skips_inbound_auth(peer.ip()) => &[],
+        None => config.authentication.as_slice(),
     };
     let accepted = tokio::select! {
         () = shutdown.cancelled() => return,
@@ -82,22 +87,25 @@ pub(super) async fn serve_connection(
     }
 
     let mut metadata = accepted.metadata.clone();
-    match kind {
-        ListenerKind::Http => "DEFAULT-HTTP",
-        ListenerKind::Socks => "DEFAULT-SOCKS",
-        ListenerKind::Mixed => "DEFAULT-MIXED",
-        ListenerKind::Redir
-        | ListenerKind::Tproxy
-        | ListenerKind::Tunnel
-        | ListenerKind::Shadowsocks
-        | ListenerKind::Trojan
-        | ListenerKind::Vless
-        | ListenerKind::Vmess
-        | ListenerKind::Hysteria2
-        | ListenerKind::Tuic
-        | ListenerKind::AnyTls => return,
-    }
-    .clone_into(&mut metadata.inbound_name);
+    match named {
+        Some(listener) => listener.name.clone_into(&mut metadata.inbound_name),
+        None => match kind {
+            ListenerKind::Http => "DEFAULT-HTTP",
+            ListenerKind::Socks => "DEFAULT-SOCKS",
+            ListenerKind::Mixed => "DEFAULT-MIXED",
+            ListenerKind::Redir
+            | ListenerKind::Tproxy
+            | ListenerKind::Tunnel
+            | ListenerKind::Shadowsocks
+            | ListenerKind::Trojan
+            | ListenerKind::Vless
+            | ListenerKind::Vmess
+            | ListenerKind::Hysteria2
+            | ListenerKind::Tuic
+            | ListenerKind::AnyTls => return,
+        }
+        .clone_into(&mut metadata.inbound_name),
+    };
     let mut fake_host = apply_host_mapping(&mut metadata, config, state);
     let (client, replaced) = crate::sniffer::prepare_tcp_stream(
         accepted.client,

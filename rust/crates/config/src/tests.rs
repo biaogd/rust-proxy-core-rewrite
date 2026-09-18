@@ -5137,3 +5137,108 @@ find-process-mode: weird
     let error = Config::from_yaml(source).expect_err("bad mode");
     assert!(matches!(error, ConfigError::InvalidFindProcessMode));
 }
+
+#[test]
+fn loads_named_http_socks_mixed_listeners_and_rejects_deferred_keys() {
+    let config = Config::from_yaml(
+        r"mode: rule
+ipv6: false
+listeners:
+  - name: named-http
+    type: http
+    listen: 127.0.0.1
+    port: 18601
+    users:
+      - username: alice
+        password: secret
+  - name: named-socks
+    type: socks
+    listen: 127.0.0.1
+    port: 18602
+    udp: false
+  - name: named-mixed
+    type: mixed
+    listen: 127.0.0.1
+    port: 18603
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("named local listeners");
+    assert_eq!(config.http_listeners.len(), 1);
+    assert_eq!(config.socks_listeners.len(), 1);
+    assert_eq!(config.mixed_listeners.len(), 1);
+    let http = &config.http_listeners[0];
+    assert_eq!(http.name, "named-http");
+    assert_eq!(http.kind, crate::NamedLocalInboundKind::Http);
+    assert_eq!(http.listen.port(), 18601);
+    assert!(!http.udp);
+    let users = http.users.as_ref().expect("explicit users");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+    assert_eq!(users[0].password, "secret");
+    assert!(!config.socks_listeners[0].udp);
+    assert!(config.mixed_listeners[0].udp);
+    assert!(config.mixed_listeners[0].users.is_none());
+    let listeners = config.listener_ports().expect("listener ports");
+    assert!(listeners.contains(&(ListenerKind::Http, 18601)));
+    assert!(listeners.contains(&(ListenerKind::Socks, 18602)));
+    assert!(listeners.contains(&(ListenerKind::Mixed, 18603)));
+    assert_eq!(
+        config
+            .named_local_listener(ListenerKind::Mixed, 18603)
+            .map(|listener| listener.name.as_str()),
+        Some("named-mixed")
+    );
+
+    for unsupported in [
+        "certificate: ./server.crt",
+        "private-key: ./server.key",
+        "reality-config:\n      public-key: unused",
+        "ech-key: unused",
+        "rule: SPECIAL",
+        "proxy: DIRECT",
+        "routing-mark: 1",
+        "udp: true",
+    ] {
+        let source = format!(
+            "mode: rule\nlisteners:\n  - name: http-bad\n    type: http\n    listen: 127.0.0.1\n    port: 18610\n    {unsupported}\nrules: ['MATCH,DIRECT']\n"
+        );
+        assert!(
+            Config::from_yaml(&source).is_err(),
+            "expected rejection for {unsupported}"
+        );
+    }
+
+    let empty_users = Config::from_yaml(
+        r"mode: rule
+listeners:
+  - name: http-nil-auth
+    type: http
+    listen: 127.0.0.1
+    port: 18611
+    users: []
+rules: ['MATCH,DIRECT']
+",
+    )
+    .expect("empty users means Nil auth store");
+    assert_eq!(
+        empty_users.http_listeners[0].users.as_ref().map(Vec::len),
+        Some(0)
+    );
+
+    let conflict = Config::from_yaml(
+        r"port: 18620
+mode: rule
+listeners:
+  - name: http-conflict
+    type: http
+    listen: 127.0.0.1
+    port: 18620
+rules: ['MATCH,DIRECT']
+",
+    );
+    assert!(
+        conflict.is_err(),
+        "named http must not collide with fixed port"
+    );
+}

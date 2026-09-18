@@ -504,9 +504,13 @@ pub(super) fn prepare_udp_request(
         }
     };
     let mut metadata = accepted.metadata.clone();
-    // Both pinned default SOCKS and mixed UDP listeners are backed by the Go
-    // SOCKS UDP listener and therefore expose DEFAULT-SOCKS, not DEFAULT-MIXED.
-    "DEFAULT-SOCKS".clone_into(&mut metadata.inbound_name);
+    // Fixed SOCKS/mixed UDP expose DEFAULT-SOCKS (Go socks UDP listener).
+    // Named socks/mixed use the listener name from YAML.
+    if let Some(named) = config.named_local_udp_listener(inbound_port) {
+        named.name.clone_into(&mut metadata.inbound_name);
+    } else {
+        "DEFAULT-SOCKS".clone_into(&mut metadata.inbound_name);
+    }
     let fake_host = apply_host_mapping(&mut metadata, config, state);
     Some(UdpSessionPacket {
         metadata,

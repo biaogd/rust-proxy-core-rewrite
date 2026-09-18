@@ -71,7 +71,7 @@ Ordered by **delete-Go risk** (users hit these first) then by dependency.
 | W1.1 | **redir** TCP (Linux/Darwin/FreeBSD; reject elsewhere) | `IN-03` Parity |
 | W1.2 | **tproxy** TCP/UDP (Linux) | `IN-04` Parity |
 | W1.3 | Static **tunnel** TCP/UDP | `IN-05` / `CFG-10` Parity |
-| W1.4 | Named `http` / `socks` / `mixed` listeners (+ TLS/Reality/ECH as Go) | `CFG-07` local named + `IN-01`/`IN-02` extension |
+| W1.4 | Named `http` / `socks` / `mixed` listeners (+ TLS/Reality/ECH as Go) | **Partial** — plain named TCP (+ socks/mixed UDP flag) + `users` via fixed accept path; TLS/Reality/ECH deferred |
 | W1.5 | TUN stacks decision: keep `smoltcp`-only **or** add Go-compatible stack names with real behavior (no silent remap) | Documented exclusion **or** `IN-06` stack Parity |
 | W1.6 | Close privileged TUN CI (8A/8B/8C/8F) to Parity | Matrix TUN rows Parity |
 | W1.7 | `iptables` inbound-interface / bypass (`CFG-12`) if still advertised | Parity or exclusion |
@@ -246,7 +246,7 @@ Copy into project tracking as needed; update statuses here when waves move.
 | A | W1.1 redir | **Partial** — Linux fixed `redir-port` TCP (this checkout); Darwin/FreeBSD/named open |
 | A | W1.2 tproxy | **Partial** — Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; UDP/named open |
 | A | W1.3 tunnel | **Partial** — top-level `tunnels:` TCP/UDP + SpecialProxy; named open |
-| A | W1.4 named http/socks/mixed | Not started |
+| A | W1.4 named http/socks/mixed | **Partial** — plain TCP + `users` auth; TLS/Reality/ECH deferred |
 | A | W2.1 PROCESS | **Partial** — Linux PROCESS-NAME/PATH + UID; regex/other OS open |
 | A | W2.2 sniffer | **Partial** — config + TCP TLS SNI / HTTP Host; QUIC/HTTP2 open |
 | A | W2.3–W2.4 geodata/MMDB/ASN | Partial |

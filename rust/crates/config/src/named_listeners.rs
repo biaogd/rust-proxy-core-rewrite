@@ -1,9 +1,12 @@
 use serde_yaml_ng::{Mapping, Value};
 
+use rewrite_model::AuthUser;
+
 use crate::ConfigError;
 use crate::model::{
     AnyTlsInboundConfig, AnyTlsInboundUser, Hysteria2InboundConfig, Hysteria2InboundUser,
-    RealityInboundConfig, ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
+    NamedLocalInboundConfig, NamedLocalInboundKind, RealityInboundConfig,
+    ShadowTlsHandshakeConfig, ShadowTlsUserConfig, ShadowsocksInboundConfig,
     ShadowsocksShadowTlsConfig, ShadowsocksSimpleObfsConfig, TrojanInboundConfig,
     TrojanInboundUser, TuicInboundConfig, TuicInboundUser, VlessFlow, VlessInboundConfig,
     VlessInboundUser, VmessInboundConfig, VmessInboundUser,
@@ -22,6 +25,9 @@ pub(crate) struct NamedListeners {
     pub hysteria2: Vec<Hysteria2InboundConfig>,
     pub tuic: Vec<TuicInboundConfig>,
     pub anytls: Vec<AnyTlsInboundConfig>,
+    pub http: Vec<NamedLocalInboundConfig>,
+    pub socks: Vec<NamedLocalInboundConfig>,
+    pub mixed: Vec<NamedLocalInboundConfig>,
 }
 
 pub(crate) fn parse_named_listeners(
@@ -38,6 +44,9 @@ pub(crate) fn parse_named_listeners(
             hysteria2: Vec::new(),
             tuic: Vec::new(),
             anytls: Vec::new(),
+            http: Vec::new(),
+            socks: Vec::new(),
+            mixed: Vec::new(),
         });
     };
     let mut shadowsocks = Vec::new();
@@ -47,6 +56,9 @@ pub(crate) fn parse_named_listeners(
     let mut hysteria2 = Vec::new();
     let mut tuic = Vec::new();
     let mut anytls = Vec::new();
+    let mut http = Vec::new();
+    let mut socks = Vec::new();
+    let mut mixed = Vec::new();
     let mut names = std::collections::BTreeSet::new();
     for (index, mapping) in listeners.into_iter().enumerate() {
         let listener_type = mapping_string(&mapping, "type").ok_or_else(|| {
@@ -116,6 +128,36 @@ pub(crate) fn parse_named_listeners(
                     &mut names,
                 )?);
             }
+            "http" => {
+                http.push(parse_named_local_listener(
+                    &mapping,
+                    index,
+                    NamedLocalInboundKind::Http,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
+            "socks" => {
+                socks.push(parse_named_local_listener(
+                    &mapping,
+                    index,
+                    NamedLocalInboundKind::Socks,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
+            "mixed" => {
+                mixed.push(parse_named_local_listener(
+                    &mapping,
+                    index,
+                    NamedLocalInboundKind::Mixed,
+                    allow_lan,
+                    bind_address,
+                    &mut names,
+                )?);
+            }
             other => {
                 return Err(ConfigError::InvalidInbound(format!(
                     "listener {index} has unsupported type: {other}"
@@ -131,7 +173,98 @@ pub(crate) fn parse_named_listeners(
         hysteria2,
         tuic,
         anytls,
+        http,
+        socks,
+        mixed,
     })
+}
+
+fn parse_named_local_listener(
+    mapping: &Mapping,
+    index: usize,
+    kind: NamedLocalInboundKind,
+    allow_lan: bool,
+    bind_address: &str,
+    names: &mut std::collections::BTreeSet<String>,
+) -> Result<NamedLocalInboundConfig, ConfigError> {
+    let mut allowed = vec!["name", "type", "listen", "port", "users"];
+    if matches!(kind, NamedLocalInboundKind::Socks | NamedLocalInboundKind::Mixed) {
+        allowed.push("udp");
+    }
+    validate_mapping_keys(mapping, &allowed, &format!("listener {index}"))?;
+    let name = mapping_string(mapping, "name")
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {index} is missing name")))?;
+    if !names.insert(name.clone()) {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener name is duplicated: {name}"
+        )));
+    }
+    let listen_host = mapping_string(mapping, "listen").unwrap_or_else(|| {
+        if allow_lan {
+            "0.0.0.0".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    });
+    let port = mapping
+        .get(Value::from("port"))
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| ConfigError::InvalidInbound(format!("listener {name} is missing port")))?;
+    let listen = resolve_ss_listen_host(Some(&listen_host), Some(port), allow_lan, bind_address)?;
+    let users = parse_named_local_users(mapping, &name)?;
+    let udp = match kind {
+        NamedLocalInboundKind::Http => false,
+        NamedLocalInboundKind::Socks | NamedLocalInboundKind::Mixed => mapping
+            .get(Value::from("udp"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    };
+    Ok(NamedLocalInboundConfig {
+        name,
+        kind,
+        listen,
+        users,
+        udp,
+    })
+}
+
+fn parse_named_local_users(
+    mapping: &Mapping,
+    name: &str,
+) -> Result<Option<Vec<AuthUser>>, ConfigError> {
+    let Some(value) = mapping.get(Value::from("users")) else {
+        return Ok(None);
+    };
+    let Some(sequence) = value.as_sequence() else {
+        return Err(ConfigError::InvalidInbound(format!(
+            "listener {name} has invalid users configuration"
+        )));
+    };
+    let mut users = Vec::with_capacity(sequence.len());
+    for (index, entry) in sequence.iter().enumerate() {
+        let Some(user_mapping) = entry.as_mapping() else {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} is invalid"
+            )));
+        };
+        validate_mapping_keys(
+            user_mapping,
+            &["username", "password"],
+            &format!("listener {name} user {index}"),
+        )?;
+        let username = mapping_string(user_mapping, "username").ok_or_else(|| {
+            ConfigError::InvalidInbound(format!(
+                "listener {name} user {index} is missing username"
+            ))
+        })?;
+        let password = mapping_string(user_mapping, "password").unwrap_or_default();
+        users.push(AuthUser {
+            username,
+            password,
+        });
+    }
+    Ok(Some(users))
 }
 
 fn parse_shadowsocks_listener(
@@ -1621,6 +1754,22 @@ pub(crate) fn validate_anytls_listener_ports(
     Ok(())
 }
 
+pub(crate) fn validate_named_local_listener_ports(
+    listeners: &[NamedLocalInboundConfig],
+) -> Result<(), ConfigError> {
+    let mut ports = std::collections::BTreeSet::new();
+    for listener in listeners {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "{} listener address is duplicated: {}",
+                listener.kind.as_str(),
+                listener.listen
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_named_listener_ports(
     shadowsocks: &[ShadowsocksInboundConfig],
     trojan: &[TrojanInboundConfig],
@@ -1629,6 +1778,9 @@ pub(crate) fn validate_named_listener_ports(
     hysteria2: &[Hysteria2InboundConfig],
     tuic: &[TuicInboundConfig],
     anytls: &[AnyTlsInboundConfig],
+    http: &[NamedLocalInboundConfig],
+    socks: &[NamedLocalInboundConfig],
+    mixed: &[NamedLocalInboundConfig],
 ) -> Result<(), ConfigError> {
     validate_shadowsocks_listener_ports(shadowsocks)?;
     validate_trojan_listener_ports(trojan)?;
@@ -1637,6 +1789,9 @@ pub(crate) fn validate_named_listener_ports(
     validate_hysteria2_listener_ports(hysteria2)?;
     validate_tuic_listener_ports(tuic)?;
     validate_anytls_listener_ports(anytls)?;
+    validate_named_local_listener_ports(http)?;
+    validate_named_local_listener_ports(socks)?;
+    validate_named_local_listener_ports(mixed)?;
     let mut ports = std::collections::BTreeSet::new();
     for listener in shadowsocks {
         ports.insert((listener.listen.ip(), listener.listen.port()));
@@ -1682,6 +1837,14 @@ pub(crate) fn validate_named_listener_ports(
         }
     }
     for listener in anytls {
+        if !ports.insert((listener.listen.ip(), listener.listen.port())) {
+            return Err(ConfigError::InvalidInbound(format!(
+                "listener address is duplicated across inbound types: {}",
+                listener.listen
+            )));
+        }
+    }
+    for listener in http.iter().chain(socks.iter()).chain(mixed.iter()) {
         if !ports.insert((listener.listen.ip(), listener.listen.port())) {
             return Err(ConfigError::InvalidInbound(format!(
                 "listener address is duplicated across inbound types: {}",

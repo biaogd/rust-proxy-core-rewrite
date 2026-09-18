@@ -1,6 +1,18 @@
 # Rust rewrite status
 
-Last updated: 2026-09-17
+Last updated: 2026-09-18
+
+### W1.4 named http / socks / mixed listeners — 2026-09-18
+
+Wave A CFG-07 local named slice. Parses `listeners:` entries with
+`type: http|socks|mixed` (name, listen, port, `users`, and `udp` for
+socks/mixed; Go defaults `udp: true`). Serves them through the existing
+fixed HTTP/SOCKS/mixed accept path (`ListenerKind::{Http,Socks,Mixed}`) with
+listener `name` as `inbound_name` and Go-shaped auth (`users` omitted →
+top-level `authentication`; `users: []` → Nil; non-empty → local list).
+TLS/Reality/ECH (`certificate` / `private-key` / `reality-config` / `ech-key`
+/ client-auth) and common `rule`/`proxy`/`routing-mark` stay fail-closed.
+Evidence: config unit tests + `compat/scripts/phase_w14_named_local.py`.
 
 ### W2.1 PROCESS-NAME / PATH / UID (Linux first) — 2026-09-17
 

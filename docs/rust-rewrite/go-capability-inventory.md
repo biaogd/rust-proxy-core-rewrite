@@ -72,7 +72,7 @@ Primary anchors: [`config/config.go`](../../config/config.go),
 | CFG-04 | Proxy groups, cycles, filters, include-all, expected status, empty fallback and removed `relay` rejection | Partial: Phase 5C current-adapter group strategies/composition/health complete | Later adapter-specific validation gates |
 | CFG-05 | Proxy/rule providers, vehicles, health checks, refresh, persistence and overrides | Partial: Phase 5C current-adapter vehicles/health/lifecycle plus rule providers complete | Named download proxy, override-expression, encryption and later adapter gates |
 | CFG-06 | Rules, sub-rules and provider-backed rule construction | Partial | 5B1–5B5 |
-| CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N implements legacy `ss-config` and the declared first named Shadowsocks listener slice with fail-closed unsupported fields | Remaining Shadowsocks fields and one gate per other IN ID |
+| CFG-07 | Named listeners and legacy fixed protocol listener fields | Partial: Phase 6C-N SS + protocol named inbounds + **W1.4** named `http`/`socks`/`mixed` (plain TCP/auth; TLS/Reality/ECH deferred) | Remaining Shadowsocks fields, listener TLS on local named, and one gate per other IN ID |
 | CFG-08 | Hosts and DNS configuration, including all defaults and validation dependencies | Partial | 4-completion gates |
 | CFG-09 | TUN, route, auto-route/redirect, stack and DNS-hijack settings | Partial: 8A Linux parse/apply + 8B Darwin utun/route/scutil DNS + 8C Windows Wintun/route/adapter DNS | 8D remaining stacks |
 | CFG-10 | Static TCP/UDP tunnels and validation | **Partial — W1.3:** top-level `tunnels:` parse/validate + TCP/UDP listeners; named deferred | W1.3 / 5B6 |
@@ -94,7 +94,7 @@ legacy SS/VMess/TUIC fields are applied through `hub/executor`.
 | ID | Go capability | Rust state | Planned gate |
 | --- | --- | --- | --- |
 | IN-01 | Mixed HTTP plus SOCKS4/4a/5 TCP and SOCKS5 UDP | Complete in declared local TCP and source-keyed UDP scope | Broader HTTP edge cases and remote UDP/UoT remain protocol gates |
-| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Complete in declared fixed-listener scope: native bind/rebind/LAN policy, TFO, Linux MPTCP fallback and current source-keyed association behavior are implemented | Linux native/slow CI results remain evidence gates; named listeners remain CFG-07 |
+| IN-02 | Fixed HTTP and SOCKS listeners, authentication, LAN policy, TFO/MPTCP and UDP association lifecycle | Complete in declared fixed-listener scope: native bind/rebind/LAN policy, TFO, Linux MPTCP fallback and current source-keyed association behavior are implemented; **W1.4** adds named `http`/`socks`/`mixed` | Linux native/slow CI results remain evidence gates; named listener TLS/Reality/ECH remain CFG-07 follow-ups |
 | IN-03 | Redir TCP on Linux/Darwin/FreeBSD and platform rejection elsewhere | **Partial — W1.1:** Linux fixed `redir-port` TCP + `SO_ORIGINAL_DST`; non-Linux fail-closed; Darwin/FreeBSD/named deferred | W1.1 then 8A–8C |
 | IN-04 | Linux TProxy TCP/UDP, original destination, socket options and write-back | **Partial — W1.2:** Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; dest from `LocalAddr`; UDP deferred | W1.2 then 8A |
 | IN-05 | Static tunnel TCP/UDP listener | **Partial — W1.3:** top-level `tunnels:` TCP/UDP + SpecialProxy bypass; named deferred | W1.3 / 5B6 |

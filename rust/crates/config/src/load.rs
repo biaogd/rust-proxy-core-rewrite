@@ -17,7 +17,7 @@ use crate::model::{
     GeoXUrls, Hysteria2InboundConfig, ListenerKind, LogLevel, Mode, NormalizedConfig, NtpConfig,
     ProfileConfig, ProxyConfig, ProxyGroupKind, RuleProviderVehicle, ShadowsocksInboundConfig,
     TrojanInboundConfig, TuicInboundConfig, TunnelInboundConfig, VlessInboundConfig,
-    VmessInboundConfig,
+    VmessInboundConfig, NamedLocalInboundConfig, NamedLocalInboundKind,
 };
 use crate::named_listeners::{parse_named_listeners, validate_named_listener_ports};
 use crate::proxy::{
@@ -225,6 +225,9 @@ impl ConfigSpec {
                 provider_directory,
             )?;
         }
+        let http_listeners = named.http;
+        let socks_listeners = named.socks;
+        let mixed_listeners = named.mixed;
         if let Some(config) = raw
             .ss_config
             .as_deref()
@@ -242,6 +245,17 @@ impl ConfigSpec {
             &hysteria2_listeners,
             &tuic_listeners,
             &anytls_listeners,
+            &http_listeners,
+            &socks_listeners,
+            &mixed_listeners,
+        )?;
+        validate_named_local_vs_fixed_ports(
+            raw.port.unwrap_or(0),
+            raw.socks_port.unwrap_or(0),
+            raw.mixed_port.unwrap_or(0),
+            &http_listeners,
+            &socks_listeners,
+            &mixed_listeners,
         )?;
         let mut proxy_names: BTreeSet<String> =
             proxies.iter().map(|proxy| proxy.name.clone()).collect();
@@ -319,6 +333,9 @@ impl ConfigSpec {
             hysteria2_listeners,
             tuic_listeners,
             anytls_listeners,
+            http_listeners,
+            socks_listeners,
+            mixed_listeners,
             tunnel_listeners,
             tun,
             sniffer,
@@ -494,6 +511,9 @@ impl TryFrom<ConfigSpec> for Config {
             hysteria2_listeners: spec.hysteria2_listeners,
             tuic_listeners: spec.tuic_listeners,
             anytls_listeners: spec.anytls_listeners,
+            http_listeners: spec.http_listeners,
+            socks_listeners: spec.socks_listeners,
+            mixed_listeners: spec.mixed_listeners,
             tunnel_listeners: spec.tunnel_listeners,
             tun: spec.tun,
             sniffer: spec.sniffer,
@@ -864,6 +884,15 @@ impl Config {
         for anytls in &self.anytls_listeners {
             listeners.push((ListenerKind::AnyTls, anytls.listen.port()));
         }
+        for http in &self.http_listeners {
+            listeners.push((ListenerKind::Http, http.listen.port()));
+        }
+        for socks in &self.socks_listeners {
+            listeners.push((ListenerKind::Socks, socks.listen.port()));
+        }
+        for mixed in &self.mixed_listeners {
+            listeners.push((ListenerKind::Mixed, mixed.listen.port()));
+        }
         if listeners.is_empty() && self.dns.is_none() && self.tunnel_listeners.is_empty() {
             return Err(ConfigError::InvalidRuntimePort(0));
         }
@@ -951,6 +980,32 @@ impl Config {
         self.anytls_listeners
             .iter()
             .find(|listener| listener.listen.port() == port)
+    }
+
+    #[must_use]
+    pub fn named_local_listener(
+        &self,
+        kind: ListenerKind,
+        port: u16,
+    ) -> Option<&NamedLocalInboundConfig> {
+        let listeners = match kind {
+            ListenerKind::Http => self.http_listeners.as_slice(),
+            ListenerKind::Socks => self.socks_listeners.as_slice(),
+            ListenerKind::Mixed => self.mixed_listeners.as_slice(),
+            _ => return None,
+        };
+        listeners
+            .iter()
+            .find(|listener| listener.listen.port() == port)
+    }
+
+    /// Named socks/mixed UDP share the SOCKS UDP path; look up by bind port.
+    #[must_use]
+    pub fn named_local_udp_listener(&self, port: u16) -> Option<&NamedLocalInboundConfig> {
+        self.socks_listeners
+            .iter()
+            .chain(self.mixed_listeners.iter())
+            .find(|listener| listener.udp && listener.listen.port() == port)
     }
 
     /// Returns the bind address for a legacy Shadowsocks inbound listener on the given port.
@@ -1325,6 +1380,44 @@ fn parse_authentication(records: Vec<String>) -> Vec<AuthUser> {
             })
         })
         .collect()
+}
+
+fn validate_named_local_vs_fixed_ports(
+    port: i64,
+    socks_port: i64,
+    mixed_port: i64,
+    http: &[NamedLocalInboundConfig],
+    socks: &[NamedLocalInboundConfig],
+    mixed: &[NamedLocalInboundConfig],
+) -> Result<(), ConfigError> {
+    let fixed = [
+        (NamedLocalInboundKind::Http, port, "port"),
+        (NamedLocalInboundKind::Socks, socks_port, "socks-port"),
+        (NamedLocalInboundKind::Mixed, mixed_port, "mixed-port"),
+    ];
+    for (kind, value, label) in fixed {
+        if value == 0 {
+            continue;
+        }
+        let Ok(fixed_port) = u16::try_from(value) else {
+            continue;
+        };
+        let listeners = match kind {
+            NamedLocalInboundKind::Http => http,
+            NamedLocalInboundKind::Socks => socks,
+            NamedLocalInboundKind::Mixed => mixed,
+        };
+        if listeners
+            .iter()
+            .any(|listener| listener.listen.port() == fixed_port)
+        {
+            return Err(ConfigError::InvalidInbound(format!(
+                "named {} listener port {fixed_port} conflicts with fixed {label}",
+                kind.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn parse_inbound_prefixes(records: Vec<String>, field: &str) -> Result<Vec<IpNet>, ConfigError> {

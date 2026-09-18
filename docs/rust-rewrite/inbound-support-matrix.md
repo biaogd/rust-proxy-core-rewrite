@@ -92,7 +92,7 @@ SSR inbound.
 
 | Type | Status | Paths | TCP | UDP | Auth | Carriers | Multi-user | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| HTTP / SOCKS / Mixed | **Implemented** (fixed ports) | `rewrite-inbound`, `runtime` local listeners | Yes | SOCKS UDP | users / USERID | None on listener | Local auth lists | Named `type: http\|socks\|mixed` **missing**; no listener TLS/Reality |
+| HTTP / SOCKS / Mixed | **Partial — fixed + W1.4 named** | `rewrite-inbound`, `runtime` local listeners, `named_listeners` | Yes | SOCKS UDP (named `udp`, default true) | fixed auth + named `users` | None on listener (TLS deferred) | Local auth lists | Named plain TCP/auth; TLS/Reality/ECH/`rule`/`proxy`/`routing-mark` rejected |
 | Shadowsocks | **Partial — 6C-N + IN-B SS2022 UDP** | `config/shadowsocks_inbound.rs`, `named_listeners.rs`, `runtime/shadowsocks_listener.rs` | Yes | Pre-2022 + standard SS2022 (not ChaCha8) | Shared password; AES-2022 EIH colon split | simple-obfs http/tls; ShadowTLS **v3 only** | EIH (AES); ShadowTLS users | Legacy `ss-config` + named `type: shadowsocks` |
 | TUN | **Partial — Phase 8A/B/C/F** | `runtime/tun.rs`, `rewrite-tun`, platform | L3 | L3 | N/A | `stack: smoltcp` only | N/A | Go stacks rejected without remap |
 | Redir / TProxy / Tunnel | **Partial — W1.1–W1.3** | `redir-port` / `tproxy-port` / `tunnels:`; serve_redir / serve_tproxy / tunnel listeners; `IP_TRANSPARENT` + fixed target | Yes (TCP) | Tunnel UDP | None | orig-dst / LocalAddr / config target | N/A | Named `type: redir\|tproxy\|tunnel`, Darwin/FreeBSD, tproxy UDP still missing |
@@ -163,8 +163,8 @@ Use these labels in later IN phases:
 
 | ID | Capability | Rust state after IN-A census | Owning gates |
 | --- | --- | --- | --- |
-| IN-01 | Mixed HTTP+SOCKS TCP/UDP | Complete in declared local scope | Phase 1/3 (preserve) |
-| IN-02 | Fixed HTTP/SOCKS auth/LAN/TFO/MPTCP | Complete in fixed-listener scope | Phase 3/5F (preserve) |
+| IN-01 | Mixed HTTP+SOCKS TCP/UDP | Complete in declared local scope; **W1.4** extends to named `mixed` | Phase 1/3 + W1.4 |
+| IN-02 | Fixed HTTP/SOCKS auth/LAN/TFO/MPTCP | Complete in fixed-listener scope; **W1.4** named http/socks (+ users) | Phase 3/5F + W1.4 |
 | IN-03 | Redir | **Partial — W1.1** Linux fixed `redir-port` TCP + `SO_ORIGINAL_DST`; Darwin/FreeBSD/named deferred | W1.1 / Phase 8A–8C |
 | IN-04 | TProxy | **Partial — W1.2** Linux fixed `tproxy-port` TCP + `IP_TRANSPARENT`; UDP deferred | W1.2 / Phase 8A |
 | IN-05 | Static tunnel | **Partial — W1.3** top-level `tunnels:` TCP/UDP + `special_proxy`; named deferred | W1.3 / 5B6 |

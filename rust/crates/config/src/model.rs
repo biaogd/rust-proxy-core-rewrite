@@ -93,6 +93,9 @@ pub struct ConfigSpec {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub http_listeners: Vec<NamedLocalInboundConfig>,
+    pub socks_listeners: Vec<NamedLocalInboundConfig>,
+    pub mixed_listeners: Vec<NamedLocalInboundConfig>,
     pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub sniffer: SnifferConfig,
@@ -168,6 +171,9 @@ pub struct Config {
     pub hysteria2_listeners: Vec<Hysteria2InboundConfig>,
     pub tuic_listeners: Vec<TuicInboundConfig>,
     pub anytls_listeners: Vec<AnyTlsInboundConfig>,
+    pub http_listeners: Vec<NamedLocalInboundConfig>,
+    pub socks_listeners: Vec<NamedLocalInboundConfig>,
+    pub mixed_listeners: Vec<NamedLocalInboundConfig>,
     pub tunnel_listeners: Vec<TunnelInboundConfig>,
     pub tun: Option<TunConfig>,
     pub sniffer: SnifferConfig,
@@ -1349,6 +1355,72 @@ fn domain_wildcard_matches(pattern: &str, host: &str) -> bool {
         return false;
     }
     host.starts_with(left) && host.ends_with(right) && host.len() >= left.len() + right.len()
+}
+
+/// Named Clash YAML `listeners:` entry with `type: http|socks|mixed`.
+///
+/// `users`:
+/// - `None` — key omitted; use top-level `authentication` (Go `AuthStore.Default`)
+/// - `Some([])` — empty list; no credentials accepted (Go `AuthStore.Nil`)
+/// - `Some([...])` — listener-local username/password list
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedLocalInboundConfig {
+    pub name: String,
+    pub kind: NamedLocalInboundKind,
+    pub listen: SocketAddr,
+    pub users: Option<Vec<AuthUser>>,
+    /// SOCKS UDP associate listener; Go defaults `true` for `socks`/`mixed`.
+    pub udp: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NamedLocalInboundKind {
+    Http,
+    Socks,
+    Mixed,
+}
+
+impl NamedLocalInboundKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Socks => "socks",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    #[must_use]
+    pub fn listener_kind(self) -> ListenerKind {
+        match self {
+            Self::Http => ListenerKind::Http,
+            Self::Socks => ListenerKind::Socks,
+            Self::Mixed => ListenerKind::Mixed,
+        }
+    }
+}
+
+impl NamedLocalInboundConfig {
+    /// Stable identity used to decide whether a reload must rebind this inbound.
+    #[must_use]
+    pub fn reload_identity(&self) -> String {
+        let users = match &self.users {
+            None => "default".to_owned(),
+            Some(users) if users.is_empty() => "nil".to_owned(),
+            Some(users) => users
+                .iter()
+                .map(|user| format!("{}:{}", user.username, user.password))
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        format!(
+            "{}/{}/udp={}/users={users}",
+            self.name,
+            self.kind.as_str(),
+            self.udp,
+            users = users
+        )
+    }
 }
 
 /// One expanded static tunnel listener (`tunnels:` entry × network).
