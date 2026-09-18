@@ -589,7 +589,11 @@ impl BodyReader {
                         }
                     }
                 }
-                PendingRecordRead::Fill { buf, filled, stage } => {
+                PendingRecordRead::Fill {
+                    buf,
+                    filled,
+                    stage: _,
+                } => {
                     match poll_fill_exact(cx, reader, buf, filled) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => {

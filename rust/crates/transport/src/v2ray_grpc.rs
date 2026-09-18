@@ -819,6 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::never_loop)] // poll_write may Pending or Ready on first try; loop is defensive.
     async fn flush_during_pending_write_does_not_duplicate_frame() {
         use std::pin::Pin;
         use std::task::{Context, Poll, Waker};

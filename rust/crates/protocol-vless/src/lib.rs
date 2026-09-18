@@ -124,6 +124,7 @@ pub fn connect_vless_on_stream_with_vision_control(
     Ok(Box::new(vless))
 }
 
+#[cfg(test)]
 fn request_header(
     destination: &Destination,
     options: VlessClientOptions,

@@ -236,6 +236,8 @@ enum PendingResponseWrite {
     /// Response header not started; coalesce on the next non-empty write.
     Idle,
     /// GunStream accepted `prefix||payload` as one frame; drain in progress.
+    /// Retained for a future FrontHeadroom path (currently unused).
+    #[allow(dead_code)]
     GunPrefixed,
     /// Combined `[VERSION, 0] || payload` partially flushed (non-Gun carriers).
     Flushing {
