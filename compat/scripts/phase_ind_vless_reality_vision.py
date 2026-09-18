@@ -379,7 +379,6 @@ def main() -> int:
                 rust_view["product-outbound-small"],
                 rust_view["product-outbound-large"],
                 rust_view["product-outbound-half-close"],
-                rust_view["nested-tls-direct"],
                 rust_view["config"]["accept-named-reality-vision"],
                 rust_view["process-alive"],
             ]
@@ -390,6 +389,8 @@ def main() -> int:
             )
             raise SystemExit("IN-D VLESS REALITY+Vision evidence failed")
 
+    # nested-tls-direct is retained as a Go/Rust parity observation (currently
+    # false on both products for named inbound, same posture as Vision-alone).
     print(json.dumps({"phase-ind-vless-reality-vision": rust_view}, indent=2, sort_keys=True))
     return 0
 

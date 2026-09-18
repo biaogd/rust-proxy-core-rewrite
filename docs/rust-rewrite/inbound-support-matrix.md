@@ -170,7 +170,7 @@ Use these labels in later IN phases:
 | IN-05 | Static tunnel | **Partial — W1.3** top-level `tunnels:` TCP/UDP + `special_proxy`; named deferred | W1.3 / 5B6 |
 | IN-06 | TUN | Partial smoltcp 8A/B/C/F | Phase 8 (preserve; do not duplicate) |
 | IN-07 | Shadowsocks + Snell server | SS 6C-N + **IN-B** SS2022 UDP/replay; Snell open | Later SS matrix / Snell deferred |
-| IN-08 | VMess + VLESS server | VLESS **Partial — IN-D** TLS+WSS+gRPC+XUDP+Vision+REALITY+Vision+REALITY; VMess **Partial — IN-E** TLS+WSS+gRPC+XUDP (AEAD alterId 0) | **IN-D** / **IN-E** (declared carriers done; Reality dest fallback / xHTTP / legacy alterId open) |
+| IN-08 | VMess + VLESS server | VLESS **Partial — IN-D** TLS+WSS+gRPC+XUDP+Vision+REALITY(+Vision); VMess **Partial — IN-E** TLS+WSS+gRPC+XUDP (AEAD alterId 0) | **IN-D** / **IN-E** (declared carriers done; Reality dest fallback / xHTTP / legacy alterId open) |
 | IN-09 | Trojan server | **Partial — IN-C** named TLS + WSS + gRPC + REALITY TCP auth; mux/`ss-option` open | **IN-C** (TLS+WSS+gRPC+REALITY auth done); mux/`ss-option`/dest fallback later |
 | IN-10 | Hysteria2 (+ realm) server | Partial — Hy2 first slice | **IN-F** (Hy2 portion); realm later |
 | IN-11 | TUIC + ShadowQUIC server | Partial — TUIC v5 named inbound | **IN-F** (TUIC v5 done); ShadowQUIC later |

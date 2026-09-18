@@ -162,8 +162,10 @@ Named `type: vless` with `reality-config` and per-user `flow: xtls-rprx-vision`
 uses `accept_reality_vision` (record-bounded REALITY TLS + Vision DIRECT
 promotion) then the same `VisionStream` path as certificate Vision. Evidence:
 `phase_ind_vless_reality_vision.py` (product REALITY+Vision outbound vs
-Go/Rust named inbound: TCP small/large/half-close and nested TLS DIRECT).
-Dest camouflage fallback, xHTTP, and combined carriers remain later W3.2 work.
+Go/Rust named inbound: TCP small/large/half-close pass; nested TLS DIRECT is
+currently false on both products and kept as a parity observation, matching
+Vision-alone inbound). Dest camouflage fallback, xHTTP, and combined carriers
+remain later W3.2 work.
 
 ### IN-D VLESS TLS + WSS + gRPC + XUDP inbound — 2026-09-15
 
